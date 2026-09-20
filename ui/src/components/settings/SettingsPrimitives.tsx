@@ -9,8 +9,15 @@ type SettingsPanelProps = {
   title?: React.ReactNode;
   description?: React.ReactNode;
   actions?: React.ReactNode;
-  children: React.ReactNode;
+  children?: React.ReactNode;
   className?: string;
+  /**
+   * `panel` (default) is the machine-management section: a header ruled off from
+   * a list of rows. `preference` is the quieter single-preference card used by
+   * ordinary Settings (design.pen le5QU / Q8zxF1) — surface-2, one 22px pad, and
+   * no internal divider, because its header and its control are one statement.
+   */
+  variant?: 'panel' | 'preference';
 };
 
 // Mirrors design.pen O8BNR/B6qFRA (svcSec1 / msgSec1):
@@ -22,27 +29,56 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   actions,
   children,
   className,
-}) => (
-  <section
-    className={clsx(
-      'flex flex-col overflow-hidden rounded-xl border border-border bg-background',
-      className
-    )}
-  >
-    {(title || description || actions) && (
-      <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
-        <div className="flex min-w-0 flex-col gap-1">
-          {title && <h2 className="text-[14px] font-semibold text-foreground">{title}</h2>}
-          {description && (
-            <p className="max-w-2xl text-[12px] leading-relaxed text-muted">{description}</p>
-          )}
-        </div>
-        {actions && <div className="shrink-0">{actions}</div>}
+  variant = 'panel',
+}) => {
+  const header = (title || description || actions) && (
+    <div
+      className={clsx(
+        'flex justify-between',
+        variant === 'preference'
+          // The source has no narrow frame, so this is an implementation
+          // decision: on a phone a 190-wide control beside the description
+          // leaves the text a column barely wider than one word, so the control
+          // drops under the label instead of squeezing it.
+          ? 'flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-[18px]'
+          : 'items-start gap-4 border-b border-border px-5 py-4'
+      )}
+    >
+      <div className="flex min-w-0 flex-col gap-1">
+        {title && <h2 className="text-[14px] font-semibold text-foreground">{title}</h2>}
+        {description && (
+          <p className="max-w-2xl text-[12px] leading-relaxed text-muted">{description}</p>
+        )}
       </div>
-    )}
-    {children}
-  </section>
-);
+      {actions && <div className="shrink-0">{actions}</div>}
+    </div>
+  );
+
+  // radius 12 (`rounded-lg` here), not the 16 the `panel` variant renders:
+  // le5QU and Q8zxF1 both draw this card at 12.
+  if (variant === 'preference') {
+    return (
+      <section className={clsx('rounded-lg border border-border bg-surface-2', className)}>
+        <div className="flex flex-col gap-5 p-[22px]">
+          {header}
+          {children}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className={clsx(
+        'flex flex-col overflow-hidden rounded-xl border border-border bg-background',
+        className
+      )}
+    >
+      {header}
+      {children}
+    </section>
+  );
+};
 
 type SettingsRowProps = {
   title: React.ReactNode;
@@ -119,21 +155,23 @@ export const SearchField: React.FC<SearchFieldProps> = ({
 // fill --mint, blur 8 #5BFFA055 glow, 38×22 with knob inset 3.
 // Off state mirrors fcMl6 (Switch/Unchecked): fill + stroke = --border-strong
 // (14% white dark / 14% black light) for sufficient contrast against bg-background.
-export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean }> = ({
+export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean; label?: string }> = ({
   enabled,
   onClick,
   disabled,
+  label,
 }) => (
   <button
     type="button"
     role="switch"
     aria-checked={enabled}
+    aria-label={label}
     disabled={disabled}
     onClick={onClick}
     className={clsx(
       'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
       enabled
-        ? 'border-mint/50 bg-mint shadow-[0_0_12px_-2px_rgba(91,255,160,0.6)]'
+        ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
         : 'border-border-strong bg-border-strong'
     )}
   >
@@ -154,6 +192,7 @@ type SettingsResourceRowProps = {
   badges?: React.ReactNode;
   detail?: React.ReactNode;
   actions?: React.ReactNode;
+  footer?: React.ReactNode;
   className?: string;
 };
 
@@ -169,11 +208,13 @@ export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
   badges,
   detail,
   actions,
+  footer,
   className,
 }) => (
   <div
     className={clsx(
-      'flex flex-col gap-4 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong md:flex-row md:items-center',
+      'flex flex-col gap-4 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong',
+      footer ? 'md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center' : 'md:flex-row md:items-center',
       className
     )}
   >
@@ -190,5 +231,6 @@ export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
       </div>
     </div>
     {actions && <div className="flex flex-wrap items-center gap-3 md:shrink-0 md:justify-end">{actions}</div>}
+    {footer && <div className="md:col-span-2">{footer}</div>}
   </div>
 );

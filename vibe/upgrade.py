@@ -1,27 +1,77 @@
 from __future__ import annotations
 
+import contextlib
+import filecmp
 import json
+import logging
 import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
+import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import cast
+from uuid import uuid4
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import (
+    InvalidSdistFilename,
+    InvalidWheelFilename,
+    canonicalize_name,
+    parse_sdist_filename,
+    parse_wheel_filename,
+)
+from packaging.version import InvalidVersion, Version
+
+from vibe.package_shape import (
+    CORE_PACKAGE_NAME,
+    LEGACY_CORE_PACKAGE_NAME,
+    MEMORY_PACKAGE_NAME as SHAPE_MEMORY_PACKAGE_NAME,
+)
+
+from config import paths as config_paths
+from core.caller_context import environment_without_caller_context
+from core.install_integrity import (
+    IntegrityResult,
+    isolated_probe_environment,
+    run_isolated_probe,
+    verify_python_environment,
+)
+from storage.lock import MigrationFileLock
+from vibe import runtime as runtime_mod
 
 
-PACKAGE_NAME = "avibe-os"
-LEGACY_PACKAGE_NAME = "vibe-remote"
+logger = logging.getLogger(__name__)
+
+PACKAGE_NAME = CORE_PACKAGE_NAME
+LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
+MEMORY_PACKAGE_NAME = SHAPE_MEMORY_PACKAGE_NAME
+PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
+# Core is on PyPI; Memory is a same-version GitHub Release companion. A recorded
+# GitHub core origin preserves its exact release tag, including gh-v previews.
+RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 DESKTOP_MANAGED_RUNTIME_ENV = "AVIBE_DESKTOP_MANAGED_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
+UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
+RESTART_PENDING_GRACE_SECONDS = 5 * 60
+DEFERRED_ACTIVATION_TIMEOUT_SECONDS = 5 * 60
+# A spec that names nothing but a package, so appending ``==<version>`` to it
+# yields a requirement rather than a broken string. PEP 508 names only:
+# anything with a path separator, a URL scheme, extras, a marker, or a version
+# of its own is deliberately excluded. See `pinned_package_spec`.
+_BARE_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 # PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
 # post + optional dev, plus a local version segment (``+local``) that we
 # accept but ignore for ordering. Word forms (alpha/beta/preview) are listed
@@ -48,11 +98,562 @@ _PRE_ORDER = {
 }
 
 
+class MemoryRequirementUnreadableError(ValueError):
+    """Persisted configuration cannot safely decide Memory package shape."""
+
+
+class RestartState(str, Enum):
+    """Closed restart-state vocabulary and its retention policy."""
+
+    def __new__(cls, value: str, retention: str | None):
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.retention = retention
+        return member
+
+    SCHEDULED = ("scheduled", "seed")
+    RUNNING = ("running", "seed")
+    SUCCEEDED = ("succeeded", "result")
+    FAILED = ("failed", "result")
+    ERROR = ("error", "result")
+    CANCELLED = ("cancelled", "result")
+    SKIPPED = ("skipped", "result")
+    UNKNOWN = ("unknown", None)
+
+
 @dataclass(frozen=True)
 class UpgradePlan:
+    """A validated package-install command and its execution metadata."""
+
     command: list[str]
     env: dict[str, str] | None
     method: str
+    preflight_command: list[str] | None = None
+    preflight_fallback_command: list[str] | None = None
+    activation: "AtomicActivation | None" = None
+    preflight_error: str | None = None
+
+
+def execute_upgrade_plan(
+    plan: UpgradePlan,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    **run_kwargs: object,
+) -> subprocess.CompletedProcess[str]:
+    """Run a validated plan after its non-mutating preflight.
+
+    The caller owns package mutation sequencing. This helper deliberately does
+    not acquire a lifecycle lock: callers can run the plan synchronously while
+    the existing restart supervisor owns any later activation.
+    """
+
+    if plan.preflight_error:
+        raise ValueError(plan.preflight_error)
+    preflight = preflight_upgrade_plan(plan, run=run, **run_kwargs)
+    if preflight is not None:
+        if preflight.returncode != 0:
+            return preflight
+
+    return run(plan.command, env=plan.env, **run_kwargs)
+
+
+def preflight_upgrade_plan(
+    plan: UpgradePlan,
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    **run_kwargs: object,
+) -> subprocess.CompletedProcess[str] | None:
+    """Resolve a plan without mutating the environment."""
+
+    if plan.preflight_command is None:
+        return None
+
+    def run_preflight(command: list[str]) -> subprocess.CompletedProcess[str]:
+        scratch_dir: str | None = None
+        try:
+            if PIP_DOWNLOAD_DEST_PLACEHOLDER in command:
+                scratch_dir = tempfile.mkdtemp(prefix="avibe-pip-download-")
+                command = [
+                    scratch_dir if argument == PIP_DOWNLOAD_DEST_PLACEHOLDER else argument
+                    for argument in command
+                ]
+            return run(command, env=plan.env, **run_kwargs)
+        finally:
+            if scratch_dir is not None:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    preflight = run_preflight(plan.preflight_command)
+    if (
+        preflight.returncode == 0
+        or plan.preflight_fallback_command is None
+        or not _pip_dry_run_is_unsupported(preflight)
+    ):
+        return preflight
+
+    return run_preflight(plan.preflight_fallback_command)
+
+
+def _pip_dry_run_is_unsupported(result: subprocess.CompletedProcess[str]) -> bool:
+    output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    return "--dry-run" in output and any(
+        marker in output
+        for marker in ("no such option", "unknown option", "unrecognized argument")
+    )
+
+
+@dataclass(frozen=True)
+class AtomicActivation:
+    """A validated candidate and the stable launcher it will replace."""
+
+    launcher: Path
+    candidate_launcher: Path
+    source_generation: Path | None = None
+
+
+def atomic_uv_install_root() -> Path:
+    """Return the durable root for versioned uv tool environments."""
+
+    return config_paths.get_vibe_remote_dir() / "runtime" / "install-generations"
+
+
+@contextlib.contextmanager
+def atomic_upgrade_lock():
+    """Serialize staged installation, launcher activation, and pruning."""
+
+    lock_path = atomic_uv_install_root().expanduser().parent / ".install.lock"
+    with MigrationFileLock(lock_path, timeout_seconds=UPGRADE_INSTALL_TIMEOUT_SECONDS):
+        yield
+
+
+def restart_is_pending() -> bool:
+    """Whether a scheduled restart still owns the next activation boundary."""
+
+    path = runtime_mod.get_restart_status_path()
+    payload = runtime_mod.read_json(path)
+    if not isinstance(payload, Mapping):
+        return False
+    return restart_record_is_pending(payload, path)
+
+
+def restart_record_is_pending(
+    payload: Mapping[str, object],
+    path: Path,
+    *,
+    grace_seconds: float = RESTART_PENDING_GRACE_SECONDS,
+) -> bool:
+    """Apply the restart ownership policy to one persisted status record."""
+
+    try:
+        state = RestartState(payload.get("state"))
+    except (TypeError, ValueError):
+        return False
+    if state.retention != "seed":
+        return False
+    supervisor_pid = payload.get("supervisor_pid")
+    if isinstance(supervisor_pid, int) and supervisor_pid > 0 and runtime_mod.pid_alive(supervisor_pid):
+        started_at = payload.get("supervisor_started_at")
+        if started_at is not None:
+            current_started_at = runtime_mod.process_create_time(supervisor_pid)
+            if current_started_at is not None:
+                return current_started_at == started_at
+        # Legacy records do not carry a process identity, and process metadata
+        # can be unavailable. In both cases a reused PID must not block upgrades
+        # for the lifetime of an unrelated process, so fall through to age.
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age <= grace_seconds
+
+
+def _is_stable_launcher_path(launcher: Path) -> bool:
+    if launcher.name.lower() not in {"vibe", "vibe.exe"}:
+        return False
+    # ``vibe_path`` has already been resolved to the command that launched this
+    # installation. Its role, not the directory uv happened to use when it was
+    # installed, makes it the stable activation point. The only unsafe shape is
+    # the entry point inside the mutable uv tool environment itself.
+    logical = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    atomic_root = os.path.normcase(os.path.abspath(os.path.expanduser(str(atomic_uv_install_root()))))
+    uv_layout = logical.replace("\\", "/").lower()
+    return "/uv/tools/" not in uv_layout and not Path(logical).is_relative_to(Path(atomic_root))
+
+
+def launcher_is_current_process(launcher: Path | str) -> bool:
+    """Whether this Windows process is holding the stable launcher open."""
+
+    if os.name != "nt":
+        return False
+    target = os.path.normcase(os.path.abspath(os.path.expanduser(str(launcher))))
+    # ``VIBE_CURRENT_EXECUTABLE`` is inherited by the long-lived Web process
+    # from the CLI that started it. It identifies a PATH entry, not the image
+    # currently holding the file open, so only argv[0] is authoritative here.
+    current = os.path.normcase(os.path.abspath(os.path.expanduser(sys.argv[0])))
+    return current == target
+
+
+def _staged_uv_environment(vibe_path: str | None) -> tuple[Path, Path, AtomicActivation | None]:
+    generation = atomic_uv_install_root() / uuid4().hex
+    # 3.0.13 only recognizes uv installs whose interpreter path contains
+    # /uv/tools/. Generations must retain that released handoff contract so an
+    # immutable 3.0.13 process can choose uv for its first product upgrade.
+    tools_dir = generation / "uv" / "tools"
+    bin_dir = generation / "bin"
+    if not vibe_path:
+        return tools_dir, bin_dir, None
+
+    launcher = Path(vibe_path).expanduser()
+    # Only replace a stable launcher link. A direct path into a virtualenv may
+    # be the user's intentional installation and cannot be switched safely by
+    # replacing the file the current process is executing.
+    if not _is_stable_launcher_path(launcher):
+        return tools_dir, bin_dir, None
+    candidate = bin_dir / launcher.name
+    return tools_dir, bin_dir, AtomicActivation(
+        launcher=launcher,
+        candidate_launcher=candidate,
+        source_generation=_launcher_generation(launcher, atomic_uv_install_root()),
+    )
+
+
+def _candidate_python(candidate_launcher: Path) -> Path | None:
+    roots = [candidate_launcher.parent]
+    with contextlib.suppress(OSError, RuntimeError):
+        resolved_parent = candidate_launcher.resolve().parent
+        if resolved_parent not in roots:
+            roots.append(resolved_parent)
+    with contextlib.suppress(OSError, RuntimeError, ValueError):
+        generation = _generation_for_path(candidate_launcher, atomic_uv_install_root())
+        if generation is not None:
+            roots.extend((generation / "uv" / "tools", generation / "tools"))
+    names = ("python.exe", "python3.exe", "python3", "python") if os.name == "nt" else ("python3", "python")
+    for root in roots:
+        for name in names:
+            candidate = root / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        if root.name == "tools" and root.is_dir():
+            for name in names:
+                for candidate in sorted(root.rglob(name)):
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        return candidate
+    return None
+
+
+def defer_upgrade_activation(
+    activation: AtomicActivation,
+    *,
+    parent_pid: int,
+    restart_required: bool = False,
+    prepare_show_runtime: bool = False,
+) -> subprocess.Popen:
+    """Run activation after a Windows CLI process releases its launcher."""
+
+    candidate_python = _candidate_python(activation.candidate_launcher)
+    if candidate_python is None:
+        raise RuntimeError(f"candidate Python missing beside {activation.candidate_launcher}")
+    command = [
+        str(candidate_python),
+        "-c",
+        "from vibe.cli import main; main()",
+        "__activate-upgrade",
+        "--parent-pid",
+        str(parent_pid),
+        "--launcher",
+        str(activation.launcher),
+        "--candidate",
+        str(activation.candidate_launcher),
+    ]
+    if activation.source_generation is not None:
+        command.extend(["--source-generation", str(activation.source_generation)])
+    if restart_required:
+        command.append("--restart")
+    if prepare_show_runtime:
+        command.append("--prepare-show-runtime")
+    parent_started_at = runtime_mod.process_create_time(parent_pid)
+    if parent_started_at is not None:
+        command.extend(["--parent-started-at", str(parent_started_at)])
+    log_path = config_paths.get_logs_dir() / f"upgrade-activation-{uuid4().hex}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+            cwd=get_safe_cwd(),
+            # Activation is Avibe's own work: it runs after this process exits,
+            # under the installation's authority, not the caller's. Keep the
+            # interpreter isolation this spawn already needs and drop the caller
+            # hop on top of it, rather than changing what probes inherit.
+            env=environment_without_caller_context(isolated_probe_environment()),
+        )
+
+
+def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
+    """Find the CLI launcher next to a saved service interpreter."""
+
+    names = ("vibe.exe", "vibe") if os.name == "nt" else ("vibe", "vibe.exe")
+    python_path = Path(launcher.python).expanduser()
+    root = atomic_uv_install_root()
+    generation = _launcher_generation(python_path, root)
+    if generation is not None:
+        generation_bin = generation / "bin"
+        for name in names:
+            candidate = generation_bin / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate
+        with contextlib.suppress(OSError):
+            for name in names:
+                candidate = next(generation.rglob(name), None)
+                if candidate is not None and candidate.is_file() and os.access(candidate, os.X_OK):
+                    return candidate
+
+    python_bin = python_path.parent
+    for name in names:
+        candidate = python_bin / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _generation_for_path(path: Path, root: Path) -> Path | None:
+    """Return the canonical generation containing a logical install path.
+
+    The leaf may itself be a symlink, as uv-managed Python launchers commonly
+    are. Walk its logical ancestors and resolve only the candidate generation
+    directory so the shared interpreter target cannot erase generation
+    ownership.
+    """
+
+    try:
+        root = root.expanduser().resolve()
+        expanded = path.expanduser()
+    except (OSError, RuntimeError):
+        return None
+    ancestors = [expanded, *expanded.parents]
+    try:
+        resolved_path = expanded.resolve()
+    except (OSError, RuntimeError):
+        resolved_path = None
+    if resolved_path is not None:
+        ancestors.extend((resolved_path, *resolved_path.parents))
+    for ancestor in dict.fromkeys(ancestors):
+        try:
+            resolved = ancestor.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if resolved.parent == root:
+            return resolved
+    return None
+
+
+def _generation_for_hardlink(launcher: Path, root: Path) -> Path | None:
+    """Find an atomic generation sharing the stable launcher's inode."""
+
+    if launcher.is_symlink() or not _is_stable_launcher_path(launcher):
+        return None
+    try:
+        launcher_stat = launcher.stat()
+        identity = (launcher_stat.st_dev, launcher_stat.st_ino)
+    except OSError:
+        return None
+    try:
+        root = root.expanduser().resolve()
+        if not root.is_dir():
+            return None
+        generations = list(root.iterdir())
+    except OSError:
+        return None
+    for generation in generations:
+        candidate = generation / "bin" / launcher.name
+        try:
+            candidate_stat = candidate.stat()
+            if generation.is_dir() and (candidate_stat.st_dev, candidate_stat.st_ino) == identity:
+                return generation
+        except OSError:
+            continue
+    return None
+
+
+def _launcher_generation(launcher: Path, root: Path) -> Path | None:
+    """Return the generation currently represented by a stable launcher."""
+
+    root = root.expanduser().resolve()
+    generation = _generation_for_path(launcher, root) or _generation_for_hardlink(launcher, root)
+    if generation is not None:
+        return generation
+    if not _is_stable_launcher_path(launcher):
+        return None
+    marker = launcher.parent / f".{launcher.name}.avibe-generation"
+    try:
+        marked = Path(marker.read_text(encoding="utf-8").lstrip("\ufeff").strip())
+    except (OSError, UnicodeError):
+        return None
+    generation = _generation_for_path(marked, root)
+    if generation is None or not generation.is_dir():
+        return None
+    # A marker is necessary only for the cross-volume copy fallback. Treat it
+    # as a hint and prove that it still describes the live launcher before use.
+    candidate = generation / "bin" / launcher.name
+    try:
+        return generation if filecmp.cmp(launcher, candidate, shallow=False) else None
+    except OSError:
+        return None
+
+
+def _update_launcher_generation_marker(launcher: Path, target: Path, root: Path) -> None:
+    """Record a copied launcher's generation without making cleanup mandatory."""
+
+    marker = launcher.parent / f".{launcher.name}.avibe-generation"
+    generation = _generation_for_path(target, root)
+    if generation is None:
+        with contextlib.suppress(OSError):
+            marker.unlink()
+        return
+    replacement = marker.parent / f".{marker.name}.{uuid4().hex}.new"
+    try:
+        replacement.write_text(str(generation), encoding="utf-8")
+        os.replace(replacement, marker)
+    except OSError:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        logger.warning("failed to update launcher generation marker %s", marker, exc_info=True)
+
+
+def atomic_activation_source_is_current(activation: AtomicActivation) -> bool:
+    """Check that the stable launcher still points at the source we measured."""
+
+    root = atomic_uv_install_root()
+    current = _launcher_generation(activation.launcher, root)
+    if activation.source_generation is None:
+        return current is None
+    source = _generation_for_path(activation.source_generation, root)
+    if current is not None or source is not None:
+        return current == source
+    try:
+        current_target = activation.launcher.resolve(strict=True)
+        return os.path.samefile(current_target, activation.source_generation)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def activation_block_reason(activation: AtomicActivation) -> str | None:
+    """Return why an activation cannot own the current install boundary."""
+
+    if restart_is_pending():
+        return "restart_pending"
+    if not atomic_activation_source_is_current(activation):
+        return "superseded"
+    return None
+
+
+def discard_atomic_uv_install_generation(path: Path | str) -> bool:
+    """Remove one failed candidate generation without touching active installs."""
+
+    root = atomic_uv_install_root().expanduser().resolve()
+    generation = _generation_for_path(Path(path), root)
+    if generation is None or not generation.is_dir():
+        return False
+    try:
+        shutil.rmtree(generation)
+    except OSError:
+        logger.warning("failed to discard atomic Avibe install generation %s", generation, exc_info=True)
+        return False
+    return True
+
+
+def verify_upgrade_candidate(activation: AtomicActivation) -> IntegrityResult:
+    """Prove a staged tool is runnable and its package tree is complete."""
+
+    candidate = activation.candidate_launcher
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return IntegrityResult(False, failures=(f"candidate launcher missing: {candidate}",))
+    python = _candidate_python(candidate)
+    if python is None:
+        return IntegrityResult(False, failures=(f"candidate Python missing beside {candidate}",))
+    result = verify_python_environment(python)
+    if not result.ok:
+        return result
+    try:
+        probe = run_isolated_probe([str(candidate), "--help"], timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return IntegrityResult(False, failures=(f"candidate launcher probe failed: {exc}",))
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+        suffix = detail[-1] if detail else f"exit code {probe.returncode}"
+        return IntegrityResult(False, failures=(f"candidate launcher probe failed: {suffix}",))
+    return result
+
+
+def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
+    """Create a replacement launcher, using copy when links cannot cross volumes."""
+
+    try:
+        replacement.symlink_to(target)
+        return
+    except OSError:
+        pass
+    try:
+        os.link(target, replacement)
+        return
+    except OSError:
+        # A regular copy is the only portable option when the stable bin and
+        # the runtime home are on different Windows volumes.
+        shutil.copy2(target, replacement)
+
+
+def activate_upgrade_candidate(activation: AtomicActivation) -> None:
+    """Atomically switch the stable launcher to a validated candidate."""
+
+    result = verify_upgrade_candidate(activation)
+    if not result.ok:
+        raise RuntimeError(f"staged Avibe install failed integrity checks: {result.detail}")
+    launcher = activation.launcher
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
+    root = atomic_uv_install_root().expanduser().resolve()
+    try:
+        _prepare_launcher_replacement(replacement, activation.candidate_launcher)
+        os.replace(replacement, launcher)
+    except Exception:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        raise
+    _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
+
+
+def activate_installer_candidate(activation: AtomicActivation) -> None:
+    """Activate an installer candidate through the shared lifecycle owner."""
+
+    with atomic_upgrade_lock():
+        reason = activation_block_reason(activation)
+        if reason == "restart_pending":
+            raise RuntimeError("an Avibe restart is still in progress")
+        if reason == "superseded":
+            raise RuntimeError("the active Avibe generation changed while the installer was staging")
+        activate_upgrade_candidate(activation)
+
+
+def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    """Atomically point a stable launcher at an installed target."""
+
+    launcher_path = Path(launcher).expanduser()
+    target_path = Path(target).expanduser()
+    if not target_path.is_file() or not os.access(target_path, os.X_OK):
+        raise RuntimeError(f"launcher target is not executable: {target_path}")
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    replacement = launcher_path.parent / f".{launcher_path.name}.avibe-{uuid4().hex}.new"
+    try:
+        _prepare_launcher_replacement(replacement, target_path)
+        os.replace(replacement, launcher_path)
+    except Exception:
+        with contextlib.suppress(OSError):
+            replacement.unlink()
+        raise
+    _update_launcher_generation_marker(launcher_path, target_path, atomic_uv_install_root().expanduser().resolve())
 
 
 def is_desktop_managed_runtime(base_env: Mapping[str, str] | None = None) -> bool:
@@ -434,12 +1035,147 @@ def get_latest_version_info(current_version: str) -> dict:
 
 def is_uv_tool_install(python_executable: str | None = None) -> bool:
     executable = (python_executable or sys.executable or "").replace("\\", "/")
-    return "/uv/tools/" in executable
+    if "/uv/tools/" in executable:
+        return True
+    try:
+        logical = Path(os.path.abspath(os.path.expanduser(executable)))
+        logical_root = Path(os.path.abspath(os.path.expanduser(str(atomic_uv_install_root()))))
+        if logical.is_relative_to(logical_root):
+            return True
+        if _launcher_generation(logical, logical_root) is not None:
+            return True
+        # A logical path may contain a symlinked parent. Resolving is only the
+        # fallback: uv's tool Python is itself commonly a symlink to a shared
+        # interpreter outside the generation.
+        return logical.resolve().is_relative_to(logical_root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
     executable = (python_executable or sys.executable or "").replace("\\", "/")
     return f"/uv/tools/{LEGACY_PACKAGE_NAME}/" in executable
+
+
+def memory_package_installed() -> bool:
+    """Return whether the optional Memory distribution is installed."""
+
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        distribution(MEMORY_PACKAGE_NAME)
+    except PackageNotFoundError:
+        return False
+    except Exception:
+        logger.warning("Could not inspect %s metadata; preserving package shape", MEMORY_PACKAGE_NAME, exc_info=True)
+        return True
+    return True
+
+
+def configured_memory_enabled() -> bool:
+    """Read the persisted Memory switch for an explicit upgrade action."""
+
+    try:
+        from config.v2_config import V2Config
+
+        required = V2Config.load().memory_required
+    except FileNotFoundError:
+        return False
+    except Exception as exc:
+        raise MemoryRequirementUnreadableError(
+            "The persisted Memory requirement could not be read"
+        ) from exc
+    if required is None:
+        raise MemoryRequirementUnreadableError(
+            "The persisted Memory requirement could not be read"
+        )
+    return required
+
+
+def _distributions_providing_this_package() -> list[str]:
+    """Every installed distribution that provides the package this module is in."""
+
+    try:
+        from importlib.metadata import packages_distributions
+        from packaging.utils import canonicalize_name
+    except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
+        return []
+    try:
+        memory_name = canonicalize_name(MEMORY_PACKAGE_NAME)
+        return sorted(
+            {
+                name
+                for name in packages_distributions().get(__name__.split(".")[0], [])
+                if canonicalize_name(name) != memory_name
+            }
+        )
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read installed distribution metadata", exc_info=True)
+        return []
+
+
+def _providers_recording_a_published_release() -> list[tuple[str, str]]:
+    """Every distribution providing this package, with the release it records.
+
+    Local-version recordings are dropped rather than reported. They identify
+    a source tree rather than a public release, so they can neither confirm nor
+    contradict a released one. Public dev versions can be published just like
+    other prereleases. An environment that answers nothing at all --
+    no provider, unreadable metadata, nothing published -- comes back empty. Both
+    callers read empty as "no evidence", never as evidence of disagreement.
+    """
+
+    distributions = _distributions_providing_this_package()
+    if not distributions:
+        return []
+    try:
+        from importlib.metadata import version as distribution_version
+
+        recorded = [(name, distribution_version(name)) for name in distributions]
+    except Exception:  # pragma: no cover - a broken environment answers nothing
+        logger.debug("Failed to read the installed distribution version", exc_info=True)
+        return []
+    return [(name, version) for name, version in recorded if _names_a_published_release(version)]
+
+
+def _providers_describing_running_code() -> list[str]:
+    """Return providers whose recorded release matches the running code.
+
+    Multiple providers can remain after the `vibe-remote` to `avibe-os` rename.
+    Comparing every published record prevents a forward install from becoming a
+    silent no-op when stale metadata claims the requested release is present.
+    """
+
+    from vibe import __version__
+
+    return [
+        name
+        for name, recorded in _providers_recording_a_published_release()
+        if recorded == __version__
+    ]
+
+
+def installed_metadata_describes_running_code() -> bool:
+    """Whether every published provider record matches the running files.
+
+    pip trusts installed metadata when deciding whether an upgrade has work to
+    do. A mismatch therefore forces the forward reinstall. Unknown source or
+    editable layouts remain unforced because they provide no reliable published
+    version to compare.
+    """
+
+    from vibe import __version__
+
+    if not _names_a_published_release(__version__):
+        return True
+
+    published = _providers_recording_a_published_release()
+    if not published:
+        return True
+    # Metadata describes the code only if EVERY provider recording a published
+    # release records this one; a single dissenter is a distribution pip would
+    # read as already satisfied.
+    return len(_providers_describing_running_code()) == len(published)
 
 
 def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
@@ -450,37 +1186,368 @@ def get_current_vibe_bin_dir(vibe_path: str | None = None) -> str | None:
     return get_launcher_bin_dir(current_vibe)
 
 
+def get_current_uv_tool_dir(python_executable: str | None = None) -> str | None:
+    """Return the logical uv tool root containing the running interpreter."""
+
+    executable = Path(python_executable or sys.executable).expanduser().absolute()
+    for parent in executable.parents:
+        if parent.name == "tools" and parent.parent.name == "uv":
+            return str(parent)
+    return None
+
+
+def _names_a_published_release(version: str) -> bool:
+    """Whether the version alone can identify a release for an index install.
+
+    Public dev versions are supported by the official release producer too.
+    Only local labels identify source builds; a dev suffix is not provenance.
+    Eligibility does not prove availability: installer preflights must still
+    resolve the matching core/companion pair before activation.
+
+    Asking the property instead of listing the strings is what stops the next
+    unlisted shape from costing the same attempt. Unparseable reads as
+    unpublished for the same reason: a version this codebase cannot even order is
+    not one it should pin an install to.
+    """
+
+    match = _VERSION_RE.match(version)
+    if match is None:
+        return False
+    return not match.group("local")
+
+
+def _published_version(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        version = str(Version(value))
+    except InvalidVersion:
+        return None
+    return version if _names_a_published_release(version) else None
+
+
+def _memory_target_version(package_spec: str, target_version: str | None) -> str | None:
+    """Choose the Memory pin from the artifact being installed or valid metadata."""
+
+    try:
+        requirement = Requirement(package_spec)
+    except InvalidRequirement:
+        artifact = package_spec
+    else:
+        if requirement.url is None:
+            specifiers = list(requirement.specifier)
+            if (
+                len(specifiers) == 1
+                and specifiers[0].operator == "=="
+                and "*" not in specifiers[0].version
+            ):
+                return _published_version(specifiers[0].version)
+            candidate = _published_version(target_version)
+            if candidate is not None and requirement.specifier.contains(candidate, prereleases=True):
+                return candidate
+            return None
+        artifact = requirement.url
+
+    if artifact.startswith(("git+", "hg+", "svn+", "bz+")):
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(artifact)
+    except ValueError:
+        return None
+    filename = Path(urllib.parse.unquote(parsed.path if parsed.scheme else artifact)).name
+    try:
+        _, version, _, _ = parse_wheel_filename(filename)
+    except InvalidWheelFilename:
+        try:
+            _, version = parse_sdist_filename(filename)
+        except InvalidSdistFilename:
+            return None
+    return _published_version(str(version))
+
+
+def _wheel_distribution(package_name: str) -> str:
+    """Spell one distribution name the way a wheel filename does."""
+
+    return canonicalize_name(package_name).replace("-", "_")
+
+
+def _recorded_install_origin(package_name: str) -> str | None:
+    """The URL an installed distribution was taken from, per PEP 610.
+
+    Installers write `direct_url.json` only when the distribution came from
+    somewhere other than an index, so its absence is itself the answer: this
+    copy was resolved by name and can be repaired the same way.
+    """
+
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        recorded = distribution(package_name).read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        logger.warning("Could not read %s install origin; assuming an index install", package_name, exc_info=True)
+        return None
+    if not recorded:
+        return None
+    try:
+        url = json.loads(recorded).get("url")
+    except (ValueError, AttributeError):
+        return None
+    return url if isinstance(url, str) else None
+
+
+def release_asset_specs(version: str) -> tuple[str, str] | None:
+    """Preserve a verified GitHub core origin during an exact package repair."""
+
+    return _release_asset_pair(version, _recorded_install_origin(PACKAGE_NAME))
+
+
+def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | None:
+    if not origin:
+        return None
+    try:
+        parsed_version = Version(version)
+    except InvalidVersion:
+        return None
+    if parsed_version.local is not None:
+        return None
+    normalized = str(parsed_version)
+    prefix = f"{RELEASE_DOWNLOAD_BASE_URL}/"
+    if not origin.startswith(prefix):
+        return None
+    # Exactly one tag segment and one filename: anything else is not an asset of
+    # this repository's releases, whatever it may resemble.
+    segments = origin[len(prefix) :].split("/")
+    if len(segments) != 2:
+        return None
+    tag, asset = segments
+    if not tag.startswith(("v", "gh-v")):
+        return None
+    tag_version = tag.removeprefix("gh-").removeprefix("v")
+    try:
+        normalized_tag_version = str(Version(tag_version))
+    except InvalidVersion:
+        return None
+    if normalized_tag_version != normalized:
+        return None
+    if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
+        return None
+    # One release directory, so the companion cannot come from another release.
+    return (
+        origin,
+        f"{prefix}{tag}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
+    )
+
+
+def memory_release_spec(version: str, core_spec: str) -> str:
+    """Name the companion explicitly, without consulting a package index.
+
+    PyPI core releases use official v-tags. An explicitly selected core wheel
+    from this repository preserves its own tag instead (including previews).
+    Other artifact origins cannot redirect the companion to an untrusted host.
+    """
+
+    try:
+        requirement = Requirement(core_spec)
+    except InvalidRequirement:
+        origin = core_spec
+    else:
+        origin = requirement.url
+    pair = _release_asset_pair(version, origin)
+    if pair:
+        return pair[1]
+    normalized = _published_version(version)
+    if normalized is None:
+        raise ValueError("A Memory install requires a published target release version")
+    return (
+        f"{RELEASE_DOWNLOAD_BASE_URL}/v{normalized}/"
+        f"{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl"
+    )
+
+
+def pinned_package_spec(
+    version: str,
+    *,
+    package_name: str,
+) -> str:
+    """Pin one explicit distribution name to one exact published version.
+
+    The explicit Memory install uses this to reinstall the running core release
+    together with its matching optional package. The distribution name must be a
+    bare package name; direct URLs and pre-versioned requirements are rejected.
+
+    The message never quotes the spec. An operator-supplied spec can be an index
+    URL carrying credentials.
+    """
+
+    spec = package_name
+    if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
+        raise ValueError("The configured upgrade package spec cannot carry a version pin")
+    return f"{spec}=={version}"
+
+
 def build_upgrade_plan(
     *,
     python_executable: str | None = None,
     uv_path: str | None = None,
     vibe_path: str | None = None,
     base_env: dict[str, str] | None = None,
+    version: str | None = None,
+    target_version: str | None = None,
+    package_name: str | None = None,
+    memory_enabled: bool = False,
+    memory_package: bool | None = None,
+    memory_version: str | None = None,
+    package_spec: str | None = None,
+    core_spec: str | None = None,
+    memory_spec: str | None = None,
 ) -> UpgradePlan:
+    """How to install avibe: the newest release, or `version` exactly.
+
+    Exact-version plans support the explicit Memory package install action. They
+    replace the ordinary upgrade request and force the installer so the matching
+    optional distribution is applied even when core is already satisfied.
+
+    Memory always comes from the target's GitHub Release, not an index.
+    Exact repairs may supply the recorded core/companion pair. Forward plans
+    derive the companion from the selected target version and core artifact.
+    """
+
+    if (core_spec or memory_spec) and not version:
+        raise ValueError("Explicit install sources require an exact target version")
+
     executable = python_executable or sys.executable
+    # A caller targeting another interpreter (for example a test-owned venv)
+    # can provide an explicit package-shape measurement.  Only infer from this
+    # process when the caller did not provide one; otherwise ambient metadata
+    # would leak into the target plan and turn an intentional core-only install
+    # into a Memory install.
+    include_memory = (
+        bool(memory_package)
+        if version or memory_package is not None
+        else bool(memory_enabled or memory_package_installed())
+    )
+    package_spec = (
+        (
+            core_spec
+            or pinned_package_spec(
+                version,
+                package_name=package_name or PACKAGE_NAME,
+            )
+        )
+        if version
+        else (package_spec or get_upgrade_package_spec())
+    )
+    if not version and include_memory:
+        target_version = _memory_target_version(package_spec, target_version)
+        if target_version is None:
+            raise ValueError("A Memory-preserving upgrade requires a target release version")
     uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
-    package_spec = get_upgrade_package_spec()
+    memory_target = (memory_version or version) if version else target_version
+    # The URL form stays a named requirement so every installer still reads it
+    # as "this distribution, from here" rather than as an anonymous artifact.
+    pinned_memory_spec = None
+    if include_memory:
+        if memory_spec:
+            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_spec}"
+        elif memory_target:
+            pinned_memory_spec = f"{MEMORY_PACKAGE_NAME} @ {memory_release_spec(memory_target, package_spec)}"
 
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
-        vibe_bin_dir = get_current_vibe_bin_dir(vibe_path)
-        if vibe_bin_dir:
-            env["UV_TOOL_BIN_DIR"] = vibe_bin_dir
-        command = [uv_binary, "tool", "install", package_spec, "--upgrade"]
-        if package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
+        preflight_error = None
+        # Exact repairs can recreate the whole uv environment too. Stage them
+        # just like forward upgrades while the service/UI still use the old one.
+        tool_dir, bin_dir, atomic = _staged_uv_environment(vibe_path)
+        if atomic is None:
+            preflight_error = "Cannot atomically upgrade uv installation: stable vibe launcher is unavailable"
+        else:
+            env["UV_TOOL_DIR"] = str(tool_dir)
+            env["UV_TOOL_BIN_DIR"] = str(bin_dir)
+        command = [uv_binary, "tool", "install", package_spec]
+        if pinned_memory_spec:
+            command.extend(["--with", pinned_memory_spec])
+        if not version:
+            command.append("--upgrade")
+        if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
             command.append("--force")
+        preflight_command = None
+        if include_memory:
+            preflight_command = [uv_binary, "pip", "install", "--dry-run", "--python", executable]
+            if not version:
+                preflight_command.append("--upgrade")
+            preflight_command.append(package_spec)
+            if pinned_memory_spec:
+                preflight_command.append(pinned_memory_spec)
         return UpgradePlan(
             command=command,
             env=env,
             method="uv",
+            preflight_command=preflight_command,
+            activation=atomic,
+            preflight_error=preflight_error,
         )
 
+    command = [executable, "-m", "pip", "install"]
+    if not version:
+        command.append("--upgrade")
+    # pip decides whether to act from metadata. Exact installs always force so a
+    # matching optional package is applied even when core is already satisfied;
+    # forward installs force only when published provider metadata disagrees with
+    # the running files.
+    if version or not installed_metadata_describes_running_code():
+        command.append("--force-reinstall")
+    command.append(package_spec)
+    if pinned_memory_spec:
+        command.append(pinned_memory_spec)
+    preflight_command = None
+    # Preflight only when the optional package shape is part of the operation.
+    # Core-only forward installs retain the origin/dev synchronous behavior: the
+    # service is still running while pip resolves, so a second resolver pass is
+    # unnecessary general-updater machinery.
+    preflight_fallback_command = None
+    if include_memory and not version:
+        preflight_command = [
+            executable,
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--upgrade",
+            package_spec,
+        ]
+        preflight_fallback_command = [
+            executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
+            package_spec,
+        ]
+        if pinned_memory_spec:
+            preflight_command.append(pinned_memory_spec)
+            preflight_fallback_command.append(pinned_memory_spec)
+    elif include_memory:
+        preflight_command = [
+            executable,
+            "-m",
+            "pip",
+            "download",
+            "--dest",
+            PIP_DOWNLOAD_DEST_PLACEHOLDER,
+        ]
+        preflight_command.extend(["--no-deps", package_spec])
+        if pinned_memory_spec:
+            preflight_command.append(pinned_memory_spec)
     return UpgradePlan(
-        command=[executable, "-m", "pip", "install", "--upgrade", package_spec],
+        command=command,
         env=dict(base_env or os.environ),
         method="pip",
+        preflight_command=preflight_command,
+        preflight_fallback_command=preflight_fallback_command,
     )
-
 
 def get_safe_cwd() -> str:
     """Return a stable, existing absolute directory for subprocess cwd.

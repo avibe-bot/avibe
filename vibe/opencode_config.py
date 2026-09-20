@@ -7,11 +7,30 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Final, Optional
 
 logger = logging.getLogger(__name__)
 
-_VALID_REASONING_VARIANTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+# Every reasoning tier OpenCode accepts, in ascending order: the unified Model
+# Hub vocabulary (``vibe.backend_model_catalog.REASONING_EFFORT_VOCABULARY``)
+# plus OpenCode's own ``none``, which names the absence of reasoning rather
+# than a level.
+#
+# Mirrored rather than imported: this module is stdlib-only so the OpenCode
+# read path can stay cheap, while the catalog module pulls in the whole
+# ``config`` / ``modules`` import graph. A contract test asserts the mirror, so
+# a tier added to the vocabulary cannot silently fall out of OpenCode's save
+# path again — which is how catalog-declared ``ultra`` became unsavable (#1840).
+OPENCODE_REASONING_VARIANTS: Final[tuple[str, ...]] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 _CUSTOM_PROVIDER_META_KEY = "vibe_remote"
 _CUSTOM_PROVIDER_ADAPTERS = {
     "openai-compatible": "@ai-sdk/openai-compatible",
@@ -50,6 +69,51 @@ class OpenCodeConfigProbeResult:
     path: Optional[Path] = None
     existing_paths: list[Path] = field(default_factory=list)
     errors: list[tuple[Path, str]] = field(default_factory=list)
+
+
+class OpenCodeRuntimeConfigInvalidError(RuntimeError):
+    """The inherited OpenCode runtime override cannot be safely managed."""
+
+
+def managed_opencode_runtime_config_content(raw: str | bytes | None) -> str:
+    """Apply Avibe-owned OpenCode runtime policy without mutating user config."""
+
+    if raw is None:
+        payload: Any = {}
+    else:
+        try:
+            content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+            if not isinstance(content, str):
+                raise TypeError("runtime config override must be text")
+            payload = parse_jsonc_object(content)
+        except (TypeError, UnicodeDecodeError, ValueError) as exc:
+            raise OpenCodeRuntimeConfigInvalidError(
+                "OpenCode runtime config override is invalid JSONC"
+            ) from exc
+    if not isinstance(payload, dict):
+        raise OpenCodeRuntimeConfigInvalidError(
+            "OpenCode runtime config override must be a JSON object"
+        )
+
+    tools = payload.get("tools")
+    managed_tools = dict(tools) if isinstance(tools, dict) else {}
+    managed_tools["skill"] = False
+    payload["tools"] = managed_tools
+
+    permission = payload.get("permission")
+    if permission is None:
+        managed_permission: dict[str, Any] = {}
+    elif isinstance(permission, str):
+        managed_permission = {"*": permission}
+    elif isinstance(permission, dict):
+        managed_permission = dict(permission)
+    else:
+        raise OpenCodeRuntimeConfigInvalidError(
+            "OpenCode runtime permission override must be a string or object"
+        )
+    managed_permission["skill"] = "deny"
+    payload["permission"] = managed_permission
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 def get_opencode_config_paths(home: Path | None = None) -> list[Path]:
@@ -492,7 +556,7 @@ def _normalize_model_id(model_id: str, *, provider_id: str | None = None) -> str
     return candidate
 
 
-def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = False) -> str:
+def _normalize_custom_provider_id(provider_id: str) -> str:
     if not isinstance(provider_id, str) or not provider_id.strip():
         raise ValueError("provider_id is required")
     candidate = provider_id.strip().lower()
@@ -500,8 +564,6 @@ def _normalize_custom_provider_id(provider_id: str, *, reject_reserved: bool = F
         raise ValueError("provider_id is too long")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", candidate):
         raise ValueError("provider_id must use lowercase letters, numbers, dot, hyphen, or underscore")
-    if reject_reserved and candidate in _RESERVED_PROVIDER_IDS:
-        raise ValueError("provider_id already exists")
     return candidate
 
 
@@ -624,7 +686,7 @@ def _normalize_reasoning_variants(
         effort = raw.strip()
         if not effort:
             continue
-        if effort not in _VALID_REASONING_VARIANTS:
+        if effort not in OPENCODE_REASONING_VARIANTS:
             raise ValueError(f"unsupported reasoning effort: {effort}")
         if uses_anthropic_thinking:
             variants[effort] = {"thinking": {"type": "enabled", "effort": effort}}
@@ -720,15 +782,24 @@ def upsert_opencode_custom_provider(
     logger_instance: Optional[logging.Logger] = None,
 ) -> Path:
     active_logger = logger_instance or logger
-    provider_id = _normalize_custom_provider_id(provider_id, reject_reserved=True)
+    provider_id = _normalize_custom_provider_id(provider_id)
     name = _normalize_custom_provider_name(name)
     adapter = _normalize_custom_provider_adapter(adapter)
     base_url = _normalize_base_url(base_url)
 
     config, target_path = _load_or_create_user_config(home=home, logger_instance=active_logger)
+    provider_map = config.get("provider")
+    provider_exists = isinstance(provider_map, dict) and provider_id in provider_map
+    if not provider_exists and (
+        is_reserved_opencode_provider_id(provider_id)
+        or provider_id.startswith("avibe-")
+    ):
+        raise ValueError("provider_id already exists")
     provider_config = _get_provider_config(config, provider_id)
-    existing_meta = provider_config.get(_CUSTOM_PROVIDER_META_KEY)
-    if provider_config and not (isinstance(existing_meta, dict) and existing_meta.get("custom") is True):
+    if provider_exists and get_opencode_custom_provider_adapter(
+        provider_id,
+        provider_config,
+    ) is None:
         raise ValueError("provider_id already exists")
 
     options = provider_config.setdefault("options", {})

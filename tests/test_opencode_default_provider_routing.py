@@ -15,9 +15,88 @@ import dataclasses
 from config.v2_config import OpenCodeConfig
 from modules.agents.opencode.agent import resolve_opencode_model_dict
 from modules.agents.opencode.utils import (
-    resolve_opencode_configured_default_model,
+    build_opencode_model_option_items,
+    build_reasoning_effort_options,
     resolve_opencode_model_id,
+    resolve_opencode_provider_preferences,
 )
+
+
+def test_native_defaults_cannot_change_model_choices_or_provider_order() -> None:
+    catalog = {
+        "providers": [
+            {"id": "openai", "models": {"gpt-fixture": {"name": "GPT Fixture"}}},
+            {"id": "anthropic", "models": {"claude-fixture": {"name": "Claude Fixture"}}},
+        ],
+    }
+    expected = build_opencode_model_option_items(catalog, max_total=25)
+    for model in ("openai/gpt-fixture", "anthropic/claude-fixture"):
+        native = {
+            "model": model,
+            "agent": {"build": {"model": model}},
+            "providers": {"openai": {}, "anthropic": {}},
+        }
+        provider, model_id = model.split("/", 1)
+        assert build_opencode_model_option_items(
+            {**catalog, "default": {provider: model_id}}, max_total=25
+        ) == expected
+        assert resolve_opencode_provider_preferences(native, "openai/gpt-fixture") == ["openai", "anthropic"]
+
+
+def test_model_hub_picker_keeps_bare_identity_and_hides_transport_provider() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "avibe-openai",
+                "name": "Avibe · OpenAI",
+                "models": {
+                    "gpt-5": {
+                        "id": "gpt-5",
+                        "name": "GPT-5",
+                        "variants": {"high": {"reasoningEffort": "high"}},
+                        "vibe_remote": {"model_hub_projected": True},
+                    }
+                },
+            }
+        ],
+        "default": {},
+    }
+
+    assert build_opencode_model_option_items(catalog, 10) == [
+        {"label": "GPT-5", "value": "gpt-5"}
+    ]
+    assert build_reasoning_effort_options(catalog, "gpt-5") == [
+        {"value": "__default__", "label": "(Default)"},
+        {"value": "high", "label": "High"}
+    ]
+
+
+def test_model_hub_picker_keeps_slash_bearing_id_whole_for_variants() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "avibe-openai",
+                "name": "Avibe · OpenAI",
+                "models": {
+                    "moonshotai/kimi-k2": {
+                        "id": "moonshotai/kimi-k2",
+                        "name": "Kimi K2",
+                        "variants": {"xhigh": {"reasoningEffort": "xhigh"}},
+                        "vibe_remote": {"model_hub_projected": True},
+                    }
+                },
+            }
+        ],
+        "default": {},
+    }
+
+    assert build_opencode_model_option_items(catalog, 10) == [
+        {"label": "Kimi K2", "value": "moonshotai/kimi-k2"}
+    ]
+    assert build_reasoning_effort_options(catalog, "moonshotai/kimi-k2") == [
+        {"value": "__default__", "label": "(Default)"},
+        {"value": "xhigh", "label": "Extra High"},
+    ]
 
 
 def test_opencode_config_default_provider_is_unset_by_default() -> None:
@@ -62,47 +141,6 @@ def test_prefixed_model_ignores_default_provider() -> None:
         "providerID": "openai",
         "modelID": "gpt-5",
     }
-
-
-def test_configured_default_model_matches_bare_model_to_default_provider() -> None:
-    assert (
-        resolve_opencode_configured_default_model(
-            "gpt-5.4",
-            default_provider="openai",
-            provider_id="openai",
-        )
-        == "gpt-5.4"
-    )
-
-
-def test_configured_default_model_matches_explicit_provider_prefix() -> None:
-    assert (
-        resolve_opencode_configured_default_model(
-            "openai/gpt-5.4",
-            default_provider="anthropic",
-            provider_id="openai",
-        )
-        == "gpt-5.4"
-    )
-
-
-def test_configured_default_model_rejects_other_provider() -> None:
-    assert (
-        resolve_opencode_configured_default_model(
-            "gpt-5.4",
-            default_provider="openai",
-            provider_id="anthropic",
-        )
-        is None
-    )
-    assert (
-        resolve_opencode_configured_default_model(
-            "openai/gpt-5.4",
-            default_provider="openai",
-            provider_id="anthropic",
-        )
-        is None
-    )
 
 
 def test_model_id_uses_catalog_casing_for_unique_match() -> None:

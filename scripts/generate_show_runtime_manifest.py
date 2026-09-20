@@ -41,7 +41,25 @@ def _read_runtime_ref(value: str | None, patterns: list[str]) -> str:
     return next(iter(refs))
 
 
-def build_manifest(*, archive_dir: Path, tag: str, repo: str, runtime_ref: str, output: Path) -> dict:
+def _generated_router(archive_dir: Path, platforms: set[str]) -> bytes:
+    """Require the template exported by every exact Runtime archive build."""
+    routers = []
+    for platform in sorted(platforms):
+        path = archive_dir / f"show-router-{platform}.tsx"
+        if not path.is_file():
+            raise SystemExit(f"Missing Show Runtime router template: {path.name}")
+        routers.append(path.read_bytes())
+    if len(set(routers)) != 1:
+        raise SystemExit("Show Runtime router templates differ across platforms")
+    router = routers[0]
+    if b"export function SsrRouterProvider" not in router:
+        raise SystemExit("Show Runtime router template does not support SSR Markdown subroutes")
+    return router
+
+
+def build_manifest(
+    *, archive_dir: Path, tag: str, repo: str, runtime_ref: str, output: Path, router_output: Path | None = None
+) -> dict:
     archives: dict[str, dict[str, object]] = {}
     base_url = f"https://github.com/{repo}/releases/download/{tag}"
     for archive in sorted(archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")):
@@ -65,6 +83,7 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, runtime_ref: str, 
     if missing:
         raise SystemExit("Missing Show Runtime archives: " + ", ".join(missing))
 
+    router = _generated_router(archive_dir, expected) if router_output is not None else None
     manifest = {
         "schema_version": 1,
         "runtime_version": runtime_ref,
@@ -76,6 +95,9 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, runtime_ref: str, 
         "archives": archives,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
+    if router_output is not None and router is not None:
+        router_output.parent.mkdir(parents=True, exist_ok=True)
+        router_output.write_bytes(router)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
 
@@ -94,6 +116,7 @@ def main() -> int:
         help="Glob pattern for files containing the Show Runtime commit used to build the archives.",
     )
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--router-output", required=True, type=Path)
     args = parser.parse_args()
     runtime_ref = _read_runtime_ref(args.runtime_ref, args.runtime_ref_file)
     manifest = build_manifest(
@@ -102,6 +125,7 @@ def main() -> int:
         repo=args.repo,
         runtime_ref=runtime_ref,
         output=args.output,
+        router_output=args.router_output,
     )
     print(json.dumps({"ok": True, "platforms": sorted(manifest["archives"])}, indent=2))
     return 0

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 import secrets
 import shutil
 import stat
-import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
 
+from config.atomic_io import write_atomic
+from config.v2_config import normalize_model_hub_base_url
+from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+
+
+logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
@@ -39,9 +43,44 @@ class SourceRecord:
     allowed_origins: tuple[str, ...]
     model_ids: tuple[str, ...]
     prefix: str
+    model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    route_model_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
+        try:
+            raw_reasoning_efforts = payload["model_reasoning_efforts"]
+        except KeyError as exc:
+            raise EngineStateError("invalid engine source reasoning state") from exc
+        if not isinstance(raw_reasoning_efforts, list):
+            raise EngineStateError("invalid engine source reasoning state")
+        raw_model_ids = payload.get("model_ids", [])
+        if not isinstance(raw_model_ids, list):
+            raise EngineStateError("invalid engine source state")
+        model_ids = tuple(str(model) for model in raw_model_ids)
+        route_model_ids = payload.get("route_model_ids", [])
+        if not isinstance(route_model_ids, list) or any(
+            not isinstance(model, str) or not model or model != model.strip()
+            for model in route_model_ids
+        ) or len(set(route_model_ids)) != len(route_model_ids):
+            raise EngineStateError("invalid engine route model state")
+        parsed_reasoning_efforts: list[tuple[str, tuple[str, ...]]] = []
+        seen_reasoning_models: set[str] = set()
+        for item in raw_reasoning_efforts:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0]
+                or item[0] not in model_ids
+                or not isinstance(item[1], list)
+                or any(not isinstance(effort, str) or not effort for effort in item[1])
+                or len(set(item[1])) != len(item[1])
+                or item[0] in seen_reasoning_models
+            ):
+                raise EngineStateError("invalid engine source reasoning state")
+            seen_reasoning_models.add(item[0])
+            parsed_reasoning_efforts.append((item[0], tuple(item[1])))
         return cls(
             source_id=str(payload["source_id"]),
             vendor=str(payload["vendor"]),
@@ -49,8 +88,10 @@ class SourceRecord:
             base_url=str(payload["base_url"]) if payload.get("base_url") else None,
             credential_ref=str(payload["credential_ref"]),
             allowed_origins=tuple(str(item) for item in payload.get("allowed_origins", [])),
-            model_ids=tuple(str(model) for model in payload.get("model_ids", [])),
+            model_ids=model_ids,
             prefix=str(payload["prefix"]),
+            model_reasoning_efforts=tuple(parsed_reasoning_efforts),
+            route_model_ids=tuple(route_model_ids),
         )
 
 
@@ -90,11 +131,18 @@ class EngineStateStore:
 
     def list_sources(self) -> list[SourceRecord]:
         with self._lock:
-            payload = self._read_json(self.root / "sources.json") or {}
-            raw_sources = payload.get("sources", [])
-            if not isinstance(raw_sources, list):
-                raise EngineStateError("invalid engine source state")
-            return [SourceRecord.from_payload(item) for item in raw_sources if isinstance(item, dict)]
+            try:
+                payload = self._read_json(self.root / "sources.json") or {}
+                raw_sources = payload.get("sources", [])
+                if not isinstance(raw_sources, list):
+                    raise EngineStateError("invalid engine source state")
+                return [
+                    SourceRecord.from_payload(item)
+                    for item in raw_sources
+                    if isinstance(item, dict)
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise EngineStateError(f"invalid engine source state: {exc}") from exc
 
     def get_source(self, source_id: str) -> SourceRecord | None:
         return next((source for source in self.list_sources() if source.source_id == source_id), None)
@@ -168,7 +216,12 @@ class EngineStateStore:
     def sync_sources(self, bindings: Sequence[Any]) -> list[SourceRecord]:
         """Atomically replace the engine projection using opaque credential refs."""
         with self._lock:
-            existing = {source.source_id: source for source in self.list_sources()}
+            path = self.root / "sources.json"
+            try:
+                existing = {source.source_id: source for source in self.list_sources()}
+            except EngineStateError as exc:
+                self._discard_invalid_state_file(path, exc)
+                existing = {}
             records: list[SourceRecord] = []
             seen: set[str] = set()
             for binding in bindings:
@@ -183,7 +236,12 @@ class EngineStateStore:
                     raise EngineStateError("unsupported source protocol")
                 vendor = str(binding.vendor).strip().lower()
                 base_url = _validated_base_url(binding.base_url)
-                _validate_source_target(vendor, protocol, base_url)
+                _validate_source_target(
+                    vendor,
+                    protocol,
+                    base_url,
+                    credential_kind=credential["kind"],
+                )
                 if credential["kind"] == "api_key":
                     if (
                         credential.get("vendor") != vendor
@@ -204,10 +262,24 @@ class EngineStateStore:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
                 model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
-                if not model_ids:
-                    raise EngineStateError("source requires at least one model id")
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
+                route_model_ids = tuple(binding.route_model_ids)
+                if any(not isinstance(model, str) or not model or model != model.strip() for model in route_model_ids):
+                    raise EngineStateError("invalid route model id")
+                reasoning_by_model: dict[str, tuple[str, ...]] = {}
+                for model_id, efforts in binding.model_reasoning_efforts:
+                    normalized_model_id = str(model_id).strip()
+                    if not normalized_model_id or normalized_model_id not in model_ids:
+                        raise EngineStateError("reasoning model id is not registered")
+                    if normalized_model_id in reasoning_by_model:
+                        raise EngineStateError("duplicate reasoning model id")
+                    normalized_efforts = tuple(
+                        dict.fromkeys(str(effort).strip() for effort in efforts)
+                    )
+                    if any(not effort for effort in normalized_efforts):
+                        raise EngineStateError("reasoning effort cannot be empty")
+                    reasoning_by_model[normalized_model_id] = normalized_efforts
                 records.append(
                     SourceRecord(
                         source_id=source_id,
@@ -217,6 +289,7 @@ class EngineStateStore:
                         credential_ref=credential_ref,
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
+                        route_model_ids=tuple(sorted(set(route_model_ids))),
                         prefix=(
                             str(credential["prefix"])
                             if credential.get("prefix")
@@ -224,6 +297,7 @@ class EngineStateStore:
                             if previous
                             else f"avibe-{secrets.token_hex(12)}"
                         ),
+                        model_reasoning_efforts=tuple(reasoning_by_model.items()),
                     )
                 )
             self._write_sources(records)
@@ -245,7 +319,18 @@ class EngineStateStore:
                 raise EngineStateError("source requires at least one model id")
             if any(not model for model in models):
                 raise EngineStateError("model id cannot be empty")
-            updated_record = SourceRecord(**{**asdict(current), "model_ids": models})
+            retained_reasoning = tuple(
+                (model_id, efforts)
+                for model_id, efforts in current.model_reasoning_efforts
+                if model_id in models
+            )
+            updated_record = SourceRecord(
+                **{
+                    **asdict(current),
+                    "model_ids": models,
+                    "model_reasoning_efforts": retained_reasoning,
+                }
+            )
             self._write_sources([updated_record if source.source_id == source_id else source for source in sources])
             return updated_record
 
@@ -425,6 +510,11 @@ class EngineStateStore:
                         **asdict(source),
                         "allowed_origins": list(source.allowed_origins),
                         "model_ids": list(source.model_ids),
+                        "route_model_ids": list(source.route_model_ids),
+                        "model_reasoning_efforts": [
+                            [model_id, list(efforts)]
+                            for model_id, efforts in source.model_reasoning_efforts
+                        ],
                     }
                     for source in sources
                 ]
@@ -443,6 +533,19 @@ class EngineStateStore:
             shutil.rmtree(instance_dir)
 
     @staticmethod
+    def _discard_invalid_state_file(path: Path, error: EngineStateError) -> None:
+        invalid_path = path.with_name(f"{path.name}.invalid")
+        try:
+            path.replace(invalid_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise EngineStateError(
+                f"unable to discard invalid engine state file: {path.name}"
+            ) from exc
+        logger.warning("Discarded invalid engine state file %s: %s", path.name, error)
+
+    @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -456,20 +559,10 @@ class EngineStateStore:
 
     @classmethod
     def _secure_write_json(cls, path: Path, payload: dict[str, Any]) -> None:
+        # The file is 0600 by ``write_atomic``; the directory is this store's own
+        # concern, since it holds the engine's secrets alongside its state.
         cls._ensure_private_dir(path.parent)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.chmod(0o600)
-            temporary.replace(path)
-            path.chmod(0o600)
-        finally:
-            temporary.unlink(missing_ok=True)
+        write_atomic(path, json.dumps(payload, sort_keys=True) + "\n")
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:
@@ -502,26 +595,55 @@ def _validated_source_id(value: str) -> str:
 
 
 def _validated_base_url(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip().rstrip("/")
-    parsed = urlparse(normalized)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    try:
+        return normalize_model_hub_base_url(value)
+    except (TypeError, ValueError):
         raise EngineStateError("invalid source base URL")
-    return normalized
 
 
-def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:
-    if protocol == "anthropic" and base_url is None and vendor != "anthropic":
-        raise EngineStateError("Anthropic-compatible source requires a base URL")
-    if protocol == "openai_responses" and base_url is None and vendor not in {"openai", "codex"}:
-        raise EngineStateError("Responses API source requires a base URL")
-    if protocol == "openai_chat" and base_url is None and vendor != "openai":
-        raise EngineStateError("OpenAI-compatible source requires a base URL")
+# `_append_source` raises these same three strings when it reaches a Source whose
+# upstream it cannot resolve. The check below is the earlier refusal of that one
+# condition, so it answers with the message the renderer would have.
+_MISSING_BASE_URL_ERRORS = {
+    "anthropic": "Anthropic-compatible source requires a base URL",
+    "openai_responses": "Responses API source requires a base URL",
+    "openai_chat": "OpenAI-compatible source requires a base URL",
+}
+
+
+def _validate_source_target(
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    *,
+    credential_kind: str,
+) -> None:
+    """Reject a Source whose upstream this runtime cannot resolve.
+
+    This asks exactly what `_append_source` asks when it renders the YAML: an
+    api-key Source is reachable over its own ``base_url``, or over the official
+    one the shipped catalog holds for its vendor, and over nothing else.
+
+    It deliberately does not compare the Source's protocol against that vendor's
+    catalog pin. Which protocols a vendor may be added as belongs to the create
+    path's proof ladder — a catalog pin, a client declaration on `custom`, or a
+    protocol-shaped response — and that decision was made when the Source was
+    saved. Re-deciding it here would judge a stored Source by a pin that can
+    change under it: a vendor repinned between releases would retroactively
+    invalidate the Sources its own earlier pin admitted. Since `sync_sources`
+    replaces the whole projection atomically, that verdict is not private to the
+    Source it falls on — it would take every other Source down with it.
+
+    An engine-held credential has no upstream to resolve at all: the auth file
+    stays inside the engine, `_append_source` returns before rendering it, and
+    `sync_sources` already requires ``base_url is None``. The requirement does
+    not reach it.
+    """
+
+    if credential_kind != "api_key":
+        return
+    if base_url is not None:
+        return
+    if official_api_key_base_url(vendor) is not None:
+        return
+    raise EngineStateError(_MISSING_BASE_URL_ERRORS[protocol])

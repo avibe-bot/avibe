@@ -89,6 +89,33 @@ def test_codex_no_base_url_when_neither_section_has_one(tmp_path: Path) -> None:
     assert state["base_url"] is None
 
 
+def test_codex_ignores_dormant_relay_section_without_oauth_capture_marker(
+    tmp_path: Path,
+) -> None:
+    """A provider section the user never activated is not proof of a
+    prior relay. After the OAuth flows clear ``model_provider``, any
+    surviving section is unpointed; treating the unique one as "the
+    relay" would silently reroute a freshly saved API key to an
+    unrelated endpoint. Disk reads must stay chain-only (active →
+    managed → legacy); recovery lives in the V2Config capture written at
+    the OAuth transition, merged in by ``get_codex_auth``."""
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "auth.json").write_text("{}", encoding="utf-8")
+    (codex_dir / "config.toml").write_text(
+        "\n".join(
+            [
+                "[model_providers.OpenAI]",
+                'name = "OpenAI"',
+                'base_url = "https://never-activated.example/v1"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    state = read_codex_auth_state(home=tmp_path)
+    assert state["base_url"] is None
+
+
 def _write_claude_settings(home: Path, env: dict) -> None:
     claude_dir = home / ".claude"
     claude_dir.mkdir()
@@ -509,6 +536,57 @@ def test_claude_settings_json_takes_precedence_over_legacy_v2config(
     assert state["base_url"] == "https://v2config.example.io"
     assert state["credential_type"] == "api_key"
     assert state["settings_conflict"] is False
+
+
+def test_save_claude_auth_blocks_recovery_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    fake_config = type("Config", (), {"load_warnings": ("recovery required",), "language": "zh"})()
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.claude_config.apply_claude_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": "sk-new",
+            "credential_type": "api_key",
+            "base_url": "https://example.invalid",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert applied == []
+
+
+def test_remove_claude_api_key_blocks_recovery_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    fake_config = type("Config", (), {"load_warnings": ("recovery required",)})()
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.claude_config.apply_claude_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.remove_backend_api_key("claude")
+
+    assert result == {
+        "ok": False,
+        "error": "config_recovery",
+        "message": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
+    }
+    assert applied == []
 
 
 def test_save_claude_explicit_auth_token_clears_v2_secret(

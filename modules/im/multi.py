@@ -370,13 +370,19 @@ class MultiIMClient(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ):
         client = self.get_client(self._resolve_platform_from_file_info(file_info))
+        options = {
+            "max_bytes": max_bytes,
+            "timeout_seconds": timeout_seconds,
+        }
+        if target_fd is not None:
+            options["target_fd"] = target_fd
         return await client.download_file_to_path(
             file_info,
             target_path,
-            max_bytes=max_bytes,
-            timeout_seconds=timeout_seconds,
+            **options,
         )
 
     async def edit_message(

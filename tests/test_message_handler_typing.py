@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import os
 import sys
+import tempfile
 import types
 import unittest
 from dataclasses import dataclass
@@ -9,6 +11,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+async def _wait_capture_tasks(handler) -> None:
+    adapter = handler.controller.memory_adapter
+    while adapter.capture_tasks:
+        tasks = tuple(adapter.capture_tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
 
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
@@ -44,8 +53,11 @@ def _load_message_handler_class():
             vibe_agent_backend: str | None = None
             vibe_agent_model: str | None = None
             vibe_agent_reasoning_effort: str | None = None
+            vibe_agent_model_explicit: bool = False
+            vibe_agent_reasoning_effort_explicit: bool = False
             vibe_agent_system_prompt: str | None = None
             files: list | None = None
+            input_metadata: object | None = None
 
         setattr(agents_module, "AgentRequest", _AgentRequest)
         sys.modules["modules.agents"] = agents_module
@@ -167,6 +179,24 @@ class _StubAgentService:
         return self.stop_result
 
 
+class _RecordingMemoryAdapter:
+    def __init__(self) -> None:
+        self.events = []
+
+    @property
+    def capture_tasks(self) -> set:
+        return set()
+
+    def offer(self, event) -> None:
+        self.events.append(event)
+
+    def quiesce_memory_capture_tasks(self) -> None:
+        return None
+
+    async def cancel_memory_capture_tasks(self) -> None:
+        return None
+
+
 class _StubController:
     def __init__(self, *, platform: str, ack_mode: str, typing_result: bool):
         self.config = type(
@@ -190,6 +220,7 @@ class _StubController:
         self.command_handler = type("Cmd", (), {"handle_start": staticmethod(lambda context, args: None)})()
         self.agent_auth_service = type("Auth", (), {})()
         self.processing_indicator = ProcessingIndicatorService(self)
+        self.memory_adapter = _RecordingMemoryAdapter()
 
     def update_thread_message_id(self, context):
         return None
@@ -204,9 +235,20 @@ class _StubController:
         is_error=False,
         level="normal",
         output=None,
+        terminal_error=None,
+        delivery=None,
     ):
         # Terminal error results settle the dot + release the SSE waiter via the
         # outbound chokepoint; a no-op here (these are IM turns, no workbench dot).
+        if message_type == "notify":
+            delivered_id = await self.get_im_client_for_context(context).send_message(
+                context,
+                text,
+            )
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+            return delivered_id
         return None
 
     def get_im_client_for_context(self, context):
@@ -258,6 +300,10 @@ class _StubController:
         return "en"
 
 
+def _capture_reservation(generation: int | None = 1):
+    return types.SimpleNamespace(config_generation=generation, release=Mock())
+
+
 class _StubSessionHandler:
     def __init__(self):
         self.alias_calls = []
@@ -282,6 +328,33 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_durable_input_keeps_canonical_text_for_memory_and_user_message(self):
+        """Scenario: MESSAGE-DELIVERY-317."""
+        for platform in ("avibe", "slack"):
+            with self.subTest(platform=platform):
+                controller = _StubController(platform=platform, ack_mode="reaction", typing_result=True)
+                controller.config.include_time_info = True
+                controller.config.include_user_info = True
+                handler = MessageHandler(controller)
+                handler.set_session_handler(_StubSessionHandler())
+                original = "original user text\n[Now: literal example]"
+                context = MessageContext(
+                    user_id="sender", channel_id="session", platform=platform,
+                    message_id="message", is_original_human_text=True,
+                    platform_specific={
+                        "delivery_ids": ["delivery"],
+                        "message_content": {"text": original},
+                        "author_id": "sender", "author_name": "Sender",
+                    },
+                )
+                await handler.handle_user_message(context, "[Recovery context]\n" + original)
+                _, request = controller.agent_service.requests[0]
+                self.assertEqual(request.user_message, original)
+                self.assertEqual(request.message, "[Recovery context]\n" + original)
+                self.assertEqual(request.input_metadata.user_name, "Sender")
+                self.assertEqual([event.text for event in controller.memory_adapter.events], [original])
+                self.assertEqual(context.platform_specific["message_content"]["text"], original)
+
     async def test_im_human_input_enters_delivery_owner_before_backend(self):
         controller = _StubController(
             platform="slack",
@@ -294,9 +367,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler.set_session_handler(_StubSessionHandler())
         handler._admit_human_delivery = AsyncMock(return_value=True)
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(
-            return_value="[metadata]\nhello"
-        )
+        controller.config.include_time_info = True
+        controller.config.include_user_info = True
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -309,7 +381,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler._admit_human_delivery.assert_awaited_once()
         assert (
             handler._admit_human_delivery.await_args.kwargs["dispatch_text"]
-            == "[metadata]\nhello"
+            == "hello"
         )
         controller.settings_manager.sessions.try_record_processed_message.assert_not_called()
         self.assertEqual(controller.agent_service.requests, [])
@@ -324,6 +396,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         server = types.SimpleNamespace(
             ensure_running=AsyncMock(),
             get_available_agents=AsyncMock(return_value=[{"name": "reviewer"}]),
+            get_explicit_subagent_model=Mock(return_value="anthropic/claude-reviewer"),
         )
         controller.agent_service.agents = {
             "opencode": types.SimpleNamespace(
@@ -345,7 +418,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler.set_session_handler(_StubSessionHandler())
         handler._admit_human_delivery = AsyncMock(return_value=True)
         handler._is_duplicate_human_delivery = Mock(return_value=False)
-        handler._prepend_message_metadata = AsyncMock(return_value="check this")
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -361,6 +433,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             call["admission_context"]["message_handler_route"]["subagent_name"],
             "reviewer",
         )
+        self.assertEqual(
+            call["admission_context"]["message_handler_route"]["subagent_model"],
+            "anthropic/claude-reviewer",
+        )
+        server.get_explicit_subagent_model.assert_called_once_with("reviewer")
         self.assertEqual(
             call["admission_context"]["message_handler_route"]["base_session_id"],
             "base-session",
@@ -379,7 +456,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         handler._is_duplicate_human_delivery = Mock(return_value=True)
-        handler._process_file_attachments = AsyncMock()
+        handler._materialize_file_attachments = AsyncMock()
         context = MessageContext(
             user_id="U1",
             channel_id="C1",
@@ -396,9 +473,101 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "review this")
 
-        handler._process_file_attachments.assert_not_awaited()
+        handler._materialize_file_attachments.assert_not_awaited()
         controller.session_turns.deliver.assert_not_awaited()
         self.assertEqual(controller.agent_service.requests, [])
+
+    async def test_durable_attachment_lease_stays_active_until_admission_owns_it(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+
+        async def admit(**kwargs):
+            self.assertIs(kwargs["attachment_lease"], lease)
+            lease.adopt.assert_not_called()
+            lease.release.assert_not_called()
+            lease.adopt()
+            lease.release()
+            return True
+
+        handler._admit_human_delivery = AsyncMock(side_effect=admit)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-attachment",
+            platform="slack",
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        lease.adopt.assert_called_once_with()
+        lease.release.assert_called_once_with()
+
+    async def test_failed_durable_admission_releases_unowned_attachment_lease(self):
+        from modules.im.base import FileAttachment
+
+        controller = _StubController(
+            platform="slack",
+            ack_mode="reaction",
+            typing_result=True,
+        )
+        controller.session_turns = types.SimpleNamespace(deliver=AsyncMock())
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        handler._is_duplicate_human_delivery = Mock(return_value=False)
+        handler._emit_agent_dispatch_failure = AsyncMock()
+        lease = Mock()
+        attachment = FileAttachment(
+            name="report.pdf",
+            mimetype="application/pdf",
+            local_path="/tmp/leased-report.pdf",
+            size=10,
+        )
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(attachment,),
+                display_errors=(),
+                lease=lease,
+            )
+        )
+        handler._admit_human_delivery = AsyncMock(
+            side_effect=RuntimeError("admission rejected")
+        )
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-rejected-attachment",
+            platform="slack",
+            files=[FileAttachment("report.pdf", "application/pdf", url="private")],
+        )
+
+        await handler.handle_user_message(context, "review this")
+
+        lease.adopt.assert_not_called()
+        lease.release.assert_called_once_with()
 
     async def test_inline_stop_uses_durable_empty_p0_owner(self):
         controller = _StubController(
@@ -491,8 +660,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(error, "context preparation failed")
-        controller.emit_agent_message.assert_awaited_once()
-        call = controller.emit_agent_message.await_args
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, call = controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (context, "notify", "Error: context preparation failed"),
+        )
         self.assertEqual(call.args[:3], (context, "result", ""))
         output = call.kwargs["output"]
         self.assertTrue(output.completes_turn)
@@ -1191,6 +1364,9 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "hello")
 
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertTrue(request.vibe_agent_model_explicit)
+        self.assertFalse(request.vibe_agent_reasoning_effort_explicit)
         sessions_store.materialize_agent_session_route.assert_called_once_with(
             "ses_wb",
             agent_id="agent-default",
@@ -1281,6 +1457,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_platform_specific_client_is_used_for_user_info(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.config.include_user_info = True
         handler = MessageHandler(controller)
         context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
 
@@ -1291,7 +1468,8 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         wechat_client = _WechatClient(typing_result=True)
         controller.get_im_client_for_context = lambda _context: wechat_client  # type: ignore[method-assign]
 
-        result = await handler._prepend_user_info(context, "hello")
+        metadata = await handler.prepare_input_metadata(context, human=True)
+        result = metadata.render("hello", controller.config)
 
         self.assertEqual(result, "[WeChat User<wx-user>]\nhello")
 
@@ -1440,9 +1618,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         controller.config.include_user_info = True
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        handler._build_current_time_line = lambda: "[Current Time: 2026-07-26 16:00:00 UTC+08:00]"
-        handler._process_file_attachments = AsyncMock(
-            return_value=([object()], ["report.pdf could not be downloaded"])
+        attachment_lease = Mock()
+        handler._materialize_file_attachments = AsyncMock(
+            return_value=types.SimpleNamespace(
+                attachments=(object(),),
+                display_errors=("report.pdf could not be downloaded",),
+                lease=attachment_lease,
+            )
         )
         handler._transcribe_audio_attachments = AsyncMock(
             return_value=[
@@ -1470,12 +1652,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "<@U_BOT> Investigate session title fallback")
 
         _, request = controller.agent_service.requests[0]
-        prepended_lines = request.message.splitlines()[:2]
         self.assertIn("<@U_BOT>", request.message)
         self.assertNotIn("<@U_BOT>", request.user_message)
         self.assertIn("[Audio Transcripts]", request.user_message)
         self.assertIn("Keep the user's words", request.user_message)
-        self.assertFalse(set(prepended_lines) & set(request.user_message.splitlines()))
+        self.assertNotIn("[Now:", request.message)
+        self.assertEqual(request.input_metadata.user_id, "U1")
         self.assertNotIn("[Attachment Download Errors]", request.user_message)
         self.assertIn("[Attachment Download Errors]", request.message)
 
@@ -1512,6 +1694,17 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduled_turn_returns_error_string_after_notifying_im(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.agent_service.error = RuntimeError("boom")
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1519,12 +1712,69 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="scheduled:task-1:abc",
             platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-error",
+                "task_execution_id": "run-scheduled-error",
+            },
         )
 
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, _terminal_call = controller.emit_agent_message.await_args_list
+        self.assertEqual(notify_call.args[:3], (context, "notify", "Error: boom"))
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-scheduled-error",
+                "ack_evidence": "delivery_only",
+                "delivered": True,
+            },
+        )
+
+    async def test_handled_backend_key_error_is_not_reclassified_as_missing_agent(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+
+        async def fail_after_dispatch(_agent_name, request):
+            error = KeyError("backend config")
+            request.failure_handled = True
+            await request.failure_handler(error)
+            raise error
+
+        controller.agent_service.handle_message = fail_after_dispatch
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="scheduled:task-1:key-error",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-key-error",
+                "task_execution_id": "run-scheduled-key-error",
+            },
+        )
+
+        result = await handler.handle_scheduled_message(context, "hello")
+
+        self.assertEqual(result, "'backend config'")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: 'backend config'")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        self.assertNotIn("not available", controller.im_client.sent_messages[0][1])
 
     async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

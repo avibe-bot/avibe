@@ -24,10 +24,11 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
-from core.runtime_ownership import SessionRuntimeDisposition
+from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
@@ -219,9 +220,250 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert captured["connected"] is True
     assert captured["options"].cli_path == "/usr/local/bin/claude-proxy"
     assert captured["options"].max_buffer_size == CLAUDE_SDK_MAX_BUFFER_SIZE
+    assert captured["options"].skills == []
+    assert captured["options"].env["AVIBE_SKILL_WORKING_DIR"] == str(tmp_path.resolve())
     assert controller.claude_sessions[f"slack_C123:{tmp_path}"] is client
     assert getattr(client, "_vibe_runtime_base_session_id") == "slack_C123"
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
+
+
+def test_session_handler_uses_native_cli_launch_reasoning_catalog(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    class _Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend,
+                channel="native_cli",
+                requested_model=requested_model,
+                target_model=requested_model,
+                runtime_model=requested_model,
+                source_id="src_native01",
+                context_window=128_000,
+                max_output_tokens=32_000,
+                reasoning_efforts=("max",),
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        lambda *_args: ["low"],
+    )
+
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = _Runtime()
+    controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
+        model="claude-opus-4-6",
+        reasoning_effort="max",
+    )
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    assert captured["options"].effort == "max"
+    assert captured["options"].env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
+
+
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+@pytest.mark.parametrize("explicit", [None, "", "333333"])
+@pytest.mark.parametrize("has_metadata", [False, True])
+def test_session_handler_preserves_explicit_limits_and_passes_alias_planning_metadata(
+    monkeypatch, tmp_path: Path, channel, explicit, has_metadata,
+) -> None:
+    import json
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured = {}
+    keys = ("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    for key in keys:
+        if explicit is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, explicit)
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    class Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel=channel,
+                requested_model=requested_model, target_model="custom-upstream",
+                runtime_model="custom-upstream", source_id="src_limitfixture",
+                gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token="limit-fixture-token",
+                context_window=128_000 if has_metadata else None,
+                max_output_tokens=32_000 if has_metadata else None,
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="planning-alias")
+    _run_session(SessionHandler(controller), MessageContext(user_id="U123", channel_id="C123"))
+
+    options = captured["options"]
+    assert options.extra_args["model"] == "custom-upstream"
+    for key, fallback in zip(keys, ("128000", "32000")):
+        expected = explicit if explicit is not None else fallback if has_metadata else None
+        assert options.env.get(key) == expected
+        assert key not in json.loads(options.settings).get("env", {})
+    assert options.setting_sources == (["project", "local"] if channel == "hub" else ["user", "project", "local"])
+
+
+def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp_path: Path) -> None:
+    import json
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured = {}
+
+    class Client:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    class Runtime:
+        async def resolve(self, backend, requested_model, **kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel="hub", requested_model=requested_model,
+                target_model="gpt-6-astra", runtime_model=requested_model,
+                source_id="src_hubsettings", gateway_base_url="http://127.0.0.1:18443/claude",
+                gateway_token="hub-settings-fixture-token",
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    controller.settings_manager.get_channel_routing = lambda _: RoutingSettings(model="claude-opus-5")
+    _run_session(SessionHandler(controller), MessageContext(user_id="U123", channel_id="C123"))
+
+    options = captured["options"]
+    settings = json.loads(options.settings)
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == options.env["ANTHROPIC_BASE_URL"]
+    assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "hub-settings-fixture-token"
+    assert settings["env"]["ANTHROPIC_API_KEY"] == ""
+    assert settings["autoMemoryEnabled"] is False
+    assert options.setting_sources == ["project", "local"]
+    assert options.extra_args["model"] == "claude-opus-5"
+
+
+def test_session_handler_recreates_cached_claude_client_when_catalog_limits_change(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.context_windows = iter((128_000, 256_000))
+
+        async def resolve(self, backend, requested_model, **_kwargs):
+            context_window = next(self.context_windows)
+            return ModelHubLaunch(
+                backend=backend,
+                channel="native_cli",
+                requested_model=requested_model,
+                target_model=requested_model,
+                runtime_model=requested_model,
+                source_id="src_native01",
+                context_window=context_window,
+                max_output_tokens=32_000,
+                reasoning_efforts=("high",),
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = _Runtime()
+    controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
+        model="claude-opus-4-6",
+        reasoning_effort="high",
+    )
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    first_client = _run_session(handler, context)
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert first_client.options.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
+    assert second_client.options.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "256000"
+
+
+def test_claude_system_prompt_follows_live_memory_enabled_state(tmp_path: Path) -> None:
+    controller = _Controller(tmp_path)
+    controller.config.memory = type("MemoryConfig", (), {"enabled": False})()
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"memory_cli_admitted": True},
+    )
+
+    disabled = asyncio.run(
+        handler._build_claude_system_prompt(
+            context,
+            session_key="test::C123",
+            agent_name="claude",
+            session_anchor="slack_C123",
+            agent_system_prompt=None,
+        )
+    )
+    controller.config.memory.enabled = True
+    enabled = asyncio.run(
+        handler._build_claude_system_prompt(
+            context,
+            session_key="test::C123",
+            agent_name="claude",
+            session_anchor="slack_C123",
+            agent_system_prompt=None,
+        )
+    )
+
+    assert "## Personal Memory" not in disabled["append"]
+    assert "## Personal Memory" in enabled["append"]
+    assert 'vibe memory search "<query>" --json' in enabled["append"]
 
 
 def test_session_handler_injects_vendored_git_into_gitless_child_env(
@@ -393,7 +635,7 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
     _run_session(handler, context)
 
     assert captured["connected"] is True
-    expected = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+    expected = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "Skill"]
     if not session_handler_module.CLAUDE_SDK_HOOKS_AVAILABLE or session_handler_module.HookMatcher is None:
         expected.append("Workflow")
     assert captured["options"].disallowed_tools == expected
@@ -439,7 +681,9 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "`vibe show path`" in prompt
+    assert "load the `use-show-pages` Skill" in prompt
+    assert "- use-show-pages:" in prompt
+    assert "`vibe show path`" not in prompt
     assert "--session-id sesk8m4q2p7x" not in prompt
     assert "--session-key" not in prompt
 
@@ -478,9 +722,11 @@ def test_session_handler_preserves_passed_agent_system_prompt(monkeypatch, tmp_p
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Use the release-reviewer Vibe Agent policy." in prompt
+    assert prompt.endswith("\n\nUse the release-reviewer Vibe Agent policy.")
+    assert prompt.count("Use the release-reviewer Vibe Agent policy.") == 1
 
 
-def test_session_handler_omits_show_pages_prompt_when_disabled(
+def test_session_handler_includes_show_pages_despite_legacy_opt_out(
     monkeypatch, tmp_path: Path
 ) -> None:
     captured: dict[str, Any] = {}
@@ -507,7 +753,8 @@ def test_session_handler_omits_show_pages_prompt_when_disabled(
     assert captured["connected"] is True
     assert "# Avibe" in prompt
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "## Show Pages" not in prompt
+    assert "## Show Pages" in prompt
+    assert "load the `use-show-pages` Skill" in prompt
     assert "vibe show path" not in prompt
 
 
@@ -614,6 +861,58 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "`slack/<user_id>`" in first_client.options.system_prompt["append"]
     assert "slack/U123" not in first_client.options.system_prompt["append"]
     assert "slack/U456" not in first_client.options.system_prompt["append"]
+
+
+def test_session_handler_recreates_cached_claude_client_when_skill_bindings_change(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+    skill_env = {"AVIBE_SKILL_WORKING_DIR": str(tmp_path)}
+
+    class _PromptSessions(_Sessions):
+        @staticmethod
+        def ensure_agent_session_id(settings_key, agent_name, base_session_id, **_kwargs):
+            return "sesk8m4q2p7x"
+
+        @staticmethod
+        def get_claude_session_id(settings_key, base_session_id):
+            return None
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module,
+        "managed_skill_environment",
+        lambda _working_path, **_kwargs: dict(skill_env),
+    )
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager.sessions = _PromptSessions()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
+
+    first_client = _run_session(handler, context)
+    skill_env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] = "a" * 64
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID" not in first_client.options.env
+    assert second_client.options.env["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "a" * 64
 
 
 def test_session_handler_recreates_terminated_cached_client_before_dispatch(
@@ -738,6 +1037,7 @@ def test_session_handler_retires_model_hub_scope_for_dead_cached_client(
         handler._cleanup_session_locked.assert_awaited_once_with(
             composite_key,
             retire_model_hub_scope=True,
+            reason="cached_process_terminated",
         )
 
     asyncio.run(exercise())
@@ -1360,6 +1660,107 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
 
 
+def test_cached_claude_subagent_revalidates_memory_principal_without_prompt_churn(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    clients: list[Any] = []
+
+    class _RoutingSessions(_Sessions):
+        @staticmethod
+        def get_claude_session_id(_settings_key, _base_session_id):
+            return None
+
+        @staticmethod
+        def get_agent_session_id(_settings_key, _base_session_id, agent_name):
+            assert agent_name == "claude"
+            return None
+
+        @staticmethod
+        def ensure_agent_session_id(
+            _settings_key,
+            agent_name,
+            _base_session_id,
+            **_kwargs,
+        ):
+            assert agent_name == "claude"
+            return "ses-subagent"
+
+    class _RoutingSettingsManager(_SettingsManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = _RoutingSessions()
+
+        @staticmethod
+        def get_channel_routing(_settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            clients.append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.config.platform = "avibe"
+    controller.config.memory = type("MemoryConfig", (), {"enabled": True})()
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"avibe": controller.settings_manager}
+    principals: dict[str, str] = {}
+
+    def configure_memory_cli_session(context, *, admitted):
+        session_id = context.platform_specific["agent_session_id"]
+        if admitted:
+            principals[session_id] = context.user_id
+        else:
+            principals.pop(session_id, None)
+        return admitted
+
+    controller.configure_memory_cli_session = configure_memory_cli_session
+    handler = SessionHandler(controller)
+
+    local_context = MessageContext(
+        user_id="local",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
+    )
+    local_client = _run_session(handler, local_context)
+    assert principals == {"ses-subagent": "local"}
+    assert "## Personal Memory" in str(local_client.options.system_prompt)
+
+    remote_context = MessageContext(
+        user_id="remote-user",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer", "memory_cli_admitted": True},
+    )
+    remote_client = _run_session(handler, remote_context)
+    assert remote_client is local_client
+    assert principals == {"ses-subagent": "remote-user"}
+
+    denied_context = MessageContext(
+        user_id="remote-user",
+        channel_id="C123",
+        platform="avibe",
+        platform_specific={"routing_subagent": "reviewer"},
+    )
+    denied_client = _run_session(handler, denied_context)
+    assert denied_client is local_client
+    assert local_client.disconnects == 0
+    assert principals == {}
+    assert "## Personal Memory" in str(denied_client.options.system_prompt)
+
+
 def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(
     monkeypatch,
     tmp_path: Path,
@@ -1532,8 +1933,11 @@ def test_session_handler_expands_tilde_in_claude_cli_path(monkeypatch, tmp_path:
     assert captured["options"].cli_path == str(Path("~/bin/claude").expanduser())
 
 
-def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp_path: Path) -> None:
-    stale_session_id = "11111111-1111-1111-1111-111111111111"
+@pytest.mark.parametrize(
+    "stale_session_id",
+    ["11111111-2222-4016-8444-555555555555", "11111111-2222-5016-8444-555555555555"],
+)
+def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp_path: Path, stale_session_id) -> None:
     captured: dict[str, Any] = {}
 
     class _StaleSessions:
@@ -1574,6 +1978,8 @@ def test_session_handler_surfaces_claude_missing_resume_session(monkeypatch, tmp
     assert exc_info.value.working_path == str(tmp_path)
     assert stale_session_id in exc_info.value.stderr
     assert captured["options"].resume == stale_session_id
+    assert controller.settings_manager.sessions.get_claude_session_id("test::C123", "slack_C123") == stale_session_id
+    assert handler.claude_sessions == {}
 
 
 def test_claude_startup_failure_is_recorded_before_scope_retirement(
@@ -1872,6 +2278,51 @@ def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path
 
     assert evicted == 0
     assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
+@pytest.mark.parametrize("ownership_arrives_during_check", [False, True])
+def test_silent_owned_claude_turn_survives_both_reclamation_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ownership_arrives_during_check: bool,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = 0.0
+    handler.active_sessions.add(composite_key)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1_000_000.0)
+
+    def snapshot(target, disposition=SessionRuntimeDisposition.ACTIVE):
+        return RuntimeTargetOwnershipSnapshot(
+            backend="claude",
+            resource_key=target.resource_key,
+            activity_runtime_keys=(),
+            sessions=(),
+            sessionless_active_activity_ids=(),
+            sessionless_fallback_run_ids=(),
+            disposition=disposition,
+        )
+
+    controller.runtime_ownership = SimpleNamespace(
+        snapshot=snapshot,
+        snapshot_many=lambda targets: tuple(
+            snapshot(
+                target,
+                SessionRuntimeDisposition.RECLAIMABLE
+                if ownership_arrives_during_check else SessionRuntimeDisposition.ACTIVE,
+            )
+            for target in targets
+        ),
+    )
+    assert asyncio.run(handler.evict_idle_sessions(600)) == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in handler.active_sessions
     assert composite_key in controller.claude_sessions
 
 
@@ -2230,6 +2681,56 @@ def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
     asyncio.run(handler.reap_orphaned_claude_sessions())
 
     assert captured["reap_in_tree"] is False
+
+
+def test_cleanup_session_logs_exact_runtime_generation(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeAgentOptions",
+        _StubClaudeAgentOptions,
+    )
+    monkeypatch.setattr(
+        session_handler_module,
+        "ClaudeSDKClient",
+        _disconnect_counting_client(captured),
+    )
+
+    controller = _Controller(tmp_path)
+    controller.runtime_activation = RuntimeActivationRegistry()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+    client = _run_session(handler, context)
+    composite_key = f"slack_C123:{tmp_path}"
+    identity = getattr(client, "_vibe_runtime_activation_identity")
+
+    async def _exercise_cleanup() -> int:
+        receiver = asyncio.create_task(asyncio.sleep(3600))
+        controller.receiver_tasks[composite_key] = receiver
+        handler.mark_session_active(composite_key)
+        receiver_identity = id(receiver)
+        with caplog.at_level("INFO", logger="core.handlers.session_handler"):
+            await handler.cleanup_session(
+                composite_key,
+                reason="test_requested_teardown",
+            )
+        return receiver_identity
+
+    receiver_identity = asyncio.run(_exercise_cleanup())
+
+    evidence = caplog.text
+    assert f"session={composite_key}" in evidence
+    assert "reason=test_requested_teardown" in evidence
+    assert "busy=True" in evidence
+    assert f"runtime_generation={identity.generation}" in evidence
+    assert f"client_identity={id(client)}" in evidence
+    assert f"receiver_identity={receiver_identity}" in evidence
+    assert "receiver_done=False" in evidence
 
 
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:

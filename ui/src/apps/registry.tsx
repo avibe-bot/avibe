@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { Suspense, lazy } from 'react';
 import { CodeXml, Eye, Folder, LayoutGrid, MonitorPlay, SquareTerminal } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -16,7 +17,7 @@ export type AppId = 'files' | 'terminal' | 'editor' | 'preview' | 'showpage' | '
 export interface AppDefinition {
   id: AppId;
   /** i18n key for the window title / Dock label. */
-  titleKey: string;
+  titleKey: TranslationKey;
   icon: LucideIcon;
   /** Tint for the Dock tile + window title icon — a CSS var token name. */
   accent: string;

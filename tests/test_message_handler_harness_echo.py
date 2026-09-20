@@ -17,7 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
-from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from modules.im import MessageContext
 
 # Reuses the isolated module loader (and controller/session stubs) from the
@@ -37,7 +36,6 @@ def _build_handler():
     handler.set_session_handler(_StubSessionHandler())
     handler._admit_human_delivery = AsyncMock(return_value=False)
     handler._is_duplicate_human_delivery = Mock(return_value=False)
-    handler._prepend_message_metadata = AsyncMock(side_effect=lambda context, message, **_kw: message)
     return controller, handler
 
 
@@ -69,24 +67,22 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_scheduled_message(_scheduled_context(), "summarize open PRs")
 
-        # The staged text is the RAW prompt: staging runs before
-        # ``_prepend_message_metadata`` decorates the text sent to the backend.
+        # The staged text is the raw prompt, independent of execution metadata.
         self.assertEqual(_staged_prompt(controller), "summarize open PRs")
         # And nothing is posted from here: the send waits for the runtime gate in
         # ``AgentService._begin_turn_status``, so a queued turn stays quiet.
         controller.message_dispatcher.emit_harness_prompt.assert_not_awaited()
 
-    async def test_durable_scheduled_text_with_metadata_marker_is_not_decorated_twice(self):
+    async def test_scheduled_input_carries_provenance_separately_from_text(self):
         controller, handler = _build_handler()
-        context = _scheduled_context(
-            **{SCHEDULED_DISPATCH_METADATA_APPLIED_KEY: True}
-        )
+        context = _scheduled_context(source_session_id="source")
 
-        await handler.handle_scheduled_message(context, "[Current Time: ...]\nFrom: #source\nwork")
+        await handler.handle_scheduled_message(context, "work")
 
-        handler._prepend_message_metadata.assert_not_awaited()
         _agent_name, request = controller.agent_service.requests[0]
-        self.assertEqual(request.message, "[Current Time: ...]\nFrom: #source\nwork")
+        self.assertEqual(request.message, "work")
+        self.assertEqual(request.input_metadata.source_session_id, "source")
+        self.assertIsNone(request.input_metadata.user_id)
 
     async def test_subagent_prefixed_prompt_is_staged_unstripped(self):
         """Scenario: MESSAGE-DELIVERY-018
@@ -126,7 +122,6 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scheduled_subagent_prefix_routes_before_hidden_provenance(self):
         controller, handler = _build_handler()
-        del handler._prepend_message_metadata
         context = _scheduled_context(
             source_kind="agent",
             source_actor="source-session",
@@ -159,8 +154,9 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.subagent_name, "echo-probe")
         self.assertEqual(
             request.message,
-            "From: #source-session\naudit the queue",
+            "audit the queue",
         )
+        self.assertEqual(request.input_metadata.source_session_id, "source-session")
 
     async def test_human_turn_never_stages_a_prompt(self):
         controller, handler = _build_handler()

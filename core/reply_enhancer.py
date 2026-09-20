@@ -8,8 +8,9 @@ Extracts special syntaxes from agent reply text:
 2. **File links** – Markdown links whose URL starts with ``file://``
    e.g. ``[screenshot](file:///tmp/shot.png)``
 
-3. **Quick-reply buttons** – A ``---`` separator followed by
-   ``[button text]`` tokens separated by ``|``
+3. **Quick-reply buttons** – A trailing row of ``[button text]`` tokens
+   separated by ``|``. The preferred form starts with a ``---`` separator;
+   pipe-separated rows are also accepted without it for compatibility.
    e.g. ``---\\n[👌好的] | [✅提交PR] | [先review一下]``
 """
 
@@ -25,17 +26,23 @@ from typing import List, Tuple
 from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
+from markdown_it.common.normalize_url import validateLink as _validate_markdown_link
+from markdown_it.common.utils import isStrSpace, unescapeAll
 from markdown_it.common.html_re import HTML_TAG_RE
 from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
 from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
+from markdown_it.rules_inline.image import image as _commonmark_image
+from markdown_it.rules_inline.link import link as _commonmark_link
 from markdown_it.rules_inline.state_inline import StateInline
 
 logger = logging.getLogger(__name__)
-_BLOCK_MARKDOWN = MarkdownIt("commonmark")
+# Block consumers use source maps/content/levels, never parsed inline children.
+_BLOCK_MARKDOWN = MarkdownIt("commonmark").disable("inline")
 _INLINE_MARKDOWN = MarkdownIt("commonmark")
 _INLINE_CODE_RANGES_KEY = "avibe_inline_code_ranges"
 _INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
 _INLINE_SILENT_RANGES_KEY = "avibe_inline_silent_ranges"
+_FILE_LINK_CAPTURES_KEY = "avibe_file_link_captures"
 
 
 def _track_inline_code(state: StateInline, silent: bool) -> bool:
@@ -76,6 +83,76 @@ def _skip_silent_control(state: StateInline, silent: bool) -> bool:
     return True
 
 
+def _validate_file_link_locally(url: str) -> bool:
+    """Allow file links only in the reply parser's isolated MarkdownIt."""
+    return url.strip().casefold().startswith("file:") or _validate_markdown_link(url)
+
+
+def _capture_file_link_rule(rule, *, is_image: bool):
+    """Wrap a CommonMark rule and record its accepted source ownership."""
+
+    def capture(state: StateInline, silent: bool) -> bool:
+        start = state.pos
+        token_start = len(state.tokens)
+        matched = rule(state, silent)
+        if not matched or silent:
+            return matched
+
+        href = None
+        for token in state.tokens[token_start:]:
+            if is_image and token.type == "image":
+                href = token.attrGet("src")
+                break
+            if not is_image and token.type == "link_open":
+                href = token.attrGet("href")
+                break
+        if not isinstance(href, str) or not href.casefold().startswith("file:"):
+            return matched
+
+        bracket_start = start + (1 if is_image else 0)
+        label_start = bracket_start + 1
+        label_end = state.md.helpers.parseLinkLabel(
+            state,
+            bracket_start,
+            not is_image,
+        )
+        pos = label_end + 1
+        if label_end < 0 or pos >= state.posMax or state.src[pos] != "(":
+            return matched
+        pos += 1
+        while pos < state.posMax:
+            char = state.src[pos]
+            if not isStrSpace(char) and char != "\n":
+                break
+            pos += 1
+        destination_start = pos
+        destination = state.md.helpers.parseLinkDestination(
+            state.src,
+            destination_start,
+            state.posMax,
+        )
+        if not destination.ok:
+            return matched
+        destination_end = destination.pos
+        if state.src[destination_start : destination_start + 1] == "<":
+            destination_start += 1
+            destination_end -= 1
+        state.env.setdefault(_FILE_LINK_CAPTURES_KEY, []).append(
+            (
+                start,
+                state.pos,
+                is_image,
+                label_start,
+                label_end,
+                destination_start,
+                destination_end,
+            )
+        )
+        return matched
+
+    return capture
+
+
 _INLINE_MARKDOWN.inline.ruler.disable(["autolink", "html_inline"])
 _INLINE_MARKDOWN.inline.ruler.before(
     "backticks",
@@ -88,6 +165,17 @@ _INLINE_MARKDOWN.inline.ruler.before(
     _skip_silent_control,
 )
 _INLINE_MARKDOWN.inline.ruler.at("backticks", _track_inline_code)
+
+_FILE_LINK_MARKDOWN = MarkdownIt("commonmark")
+_FILE_LINK_MARKDOWN.validateLink = _validate_file_link_locally
+_FILE_LINK_MARKDOWN.inline.ruler.at(
+    "link",
+    _capture_file_link_rule(_commonmark_link, is_image=False),
+)
+_FILE_LINK_MARKDOWN.inline.ruler.at(
+    "image",
+    _capture_file_link_rule(_commonmark_image, is_image=True),
+)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -134,14 +222,57 @@ class EnhancedReply:
     secret_requests: List[SecretRequest] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _FileLinkMatch:
+    """Small match-compatible value shared by the regex and angle scanner."""
+
+    source: str
+    start_offset: int
+    end_offset: int
+    bang: str
+    label: str
+    url: str
+    label_start_offset: int
+    label_end_offset: int
+    url_start_offset: int
+    url_end_offset: int
+
+    def start(self, group: int | None = None) -> int:
+        if group in (None, 0):
+            return self.start_offset
+        if group == 1:
+            return self.start_offset
+        if group == 2:
+            return self.label_start_offset
+        if group == 3:
+            return self.url_start_offset
+        raise IndexError(group)
+
+    def end(self, group: int | None = None) -> int:
+        if group in (None, 0):
+            return self.end_offset
+        if group == 1:
+            return self.start_offset + len(self.bang)
+        if group == 2:
+            return self.label_end_offset
+        if group == 3:
+            return self.url_end_offset
+        raise IndexError(group)
+
+    def group(self, *groups: int) -> str | tuple[str, ...]:
+        values = (self.source, self.bang, self.label, self.url)
+        if not groups:
+            return self.source
+        selected = tuple(values[group] for group in groups)
+        return selected[0] if len(selected) == 1 else selected
+
+    def groups(self) -> tuple[str, str, str]:
+        return self.bang, self.label, self.url
+
+
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
-
-# Matches markdown links with file:// URLs, including image links:
-#   [label](file:///path)
-#   ![alt](file:///path)
-_FILE_LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\((file://(?:[^()]+|\([^)]*\))+)\)")
 
 # Matches the quick-reply button block at the end of the text.
 # A horizontal rule (``---``) on its own line, followed by bracket buttons.
@@ -164,6 +295,25 @@ _BUTTON_BLOCK_RE = re.compile(
     r"\s*$",  # trailing whitespace / end of string
 )
 
+# Compatibility form for replies that omit the ``---`` line. Keep this more
+# restrictive than the preferred form: it must be one trailing line with at
+# least two tokens and an explicit pipe, so ordinary ``[bracketed text]`` and
+# reference links remain message content.
+_BUTTON_LINE_TOKEN = (
+    r"(?:\[[^\]\r\n]+\]"
+    + _LINK_SUFFIX
+    + r"|<https?://[^|>\r\n]+\|[^>\r\n]+>)"
+)
+_UNSEPARATED_BUTTON_ROW_RE = re.compile(
+    r"\r?\n"
+    r"([ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*(?:[|｜][ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*)+(?:[|｜][ \t]*)?)"
+    r"(?:\r?\n[ \t]*)*$"
+)
+
 # Individual button tokens. Link variants are accepted for compatibility only;
 # the bracket label (or Slack link text) remains the quick-reply payload.
 _BUTTON_TOKEN_RE = re.compile(
@@ -177,6 +327,65 @@ _BUTTON_TOKEN_RE = re.compile(
 # (Detection matches the whole block instead of scanning for ``|``, which a URL
 # may itself contain.)
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
+_LINK_ONLY_BUTTON_ROW_RE = re.compile(
+    r"\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*"
+    r"(?:[|｜]\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*)+"
+)
+
+
+def _is_markdown_table_delimiter_line(line: str) -> bool:
+    """Return whether *line* is a Markdown table delimiter row."""
+    if "|" not in line:
+        return False
+    cells = line.strip().strip("|").split("|")
+    return len(cells) >= 2 and all(
+        re.fullmatch(r"\s*:?\-+:?\s*", cell) for cell in cells
+    )
+
+
+def _is_markdown_table_delimiter_before(markdown_mask: str, start: int) -> bool:
+    """Return whether a separator-free row belongs to the preceding table."""
+    prefix = markdown_mask[:start]
+    if prefix.endswith("\n"):
+        return False
+    lines = prefix.splitlines()
+    if not lines or "|" not in lines[-1]:
+        return False
+
+    # Walk through contiguous table rows so the final row of a multi-row table
+    # is not mistaken for a quick-reply footer.
+    index = len(lines) - 1
+    while index >= 0 and "|" in lines[index]:
+        if _is_markdown_table_delimiter_line(lines[index]):
+            return index > 0 and "|" in lines[index - 1]
+        index -= 1
+    return False
+
+
+def _markdown_container_level_at(text: str, start: int) -> int:
+    """Return the CommonMark container nesting level for a candidate row."""
+    newline = re.match(r"\r\n|\r|\n", text[start:])
+    if newline is None:
+        return 0
+
+    line_offsets = [0]
+    line_offsets.extend(
+        match.end() for match in re.finditer(r"\r\n|\r|\n", text)
+    )
+    candidate_position = start + newline.end()
+    line_index = bisect_left(line_offsets, candidate_position + 1) - 1
+    for token in _BLOCK_MARKDOWN.parse(text):
+        if (
+            token.type == "inline"
+            and token.map is not None
+            and token.map[0] <= line_index < token.map[1]
+        ):
+            return token.level
+    return 0
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.
@@ -205,7 +414,11 @@ _SECRET_REQUEST_RE = re.compile(r"\$<([A-Za-z_][A-Za-z0-9_]*)>")
 
 
 def process_reply(
-    text: str, *, include_quick_replies: bool = True, keep_file_links: bool = False
+    text: str,
+    *,
+    include_quick_replies: bool = True,
+    allow_unseparated_quick_replies: bool = True,
+    keep_file_links: bool = False,
 ) -> EnhancedReply:
     """Parse *text* and return an ``EnhancedReply``.
 
@@ -217,6 +430,9 @@ def process_reply(
     workbench needs the links in place so it can rewrite them to media-proxy URLs
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
+
+    ``allow_unseparated_quick_replies`` gates only the compatibility syntax;
+    explicit ``---`` button blocks retain their existing behavior.
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
     visible_text = text
@@ -231,7 +447,11 @@ def process_reply(
             markdown_mask,
         )
     if include_quick_replies:
-        buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
+        buttons, text_clean = _extract_buttons(
+            text_no_files,
+            mask_no_files,
+            allow_unseparated=allow_unseparated_quick_replies,
+        )
     else:
         buttons, text_clean = [], text_no_files
     return EnhancedReply(
@@ -287,8 +507,8 @@ def _extract_file_links(
     results: List[FileLink] = []
     for match in _file_link_matches(text, markdown_mask):
         bang, label, url = match.groups()
-        parsed = urlparse(url)
-        if parsed.scheme != "file":
+        parsed = _parse_file_uri(url)
+        if parsed.scheme.casefold() != "file":
             continue
         path = _file_uri_to_local_path(parsed)
         if not os.path.isabs(path):
@@ -300,6 +520,8 @@ def _extract_file_links(
 
 def _file_uri_to_local_path(parsed) -> str:
     """Convert a parsed file URI into a local path for the current OS."""
+    # CommonMark pointy destinations permit backslash-escaped angle brackets;
+    # those escapes are Markdown syntax, not part of the local filename.
     path = unquote(parsed.path)
     if os.name != "nt":
         return path
@@ -309,6 +531,194 @@ def _file_uri_to_local_path(parsed) -> str:
     if re.match(r"^/[A-Za-z]:/", path):
         path = path[1:]
     return ntpath.normpath(path)
+
+
+def _parse_file_uri(value: str):
+    """Parse a CommonMark-normalized file destination."""
+    return urlparse(value)
+
+
+def _protect_file_uri_delimiters(value: str) -> str:
+    """Keep escaped URI delimiters in the path before CommonMark unescaping."""
+    chars: List[str] = []
+    cursor = 0
+    while cursor < len(value):
+        if value[cursor] != "\\":
+            chars.append(value[cursor])
+            cursor += 1
+            continue
+        slash_start = cursor
+        while cursor < len(value) and value[cursor] == "\\":
+            cursor += 1
+        slash_count = cursor - slash_start
+        if cursor < len(value) and value[cursor] in "?#":
+            chars.append("\\" * (slash_count - slash_count % 2))
+            chars.append(
+                f"%{ord(value[cursor]):02X}"
+                if slash_count % 2
+                else value[cursor]
+            )
+            cursor += 1
+            continue
+        chars.append("\\" * slash_count)
+    return "".join(chars)
+
+
+def _normalize_file_destination(value: str) -> str:
+    """Apply markdown-it's strict entity and backslash normalization once."""
+    return unescapeAll(_protect_file_uri_delimiters(value))
+
+
+def _mask_legacy_bare_file_link_spaces(source: str) -> str:
+    """Make only legacy bare ``file://`` path spaces parseable by CommonMark.
+
+    The returned source is the same length as the input. MarkdownIt still owns
+    link/image syntax and nesting; replacing the spaces only lets it evaluate
+    the one historical extension that CommonMark rejects lexically.
+    """
+    marker = "](file://"
+    if marker not in source or " " not in source:
+        return source
+
+    masked: List[str] | None = None
+    search_start = 0
+    while True:
+        marker_start = source.find(marker, search_start)
+        if marker_start < 0:
+            break
+        destination_start = marker_start + 2
+        cursor = destination_start + len("file://")
+        depth = 0
+        slash_count = 0
+        space_offsets: List[int] = []
+        destination_end = -1
+        later_marker_start = -1
+        while cursor < len(source):
+            if source.startswith(marker, cursor):
+                later_marker_start = cursor
+                break
+            char = source[cursor]
+            if char in "\t\r\n":
+                break
+            if char == "\\":
+                slash_count += 1
+                cursor += 1
+                continue
+
+            escaped = slash_count % 2 == 1
+            slash_count = 0
+            if char == " " and depth >= 0:
+                space_offsets.append(cursor)
+            elif char == "(" and not escaped:
+                depth += 1
+            elif char == ")" and not escaped:
+                if depth == 0:
+                    destination_end = cursor
+                    break
+                depth -= 1
+            cursor += 1
+
+        if later_marker_start >= 0:
+            search_start = later_marker_start
+            continue
+        if destination_end >= 0 and space_offsets:
+            title_separator = _legacy_bare_title_separator(
+                source,
+                destination_start,
+                destination_end,
+            )
+            if title_separator is not None:
+                space_offsets = [
+                    offset for offset in space_offsets if offset < title_separator
+                ]
+            if not space_offsets:
+                search_start = destination_end + 1
+                continue
+            if masked is None:
+                masked = list(source)
+            for offset in space_offsets:
+                masked[offset] = "_"
+            search_start = destination_end + 1
+        elif cursor >= len(source):
+            break
+        else:
+            search_start = cursor + 1
+
+    return "".join(masked) if masked is not None else source
+
+
+def _legacy_bare_title_separator(
+    source: str,
+    destination_start: int,
+    destination_end: int,
+) -> int | None:
+    """Return the ASCII-space separator before a standard trailing title."""
+    if destination_end <= destination_start + 2:
+        return None
+    closer = source[destination_end - 1]
+    opener = "(" if closer == ")" else closer
+    if opener not in "\"'(":
+        return None
+
+    cursor = destination_end - 2
+    title_start = -1
+    while cursor >= destination_start:
+        if source[cursor] != opener:
+            cursor -= 1
+            continue
+        slash_start = cursor
+        while slash_start > destination_start and source[slash_start - 1] == "\\":
+            slash_start -= 1
+        if (cursor - slash_start) % 2 == 0:
+            title_start = cursor
+            break
+        cursor = slash_start - 1
+    if title_start <= destination_start or source[title_start - 1] != " ":
+        return None
+
+    title = _FILE_LINK_MARKDOWN.helpers.parseLinkTitle(
+        source,
+        title_start,
+        destination_end,
+    )
+    if not title.ok or title.pos != destination_end:
+        return None
+    separator = title_start - 1
+    while separator > destination_start and source[separator - 1] == " ":
+        separator -= 1
+    return separator
+
+
+def _inline_file_link_captures(
+    content: str,
+) -> list[tuple[int, int, bool, int, int, int, int]]:
+    """Capture CommonMark links plus the bounded legacy bare-space extension."""
+    env: dict = {_FILE_LINK_CAPTURES_KEY: []}
+    _FILE_LINK_MARKDOWN.inline.parse(content, _FILE_LINK_MARKDOWN, env, [])
+    captures = list(env[_FILE_LINK_CAPTURES_KEY])
+
+    compatibility_source = _mask_legacy_bare_file_link_spaces(content)
+    if compatibility_source == content:
+        return captures
+
+    compatibility_env: dict = {_FILE_LINK_CAPTURES_KEY: []}
+    _FILE_LINK_MARKDOWN.inline.parse(
+        compatibility_source,
+        _FILE_LINK_MARKDOWN,
+        compatibility_env,
+        [],
+    )
+    claimed_spans = {(capture[0], capture[1]) for capture in captures}
+    for capture in compatibility_env[_FILE_LINK_CAPTURES_KEY]:
+        destination = content[capture[5] : capture[6]]
+        if (
+            (capture[0], capture[1]) not in claimed_spans
+            and content[capture[5] - 1 : capture[5]] != "<"
+            and destination.startswith("file://")
+            and " " in destination
+        ):
+            captures.append(capture)
+    return captures
 
 
 def _strip_file_links(text: str) -> str:
@@ -336,21 +746,167 @@ def _strip_file_links_with_mask(text: str, markdown_mask: str) -> Tuple[str, str
     return "".join(text_parts), "".join(mask_parts)
 
 
+def _replace_file_links(text: str, replacement) -> str:
+    """Replace eligible file-link destinations while preserving Markdown syntax."""
+    matches = _file_link_matches(text)
+    if not matches:
+        return text
+    parts: List[str] = []
+    cursor = 0
+    for match in matches:
+        parts.append(text[cursor : match.start(3)])
+        parts.append(replacement(match))
+        cursor = match.end(3)
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _inline_source_offsets(
+    text: str,
+    start: int,
+    end: int,
+    content: str,
+) -> dict[int, int]:
+    """Map container-stripped inline content offsets to source offsets."""
+    source_lines: List[Tuple[int, str]] = []
+    line_start = start
+    for match in re.finditer(r"\r\n|\r|\n", text[start:end]):
+        line_end = start + match.start()
+        source_lines.append((line_start, text[line_start:line_end]))
+        line_start = start + match.end()
+    source_lines.append((line_start, text[line_start:end]))
+
+    offsets: dict[int, int] = {}
+    source_index = 0
+    content_offset = 0
+    for content_line in content.split("\n"):
+        for candidate_index in range(source_index, len(source_lines)):
+            absolute_start, source_line = source_lines[candidate_index]
+            normalized_source_line = source_line.replace("\x00", "\ufffd")
+            relative_start = normalized_source_line.find(content_line)
+            if relative_start < 0:
+                continue
+            for relative_offset in range(len(content_line) + 1):
+                offsets[content_offset + relative_offset] = (
+                    absolute_start + relative_start + relative_offset
+                )
+            source_index = candidate_index + 1
+            break
+        content_offset += len(content_line) + 1
+    return offsets
+
+
+def _map_file_link_capture(
+    capture: tuple[int, int, bool, int, int, int, int],
+    offsets: dict[int, int],
+) -> tuple[int, int, bool, int, int, int, int] | None:
+    """Translate one inline-token capture back to the original source."""
+    start, end, is_image, label_start, label_end, url_start, url_end = capture
+    boundaries = (start, end - 1, label_start, label_end, url_start, url_end)
+    if any(boundary not in offsets for boundary in boundaries):
+        return None
+    return (
+        offsets[start],
+        offsets[end - 1] + 1,
+        is_image,
+        offsets[label_start],
+        offsets[label_end],
+        offsets[url_start],
+        offsets[url_end],
+    )
+
+
 def _file_link_matches(
     text: str,
     markdown_mask: str | None = None,
-) -> List[re.Match]:
-    """Find eligible link ranges using a mask, then recover original groups."""
-    matches: List[re.Match] = []
-    mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    for masked_match in _FILE_LINK_RE.finditer(mask):
-        original_match = _FILE_LINK_RE.fullmatch(
+) -> List[_FileLinkMatch]:
+    """Return file links accepted by CommonMark and the local-path policy."""
+    code_ranges, inline_ranges, _ = _markdown_block_ranges(text)
+    captures: list[tuple[int, int, bool, int, int, int, int]] = []
+    for source_start, source_end, content in inline_ranges:
+        inline_captures = _inline_file_link_captures(content)
+        if not inline_captures:
+            continue
+        offsets = _inline_source_offsets(
             text,
-            masked_match.start(),
-            masked_match.end(),
+            source_start,
+            source_end,
+            content,
         )
-        if original_match is not None:
-            matches.append(original_match)
+        for capture in inline_captures:
+            mapped = _map_file_link_capture(capture, offsets)
+            if mapped is not None:
+                captures.append(mapped)
+
+    if markdown_mask is not None:
+        for source_start, source_end in code_ranges:
+            if "[" not in markdown_mask[source_start:source_end]:
+                continue
+            for capture in _inline_file_link_captures(
+                text[source_start:source_end]
+            ):
+                captures.append(
+                    (
+                        source_start + capture[0],
+                        source_start + capture[1],
+                        capture[2],
+                        source_start + capture[3],
+                        source_start + capture[4],
+                        source_start + capture[5],
+                        source_start + capture[6],
+                    )
+                )
+
+    candidates: List[_FileLinkMatch] = []
+    captures = sorted(
+        captures,
+        key=lambda capture: (capture[0], -capture[1]),
+    )
+    for capture in captures:
+        (
+            start,
+            end,
+            is_image,
+            label_start,
+            label_end,
+            url_start,
+            url_end,
+        ) = capture
+        opener_end = start + (2 if is_image else 1)
+        if (
+            markdown_mask is not None
+            and markdown_mask[start:opener_end] != text[start:opener_end]
+        ):
+            continue
+        normalized_url = _normalize_file_destination(text[url_start:url_end])
+        try:
+            parsed = _parse_file_uri(normalized_url)
+        except ValueError:
+            continue
+        path = _file_uri_to_local_path(parsed)
+        if parsed.scheme.casefold() != "file" or not os.path.isabs(path):
+            continue
+        candidates.append(
+            _FileLinkMatch(
+                source=text[start:end],
+                start_offset=start,
+                end_offset=end,
+                bang="!" if is_image else "",
+                label=text[label_start:label_end],
+                url=normalized_url,
+                label_start_offset=label_start,
+                label_end_offset=label_end,
+                url_start_offset=url_start,
+                url_end_offset=url_end,
+            )
+        )
+    matches: List[_FileLinkMatch] = []
+    covered_until = 0
+    for candidate in candidates:
+        if candidate.start() < covered_until:
+            continue
+        matches.append(candidate)
+        covered_until = candidate.end()
     return matches
 
 
@@ -904,13 +1460,19 @@ def _raw_html_end(
 def _extract_buttons(
     text: str,
     markdown_mask: str | None = None,
+    *,
+    allow_unseparated: bool = True,
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    masked_match = _BUTTON_BLOCK_RE.search(mask)
+    pattern = _BUTTON_BLOCK_RE
+    masked_match = pattern.search(mask)
+    if masked_match is None and allow_unseparated:
+        pattern = _UNSEPARATED_BUTTON_ROW_RE
+        masked_match = pattern.search(mask)
     if masked_match is None:
         return [], text
-    m = _BUTTON_BLOCK_RE.fullmatch(
+    m = pattern.fullmatch(
         text,
         masked_match.start(),
         masked_match.end(),
@@ -918,7 +1480,31 @@ def _extract_buttons(
     if m is None:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and not text[: m.start()].strip():
+        return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE:
+        code_ranges, _, blocking_ranges = _markdown_block_ranges(text)
+        html_block_ranges = [
+            source_range
+            for source_range in blocking_ranges
+            if source_range not in code_ranges
+        ]
+        if any(start <= m.start(1) < end for start, end in html_block_ranges):
+            return [], text
+        if _markdown_container_level_at(text, m.start()) > 1:
+            return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
+        mask, m.start()
+    ):
+        return [], text
+
     block = m.group(1)
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _LINK_ONLY_BUTTON_ROW_RE.fullmatch(
+        block.strip()
+    ):
+        return [], text
     # A block made up solely of plain Markdown links with no ``|``/``｜``
     # separator is a genuine reference-link section (``---\n[Release notes](…)``,
     # possibly several on their own lines), not a button group — leave the text
@@ -937,8 +1523,20 @@ def _extract_buttons(
     if not buttons:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) > 5:
+        return [], text
+
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and len(buttons) < 2:
+        return [], text
+
     # Enforce a reasonable upper bound on button count
     buttons = buttons[:5]
 
     cleaned = text[: m.start()]
     return buttons, cleaned
+
+
+def strip_quick_reply_buttons(text: str) -> str:
+    """Remove a trailing quick-reply row while preserving all other markup."""
+    _, cleaned = _extract_buttons(text)
+    return cleaned

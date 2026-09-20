@@ -96,7 +96,18 @@ async def run_inbox_bridge() -> None:
                 # the next genuine drop reconnects promptly.
                 backoff = _BACKOFF_INITIAL
                 if event_type == "connected":
+                    # The internal feed's handshake, consumed here and not
+                    # relayed. ``_set_bridge_connected`` already published the
+                    # browser-facing expression of this exact fact, and the
+                    # client turns that leg transition into one gap-ended
+                    # signal. Forwarding this frame too made every controller
+                    # recovery announce twice, because ``connected`` on the
+                    # browser stream is a different claim -- "your subscription
+                    # is established", carrying a sub_id and a heartbeat
+                    # cadence this frame has never had. One fact, one owner,
+                    # and the leg's owner is the side that tracks the leg.
                     _set_bridge_connected(True)
+                    continue
                 event_id = (
                     str(data.get("_event_id") or "")
                     if isinstance(data, dict)

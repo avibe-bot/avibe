@@ -42,3 +42,32 @@ def test_reset_config_keeps_existing_server_manager_until_refresh_completes(monk
             "resource_governor": None,
         }
     ]
+
+
+def test_model_hub_overlay_preparer_is_attached_to_lazy_server(monkeypatch) -> None:
+    config = SimpleNamespace(binary="opencode", port=4096, request_timeout_seconds=60)
+    server = SimpleNamespace(set_model_hub_overlay_preparer=lambda preparer: None)
+    attached = []
+    server.set_model_hub_overlay_preparer = attached.append
+
+    async def _get_instance(**kwargs):
+        return server
+
+    async def _prepare_overlay():
+        return None
+
+    monkeypatch.setattr(
+        client_manager_module.OpenCodeServerManager,
+        "get_instance",
+        _get_instance,
+    )
+
+    async def _run():
+        manager = OpenCodeClientManager(config)
+        manager.set_model_hub_overlay_preparer(_prepare_overlay)
+        return await manager.get_server()
+
+    result = asyncio.run(_run())
+
+    assert result is server
+    assert attached == [_prepare_overlay]

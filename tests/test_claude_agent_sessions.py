@@ -1,6 +1,7 @@
 import asyncio
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
@@ -8,17 +9,48 @@ from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
+from core.agent_input import AgentInputMetadata
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     backend_dispatch_attempted,
     set_dispatch_phase,
 )
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock, UserMessage
+
+
+async def test_skill_catalog_is_offered_once_per_accepted_claude_client(monkeypatch):
+    controller = _StubController()
+    client = SimpleNamespace(query=AsyncMock(), _vibe_pending_skill_catalog={"entries": []})
+    controller.session_handler.get_or_create_claude_session = AsyncMock(return_value=client)
+    agent = ClaudeAgent(controller)
+    agent._prepare_message_with_files = lambda request: request.message
+    agent._delete_ack = AsyncMock()
+    agent._receive_messages = AsyncMock()
+    accepted = Mock()
+    monkeypatch.setattr("core.skill_observability.accept_catalog", accepted)
+    context = SimpleNamespace(platform_specific={"agent_session_id": "ses"})
+    request = SimpleNamespace(
+        context=context, message="hello", working_path="/fixture", base_session_id="ses",
+        composite_session_id="runtime", session_key="scope", subagent_name=None,
+        subagent_model=None, subagent_reasoning_effort=None, ack_message_id=None,
+        ack_reaction_message_id=None, ack_reaction_emoji=None, files=None,
+    )
+    await agent.handle_message(request)
+    await asyncio.sleep(0)
+    assert accepted.call_args.args[2] == {"entries": []}
+    assert client._vibe_pending_skill_catalog is None
+    await agent.handle_message(request)
+    await asyncio.sleep(0)
+    # The helper gets no candidate on reuse and therefore cannot enqueue an event.
+    assert accepted.call_args.args[2] is None
+    for task in controller.receiver_tasks.values():
+        await task
 
 
 class _StubSessions:
@@ -77,7 +109,9 @@ class _StubController:
             *,
             current_receiver_task=None,
             activation_retired=False,
+            reason="unspecified",
         ):
+            del activation_retired, reason
             receiver_task = self.receiver_tasks.pop(composite_key, None)
             client = self.claude_sessions.pop(composite_key, None)
             cleanup_from_receiver = receiver_task is not None and receiver_task is current_receiver_task
@@ -227,6 +261,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 session_key="wechat-user",
                 subagent_name=None,
                 subagent_model=None,
+                vibe_agent_model="claude-fixture",
                 subagent_reasoning_effort=None,
                 ack_message_id=None,
                 ack_reaction_message_id=None,
@@ -313,6 +348,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 session_key="wechat-user",
                 subagent_name=None,
                 subagent_model=None,
+                vibe_agent_model="claude-fixture",
                 subagent_reasoning_effort=None,
                 ack_message_id=None,
                 ack_reaction_message_id=None,
@@ -397,6 +433,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             session_key="wechat-user",
             subagent_name=None,
             subagent_model=None,
+            vibe_agent_model="claude-fixture",
             subagent_reasoning_effort=None,
             ack_message_id=None,
             ack_reaction_message_id=None,
@@ -488,11 +525,14 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             current_receiver_task=None,
             activation_retired=False,
+            reason="user_stop",
         )
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
-        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+        controller.processing_indicator.finish.assert_awaited_once_with(
+            pending_request, terminal_emoji=STOPPED_REACTION_EMOJI
+        )
 
     async def test_handle_stop_waits_for_in_flight_steering_write(self):
         controller = _StubController()
@@ -673,8 +713,11 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             current_receiver_task=None,
             activation_retired=False,
+            reason="user_stop",
         )
-        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+        controller.processing_indicator.finish.assert_awaited_once_with(
+            pending_request, terminal_emoji=STOPPED_REACTION_EMOJI
+        )
 
     async def test_handle_stop_keeps_runtime_gate_until_cleanup_finishes(self):
         controller = _StubController()
@@ -787,6 +830,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             session_key="wechat-user",
             subagent_name=None,
             subagent_model=None,
+            vibe_agent_model="claude-fixture",
             subagent_reasoning_effort=None,
             ack_message_id=None,
             ack_reaction_message_id=None,
@@ -1886,6 +1930,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(
             context=request_context,
             message="hello",
+            input_metadata=AgentInputMetadata(user_id="U1", user_name="Sender"),
             working_path="/tmp/work",
             base_session_id="wechat_o9",
             composite_session_id="wechat_o9:/tmp/work",
@@ -1899,12 +1944,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             files=None,
         )
 
-        await agent.handle_message(request)
+        with patch("core.agent_input.datetime") as clock:
+            clock.now.return_value.astimezone.return_value = datetime(2026, 9, 6, 11, tzinfo=timezone.utc)
+
+            async def prepare_session(*_args, **_kwargs):
+                clock.now.return_value.astimezone.return_value = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+                return client
+
+            controller.session_handler.get_or_create_claude_session.side_effect = prepare_session
+            await agent.handle_message(request)
         await asyncio.sleep(0)
 
         controller.session_handler.get_or_create_claude_session.assert_awaited_once()
         self.assertEqual(mark_active_calls, [runtime_key])
-        client.query.assert_awaited_once_with("hello", session_id=runtime_key)
+        client.query.assert_awaited_once_with(
+            "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\nhello", session_id=runtime_key,
+        )
+        self.assertEqual(request.message, "hello")
         self.assertIn(runtime_key, agent._pending_requests)
         self.assertIn(runtime_key, agent._pending_reactions)
         self.assertNotIn(request.composite_session_id, agent._pending_requests)
@@ -2028,6 +2084,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             current_receiver_task=None,
             activation_retired=False,
+            reason="query_auth_failure",
         )
         self.assertEqual(agent._pending_requests[runtime_key], [queued_request])
         controller.session_handler.handle_session_error.assert_not_awaited()
@@ -2340,6 +2397,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             session_key,
             current_receiver_task=receiver_task,
             activation_retired=False,
+            reason="claude_agent_cleanup",
         )
         self.assertNotIn(session_key, agent._last_assistant_text)
         self.assertNotIn(session_key, agent._pending_assistant_message)
@@ -2418,6 +2476,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
+            reason="receiver_error_auth_failure",
         )
         self.assertFalse(agent._pending_requests.get(composite_key))
 
@@ -2982,6 +3041,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
+            reason="receiver_auth_failure",
         )
         self.assertFalse(agent._pending_requests.get(composite_key))
 
@@ -3146,6 +3206,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
+            reason="transport_auth_failure",
         )
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
@@ -3631,6 +3692,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=None,
             activation_retired=False,
+            reason="stuck_active_eviction",
         )
         agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
         controller.emit_agent_message.assert_awaited_once_with(
@@ -3766,6 +3828,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             composite_key,
             current_receiver_task=asyncio.current_task(),
             activation_retired=False,
+            reason="transport_auth_failure",
         )
         self.assertEqual(agent._remove_ack_reaction.await_count, 2)
         self.assertEqual(agent._remove_ack_reaction.await_args_list[0].args, (pending_request_1,))

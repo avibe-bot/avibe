@@ -90,6 +90,41 @@ def test_render_actions_result_waits_for_missing_or_running_runs() -> None:
     assert failed is False
 
 
+def test_normalize_selected_runs_distinguishes_rerun_attempts() -> None:
+    module = _load_module()
+    first = module._normalize_selected_runs(
+        {
+            "CI": [
+                {
+                    "id": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": "abc123",
+                    "head_branch": "main",
+                    "run_attempt": 1,
+                }
+            ]
+        }
+    )
+    rerun = module._normalize_selected_runs(
+        {
+            "CI": [
+                {
+                    "id": 1,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "head_sha": "abc123",
+                    "head_branch": "main",
+                    "run_attempt": 2,
+                }
+            ]
+        }
+    )
+
+    assert first != rerun
+    assert first["CI"][0]["run_attempt"] == 1
+
+
 def test_render_actions_result_reports_success() -> None:
     module = _load_module()
     output, failed = module._render_actions_result(

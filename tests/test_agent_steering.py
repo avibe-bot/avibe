@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 import pytest
 from aiohttp.client_reqrep import ConnectionKey
+from core.agent_input import AgentInputMetadata
 
 from core.services.agent_steering import (
     ActiveSteerTarget,
@@ -30,9 +32,31 @@ from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 
+from tests.test_memory_delegated_reads import (
+    _create_definition,
+    delegated_owner_transport,  # noqa: F401 -- fixture with real internal accessor
+)
+from tests.test_session_delivery_fsm import (
+    _context, _seed_session,
+    _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
+)
+
 
 STEER_TEXT = "补充：**不要改写**\n```python\nprint('λ')\n```"
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
+
+
+@pytest.fixture(params=["plain", "human", "harness"])
+def native_input(request, monkeypatch):
+    now = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+    monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
+        now=lambda: SimpleNamespace(astimezone=lambda: now)
+    ))
+    if request.param == "plain":
+        return None, ""
+    if request.param == "human":
+        return AgentInputMetadata(user_id="incoming", user_name="Sender"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<incoming>]\n"
+    return AgentInputMetadata(source_session_id="source-session"), "[Now: 2026-09-06 11:10:00 UTC+00:00]\nFrom: #source-session\n"
 
 
 def test_steer_outcomes_are_exhaustive() -> None:
@@ -110,9 +134,13 @@ class _OpenCodeSessionManager:
     def __init__(self, base_session_id: str, native_session_id: str, cwd: str) -> None:
         self.base_session_id = base_session_id
         self.request_session = (native_session_id, cwd, "session-key")
+        self.session_lock = asyncio.Lock()
 
     def get_request_session(self, base_session_id: str):
         return self.request_session if base_session_id == self.base_session_id else None
+
+    def get_session_lock(self, _base_session_id: str):
+        return self.session_lock
 
 
 class _OpenCodeServer:
@@ -141,6 +169,7 @@ class _OpenCodeServer:
         self.list_calls = 0
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple] = []
+        self.inactive_runs: list[str] = []
 
     async def prompt_async(self, **kwargs) -> None:
         self.prompt_calls.append(kwargs)
@@ -188,6 +217,9 @@ class _OpenCodeServer:
         self.abort_calls.append(args)
         return True
 
+    async def mark_run_inactive(self, session_id: str) -> None:
+        self.inactive_runs.append(session_id)
+
 
 def _primary_request(*, session_id: str = "avibe-session", backend: str) -> AgentRequest:
     context = MessageContext(
@@ -210,6 +242,7 @@ def _primary_request(*, session_id: str = "avibe-session", backend: str) -> Agen
         base_session_id=session_id,
         composite_session_id="runtime-key",
         session_key="scope-key",
+        vibe_agent_model="fixture-provider/fixture-model" if backend == "opencode" else f"{backend}-fixture",
     )
 
 
@@ -229,12 +262,13 @@ def _controller_with_active_gate(agent, primary: AgentRequest, gate_task: asynci
     return controller
 
 
-def _steer_request(native_turn_id: str, *, logical_turn_id: str = "logical-turn") -> SteerRequest:
+def _steer_request(native_turn_id: str, *, logical_turn_id: str = "logical-turn", input_metadata=None) -> SteerRequest:
     return SteerRequest(
         target_session_id="avibe-session",
         expected_logical_turn_id=logical_turn_id,
         expected_native_turn_id=native_turn_id,
         text=STEER_TEXT,
+        input_metadata=input_metadata,
     )
 
 
@@ -250,11 +284,13 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
 
 
 @pytest.mark.anyio
-async def test_codex_steers_expected_active_turn_without_starting_another_turn() -> None:
+async def test_codex_steers_expected_active_turn_without_starting_another_turn(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="codex")
     gate_task = await _held_task()
     transport = _CodexTransport()
     agent = object.__new__(CodexAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
     agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
     agent._transports = {primary.working_path: transport}
@@ -263,7 +299,10 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         identity = active_steer_identity(controller, "codex", "avibe-session")
         assert identity == ("logical-turn", "codex-turn")
 
-        receipt = await steer_active_turn(controller, "codex", _steer_request(identity[1]))
+        request = _steer_request(identity[1], input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "codex", request)
+        assert request.text == STEER_TEXT
+        assert primary.message == "primary"
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         assert transport.calls == [
@@ -272,7 +311,7 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
                 {
                     "threadId": "codex-thread",
                     "expectedTurnId": "codex-turn",
-                    "input": [{"type": "text", "text": STEER_TEXT}],
+                    "input": [{"type": "text", "text": prefix + STEER_TEXT}],
                 },
             )
         ]
@@ -281,6 +320,41 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn()
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_codex_start_renders_now_after_runtime_prompt_preparation(monkeypatch):
+    """Scenario: MESSAGE-DELIVERY-318."""
+    current = datetime(2026, 9, 6, 11, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("core.agent_input.datetime", SimpleNamespace(
+        now=lambda: SimpleNamespace(astimezone=lambda: current)
+    ))
+    request = _primary_request(backend="codex")
+    request.input_metadata = AgentInputMetadata(user_id="sender", user_name="Sender")
+    agent = object.__new__(CodexAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
+    agent.controller = SimpleNamespace()
+    agent._prompt_state_agent_session_id = lambda _request: None
+    agent._resolve_codex_agent_settings = lambda _request: (None, None, None, None)
+    agent._read_persisted_prompt_strategy_marker = Mock(return_value=None)
+    agent._write_caller_env_script = Mock()
+    agent._turn_registry = SimpleNamespace(
+        begin_turn_start=Mock(),
+        finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+    )
+
+    async def prepare_runtime(*_args, **_kwargs):
+        nonlocal current
+        await asyncio.sleep(0)
+        current = datetime(2026, 9, 6, 11, 10, tzinfo=timezone.utc)
+
+    agent._inject_thread_developer_instructions = AsyncMock(side_effect=prepare_runtime)
+    transport = SimpleNamespace(send_request=AsyncMock(return_value={"turn": {"id": "native-turn"}}))
+    await agent._start_turn(transport, request, "native-thread", developer_instructions="runtime instructions")
+    agent._inject_thread_developer_instructions.assert_awaited_once()
+    params = transport.send_request.await_args.args[1]
+    assert params["input"] == [{"type": "text", "text": "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<sender>]\nprimary"}]
+    assert request.message == request.user_message == "primary"
 
 
 @pytest.mark.anyio
@@ -359,12 +433,14 @@ async def test_codex_rejects_stale_native_turn_and_unavailable_runtime() -> None
 
 
 @pytest.mark.anyio
-async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> None:
+async def test_claude_uses_one_client_receiver_and_primary_result_owner(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="claude")
     gate_task = await _held_task()
     receiver_task = await _held_task()
     client = _ClaudeClient()
     agent = object.__new__(ClaudeAgent)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     agent.claude_sessions = {"runtime-key": client}
     agent.receiver_tasks = {"runtime-key": receiver_task}
     agent.session_handler = _ClaudeSessionHandler("runtime-key")
@@ -376,10 +452,12 @@ async def test_claude_uses_one_client_receiver_and_primary_result_owner() -> Non
         assert identity is not None
         receiver_generation = identity[1]
 
-        receipt = await steer_active_turn(controller, "claude", _steer_request(receiver_generation))
+        request = _steer_request(receiver_generation, input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "claude", request)
+        assert request.text == STEER_TEXT
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
-        assert client.queries == [("primary", "runtime-key"), (STEER_TEXT, "runtime-key")]
+        assert client.queries == [("primary", "runtime-key"), (prefix + STEER_TEXT, "runtime-key")]
         assert agent.receiver_tasks == {"runtime-key": receiver_task}
         assert agent._pending_requests["runtime-key"] is primary_requests
         assert agent._pending_requests["runtime-key"] == [primary]
@@ -562,6 +640,8 @@ async def test_shared_boundary_finishes_native_reconciliation_before_propagating
 
         assert agent._steering_generation("runtime-key") == 1
         assert agent._pending_steering_input_state("runtime-key") == "accepted"
+        assert agent.claude_sessions["runtime-key"] is client
+        assert agent.receiver_tasks["runtime-key"] is receiver_task
         assert agent._pending_requests["runtime-key"] == [primary]
         assert not receiver_task.done()
     finally:
@@ -602,6 +682,7 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
         primary.working_path,
     )
     agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._user_stopped_sessions = set()
     agent._steering_states = {
         primary.base_session_id: _OpenCodeSteerState(
             task=task,
@@ -621,34 +702,39 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
 
 
 @pytest.mark.anyio
-async def test_opencode_steers_existing_runner_without_abort_or_new_turn() -> None:
+async def test_opencode_steers_existing_runner_without_abort_or_new_turn(native_input) -> None:
+    metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
     server = _OpenCodeServer()
     agent = _opencode_agent(primary, gate_task, server)
+    agent.config = SimpleNamespace(include_time_info=True, include_user_info=True)
     controller = _controller_with_active_gate(agent, primary, gate_task)
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
         assert identity is not None
 
-        receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
+        request = _steer_request(identity[1], input_metadata=metadata)
+        receipt = await steer_active_turn(controller, "opencode", request)
+        assert request.text == STEER_TEXT
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         state = agent._steering_states[primary.base_session_id]
-        assert state.awaiting_user_text == STEER_TEXT
-        assert state.awaiting_start_confirmation_deadline is not None
-        assert state.awaiting_start_confirmation_deadline > time.monotonic()
+        assert state.awaiting_user_text == prefix + STEER_TEXT
+        assert state.awaiting_prompt_accepted is True
+        assert state.awaiting_prompt_activity_deadline is not None
+        assert state.awaiting_prompt_activity_deadline > time.monotonic()
         assert state.awaiting_active_status_observed is False
         assert server.prompt_calls == [
             {
                 "session_id": "opencode-session",
                 "directory": primary.working_path,
-                "text": STEER_TEXT,
+                "text": prefix + STEER_TEXT,
                 "agent": "build",
                 "model": {"providerID": "openai", "modelID": "gpt-5"},
                 "reasoning_effort": "high",
                 "system": "primary system prompt",
-                "tools": {"question": False},
+                "tools": {"question": False, "skill": False},
             }
         ]
         assert server.abort_calls == []
@@ -683,7 +769,8 @@ async def test_opencode_keeps_reconciliation_armed_after_post_write_idle() -> No
         assert receipt.reason == "native_turn_start_pending"
         assert state.awaiting_user_text == STEER_TEXT
         assert state.awaiting_after_message_ids == {"primary-user"}
-        assert state.awaiting_start_confirmation_deadline is not None
+        assert state.awaiting_prompt_accepted is True
+        assert state.awaiting_prompt_activity_deadline is not None
         assert server.abort_calls == []
     finally:
         await _cancel_tasks(gate_task)
@@ -791,7 +878,10 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
     controller.emit_agent_message = AsyncMock()
     agent._get_server = AsyncMock(return_value=server)
     removed_polls: list[str] = []
-    agent.sessions = SimpleNamespace(remove_active_poll=removed_polls.append)
+    agent.sessions = SimpleNamespace(
+        get_all_active_polls=lambda: {"opencode-session": object()},
+        remove_active_poll=removed_polls.append,
+    )
     state = agent._steering_states[primary.base_session_id]
     try:
         identity = active_steer_identity(controller, "opencode", "avibe-session")
@@ -815,6 +905,7 @@ async def test_opencode_stop_waits_for_in_flight_steering_write() -> None:
         assert state.closing is True
         assert server.abort_calls == [("opencode-session", primary.working_path)]
         assert gate_task.cancelled()
+        assert server.inactive_runs == ["opencode-session"]
         assert removed_polls == ["opencode-session"]
     finally:
         await _cancel_tasks(gate_task)
@@ -877,9 +968,26 @@ async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None
 
 @pytest.mark.anyio
 async def test_opencode_coordinator_error_aborts_through_steering_owner(
-    monkeypatch,
+    monkeypatch, native_input, managers, delegated_owner_transport, tmp_path,
 ) -> None:
+    """MEMORY-SEARCH-028: failed initial bind retries before delegated definitions."""
+    from core.session_turns import DeliveryRequest
+
+    manager, _fresh, engine, _other, _starts = managers
+    _seed_session(engine, "avibe-session")
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    durable = await manager.deliver(
+        DeliveryRequest(session_id="avibe-session", priority="p3", content="delegate", author_id="local"),
+        context=_context("avibe-session"),
+    )
+    attempts = 0
+    retry_succeeded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr("modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS", 0)
+    metadata, prefix = native_input
     primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["turn_token"] = durable.turn_id
+    primary.input_metadata = metadata
     poll_started = asyncio.Event()
     fail_poll = asyncio.Event()
     steer_started = asyncio.Event()
@@ -888,6 +996,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     class _Server:
         prompt_count = 0
+
+        def caller_context_binding_path(self):
+            return "/old-avibe-home/runtime/opencode_caller_context.json"
 
         async def ensure_running(self):
             return None
@@ -901,6 +1012,7 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         async def prompt_async(self, **kwargs):
             self.prompt_count += 1
             if self.prompt_count == 1:
+                assert kwargs["text"] == prefix + primary.message
                 events.append("primary")
                 return
             steer_started.set()
@@ -949,6 +1061,9 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     class _Sessions:
         def add_active_poll(self, **kwargs):
+            snapshot = kwargs["processing_indicator"]["opencode_caller_context_env"]
+            assert "AVIBE_SESSION_ID" in snapshot
+            assert "AVIBE_CALLER_SESSION_PROOF" not in snapshot
             return None
 
         def remove_active_poll(self, session_id):
@@ -965,7 +1080,6 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -997,9 +1111,38 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+    binding_paths: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("initial binding write failed")
+        from core.caller_context import verify_caller_session_proof
+
+        env = kwargs["extra_env"]
+        assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "local"})
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for kind in ("scheduled", "watch"):
+            definition = _create_definition(kind, tmp_path / f"retry-{kind}.json", session_id="avibe-session")
+            assert definition.metadata["delegated_memory_owner"]["user_id"] == "local"
+        loop.call_soon_threadsafe(retry_succeeded.set)
+        binding_tokens.append(kwargs["binding_token"])
+        binding_paths.append(kwargs["path"])
+        return True
+
+    unbound: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token, path: unbound.append(
+            (session_id, binding_token, path)
+        ),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1010,14 +1153,16 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
     process_task = asyncio.create_task(agent._process_message(primary))
     agent._active_requests[primary.base_session_id] = process_task
     await poll_started.wait()
+    await asyncio.wait_for(retry_succeeded.wait(), timeout=5)
     state = agent._steering_states[primary.base_session_id]
-    assert state.awaiting_user_text == primary.message
-    assert state.awaiting_start_confirmation_deadline is not None
-    assert state.awaiting_start_confirmation_deadline > time.monotonic()
+    assert state.awaiting_user_text == prefix + primary.message
+    assert state.awaiting_prompt_accepted is True
+    assert state.awaiting_prompt_activity_deadline is not None
+    assert state.awaiting_prompt_activity_deadline > time.monotonic()
     assert state.awaiting_active_status_observed is False
     target = ActiveSteerTarget(
         runtime_key=primary.base_session_id,
-        logical_turn_id="logical-turn",
+        logical_turn_id=durable.turn_id,
         context=primary.context,
         agent_request=primary,
         agent=agent,
@@ -1035,6 +1180,16 @@ async def test_opencode_coordinator_error_aborts_through_steering_owner(
 
     assert receipt.outcome is SteerOutcome.ACCEPTED
     assert events == ["primary", "steer", "abort"]
+    assert attempts == 2
+    assert len(binding_tokens) == 1
+    assert binding_paths == ["/old-avibe-home/runtime/opencode_caller_context.json"]
+    assert unbound == [
+        (
+            "opencode-session",
+            binding_tokens[0],
+            "/old-avibe-home/runtime/opencode_caller_context.json",
+        )
+    ]
     backend_failure.assert_awaited_once()
 
 
@@ -1120,7 +1275,6 @@ async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanu
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1203,7 +1357,7 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
 
         async def abort_session(self, session_id, directory):
             events.append("abort")
-            return True
+            raise OSError("abort status unknown")
 
         async def mark_run_active(self, session_id):
             return None
@@ -1237,10 +1391,14 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
             return False
 
     class _Sessions:
+        active = False
+
         def add_active_poll(self, **kwargs):
+            self.active = True
             events.append("persist_poll")
 
         def remove_active_poll(self, session_id):
+            self.active = False
             events.append("remove_poll")
 
     server = _Server()
@@ -1248,7 +1406,6 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         config=SimpleNamespace(
             platform="avibe",
             reply_enhancements=False,
-            show_pages_prompt=False,
             remote_access=None,
             language="en",
             opencode=SimpleNamespace(
@@ -1279,9 +1436,20 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
         "modules.agents.opencode.agent.build_system_prompt_injection",
         lambda **kwargs: "system prompt",
     )
+    binding_tokens: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        binding_tokens.append(kwargs["binding_token"])
+        return True
+
+    unbound: list[tuple[str, str]] = []
     monkeypatch.setattr(
         "modules.agents.opencode.agent.bind_caller_context_session",
-        lambda *args, **kwargs: None,
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token: unbound.append((session_id, binding_token)),
     )
     backend_failure = AsyncMock()
     monkeypatch.setattr(
@@ -1292,6 +1460,9 @@ async def test_opencode_ambiguous_start_failure_preserves_recovery_poll(
     await agent._process_message(primary)
 
     assert events == ["persist_poll", "prompt", "abort"]
+    assert agent.sessions.active is True
+    assert len(binding_tokens) == 1
+    assert unbound == []
     backend_failure.assert_awaited_once()
 
 
@@ -1368,7 +1539,11 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
         receipt = await steer_active_turn(controller, "opencode", _steer_request(identity[1]))
         await asyncio.sleep(0.15)
 
-        assert not poll_task.done()
+        # The poll owner now receives the in-progress snapshot once the steered
+        # user message is visible while the native session is busy, so the poll
+        # loop keeps streaming live activity instead of blocking on busy.
+        intermediate = await asyncio.wait_for(poll_task, timeout=1)
+        assert intermediate[-1]["info"]["role"] == "user"
         assert state.closing is False
         server.messages.append(
             {
@@ -1382,7 +1557,10 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
             }
         )
         server.status = {"type": "idle"}
-        messages = await asyncio.wait_for(poll_task, timeout=1)
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
 
         assert receipt.outcome is SteerOutcome.ACCEPTED
         assert messages[-1]["info"]["id"] == "steered-assistant"
@@ -1390,6 +1568,356 @@ async def test_opencode_poll_owner_observes_accepted_steer_before_terminalizing(
         assert agent._active_requests == {primary.base_session_id: gate_task}
     finally:
         await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_regular_turn_streams_snapshot_while_busy() -> None:
+    """A plain turn (start-armed, like ``_process_message``) must hand the
+    in-progress snapshot back to the poll loop while the native session is
+    busy, so live tool activity streams instead of blocking until idle."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "baseline-user", "role": "user"},
+                "parts": [{"type": "text", "text": "earlier prompt"}],
+            },
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            },
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            },
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"baseline-user"}
+    state.awaiting_user_text = "primary"
+    state.awaiting_prompt_accepted = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        intermediate = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert intermediate[-1]["info"]["id"] == "running-assistant"
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "final response"}],
+            }
+        )
+        server.status = {"type": "idle"}
+        final = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert final[-1]["info"]["id"] == "final-assistant"
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_regular_turn_waits_for_unconfirmed_start() -> None:
+    """While the inserted user message is not yet visible, a busy session must
+    keep waiting within the start-confirmation deadline (the 204-then-busy
+    race guard), not hand an empty snapshot back to the poll loop."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"primary-user"}
+    state.awaiting_user_text = "primary"
+    state.awaiting_prompt_accepted = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.awaiting_active_status_observed is False
+
+        server.messages.append(
+            {
+                "info": {"id": "steer-user-1", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            }
+        )
+        intermediate = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert intermediate[-1]["info"]["id"] == "steer-user-1"
+        assert state.awaiting_active_status_observed is True
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_restored_busy_snapshot_requires_post_boundary_evidence() -> None:
+    """A restored boundary-sampled poll must not receive a busy snapshot that
+    only contains boundary messages (the pre-restore final answer): the
+    restored poll loop would treat it as the final response and drop the
+    still-running poll."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "old-final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "old answer"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"old-final-assistant"}
+    state.awaiting_user_text = None
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            }
+        )
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "running-assistant"
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_restored_empty_boundary_still_requires_new_evidence() -> None:
+    """When the sampled reconciliation boundary is empty (only pre-prompt
+    baseline messages existed at sample time), a busy snapshot holding only
+    the baseline final answer must still be gated: an empty boundary is not
+    automatic evidence."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {
+                    "id": "old-final-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "old answer"}],
+            }
+        ],
+        status={"type": "busy"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.baseline_message_ids = {"old-final-assistant"}
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = None
+    state.restored = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "running-assistant",
+                    "role": "assistant",
+                },
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "bash",
+                        "callID": "call-bash",
+                        "state": {"status": "running", "input": {"command": "ls"}},
+                    }
+                ],
+            }
+        )
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "running-assistant"
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_retry_keeps_completed_error_snapshots_gated() -> None:
+    """A completed assistant error must stay gated while the native session
+    still reports busy/retry: handing it to the poll loop would emit a
+    terminal failure (or a competing "continue") while OpenCode's own retry
+    is still active."""
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "primary"}],
+            },
+            {
+                "info": {
+                    "id": "failed-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "error": {"name": "ProviderError", "data": {"message": "boom"}},
+                },
+                "parts": [],
+            },
+        ],
+        status={"type": "retry"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = "primary"
+    state.awaiting_prompt_accepted = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    poll_task = None
+    try:
+        poll_task = asyncio.create_task(
+            poll_server.list_messages("opencode-session", primary.working_path)
+        )
+        await asyncio.sleep(0.15)
+
+        assert not poll_task.done()
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
+        server.messages.append(
+            {
+                "info": {
+                    "id": "retried-assistant",
+                    "role": "assistant",
+                    "time": {"completed": 2},
+                    "finish": "stop",
+                },
+                "parts": [{"type": "text", "text": "recovered"}],
+            }
+        )
+        server.status = {"type": "busy"}
+        snapshot = await asyncio.wait_for(poll_task, timeout=1)
+
+        assert snapshot[-1]["info"]["id"] == "retried-assistant"
+        assert state.closing is True
+    finally:
+        await _cancel_tasks(*(task for task in (poll_task, gate_task) if task is not None))
+
+
+@pytest.mark.anyio
+async def test_opencode_idle_post_boundary_error_clears_awaiting_boundary() -> None:
+    """A completed retry error must reach the poll owner, not a synthetic idle failure."""
+
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(
+        messages=[
+            {
+                "info": {"id": "primary-user", "role": "user"},
+                "parts": [{"type": "text", "text": "continue"}],
+            },
+            {
+                "info": {
+                    "id": "retry-error",
+                    "role": "assistant",
+                    "time": {"completed": 1},
+                    "error": {"name": "UnknownError", "data": {"message": "tls"}},
+                },
+                "parts": [],
+            },
+        ],
+        status={"type": "idle"},
+    )
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = {"older-error"}
+    state.awaiting_user_text = "continue"
+    state.awaiting_active_status_observed = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        snapshot = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+        assert snapshot[-1]["info"]["id"] == "retry-error"
+        assert snapshot[-1]["info"]["error"]["name"] == "UnknownError"
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is False
+    finally:
+        await _cancel_tasks(gate_task)
 
 
 @pytest.mark.anyio
@@ -1523,7 +2051,7 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
 
     class _DelayedStartServer(_OpenCodeServer):
         async def list_messages(self, session_id: str, directory: str) -> list[dict]:
-            if self.list_calls == 3:
+            if self.list_calls == 2:
                 self.messages.append(
                     {
                         "info": {
@@ -1560,7 +2088,7 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
     state.baseline_message_ids = {"primary-assistant"}
     state.awaiting_after_message_ids = {"primary-assistant"}
     state.awaiting_user_text = "follow-up"
-    state.awaiting_start_confirmation_deadline = time.monotonic() + 1
+    state.awaiting_prompt_accepted = True
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
         messages = await asyncio.wait_for(
@@ -1568,11 +2096,13 @@ async def test_opencode_accepted_prompt_waits_for_delayed_busy_registration() ->
             timeout=1,
         )
 
+        # The busy snapshot is handed back once the inserted user message is
+        # visible; the third list lands the completed final assistant.
         assert messages[-1]["info"]["id"] == "follow-up-assistant"
         assert state.terminal_status_failure_messages is None
         assert state.awaiting_after_message_ids is None
         assert state.closing is True
-        assert server.list_calls == 4
+        assert server.list_calls == 3
     finally:
         await _cancel_tasks(gate_task)
 
@@ -1611,9 +2141,19 @@ async def test_opencode_idle_waits_for_delayed_terminal_message_visibility() -> 
     state = agent._steering_states[primary.base_session_id]
     state.awaiting_after_message_ids = set()
     state.awaiting_user_text = "follow-up"
-    state.awaiting_start_confirmation_deadline = time.monotonic() - 1
+    state.awaiting_prompt_accepted = True
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
+        intermediate = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        # Busy + inserted user visible → in-progress snapshot streams back.
+        assert intermediate[-1]["info"]["id"] == "follow-up-user"
+        assert state.awaiting_active_status_observed is True
+        assert state.closing is False
+
         messages = await asyncio.wait_for(
             poll_server.list_messages("opencode-session", primary.working_path),
             timeout=1,
@@ -1629,23 +2169,65 @@ async def test_opencode_idle_waits_for_delayed_terminal_message_visibility() -> 
 
 
 @pytest.mark.anyio
-async def test_opencode_accepted_prompt_idle_start_timeout_is_terminal() -> None:
+async def test_opencode_accepted_prompt_stays_owned_until_delayed_result() -> None:
     primary = _primary_request(backend="opencode")
     gate_task = await _held_task()
-    server = _OpenCodeServer(
-        messages=[
-            {
-                "info": {"id": "follow-up-user", "role": "user"},
-                "parts": [{"type": "text", "text": "follow-up"}],
-            }
-        ],
-        status={"type": "idle"},
-    )
+
+    class _DelayedAcceptedPromptServer(_OpenCodeServer):
+        async def list_messages(self, session_id: str, directory: str) -> list[dict]:
+            if self.list_calls == 1:
+                self.messages.extend(
+                    [
+                        {
+                            "info": {"id": "follow-up-user", "role": "user"},
+                            "parts": [{"type": "text", "text": "follow-up"}],
+                        },
+                        {
+                            "info": {
+                                "id": "follow-up-assistant",
+                                "role": "assistant",
+                                "time": {"completed": 2},
+                                "finish": "stop",
+                            },
+                            "parts": [{"type": "text", "text": "answered"}],
+                        },
+                    ]
+                )
+            return await super().list_messages(session_id, directory)
+
+    server = _DelayedAcceptedPromptServer(status={"type": "idle"})
     agent = _opencode_agent(primary, gate_task, server)
     state = agent._steering_states[primary.base_session_id]
     state.awaiting_after_message_ids = set()
     state.awaiting_user_text = "follow-up"
-    state.awaiting_start_confirmation_deadline = time.monotonic() - 1
+    state.awaiting_prompt_accepted = True
+    poll_server = _SteeringAwareOpenCodeServer(server, state)
+    try:
+        messages = await asyncio.wait_for(
+            poll_server.list_messages("opencode-session", primary.working_path),
+            timeout=1,
+        )
+
+        assert messages[-1]["info"]["id"] == "follow-up-assistant"
+        assert state.terminal_status_failure_messages is None
+        assert state.awaiting_after_message_ids is None
+        assert state.closing is True
+        assert server.list_calls == 2
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_opencode_accepted_prompt_without_activity_is_bounded() -> None:
+    primary = _primary_request(backend="opencode")
+    gate_task = await _held_task()
+    server = _OpenCodeServer(status={"type": "idle"})
+    agent = _opencode_agent(primary, gate_task, server)
+    state = agent._steering_states[primary.base_session_id]
+    state.awaiting_after_message_ids = set()
+    state.awaiting_user_text = "follow-up"
+    state.awaiting_prompt_accepted = True
+    state.awaiting_prompt_activity_deadline = time.monotonic() - 1
     poll_server = _SteeringAwareOpenCodeServer(server, state)
     try:
         messages = await poll_server.list_messages(

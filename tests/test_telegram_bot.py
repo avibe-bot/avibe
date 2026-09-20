@@ -14,6 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import chat_discovery
+from core.processing_indicator import (
+    INTERRUPTED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
+)
 from core.message_context import resolve_context_thread_id
 from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
@@ -25,12 +29,13 @@ from config.v2_config import TelegramConfig
 
 @pytest.fixture(autouse=True)
 def _reset_chat_discovery_cache():
-    """chat_discovery keeps process-global debounce/migration caches keyed on
+    """chat_discovery keeps a process-global debounce cache keyed on
     (platform, chat_id) — not on the DB path — so a chat remembered by one test
     short-circuits remember_chat in a later test that points get_vibe_remote_dir at
-    a fresh tmp dir. Clear them between tests for isolation."""
+    a fresh tmp dir. Clear it between tests for isolation. The migrated-target memo
+    it used to keep alongside is now `ensure_sqlite_state`'s, which conftest's
+    `_reset_cached_sqlite_engines` already resets for every test."""
     chat_discovery._debounce_cache.clear()
-    chat_discovery._migrated_db_paths.clear()
     yield
 
 
@@ -107,7 +112,7 @@ def test_group_message_uses_channel_require_mention_override() -> None:
     )
 
     bot.on_message_callback.assert_awaited_once()
-    assert bot.on_message_callback.await_args.args[0].is_ordinary_text is True
+    assert bot.on_message_callback.await_args.args[0].is_original_human_text is True
     assert bot.on_message_callback.await_args.args[1] == "hello team"
 
 
@@ -204,6 +209,27 @@ def test_extract_files_includes_voice_and_audio_messages() -> None:
         ("telegram-voice.ogg", "audio/ogg", "voice-file", 1234),
         ("song.mp3", "audio/mpeg", "audio-file", 5678),
     ]
+
+
+def test_photo_context_publishes_ordinary_attachment_fact_from_largest_photo() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = bot._build_message_context(
+        {
+            "message_id": 79,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False},
+            "media_group_id": "album-1",
+            "photo": [
+                {"file_id": "small", "file_size": 10},
+                {"file_id": "large", "file_size": 42},
+            ],
+        }
+    )
+
+    assert context is not None
+    assert context.is_original_human_attachment is True
+    assert context.files is not None
+    assert [file.url for file in context.files] == ["large"]
 
 
 def test_plain_group_sessions_are_channel_scoped() -> None:
@@ -1113,6 +1139,51 @@ def test_add_reaction_uses_telegram_message_reactions() -> None:
 
     assert result is True
     reaction_mock.assert_awaited_once_with("123456:test-token", "-100123", "77", "👀", proxy_url=None)
+
+
+def test_terminal_receipts_are_translated_to_allowed_reactions() -> None:
+    """⏹️/⚠️ are not on Telegram's fixed reaction list.
+
+    ``setMessageReaction`` rejects the whole call for an off-list emoji, so an
+    untranslated receipt is not a degraded receipt — it is no reaction at all, on
+    exactly the turns (a /stop, a runtime that died) whose only trace it is. The
+    ack 👀 and the admission receipts are already mapped, so terminal states must
+    not be the one family that silently drops.
+    """
+
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    allowed = {"👀", "🤔", "🤷", "✍", "🙊", "😱"}
+
+    for emoji in (
+        STOPPED_REACTION_EMOJI,
+        INTERRUPTED_REACTION_EMOJI,
+        # The constants carry U+FE0F; a caller that strips it must map too.
+        STOPPED_REACTION_EMOJI.rstrip("️"),
+        INTERRUPTED_REACTION_EMOJI.rstrip("️"),
+    ):
+        normalized = bot._normalize_reaction_emoji(emoji)
+        assert normalized in allowed, f"{emoji!r} -> {normalized!r} is off Telegram's list"
+
+    # Distinct receipts stay distinguishable after translation.
+    assert bot._normalize_reaction_emoji(STOPPED_REACTION_EMOJI) != bot._normalize_reaction_emoji(
+        INTERRUPTED_REACTION_EMOJI
+    )
+
+
+def test_add_reaction_sends_the_translated_terminal_receipt() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+
+    with patch(
+        "modules.im.telegram.telegram_api.set_message_reaction",
+        new=AsyncMock(return_value={"ok": True}),
+    ) as reaction_mock:
+        result = asyncio.run(bot.add_reaction(context, "77", STOPPED_REACTION_EMOJI))
+
+    assert result is True
+    sent = reaction_mock.await_args.args[3]
+    assert sent != STOPPED_REACTION_EMOJI
+    assert "️" not in sent
 
 
 def test_remove_reaction_clears_telegram_message_reactions() -> None:

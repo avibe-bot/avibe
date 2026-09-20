@@ -7,6 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from core.agent_auth_service import classify_auth_error
 from core.backend_failure import backend_failure_notification_output, emit_backend_failure
+from core.handlers.session_handler import ClaudeSessionNotFoundError
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -16,7 +17,8 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.native_dispatch_phase import mark_backend_dispatch_attempted, mark_prewrite_recovery_required
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_work import RuntimeWorkLane
@@ -141,6 +143,13 @@ class ClaudeAgent(BaseAgent):
 
     def _format_error_notify(self, error: Exception, *, composite_key: str | None = None) -> str:
         """Return the durable notify text for Claude terminal errors."""
+        if isinstance(error, ClaudeSessionNotFoundError):
+            detail = self._translate_error(
+                "error.claudeSessionNotFound",
+                sessionId=error.session_id,
+                path=error.working_path,
+            )
+            return f"❌ {detail}"
         if is_claude_sdk_buffer_error(error):
             return f"❌ {self._translate_error('error.sessionConnectionLost')}"
         client = self.claude_sessions.get(composite_key) if composite_key else None
@@ -199,6 +208,7 @@ class ClaudeAgent(BaseAgent):
 
             # Prepare message with file attachment info if present
             message = self._prepare_message_with_files(request)
+            message = self.render_input(message, getattr(request, "input_metadata", None))
             input_receipt = self._register_native_input(
                 runtime_session_key,
                 message,
@@ -212,6 +222,10 @@ class ClaudeAgent(BaseAgent):
                 self._remove_native_input_receipt(runtime_session_key, input_receipt)
                 raise
             input_receipt.state = "accepted"
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(self.controller, context, getattr(client, "_vibe_pending_skill_catalog", None), backend="claude")
+            setattr(client, "_vibe_pending_skill_catalog", None)
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
@@ -249,6 +263,9 @@ class ClaudeAgent(BaseAgent):
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
+            missing_session = isinstance(e, ClaudeSessionNotFoundError)
+            if missing_session:
+                mark_prewrite_recovery_required(context, "native_session_not_found")
             diagnostic = self._claude_error_diagnostic(runtime_session_key, e)
             # Classify BEFORE recording: ``record_model_hub_native_failure``
             # turns the pending native/hub attempt into a failed one, so a
@@ -266,13 +283,17 @@ class ClaudeAgent(BaseAgent):
             await self._remove_ack_reaction(request)
             error_notify = self._format_error_notify(e, composite_key=runtime_session_key)
             try:
-                handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
-                    context,
-                    "claude",
-                    error_notify,
-                    output=terminal_output_for(request),
-                    terminal_error=diagnostic,
-                )
+                # A typed local resume failure takes precedence over incidental
+                # auth words in the working path or captured process diagnostic.
+                handled = False
+                if not missing_session:
+                    handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                        context,
+                        "claude",
+                        error_notify,
+                        output=terminal_output_for(request),
+                        terminal_error=diagnostic,
+                    )
                 if handled and client is not None and get_claude_client_returncode(client) is not None:
                     # Auth recovery owns the visible settlement, but a query can
                     # fail after the cached CLI has already exited. Retire that
@@ -282,6 +303,7 @@ class ClaudeAgent(BaseAgent):
                     await self._cleanup_runtime_session(
                         runtime_session_key,
                         preserve_pending_request_state=True,
+                        reason="query_auth_failure",
                     )
                 if not handled:
                     # Third and last emit site that can be holding a claimed
@@ -322,7 +344,7 @@ class ClaudeAgent(BaseAgent):
                                 context,
                                 "notify",
                                 error_notify,
-                                metadata=notification.metadata,
+                                metadata=notification.provenance(context),
                                 native_message_id=notification.idempotency_key,
                             )
                         except Exception:
@@ -476,7 +498,10 @@ class ClaudeAgent(BaseAgent):
                 sessions_to_clear.append(composite_id)
 
         for composite_id in sessions_to_clear:
-            await self._cleanup_runtime_session(composite_id)
+            await self._cleanup_runtime_session(
+                composite_id,
+                reason="session_clear",
+            )
 
         # Legacy session manager cleanup (best-effort)
         await self.session_manager.clear_session(session_key)
@@ -585,7 +610,10 @@ class ClaudeAgent(BaseAgent):
         session_ids = self.runtime_turn_keys()
 
         for composite_id in session_ids:
-            await self._cleanup_runtime_session(composite_id)
+            await self._cleanup_runtime_session(
+                composite_id,
+                reason="auth_refresh",
+            )
 
         logger.info("Refreshed Claude auth state across %d runtime session(s)", len(session_ids))
 
@@ -610,7 +638,10 @@ class ClaudeAgent(BaseAgent):
         if composite_key not in self.claude_sessions and composite_key not in self.receiver_tasks:
             return
 
-        await self._cleanup_runtime_session(composite_key)
+        await self._cleanup_runtime_session(
+            composite_key,
+            reason="resume_rebind",
+        )
         logger.info("Prepared Claude runtime for resumed session %s", composite_key)
 
     async def _disconnect_client(self, client, composite_key: str) -> None:
@@ -688,6 +719,7 @@ class ClaudeAgent(BaseAgent):
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
+        reason: str = "claude_agent_cleanup",
     ) -> None:
         """Drop Claude runtime state without canceling the current receiver task."""
 
@@ -699,6 +731,7 @@ class ClaudeAgent(BaseAgent):
                 preserve_pending_request_state=preserve_pending_request_state,
                 runtime_lock_held=runtime_lock_held,
                 activation_retired=activation_retired,
+                reason=reason,
             )
         finally:
             self._retire_steering_state(composite_key)
@@ -711,6 +744,7 @@ class ClaudeAgent(BaseAgent):
         preserve_pending_request_state: bool = False,
         runtime_lock_held: bool = False,
         activation_retired: bool = False,
+        reason: str = "claude_agent_cleanup",
     ) -> None:
 
         self._last_assistant_text.pop(composite_key, None)
@@ -733,6 +767,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=current_receiver_task,
                 activation_retired=activation_retired,
+                reason=reason,
             )
             return
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -786,6 +821,7 @@ class ClaudeAgent(BaseAgent):
                     preserve_pending_request_state=True,
                     runtime_lock_held=runtime_lock_held,
                     activation_retired=activation_retired,
+                    reason="stuck_active_eviction",
                 )
             except Exception:
                 if context is not None:
@@ -1096,14 +1132,15 @@ class ClaudeAgent(BaseAgent):
                 )
             writers = self._steering_writer_keys()
             writers.add(composite_key)
+            message = self.render_input(request.text, request.input_metadata)
             input_receipt = self._register_native_input(
                 composite_key,
-                request.text,
+                message,
                 kind="steer",
             )
             try:
                 try:
-                    await client.query(request.text, session_id=composite_key)
+                    await client.query(message, session_id=composite_key)
                 except (asyncio.TimeoutError, TimeoutError) as exc:
                     input_receipt.state = "unknown"
                     self._advance_steering_generation(composite_key)
@@ -1263,15 +1300,29 @@ class ClaudeAgent(BaseAgent):
         self._adopt_pending_turn_token(request.context, stopped_request)
         if stopped_request is not None:
             try:
-                await self._remove_specific_pending_reaction(composite_key, request.context, stopped_request)
-                await self._remove_ack_reaction(stopped_request)
+                # Registry only: ``finish()`` below owns removing the 👀 and
+                # putting ⏹️ in its place, and it can only do that if the
+                # reaction is still on the message when it runs.
+                await self._remove_specific_pending_reaction(
+                    composite_key,
+                    request.context,
+                    stopped_request,
+                    clear_on_platform=False,
+                )
+                await self._remove_ack_reaction(
+                    stopped_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI,
+                )
             except Exception:
                 logger.debug("Failed to clear Claude stop processing indicator", exc_info=True)
 
         self._suppress_receiver_runtime_release.add(composite_key)
         try:
             self._mark_session_idle_if_no_pending_requests(composite_key)
-            await self._cleanup_runtime_session(composite_key)
+            await self._cleanup_runtime_session(
+                composite_key,
+                reason="user_stop",
+            )
         except Exception as err:
             logger.error("Failed to clean up stopped Claude session %s: %s", composite_key, err, exc_info=True)
             self._release_service_runtime_turn(request.context)
@@ -1283,7 +1334,9 @@ class ClaudeAgent(BaseAgent):
             # A user-initiated stop is terminal but intentional, so it carries
             # NO user-facing message: a single SILENT result settles the dot to
             # idle + releases the SSE waiter through the outbound chokepoint
-            # WITHOUT a bubble. Emit only after cleanup so the next turn cannot
+            # WITHOUT a bubble. IM says it in the reaction instead — the ⏹️
+            # stamped above is the receipt, at no cost in thread noise. Emit
+            # only after cleanup so the next turn cannot
             # acquire the gate and reuse a client that this stop is still
             # disconnecting. ``stop_output_for`` (not the terminal-turn default) keeps
             # this empty body out of the run's terminal state so the stop settles it
@@ -1317,7 +1370,10 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     exc_info=True,
                 )
-        await self._cleanup_runtime_session(composite_key)
+        await self._cleanup_runtime_session(
+            composite_key,
+            reason="running_agent_end",
+        )
         return True
 
     async def _receive_messages(
@@ -1397,6 +1453,7 @@ class ClaudeAgent(BaseAgent):
                         composite_key,
                         current_receiver_task=asyncio.current_task(),
                         preserve_pending_request_state=True,
+                        reason="ambiguous_primary_receiver_failure",
                     )
                     if settling_ambiguous_assistant_text:
                         self._last_assistant_text[composite_key] = (
@@ -2049,6 +2106,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_eof",
                 )
                 return
             await self._handle_receiver_eof(
@@ -2182,6 +2240,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_auth_failure",
                 )
                 if pending_request is not None:
                     await self._remove_ack_reaction(pending_request)
@@ -2243,6 +2302,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="receiver_eof_without_result",
             )
         try:
             await self._emit_no_result_settlement(
@@ -2296,6 +2356,7 @@ class ClaudeAgent(BaseAgent):
                     composite_key,
                     current_receiver_task=asyncio.current_task(),
                     preserve_pending_request_state=True,
+                    reason="receiver_error_auth_failure",
                 )
                 if pending_request is not None:
                     await self._remove_ack_reaction(pending_request)
@@ -2424,6 +2485,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="transport_auth_failure",
             )
             if pending_request is not None:
                 await self._remove_ack_reaction(pending_request)
@@ -3829,11 +3891,23 @@ class ClaudeAgent(BaseAgent):
             self._pending_requests.pop(composite_key, None)
 
     async def _remove_specific_pending_reaction(
-        self, composite_key: str, context: MessageContext, request: AgentRequest
+        self,
+        composite_key: str,
+        context: MessageContext,
+        request: AgentRequest,
+        *,
+        clear_on_platform: bool = True,
     ) -> None:
         """Remove a specific reaction from the queue by matching message_id.
 
         Used on error paths to remove the current request's reaction instead of FIFO.
+
+        ``clear_on_platform=False`` forgets the REGISTRY entry only. The registry
+        and the processing indicator both point at the same platform reaction, so
+        a caller that then calls ``_remove_ack_reaction`` would otherwise remove
+        it twice — and the second removal reports failure (the reaction is
+        already gone), which is exactly what suppresses a terminal receipt. A
+        stop hands both platform operations to ``finish()`` instead.
         """
         target_id = getattr(request, "ack_reaction_message_id", None)
         target_emoji = getattr(request, "ack_reaction_emoji", None)
@@ -3848,6 +3922,8 @@ class ClaudeAgent(BaseAgent):
                 reactions.pop(i)
                 if not reactions:
                     self._pending_reactions.pop(composite_key, None)
+                if not clear_on_platform:
+                    return
                 try:
                     await self.im_client.remove_reaction(context, msg_id, emoji)
                 except Exception as err:
@@ -4053,6 +4129,7 @@ class ClaudeAgent(BaseAgent):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 preserve_pending_request_state=True,
+                reason="result_auth_failure",
             )
         return handled
 

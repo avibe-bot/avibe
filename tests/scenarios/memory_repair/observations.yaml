@@ -1,0 +1,34 @@
+version: 1
+capability: memory_repair
+observations:
+  - id: MEMORY-REPAIR-OBS-001
+    scenarios:
+      - MEMORY-WAKE-001
+      - MEMORY-WAKE-002
+      - MEMORY-WAKE-201
+      - MEMORY-WAKE-202
+      - MEMORY-WAKE-203
+    observation: Startup, explicit Wake, and unexpected child recovery share one volatile non-destructive path; retained ownership is stopped before replacement, reconciliation failures stay visible, and failures never route into Repair.
+  - id: MEMORY-REPAIR-OBS-002
+    scenarios:
+      - MEMORY-REPAIR-201
+      - MEMORY-REPAIR-202
+      - MEMORY-REPAIR-203
+      - MEMORY-REPAIR-206
+    observation: Destructive authority consists only of exact accepted-loss confirmation, process exclusion, proven termination, and fixed confined surfaces; stable identity and project rows remain outside deletion.
+  - id: MEMORY-REPAIR-OBS-003
+    scenarios:
+      - MEMORY-REPAIR-204
+      - MEMORY-REPAIR-205
+    observation: No operation stage is persisted or resumed; startup reevaluates the native root, while ordinary provider and machine faults stay degraded.
+
+  - id: MEMORY-REPAIR-OBS-004
+    scenarios:
+      - MEMORY-WAKE-204
+      - MEMORY-WAKE-205
+    observation: Darwin arm64 tests inject the psutil boot-time read locally; public references survive the display-time shift. The real EverOS 1.2.3 pipeline requires 1024-dimensional embedding responses. Native production Wake, claims, writer, extraction, indexing and keyword recall run with test-owned storage and loopback model doubles; this is not model-quality or four-platform deployment evidence. Local Incus provisioning is blocked before target creation by required IM/model seed configuration.
+  - id: MEMORY-REPAIR-OBS-005
+    scenarios:
+      - MEMORY-WAKE-206
+      - MEMORY-WAKE-207
+    observation: Released darwin-arm64 EverOS 1.2.3 archive SHA-256 296f320ec9acc55fc01f5c4f6ff2a4a338710a33b73e41615f957ce0569e3e07 passed the isolated native route/memorize contract trial on 2026-09-17. A synthetic pipeline acknowledges after 31 seconds; withholding its response reports an ambiguous write and a later request succeeds. Real external models and unified Incus surfaces remain residual integration checks.

@@ -51,8 +51,7 @@ describe('sameIds', () => {
     expect(sameIds([], [])).toBe(true);
   });
 
-  // The composition that decides whether a `follow` backend gets forked to
-  // `custom`. `movedOrder` hands back a FRESH array at either boundary, so the
+  // `movedOrder` hands back a FRESH array at either boundary, so the
   // commit path has to compare contents; on `!==` alone every ArrowUp on row 1
   // would silently cost the user their recommended order.
   it('sees a boundary move as no change at all', () => {

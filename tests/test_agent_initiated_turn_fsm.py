@@ -61,6 +61,7 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_registers_in_flight_then_terminal_result_settles(self):
         mgr, _ = _manager()
         ctx = _ctx("s1")
+        sink_key = build_context_turn_sink_key(ctx, session_key="avibe::s1")
         events: list[tuple[str, str]] = []
         with patch(
             "core.inbox_events.bus.publish",
@@ -70,7 +71,7 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ok)
             # Stop target + sink exist synchronously (before any further receiver emit).
             self.assertIn("s1", mgr.in_flight)
-            sink = mgr.get_turn_sink("avibe::s1")
+            sink = mgr.get_turn_sink(sink_key)
             self.assertIsNotNone(sink)
             self.assertIn(("turn.start", "s1"), events)
 
@@ -79,7 +80,7 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             await _settle()
 
             self.assertNotIn("s1", mgr.in_flight)
-            self.assertIsNone(mgr.get_turn_sink("avibe::s1"))
+            self.assertIsNone(mgr.get_turn_sink(sink_key))
             self.assertIn(("turn.end", "s1"), events)
         # Natural completion flushes the send-while-busy queue (mirrors _run).
         mgr.flush_queue.assert_awaited()
@@ -131,7 +132,8 @@ class RegisterAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         mgr, _ = _manager()
         ctx = _ctx("s3")
         # A streaming turn already owns this session's sink.
-        mgr.register_turn_sink("avibe::s3", on_chunk=AsyncMock(), done_event=asyncio.Event())
+        sink_key = build_context_turn_sink_key(ctx, session_key="avibe::s3")
+        mgr.register_turn_sink(sink_key, on_chunk=AsyncMock(), done_event=asyncio.Event())
         with patch("core.inbox_events.bus.publish"):
             ok = mgr.register_agent_initiated_turn(ctx)
         self.assertFalse(ok)

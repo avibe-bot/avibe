@@ -1,3 +1,4 @@
+import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowRight, Bot, HelpCircle, MessageSquare, Radio, Send, Sparkles, Type } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -5,7 +6,9 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { SettingsPageShell } from './SettingsPageShell';
+import { isLocalOnlyMessagingField } from '@/lib/adminNavigation';
 import {
   platformHasCapability,
   getEnabledPlatforms,
@@ -23,39 +26,9 @@ import {
   MIN_CHAT_MESSAGE_FONT_SIZE,
   normalizeChatMessageFontSize,
 } from '@/lib/chatDisplay';
+import { configChanges } from '@/lib/configMutations';
 
-const SAVE_KEYS = [
-  'platforms',
-  'ack_mode',
-  'show_duration',
-  'include_time_info',
-  'include_user_info',
-  'reply_enhancements',
-  'show_pages_prompt',
-  'agent_progress_style',
-  'audio_asr',
-  'slack',
-  'discord',
-  'telegram',
-  'lark',
-  'wechat',
-  'agents',
-] as const;
-
-function buildMessagePatch(config: any, extraPatch: Record<string, unknown> = {}) {
-  // ``save_config`` merges onto the stored config and the backend derives the
-  // internal default platform from ``platforms.enabled``, so this messaging
-  // save no longer sends a ``platform``/primary field.
-  const patch: Record<string, unknown> = {};
-
-  for (const key of SAVE_KEYS) {
-    patch[key] = config?.[key];
-  }
-
-  return { ...patch, ...extraPatch };
-}
-
-function formatSavedAt(value: number | null, t: (key: string) => string) {
+function formatSavedAt(value: number | null, t: TFunction) {
   if (!value) return t('settings.messagingStatusIdle');
   const deltaSec = Math.max(0, Math.round((Date.now() - value) / 1000));
   return deltaSec <= 1
@@ -69,6 +42,10 @@ function formatSavedAt(value: number | null, t: (key: string) => string) {
 export const SettingsMessagingPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
+  const canUseSystem = capabilities.can_use_system;
+  const canManageInstance = capabilities.can_manage_instance;
+  const canEditMessaging = capabilities.can_chat || canUseSystem;
   const [config, setConfig] = useState<any>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -93,10 +70,17 @@ export const SettingsMessagingPage: React.FC = () => {
   );
 
   const persist = async (nextConfig: any, extraPatch?: Record<string, unknown>) => {
+    // Field-specific for everyone (#1458 stage ③): the save carries only
+    // the control's patch. A control without an explicit patch would post
+    // ``{}`` (silent no-op success) — fail visibly instead.
+    if (!extraPatch) {
+      setSaveError(t('common.saveFailed'));
+      return;
+    }
     setConfig(nextConfig);
     setSaveError(null);
     try {
-      await api.saveConfig(buildMessagePatch(nextConfig, extraPatch));
+      await api.mutateConfig(configChanges({}, extraPatch));
       setSavedAt(Date.now());
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : t('common.saveFailed'));
@@ -125,11 +109,14 @@ export const SettingsMessagingPage: React.FC = () => {
     { value: 'concise', label: t('dashboard.agentProgressStyleConcise') },
     { value: 'verbose', label: t('dashboard.agentProgressStyleVerbose') },
   ];
+  const canShowProtectedMessagingControl = (field: string) =>
+    canUseSystem || !isLocalOnlyMessagingField(field);
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
   const audioEchoEnabled = audioAsr.echo_transcript !== false;
-  const vibeCloud = config.remote_access?.vibe_cloud || {};
-  const vibeCloudPaired = Boolean(vibeCloud.enabled && vibeCloud.instance_id);
+  // Server-computed readiness: the identifiers alone cannot answer this, since
+  // the secret the ASR runtime needs is redacted from every config response.
+  const vibeCloudPaired = Boolean(config.remote_access?.vibe_cloud?.paired);
   const audioAsrEnabled = vibeCloudPaired && audioAsr.enabled !== false;
   const chatMessageFontSize = normalizeChatMessageFontSize(config.ui?.chat_message_font_size);
   const saveChatMessageFontSize = (fontSize: number) => {
@@ -188,8 +175,8 @@ export const SettingsMessagingPage: React.FC = () => {
             className={clsx(
               'inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[0.14em]',
               saveError
-                ? 'border-danger/30 bg-danger/10 text-danger'
-                : 'border-mint/30 bg-mint/[0.08] text-mint'
+                ? 'border-destructive/30 bg-destructive/10 text-destructive-ink'
+                : 'border-mint/30 bg-mint/[0.08] text-mint-ink'
             )}
           >
             {saveError ? t('common.saveFailed') : t('settings.messagingAutosaved')}
@@ -203,7 +190,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Sparkles className="size-3.5 text-cyan" />
+            <Sparkles className="size-3.5 text-cyan-ink" />
             {t('settings.messagingInputEnrichmentTitle')}
           </span>
         }
@@ -231,12 +218,17 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioAsrEnabled}
-              disabled={!vibeCloudPaired}
+              disabled={!canEditMessaging || !vibeCloudPaired}
               onClick={() =>
                 void persist({
                   ...config,
                   audio_asr: {
                     ...audioAsr,
+                    enabled: !audioAsrEnabled,
+                    enabled_configured: true,
+                  },
+                }, {
+                  audio_asr: {
                     enabled: !audioAsrEnabled,
                     enabled_configured: true,
                   },
@@ -252,7 +244,7 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={audioEchoEnabled}
-              disabled={!audioAsrEnabled}
+              disabled={!canEditMessaging || !audioAsrEnabled}
               onClick={() =>
                 void persist({
                   ...config,
@@ -260,6 +252,8 @@ export const SettingsMessagingPage: React.FC = () => {
                     ...audioAsr,
                     echo_transcript: !audioEchoEnabled,
                   },
+                }, {
+                  audio_asr: { echo_transcript: !audioEchoEnabled },
                 })
               }
             />
@@ -270,7 +264,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Bot className="size-3.5 text-mint" />
+            <Bot className="size-3.5 text-mint-ink" />
             {t('settings.messagingAgentContextTitle')}
           </span>
         }
@@ -283,7 +277,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={includeTimeInfoEnabled}
               onClick={() =>
-                void persist({ ...config, include_time_info: !includeTimeInfoEnabled })
+                void persist(
+                  { ...config, include_time_info: !includeTimeInfoEnabled },
+                  { include_time_info: !includeTimeInfoEnabled },
+                )
               }
             />
           }
@@ -296,7 +293,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={Boolean(config.include_user_info)}
               onClick={() =>
-                void persist({ ...config, include_user_info: !config.include_user_info })
+                void persist(
+                  { ...config, include_user_info: !config.include_user_info },
+                  { include_user_info: !config.include_user_info },
+                )
               }
             />
           }
@@ -306,7 +306,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Radio className="size-3.5 text-gold" />
+            <Radio className="size-3.5 text-gold-ink" />
             {t('settings.messagingWorkFeedbackTitle')}
           </span>
         }
@@ -319,7 +319,10 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.ack_mode || 'typing'}
               onChange={(event) =>
-                void persist({ ...config, ack_mode: event.target.value || 'typing' })
+                void persist(
+                  { ...config, ack_mode: event.target.value || 'typing' },
+                  { ack_mode: event.target.value || 'typing' },
+                )
               }
               className="w-40"
             >
@@ -339,10 +342,13 @@ export const SettingsMessagingPage: React.FC = () => {
             <CompactSelect
               value={config.agent_progress_style || 'off'}
               onChange={(event) =>
-                void persist({
-                  ...config,
-                  agent_progress_style: event.target.value || 'off',
-                })
+                void persist(
+                  {
+                    ...config,
+                    agent_progress_style: event.target.value || 'off',
+                  },
+                  { agent_progress_style: event.target.value || 'off' },
+                )
               }
               className="w-40"
             >
@@ -355,64 +361,82 @@ export const SettingsMessagingPage: React.FC = () => {
           }
         />
 
-        <SettingsRow
-          title={t('dashboard.errorRetryLimit')}
-          description={t('dashboard.errorRetryLimitHint')}
-          control={
-            <CompactField
-              type="number"
-              min={0}
-              max={10}
-              value={config.agents?.opencode?.error_retry_limit ?? 1}
-              onChange={(event) => {
-                const limit = Math.max(0, Math.min(10, Number(event.target.value) || 0));
-                void persist({
-                  ...config,
-                  agents: {
-                    ...(config.agents || {}),
-                    opencode: {
-                      ...(config.agents?.opencode || {}),
-                      error_retry_limit: limit,
-                    },
-                  },
-                });
-              }}
-              className="w-24 text-center font-mono"
+        {canShowProtectedMessagingControl('agents.opencode.error_retry_limit') && (
+          <>
+            <SettingsRow
+              title={t('dashboard.errorRetryLimit')}
+              description={t('dashboard.errorRetryLimitHint')}
+              control={
+                <CompactField
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={config.agents?.opencode?.error_retry_limit ?? 1}
+                  onChange={(event) => {
+                    const limit = Math.max(0, Math.min(10, Number(event.target.value) || 0));
+                    void persist(
+                      {
+                        ...config,
+                        agents: {
+                          ...(config.agents || {}),
+                          opencode: {
+                            ...(config.agents?.opencode || {}),
+                            error_retry_limit: limit,
+                          },
+                        },
+                      },
+                      {
+                        agents: {
+                          opencode: { error_retry_limit: limit },
+                        },
+                      },
+                    );
+                  }}
+                  className="w-24 text-center font-mono"
+                />
+              }
             />
-          }
-        />
 
-        <SettingsRow
-          title={t('dashboard.opencodeActiveTurnTimeout')}
-          description={t('dashboard.opencodeActiveTurnTimeoutHint')}
-          control={
-            <CompactField
-              type="number"
-              min={1}
-              max={1440}
-              value={Math.round(
-                (config.agents?.opencode?.active_turn_timeout_seconds ?? 5400) / 60
-              )}
-              onChange={(event) => {
-                const minutes = Math.max(
-                  1,
-                  Math.min(1440, Number(event.target.value) || 1)
-                );
-                void persist({
-                  ...config,
-                  agents: {
-                    ...(config.agents || {}),
-                    opencode: {
-                      ...(config.agents?.opencode || {}),
-                      active_turn_timeout_seconds: Math.round(minutes * 60),
-                    },
-                  },
-                });
-              }}
-              className="w-24 text-center font-mono"
+            <SettingsRow
+              title={t('dashboard.opencodeActiveTurnTimeout')}
+              description={t('dashboard.opencodeActiveTurnTimeoutHint')}
+              control={
+                <CompactField
+                  type="number"
+                  min={0}
+                  max={1440}
+                  value={Math.round(
+                    (config.agents?.opencode?.active_turn_timeout_seconds ?? 0) / 60
+                  )}
+                  onChange={(event) => {
+                    const minutes = Math.max(
+                      0,
+                      Math.min(1440, Number(event.target.value) || 0)
+                    );
+                    void persist(
+                      {
+                        ...config,
+                        agents: {
+                          ...(config.agents || {}),
+                          opencode: {
+                            ...(config.agents?.opencode || {}),
+                            active_turn_timeout_seconds: Math.round(minutes * 60),
+                          },
+                        },
+                      },
+                      {
+                        agents: {
+                          opencode: { active_turn_timeout_seconds: Math.round(minutes * 60) },
+                        },
+                      },
+                    );
+                  }}
+                  className="w-24 text-center font-mono"
+                />
+              }
             />
-          }
-        />
+          </>
+        )}
 
         <SettingsRow
           title={t('dashboard.showDuration')}
@@ -420,7 +444,10 @@ export const SettingsMessagingPage: React.FC = () => {
           control={
             <ToggleSwitch
               enabled={config.show_duration !== false}
-              onClick={() => void persist({ ...config, show_duration: !config.show_duration })}
+              onClick={() => void persist(
+                { ...config, show_duration: !config.show_duration },
+                { show_duration: !config.show_duration },
+              )}
             />
           }
         />
@@ -429,7 +456,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Send className="size-3.5 text-cyan" />
+            <Send className="size-3.5 text-cyan-ink" />
             {t('settings.messagingReplyExperienceTitle')}
           </span>
         }
@@ -442,42 +469,34 @@ export const SettingsMessagingPage: React.FC = () => {
             <ToggleSwitch
               enabled={config.reply_enhancements !== false}
               onClick={() =>
-                void persist({ ...config, reply_enhancements: !config.reply_enhancements })
+                void persist(
+                  { ...config, reply_enhancements: !config.reply_enhancements },
+                  { reply_enhancements: !config.reply_enhancements },
+                )
               }
             />
           }
         />
-        <SettingsRow
-          title={t('dashboard.showPagesPrompt')}
-          description={t('dashboard.showPagesPromptHint')}
-          control={
-            <ToggleSwitch
-              enabled={config.show_pages_prompt !== false}
-              onClick={() =>
-                void persist({
-                  ...config,
-                  show_pages_prompt: !(config.show_pages_prompt !== false),
-                })
-              }
-            />
-          }
-        />
-        {slackSupportsLinkUnfurl && (
+        {/* ``slack.*`` is outside the Editor write allowlist, so this control
+            is only offered to roles that may manage the instance — a remote
+            Owner included, which is why it carries its own field patch. */}
+        {canManageInstance && slackSupportsLinkUnfurl && (
           <SettingsRow
             title={t('dashboard.slackLinkPreviews')}
             description={t('dashboard.slackLinkPreviewsHint')}
             control={
               <ToggleSwitch
                 enabled={Boolean(config.slack?.disable_link_unfurl)}
-                onClick={() =>
-                  void persist({
-                    ...config,
-                    slack: {
-                      ...(config.slack || {}),
-                      disable_link_unfurl: !config.slack?.disable_link_unfurl,
+                onClick={() => {
+                  const next = !config.slack?.disable_link_unfurl;
+                  void persist(
+                    {
+                      ...config,
+                      slack: { ...(config.slack || {}), disable_link_unfurl: next },
                     },
-                  })
-                }
+                    { slack: { disable_link_unfurl: next } },
+                  );
+                }}
               />
             }
           />
@@ -487,7 +506,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <Type className="size-3.5 text-mint" />
+            <Type className="size-3.5 text-mint-ink" />
             {t('settings.messagingDisplayTitle')}
           </span>
         }
@@ -570,7 +589,7 @@ export const SettingsMessagingPage: React.FC = () => {
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
-            <MessageSquare className="size-3.5 text-mint" />
+            <MessageSquare className="size-3.5 text-mint-ink" />
             {t('settings.messagingGroupsTitle')}
           </span>
         }
@@ -581,7 +600,7 @@ export const SettingsMessagingPage: React.FC = () => {
           description={t('settings.messagingGroupsHint')}
           control={
             <Link
-              to="/admin/groups"
+              to="/settings/platforms/groups"
               className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-foreground/[0.04] px-3 text-[12px] font-medium text-foreground transition hover:border-border-strong"
             >
               {t('common.manageChannels')}

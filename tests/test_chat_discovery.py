@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
+
+import pytest
 
 from config.v2_settings import ChannelSettings, SettingsState
 from core import chat_discovery
@@ -9,6 +13,43 @@ from storage.migrations import run_migrations
 from storage import message_deliveries as delivery_store
 from storage.workbench_sessions_service import create_session
 from storage.settings_service import SQLiteSettingsService
+
+
+@pytest.fixture(scope="module")
+def _chat_schema_template(tmp_path_factory):
+    path = tmp_path_factory.mktemp("chat-schema") / "empty.sqlite"
+    run_migrations(path)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return path
+
+
+@pytest.fixture
+def db_path(tmp_path, sqlite_db_factory, _chat_schema_template):
+    return sqlite_db_factory(tmp_path / "vibe.sqlite", template=_chat_schema_template)
+
+
+def test_chat_template_matches_real_migration_and_keeps_copies_private(
+    tmp_path, db_path, sqlite_db_factory, _chat_schema_template,
+):
+    from tests.test_sqlite_state_migration import _schema_fingerprint
+
+    reference = tmp_path / "reference.sqlite"
+    run_migrations(reference)
+    with closing(sqlite3.connect(reference)) as fresh, closing(sqlite3.connect(db_path)) as clone:
+        assert _schema_fingerprint(fresh) == _schema_fingerprint(clone)
+        assert sorted(row for row in fresh.iterdump() if row.startswith("INSERT INTO")) == sorted(
+            row for row in clone.iterdump() if row.startswith("INSERT INTO")
+        )
+        for pragma in ("journal_mode", "user_version", "application_id"):
+            assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
+        assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    original = _chat_schema_template.read_bytes()
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute("CREATE TABLE fixture_mutation (value TEXT)")
+        connection.execute("INSERT INTO fixture_mutation VALUES ('private')")
+    other = sqlite_db_factory(tmp_path / "other.sqlite", template=_chat_schema_template)
+    assert other.read_bytes() == _chat_schema_template.read_bytes() == original
 
 
 def _auth_context(platform: str, **kwargs) -> str:
@@ -37,10 +78,7 @@ def test_metadata_merge_preserves_unknown_keys_and_sticky_true_flags() -> None:
     assert merged[chat_discovery.METADATA_VISIBILITY_STATUS] == chat_discovery.VISIBILITY_VISIBLE
 
 
-def test_remember_chat_lists_inventory_with_configured_state(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
-
+def test_remember_chat_lists_inventory_with_configured_state(db_path: Path) -> None:
     chat_discovery.remember_chat(
         "telegram",
         "123",
@@ -71,9 +109,7 @@ def test_remember_chat_lists_inventory_with_configured_state(tmp_path: Path) -> 
     assert chats[0].visibility_status == chat_discovery.VISIBILITY_VISIBLE
 
 
-def test_remember_thread_lists_discovered_and_configured_topics(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_remember_thread_lists_discovered_and_configured_topics(db_path: Path) -> None:
     chat_discovery.remember_chat(
         "telegram",
         "-1001",
@@ -113,10 +149,8 @@ def test_remember_thread_lists_discovered_and_configured_topics(tmp_path: Path) 
     assert topics[0]["name"] == "Releases"
 
 
-def test_passively_discovered_topics_leave_fallback_names_to_ui(tmp_path: Path) -> None:
+def test_passively_discovered_topics_leave_fallback_names_to_ui(db_path: Path) -> None:
     # Scenario: TELEGRAM-TOPIC-004
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
     chat_discovery.remember_chat(
         "telegram",
         "-1001",
@@ -145,9 +179,7 @@ def test_passively_discovered_topics_leave_fallback_names_to_ui(tmp_path: Path) 
     assert [(topic["id"], topic["name"]) for topic in topics] == [("1", ""), ("42", "")]
 
 
-def test_remember_chat_debounce_does_not_suppress_retry_after_persist_failure(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_remember_chat_debounce_does_not_suppress_retry_after_persist_failure(db_path: Path, monkeypatch) -> None:
     original_upsert_scope = chat_discovery.upsert_scope
     calls = 0
 
@@ -220,9 +252,7 @@ def test_legacy_migration_rename_tolerates_missing_source(tmp_path: Path) -> Non
     assert target.exists() is False
 
 
-def test_refresh_marks_absent_rows_not_returned_without_deleting_settings(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_refresh_marks_absent_rows_not_returned_without_deleting_settings(db_path: Path, monkeypatch) -> None:
     chat_discovery.remember_chat(
         "slack",
         "C_OLD",
@@ -261,9 +291,7 @@ def test_refresh_marks_absent_rows_not_returned_without_deleting_settings(tmp_pa
     assert chats["C_OLD"].configured is True
 
 
-def test_refresh_failure_keeps_stale_cache_and_records_error(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_refresh_failure_keeps_stale_cache_and_records_error(db_path: Path, monkeypatch) -> None:
     chat_discovery.remember_chat(
         "slack",
         "C_KEEP",
@@ -290,9 +318,7 @@ def test_refresh_failure_keeps_stale_cache_and_records_error(tmp_path: Path, mon
     assert response["error"] == "boom"
 
 
-def test_empty_cache_channel_response_respects_refresh_backoff(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_empty_cache_channel_response_respects_refresh_backoff(db_path: Path, monkeypatch) -> None:
     calls = 0
 
     from vibe import api
@@ -314,9 +340,7 @@ def test_empty_cache_channel_response_respects_refresh_backoff(tmp_path: Path, m
     assert second["error"] == "bad token"
 
 
-def test_stale_cache_schedules_only_one_background_refresh(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_stale_cache_schedules_only_one_background_refresh(db_path: Path, monkeypatch) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",
@@ -358,9 +382,7 @@ def test_stale_cache_schedules_only_one_background_refresh(tmp_path: Path, monke
     assert second["refreshing"] is True
 
 
-def test_slack_cached_response_respects_member_only_browse_mode(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_slack_cached_response_respects_member_only_browse_mode(db_path: Path) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",
@@ -389,9 +411,7 @@ def test_slack_cached_response_respects_member_only_browse_mode(tmp_path: Path) 
     assert {channel["id"] for channel in browse_all["channels"]} == {"C_MEMBER", "C_OTHER"}
 
 
-def test_slack_member_only_response_excludes_not_returned_member_channels(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_slack_member_only_response_excludes_not_returned_member_channels(db_path: Path) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",
@@ -425,9 +445,7 @@ def test_slack_member_only_response_excludes_not_returned_member_channels(tmp_pa
     assert [channel["id"] for channel in response["channels"]] == ["C_PRESENT"]
 
 
-def test_slack_member_only_opt_in_exposes_not_returned_member_channels(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_slack_member_only_opt_in_exposes_not_returned_member_channels(db_path: Path) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",
@@ -466,9 +484,7 @@ def test_slack_member_only_opt_in_exposes_not_returned_member_channels(tmp_path:
     assert response["summary"]["not_returned_count"] == 1
 
 
-def test_slack_browse_all_refreshes_after_member_only_cache_hit(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_slack_browse_all_refreshes_after_member_only_cache_hit(db_path: Path, monkeypatch) -> None:
     calls: list[bool] = []
 
     from vibe import api
@@ -510,9 +526,7 @@ def test_slack_browse_all_refreshes_after_member_only_cache_hit(tmp_path: Path, 
     assert {channel["id"] for channel in cached_browse_all["channels"]} == {"C_MEMBER", "C_OTHER"}
 
 
-def test_slack_channel_cache_is_scoped_by_auth_context(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_slack_channel_cache_is_scoped_by_auth_context(db_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
     from vibe import api
@@ -538,9 +552,7 @@ def test_slack_channel_cache_is_scoped_by_auth_context(tmp_path: Path, monkeypat
     assert [channel["id"] for channel in cached_first["channels"]] == ["C_A"]
 
 
-def test_active_channel_response_rejects_missing_auth_context_without_cache_read(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_active_channel_response_rejects_missing_auth_context_without_cache_read(db_path: Path) -> None:
     chat_discovery.remember_chat(
         "slack",
         "C_OLD",
@@ -556,9 +568,7 @@ def test_active_channel_response_rejects_missing_auth_context_without_cache_read
     assert response["error"] == "Missing slack channel refresh credentials"
 
 
-def test_discord_refresh_state_is_scoped_by_guild(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_discord_refresh_state_is_scoped_by_guild(db_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 
     from vibe import api
@@ -597,10 +607,7 @@ def test_discord_refresh_state_is_scoped_by_guild(tmp_path: Path, monkeypatch) -
     assert chat_discovery.refresh_state("discord", db_path=db_path).last_success_at is None
 
 
-def test_discord_cached_payload_preserves_numeric_channel_type(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
-
+def test_discord_cached_payload_preserves_numeric_channel_type(db_path: Path, monkeypatch) -> None:
     from vibe import api
 
     monkeypatch.setattr(
@@ -659,9 +666,7 @@ def _seed_not_returned_discord(db_path: Path) -> None:
     )
 
 
-def test_channels_response_hides_not_returned_by_default_and_opts_in(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_channels_response_hides_not_returned_by_default_and_opts_in(db_path: Path) -> None:
     _seed_not_returned_discord(db_path)
     # Mark already fetched so no live refresh is attempted.
     chat_discovery.set_state_meta(
@@ -691,9 +696,7 @@ def test_channels_response_hides_not_returned_by_default_and_opts_in(tmp_path: P
     assert shown["summary"]["not_returned_count"] == 1
 
 
-def test_all_not_returned_does_not_trigger_refresh_each_call(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_all_not_returned_does_not_trigger_refresh_each_call(db_path: Path, monkeypatch) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",
@@ -734,9 +737,7 @@ def test_all_not_returned_does_not_trigger_refresh_each_call(tmp_path: Path, mon
     assert first["summary"]["not_returned_count"] == 1
 
 
-def test_refresh_skips_not_returned_marking_when_lark_truncated(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_refresh_skips_not_returned_marking_when_lark_truncated(db_path: Path, monkeypatch) -> None:
     auth_context = _auth_context("lark", app_id="a", app_secret="s", domain="feishu")
     chat_discovery.remember_chat(
         "lark",
@@ -770,9 +771,7 @@ def test_refresh_skips_not_returned_marking_when_lark_truncated(tmp_path: Path, 
     assert chats["oc_new"].visibility_status == chat_discovery.VISIBILITY_VISIBLE
 
 
-def test_background_refresh_skips_marking_when_lark_truncated(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_background_refresh_skips_marking_when_lark_truncated(db_path: Path, monkeypatch) -> None:
     auth_context = _auth_context("lark", app_id="a", app_secret="s", domain="feishu")
     chat_discovery.remember_chat(
         "lark",
@@ -822,9 +821,7 @@ def test_background_refresh_skips_marking_when_lark_truncated(tmp_path: Path, mo
     assert chats["oc_keepbg"].visibility_status != chat_discovery.VISIBILITY_NOT_RETURNED
 
 
-def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_delete_scope_removes_scope_and_settings(db_path: Path) -> None:
     chat_discovery.remember_chat("telegram", "999", name="Gone", db_path=db_path)
     service = SQLiteSettingsService(db_path)
     try:
@@ -851,9 +848,7 @@ def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
     }
 
 
-def test_delete_scope_cascades_child_thread_settings(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_delete_scope_cascades_child_thread_settings(db_path: Path) -> None:
     chat_discovery.remember_chat("telegram", "-1001", name="Forum", db_path=db_path)
     chat_discovery.remember_thread(
         "telegram",
@@ -893,13 +888,11 @@ def test_delete_scope_cascades_child_thread_settings(tmp_path: Path) -> None:
         reloaded.close()
 
 
-def test_delete_scope_preserves_child_thread_history(tmp_path: Path) -> None:
+def test_delete_scope_preserves_child_thread_history(db_path: Path) -> None:
     from datetime import datetime, timezone
 
     from storage.models import messages
 
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
     chat_discovery.remember_chat("telegram", "-1001", name="Forum", db_path=db_path)
     chat_discovery.remember_thread(
         "telegram",
@@ -997,13 +990,11 @@ def test_delete_scope_preserves_child_thread_history(tmp_path: Path) -> None:
         reloaded.close()
 
 
-def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path) -> None:
+def test_delete_scope_with_history_dismisses_instead_of_deleting(db_path: Path) -> None:
     from datetime import datetime, timezone
 
     from storage.models import messages
 
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
     chat_discovery.remember_chat("telegram", "777", name="HasHistory", db_path=db_path)
     scope_id = chat_discovery.make_scope_id("telegram", chat_discovery.CHANNEL_SCOPE_TYPE, "777")
 
@@ -1046,9 +1037,7 @@ def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path)
     assert kept is not None
 
 
-def test_delete_scope_with_pending_delivery_dismisses_instead_of_deleting(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_delete_scope_with_pending_delivery_dismisses_instead_of_deleting(db_path: Path) -> None:
     chat_discovery.remember_chat("telegram", "pending", name="Pending", db_path=db_path)
     scope_id = chat_discovery.make_scope_id(
         "telegram",
@@ -1097,9 +1086,7 @@ def test_delete_scope_with_pending_delivery_dismisses_instead_of_deleting(tmp_pa
         engine.dispose()
 
 
-def test_delete_scope_ignores_retired_delivery_snapshots(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_delete_scope_ignores_retired_delivery_snapshots(db_path: Path) -> None:
     chat_discovery.remember_chat("telegram", "retired", name="Retired", db_path=db_path)
     scope_id = chat_discovery.make_scope_id(
         "telegram",
@@ -1147,13 +1134,11 @@ def test_delete_scope_ignores_retired_delivery_snapshots(tmp_path: Path) -> None
     }
 
 
-def test_remember_chat_clears_dismissed_on_passive_rediscovery(tmp_path: Path) -> None:
+def test_remember_chat_clears_dismissed_on_passive_rediscovery(db_path: Path) -> None:
     from datetime import datetime, timezone
 
     from storage.models import messages
 
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
     chat_discovery.remember_chat("telegram", "tg_redisc", name="Gone", db_path=db_path)
     scope_id = chat_discovery.make_scope_id("telegram", chat_discovery.CHANNEL_SCOPE_TYPE, "tg_redisc")
 
@@ -1190,9 +1175,7 @@ def test_remember_chat_clears_dismissed_on_passive_rediscovery(tmp_path: Path) -
     assert [c.chat_id for c in chat_discovery.list_chats("telegram", db_path=db_path)] == ["tg_redisc"]
 
 
-def test_refresh_clears_dismissed_flag_on_rediscovery(tmp_path: Path, monkeypatch) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
+def test_refresh_clears_dismissed_flag_on_rediscovery(db_path: Path, monkeypatch) -> None:
     auth_context = _auth_context("slack", bot_token="x")
     chat_discovery.remember_chat(
         "slack",

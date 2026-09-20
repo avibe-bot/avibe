@@ -36,11 +36,12 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
       .listProjects()
       .then((result) => {
         if (cancelled) return;
-        setProjects(result.projects);
-        if (result.projects.length > 0) {
+        const chatProjects = result.projects.filter((project) => project.capabilities.can_chat);
+        setProjects(chatProjects);
+        if (chatProjects.length > 0) {
           // Default to the most recently active project so the user can
           // usually just hit "Open chat" without touching the picker.
-          const sorted = [...result.projects].sort((a, b) => {
+          const sorted = [...chatProjects].sort((a, b) => {
             const aTs = a.last_active_at || a.created_at;
             const bTs = b.last_active_at || b.created_at;
             return bTs.localeCompare(aTs);
@@ -99,7 +100,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
       onClick={onClose}
     >
       <div
-        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),0_0_32px_-12px_rgba(124,91,255,0.55)]"
+        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -112,7 +113,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         </button>
 
         {/* Hero icon — 64x64 violet-soft tile with glow */}
-        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet shadow-[0_0_28px_-6px_rgba(124,91,255,0.6)]">
+        <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-glow-md-violet">
           <Sparkles className="size-[30px]" />
         </div>
 
@@ -150,7 +151,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
             >
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.display_name} · {p.folder_path}
+                  {p.display_name}
                 </option>
               ))}
             </Select>
@@ -158,7 +159,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
         </div>
 
         {error && (
-          <div className="w-full rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="w-full rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

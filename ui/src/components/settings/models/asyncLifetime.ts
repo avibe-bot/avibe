@@ -2,7 +2,7 @@
 // be exercised directly: which request may land, what speaks for a row when no
 // read does, how long a write counts as outstanding, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
-import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState, Source } from './types';
+import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
 /**
@@ -23,6 +23,114 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
       } catch (error) {
         if (request !== latestRequest) return 'stale';
         throw error;
+      }
+    },
+  };
+};
+
+/** Gives each independent key its own latest-result generation. */
+export const createLatestAsyncAuthorityByKey = <K, T>(
+  land: (key: K, value: T) => void,
+) => {
+  const latestRequest = new Map<K, number>();
+  const advance = (key: K) => {
+    latestRequest.set(key, (latestRequest.get(key) ?? 0) + 1);
+  };
+
+  return {
+    /** Advances one key before an authoritative write echo is installed. */
+    invalidate: (key: K): void => advance(key),
+    /** Advances retired keys so their pending requests cannot regain ownership. */
+    invalidateExcept: (activeKeys: ReadonlySet<K>): void => {
+      for (const key of latestRequest.keys()) {
+        if (!activeKeys.has(key)) advance(key);
+      }
+    },
+    run: async (key: K, read: () => Promise<T>): Promise<'landed' | 'stale'> => {
+      const request = (latestRequest.get(key) ?? 0) + 1;
+      latestRequest.set(key, request);
+      try {
+        const value = await read();
+        if (latestRequest.get(key) !== request) return 'stale';
+        land(key, value);
+        return 'landed';
+      } catch (error) {
+        if (latestRequest.get(key) !== request) return 'stale';
+        throw error;
+      }
+    },
+  };
+};
+
+export type EntityGeneration<K> = Readonly<{ key: K; generation: number }>;
+
+/** Owns a keyed entity collection across mutation echoes and list snapshots. */
+export const createLatestEntityAuthorityByKey = <K, T>(
+  keyOf: (value: T) => K,
+  land: (values: T[]) => void,
+) => {
+  let generation = 0;
+  const generations = new Map<K, number>();
+  const pending = new Map<K, number>();
+  const values = new Map<K, T>();
+  const publish = () => land([...values.values()]);
+  const begin = (key: K): EntityGeneration<K> => {
+    const ticket = { key, generation: ++generation } as const;
+    generations.set(key, ticket.generation);
+    pending.set(key, ticket.generation);
+    return ticket;
+  };
+
+  return {
+    begin,
+    current: (key: K): T | undefined => values.get(key),
+    beginSnapshot: (): number => ++generation,
+    settle: (ticket: EntityGeneration<K>, value: T): 'landed' | 'stale' => {
+      if (ticket.key !== keyOf(value) || generations.get(ticket.key) !== ticket.generation) return 'stale';
+      values.set(ticket.key, value);
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
+      publish();
+      return 'landed';
+    },
+    settleRemoval: (ticket: EntityGeneration<K>): 'landed' | 'stale' => {
+      if (generations.get(ticket.key) !== ticket.generation) return 'stale';
+      values.delete(ticket.key);
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
+      publish();
+      return 'landed';
+    },
+    abandon: (ticket: EntityGeneration<K>): void => {
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
+    },
+    settleSnapshot: (snapshotGeneration: number, incoming: readonly T[]): void => {
+      const incomingByKey = new Map(incoming.map((value) => [keyOf(value), value]));
+      const keys = new Set([...values.keys(), ...incomingByKey.keys()]);
+      for (const key of keys) {
+        if (pending.has(key) || (generations.get(key) ?? 0) > snapshotGeneration) continue;
+        generations.set(key, snapshotGeneration);
+        const value = incomingByKey.get(key);
+        if (value === undefined) values.delete(key);
+        else values.set(key, value);
+      }
+      publish();
+    },
+    /** Lands only the named snapshot rows. Callers use this for a scoped
+     * reconciliation so an absent, concurrently mutating sibling is untouched. */
+    settleSnapshotEntries: (snapshotGeneration: number, incoming: readonly T[]): void => {
+      for (const value of incoming) {
+        const key = keyOf(value);
+        if (pending.has(key) || (generations.get(key) ?? 0) > snapshotGeneration) continue;
+        generations.set(key, snapshotGeneration);
+        values.set(key, value);
+      }
+      publish();
+    },
+    landLatest: (value: T): void => {
+      const ticket = begin(keyOf(value));
+      if (generations.get(ticket.key) === ticket.generation) {
+        values.set(ticket.key, value);
+        pending.delete(ticket.key);
+        publish();
       }
     },
   };
@@ -89,11 +197,6 @@ export const agentsWithEcho = (
   agents: readonly AgentSupply[],
   echoed: AgentSupply,
 ): AgentSupply[] => agents.map((agent) => (agent.backend === echoed.backend ? echoed : agent));
-
-/** Takes one source mutation echo into the already-loaded inventory without
- *  letting that single-row response answer which other rows exist. */
-export const sourcesWithEcho = (sources: readonly Source[], echoed: Source): Source[] =>
-  sources.map((source) => (source.id === echoed.id ? echoed : source));
 
 // ── A write that outlives the drawer that issued it ────────────────────────
 /**
@@ -197,13 +300,9 @@ export type PendingWrite = {
 // colliding with ['a b'].
 const sig = (parts: readonly (string | number | boolean)[]): string => parts.join('\u0000');
 
-/** 来源顺序 drawer: the per-backend policy + ordered subset it edits. */
+/** Source-order drawer: the exact ordered subset it edits. */
 export const savedSourcesKey = (agent: AgentSupply): string =>
-  sig([agent.sources?.policy ?? 'follow', ...(agent.sources?.order ?? [])]);
-
-/** 映射 drawer: the stored overrides its draft is seeded from. */
-export const savedMappingsKey = (agent: AgentSupply): string =>
-  sig((agent.mappings ?? []).flatMap((m) => [m.builtin_id, m.target_model_id, m.enabled]));
+  sig(agent.sources?.order ?? []);
 
 /** OpenCode 模型菜单 drawer: the stored view + checked identifiers. */
 export const savedMenuKey = (menu: AgentMenu | null | undefined): string =>
@@ -243,7 +342,7 @@ export const seedStep = (state: SeedState, authoritative: string): { state: Seed
  */
 export type FlowEvent =
   | { kind: 'reset' }
-  | { kind: 'error'; errorKey: string }
+  | { kind: 'error'; errorKey: string; failureClass: OAuthFailureClass }
   | { kind: 'response'; flow: OAuthFlow }
   | { kind: 'tick'; overdue: boolean };
 
@@ -259,10 +358,53 @@ export type FlowEvent =
  */
 export type FlowAction = 'continue' | 'succeed' | 'fail' | 'timeout' | 'ignore';
 
-/** Everything that decides what the dialog shows, including its terminal latch. */
-export type FlowView = { flow: OAuthFlow | null; errorKey: string | null; settled: boolean };
+export type ModelHubFailureClass =
+  | 'authoritative-terminal'
+  | 'inconclusive'
+  | 'retryable-provider';
 
-export const initialFlowView: FlowView = { flow: null, errorKey: null, settled: false };
+export type OAuthFailureClass = ModelHubFailureClass;
+
+type ModelHubFailureEvidence = {
+  serverNamed: boolean;
+  code?: string;
+  detail?: string;
+} | null;
+
+const AUTHORITATIVE_TERMINAL_CODES = new Set([
+  'source_not_found',
+  'flow_settled',
+  'already_connected',
+]);
+
+/** One classification shared by polling, timeout recovery, and Retry. */
+export const classifyModelHubFailure = (failure: ModelHubFailureEvidence): ModelHubFailureClass => {
+  const rawCode = failure?.code ?? failure?.detail;
+  const code = rawCode?.startsWith('modelHub.errors.')
+    ? rawCode.slice('modelHub.errors.'.length)
+    : rawCode;
+  if (!failure?.serverNamed || code === 'engine_down') return 'inconclusive';
+  return code && AUTHORITATIVE_TERMINAL_CODES.has(code)
+    ? 'authoritative-terminal'
+    : 'retryable-provider';
+};
+
+export const classifyOAuthFailure = classifyModelHubFailure;
+
+/** Everything that decides what the dialog shows, including its terminal latch. */
+export type FlowView = {
+  flow: OAuthFlow | null;
+  errorKey: string | null;
+  failureClass: OAuthFailureClass | null;
+  settled: boolean;
+};
+
+export const initialFlowView: FlowView = {
+  flow: null,
+  errorKey: null,
+  failureClass: null,
+  settled: false,
+};
 
 /**
  * The states in which the SERVER has reported a flow finished — one list, because
@@ -284,7 +426,15 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
   // source).
   if (view.settled) return { view, action: 'ignore' };
   if (event.kind === 'error') {
-    return { view: { flow: view.flow, errorKey: event.errorKey, settled: true }, action: 'fail' };
+    return {
+      view: {
+        flow: view.flow,
+        errorKey: event.errorKey,
+        failureClass: event.failureClass,
+        settled: true,
+      },
+      action: 'fail',
+    };
   }
   if (event.kind === 'tick') {
     if (!event.overdue) return { view, action: 'continue' };
@@ -292,13 +442,19 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
       view: {
         flow: view.flow ? { ...view.flow, state: 'failed' } : null,
         errorKey: 'settings.models.oauth.error.timeout',
+        failureClass: classifyOAuthFailure(null),
         settled: true,
       },
       action: 'timeout',
     };
   }
   const flow = event.flow;
-  if (flow.state === 'success') return { view: { flow, errorKey: null, settled: true }, action: 'succeed' };
+  if (flow.state === 'success') {
+    return {
+      view: { flow, errorKey: null, failureClass: null, settled: true },
+      action: 'succeed',
+    };
+  }
   // `settled` means terminal, not successful: a failed flow is just as finished,
   // and a later arrival has just as little business reopening it. Which states
   // those are is `flowStateTerminal`'s to say — success has already returned, so
@@ -308,12 +464,16 @@ export const flowStep = (view: FlowView, event: FlowEvent): { view: FlowView; ac
       view: {
         flow,
         errorKey: flow.error_key ?? 'settings.models.oauth.error.generic',
+        failureClass: classifyOAuthFailure({ serverNamed: true }),
         settled: true,
       },
       action: 'fail',
     };
   }
-  return { view: { flow, errorKey: null, settled: false }, action: 'continue' };
+  return {
+    view: { flow, errorKey: null, failureClass: null, settled: false },
+    action: 'continue',
+  };
 };
 
 /**
@@ -430,15 +590,16 @@ export const terminalArrivalMovedRows = (action: FlowAction): boolean =>
  * not one the server named. Settling on it declares a terminal nobody reported, over
  * an operation that may have committed — the dialog says 授权失败 on a source the
  * server did create, and an ordinary connect retried from there mints a second one.
- * `serverNamed` is the same discriminator `mayHaveWritten` reads for the refetch,
- * asked here about speech instead of writes: a refusal that named itself knows the
- * login went nowhere; a transport failure knows nothing at all.
+ * `classifyOAuthFailure` owns that discriminator: a refusal that named itself can
+ * answer about the flow, while an inconclusive class cannot.
  *
  * Dropping it is bounded either way — the caller keeps polling, and the deadline at
  * the top of each tick is the dialog's own verdict when nothing ever answers.
  */
-export const pollFailureSettles = (submitOutstanding: boolean, serverNamed: boolean): boolean =>
-  !submitOutstanding && serverNamed;
+export const pollFailureSettles = (
+  submitOutstanding: boolean,
+  failureClass: OAuthFailureClass,
+): boolean => !submitOutstanding && failureClass !== 'inconclusive';
 
 /**
  * Whether the failure that just arrived is the one now ON SCREEN.

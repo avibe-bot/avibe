@@ -5,7 +5,19 @@ export const SESSION_ROW_ACTION_BUTTON_CLASS = 'size-5 rounded-md';
 export const SESSION_ROW_PIN_POSITION_CLASS = 'right-5';
 export const SESSION_ROW_MENU_POSITION_CLASS = 'right-0';
 
-// Pinned rows reserve the rail at rest; unpinned rows expand it only while
-// either control is revealed through hover/focus or while the menu is open.
-export const sessionRowActionPaddingClass = (menuOpen: boolean, pinned: boolean) =>
-  menuOpen || pinned ? 'pr-11' : 'pr-2.5 hover:pr-11 focus-within:pr-11 pointer-coarse:pr-11';
+// The desktop session row's left inset, and the one owner of it. Every row
+// carries the selected accent's 2px border and only its colour changes with
+// selection, so the status dot and the name keep one X coordinate. Paying for
+// that border with a second `pl-*` on the selected row cannot work: utilities
+// of equal specificity are resolved by their order in the generated stylesheet
+// rather than by the order of the class string, and Tailwind emitted the 26px
+// padding after the 24px one — so the compensation never applied and selecting
+// a row pushed its contents 2px to the right.
+export const SESSION_ROW_INDENT_CLASS = 'border-l-2 pl-[24px]';
+
+// A running session's dot pulses, so the user can see which session is working
+// while reading another chat. `animate-pulse` is a ~2s opacity cycle that keeps
+// the dot visible throughout and moves no geometry; under reduced motion the
+// dot falls back to its static status colour. Shared by the desktop sidebar and
+// the mobile session list so the two surfaces cannot drift apart.
+export const SESSION_STATUS_DOT_MOTION_CLASS = 'animate-pulse motion-reduce:animate-none';

@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core.delivery_target import routed_delivery_context
 from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
@@ -33,6 +34,7 @@ from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
+    communication_type_for_output,
     output_for_message,
 )
 from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
@@ -318,6 +320,12 @@ class ConsolidatedMessageDispatcher:
         # while a missing one defeats the feature.
         self._harness_prompt_echo_keys: set[str] = set()
         self._harness_prompt_echo_order: list[str] = []
+        # Run activity is best-effort liveness evidence, never part of an
+        # individual streamed event's delivery critical path.  One flush task
+        # coalesces repeated ids while a SQLite writer is busy; controller
+        # shutdown drains that exact task before stopping the shared executor.
+        self._pending_agent_run_activity_ids: set[str] = set()
+        self._agent_run_activity_flush_task: asyncio.Task[None] | None = None
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -430,19 +438,9 @@ class ConsolidatedMessageDispatcher:
         return i18n_t(key, lang, **kwargs)
 
     def _get_target_context(self, context: MessageContext) -> MessageContext:
-        payload = dict(context.platform_specific or {})
-        delivery_override = payload.get("delivery_override")
-        if isinstance(delivery_override, dict):
-            next_payload = dict(payload)
-            next_payload["is_dm"] = delivery_override.get("is_dm", next_payload.get("is_dm", False))
-            return MessageContext(
-                user_id=str(delivery_override.get("user_id") or context.user_id),
-                channel_id=str(delivery_override.get("channel_id") or context.channel_id),
-                platform=delivery_override.get("platform") or context.platform,
-                thread_id=delivery_override.get("thread_id"),
-                message_id=context.message_id,
-                platform_specific=next_payload,
-            )
+        target = routed_delivery_context(context)
+        if target is not context:
+            return target
         if self._get_im_client(context).should_use_thread_for_reply() and context.thread_id:
             return MessageContext(
                 user_id=context.user_id,
@@ -460,6 +458,11 @@ class ConsolidatedMessageDispatcher:
         tracking_key = f"{session_key}:{thread_key}"
         trigger_id = self._thread_current_message_id.get(tracking_key) or context.message_id or ""
         return f"{session_key}:{thread_key}:{trigger_id}"
+
+    def status_key_for_context(self, context: MessageContext) -> str:
+        """Capture the current turn's status key before runtime ownership changes."""
+
+        return self._get_consolidated_message_key(context)
 
     def update_thread_message_id(self, context: MessageContext) -> None:
         if not context.message_id:
@@ -506,6 +509,27 @@ class ConsolidatedMessageDispatcher:
 
     async def _clear_consolidated_state(self, context: MessageContext) -> None:
         await self._drop_status_keys(self._get_consolidated_message_key(context))
+
+    async def finish_prewrite_stop_surfaces(
+        self,
+        context: MessageContext,
+        *,
+        consolidated_key: str,
+    ) -> None:
+        """Retire IM-only progress surfaces without claiming Turn terminal ownership."""
+
+        try:
+            await self._collapse_status_bubble(
+                context,
+                self._get_im_client(context),
+                reason="stopped",
+                consolidated_key=consolidated_key,
+            )
+        finally:
+            try:
+                await self._drop_status_keys(consolidated_key)
+            finally:
+                await self._finish_processing_indicator_turn(context)
 
     # ------------------------------------------------------------------
     # Concise status bubble (Slack / Discord)
@@ -913,12 +937,19 @@ class ConsolidatedMessageDispatcher:
         if done:
             footer = self._status_footer_text(context, elapsed_s=elapsed_s, done=True, reason=reason)
         else:
+            from core.model_hub_progress import recovery_status_text
+
+            recovery_label = recovery_status_text(
+                self.controller,
+                (context.platform_specific or {}).get("turn_token"),
+                str(getattr(getattr(self.controller, "config", None), "language", "en") or "en"),
+            )
             last = self._status_last_activity_at.get(consolidated_key, started)
             tick = self._status_render_tick.get(consolidated_key, 0)
             self._status_render_tick[consolidated_key] = tick + 1
             hourglass = "⏳" if tick % 2 == 0 else "⌛"
             backend_dead = self._backend_dead(context)
-            body = self._decorate_body_with_action_time(
+            body = recovery_label or self._decorate_body_with_action_time(
                 context, body, now - last, backend_dead=backend_dead
             )
             footer = self._status_footer_text(
@@ -1056,7 +1087,12 @@ class ConsolidatedMessageDispatcher:
             return self._consolidated_message_ids.get(consolidated_key)
 
     async def _collapse_status_bubble(
-        self, context: MessageContext, im_client, *, reason: str = "done"
+        self,
+        context: MessageContext,
+        im_client,
+        *,
+        reason: str = "done",
+        consolidated_key: str | None = None,
     ) -> None:
         """Collapse a still-open concise status bubble to its terminal marker.
 
@@ -1073,7 +1109,7 @@ class ConsolidatedMessageDispatcher:
         if a bubble exists — edits it to the terminal footer. The footer marker
         (✅ for ``done`` else ⏹, time only when ``show_duration``) is owned by
         ``_status_footer_text``. ``reason`` ∈ {"done","stopped","failed"}."""
-        key = self._get_consolidated_message_key(context)
+        key = consolidated_key or self._get_consolidated_message_key(context)
         # Gate on whether a CONCISE bubble was posted for this turn, not the current
         # style: a Web UI concise -> off/verbose change mid-turn must still collapse
         # an already-posted bubble. Keying on the concise-bubble set (not plain
@@ -1355,6 +1391,37 @@ class ConsolidatedMessageDispatcher:
         metadata["turn_failure_notification"] = notification
         return replace(output_semantics, metadata=metadata)
 
+    def _output_with_implicit_turn_failure_notification(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+        *,
+        is_error: bool,
+        has_visible_result: bool,
+        mutates_turn_lifecycle: bool,
+    ) -> MessageOutput:
+        """Give an invisible failed Harness Turn one shared fallback identity."""
+
+        if (
+            not is_error
+            or has_visible_result
+            or not mutates_turn_lifecycle
+            or not output_semantics.settles_run
+        ):
+            return output_semantics
+        notification = output_semantics.metadata.get("turn_failure_notification")
+        if isinstance(notification, dict) and str(notification.get("failure_id") or "").strip():
+            return output_semantics
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        if not turn_id:
+            return output_semantics
+        metadata = dict(output_semantics.metadata)
+        metadata["turn_failure_notification"] = {
+            "failure_id": f"turn:{turn_id}",
+            "delivered": False,
+        }
+        return replace(output_semantics, metadata=metadata)
+
     def _run_has_blocking_activity(self, run_id: str) -> bool:
         service = getattr(self.controller, "agent_service", None)
         registry = getattr(service, "activities", None)
@@ -1539,6 +1606,77 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
+
+    def _schedule_agent_run_activity(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> None:
+        """Coalesce one real non-terminal output into the liveness writer."""
+
+        if not output_semantics.records_run_output or output_semantics.settles_run:
+            return
+        run_ids = self._terminal_agent_run_ids(context, output_semantics)
+        if not run_ids:
+            return
+        scheduled_tasks = getattr(self.controller, "scheduled_task_service", None)
+        runtime_store = getattr(scheduled_tasks, "request_store", None)
+        record_activity = getattr(runtime_store, "record_run_activity", None)
+        if not callable(record_activity):
+            return
+        self._pending_agent_run_activity_ids.update(run_ids)
+        task = self._agent_run_activity_flush_task
+        if task is None or task.done():
+            self._agent_run_activity_flush_task = asyncio.create_task(
+                self._flush_agent_run_activity(),
+                name="agent-run-activity-flush",
+            )
+
+    async def _flush_agent_run_activity(self) -> None:
+        """Flush coalesced activity without delaying streamed delivery."""
+
+        try:
+            while self._pending_agent_run_activity_ids:
+                run_ids = tuple(sorted(self._pending_agent_run_activity_ids))
+                self._pending_agent_run_activity_ids.difference_update(run_ids)
+                scheduled_tasks = getattr(
+                    self.controller, "scheduled_task_service", None
+                )
+                runtime_store = getattr(scheduled_tasks, "request_store", None)
+                record_activity = getattr(runtime_store, "record_run_activity", None)
+                if not callable(record_activity):
+                    continue
+                try:
+                    supervisor = getattr(
+                        self.controller, "runtime_work_supervisor", None
+                    )
+                    run_sync = getattr(supervisor, "run_sync", None)
+                    if callable(run_sync):
+                        await run_sync(lambda: record_activity(run_ids))
+                    else:
+                        await asyncio.to_thread(record_activity, run_ids)
+                except Exception:
+                    logger.warning(
+                        "Failed to record Run activity for %s",
+                        ",".join(run_ids),
+                        exc_info=True,
+                    )
+        finally:
+            self._agent_run_activity_flush_task = None
+            if self._pending_agent_run_activity_ids:
+                self._agent_run_activity_flush_task = asyncio.create_task(
+                    self._flush_agent_run_activity(),
+                    name="agent-run-activity-flush",
+                )
+
+    async def drain_agent_run_activity(self) -> None:
+        """Join all activity writes admitted before controller shutdown."""
+
+        while True:
+            task = self._agent_run_activity_flush_task
+            if task is None:
+                return
+            await asyncio.shield(task)
 
     def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
         turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
@@ -1999,11 +2137,6 @@ class ConsolidatedMessageDispatcher:
         canonical_type = settings_manager._canonicalize_message_type(message_type or "")
         settings_key = self._get_settings_key(context)
         output_semantics = output_for_message(canonical_type, output)
-        if canonical_type == "result" and output_semantics.completes_turn:
-            output_semantics = self._output_with_turn_fallback_owner(
-                context,
-                output_semantics,
-            )
         activity_batch_incomplete = bool(
             output_semantics.requires_delivery_for_run_settlement
             and output_semantics.metadata.get("activity_batch_complete") is False
@@ -2042,6 +2175,11 @@ class ConsolidatedMessageDispatcher:
             terminal_reason = "failed"
 
         visible_output_type = canonical_type in {"result", "output"}
+        communication_type = communication_type_for_output(
+            canonical_type,
+            output_semantics,
+            is_error=is_error,
+        )
         if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info(
@@ -2050,14 +2188,35 @@ class ConsolidatedMessageDispatcher:
                     self._get_session_key(context),
                 )
                 return None
+        if current_runtime_turn or output_semantics.detached:
+            self._schedule_agent_run_activity(context, output_semantics)
+        quick_reply_target = routed_delivery_context(context)
         raw_text = text
         enhanced = None
         if visible_output_type and level != "silent":
             quick_replies_on = getattr(self.controller.config, "reply_enhancements", True)
-            enhanced = process_reply(raw_text, include_quick_replies=quick_replies_on)
+            enhanced = process_reply(
+                raw_text,
+                include_quick_replies=quick_replies_on,
+                allow_unseparated_quick_replies=self._supports_quick_replies(
+                    quick_reply_target
+                ),
+            )
             text = enhanced.visible_text
         else:
             text = strip_silent_blocks(raw_text)
+        if canonical_type == "result" and output_semantics.completes_turn:
+            output_semantics = self._output_with_implicit_turn_failure_notification(
+                context,
+                output_semantics,
+                is_error=is_error,
+                has_visible_result=level != "silent" and bool(text and text.strip()),
+                mutates_turn_lifecycle=mutates_turn_lifecycle,
+            )
+            output_semantics = self._output_with_turn_fallback_owner(
+                context,
+                output_semantics,
+            )
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.
@@ -2339,16 +2498,18 @@ class ConsolidatedMessageDispatcher:
                 recorded_text = self._fold_footer(persist_text, result_footer)
                 persisted_output = None
                 if visible_output_type:
-                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         background_enhanced = process_reply(
                             raw_text,
                             include_quick_replies=quick_replies_on,
+                            allow_unseparated_quick_replies=self._supports_quick_replies(
+                                target_context
+                            ),
                             keep_file_links=True,
                         )
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             background_enhanced.text or persist_text,
                             quick_replies=[b.text for b in background_enhanced.buttons] or None,
                             result_footer=result_footer,
@@ -2358,7 +2519,7 @@ class ConsolidatedMessageDispatcher:
                     else:
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             recorded_text,
                             result_footer=result_footer,
                             metadata=output_metadata,
@@ -2745,7 +2906,6 @@ class ConsolidatedMessageDispatcher:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
                     # as an unread agent reply (unread queries are result-only). Codex P2.
-                    result_type = "error" if is_error else canonical_type
                     if target_context.platform == "avibe":
                         # Keep the ``file://`` links in the persisted avibe text so the
                         # workbench media-proxy rewrite (in ``persist_agent_message``)
@@ -2755,11 +2915,16 @@ class ConsolidatedMessageDispatcher:
                         # render the button group (IM channels render native buttons
                         # from the same ``enhanced.buttons``).
                         avibe_enhanced = process_reply(
-                            raw_text, include_quick_replies=quick_replies_on, keep_file_links=True
+                            raw_text,
+                            include_quick_replies=quick_replies_on,
+                            allow_unseparated_quick_replies=self._supports_quick_replies(
+                                target_context
+                            ),
+                            keep_file_links=True,
                         )
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             avibe_enhanced.text or persist_text,
                             quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
                             result_footer=folded_footer,
@@ -2769,7 +2934,7 @@ class ConsolidatedMessageDispatcher:
                     else:
                         persisted_output = persist_agent_message(
                             target_context,
-                            result_type,
+                            communication_type,
                             persisted_result_text,
                             result_footer=folded_footer,
                             metadata=output_metadata,
@@ -2855,7 +3020,7 @@ class ConsolidatedMessageDispatcher:
                         context,
                         text=display_text,
                         message_id=primary_message_id,
-                        kind=canonical_type,
+                        kind=communication_type,
                         completes_turn=mutates_turn_lifecycle,
                     )
                 elif mutates_turn_lifecycle:

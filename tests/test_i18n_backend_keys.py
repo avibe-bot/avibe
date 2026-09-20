@@ -23,6 +23,7 @@ from core.failure_notices import (
     NOTICE_REASON_UNKNOWN_I18N_KEY,
     PER_FIRE_INTERRUPT_REASONS,
 )
+from vibe.memory_contract import CLOSED_MEMORY_ERROR_CODES
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLEMENT_I18N_KEYS,
@@ -34,6 +35,12 @@ from storage.background import (
     SWEEP_REASON_ORPHANED,
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+)
+from vibe.cli import (
+    _MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
+    _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
+    _MEMORY_CLI_REASON_I18N_KEYS,
+    _MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
 )
 from vibe.i18n import get_supported_languages, t
 
@@ -70,6 +77,33 @@ def test_no_backend_translation_is_blank() -> None:
 
 
 @pytest.mark.parametrize(
+    "key",
+    sorted(
+        {
+            *_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS.values(),
+            *_MEMORY_CLI_REASON_I18N_KEYS.values(),
+            "memory.cli.runtimeState.unknown",
+            "memory.cli.providerState.unknown",
+            "memory.cli.attachmentCaptureState.unknown",
+            "memory.cli.reason.unknown",
+            "memory.cli.unknownVersion",
+        }
+    ),
+)
+def test_every_memory_cli_status_label_resolves(key: str) -> None:
+    for lang in get_supported_languages():
+        resolved = t(key, lang)
+        assert resolved != key, f"{key} is not translated in {lang}"
+        assert resolved.strip()
+
+
+def test_memory_cli_reason_map_covers_the_closed_memory_error_vocabulary() -> None:
+    assert set(_MEMORY_CLI_REASON_I18N_KEYS) == set(CLOSED_MEMORY_ERROR_CODES)
+
+
+@pytest.mark.parametrize(
     "reason,key",
     sorted(SETTLEMENT_I18N_KEYS.items()) + sorted(SWEEP_I18N_KEYS.items()),
 )
@@ -80,6 +114,44 @@ def test_every_run_settlement_reason_resolves(reason: str, key: str) -> None:
         resolved = t(key, lang)
         assert resolved != key, f"{key} is not translated in {lang} (reason={reason})"
         assert resolved.strip()
+
+
+@pytest.mark.parametrize(
+    ("key", "language", "expected"),
+    [
+        (
+            "harness.run.interrupted.restarted",
+            "en",
+            "[Avibe Harness] This run was interrupted during execution. Completed work is "
+            "preserved. Trigger it again if the work still needs doing.",
+        ),
+        (
+            "harness.run.interrupted.restarted",
+            "zh",
+            "[Avibe Harness] 本次 run 执行途中被中断。已执行的部分不会丢失，"
+            "如果这项工作仍需完成，请重新触发。",
+        ),
+        (
+            "harness.run.interrupted.orphaned",
+            "en",
+            "[Avibe Harness] Nothing is executing this run, most likely because the service "
+            "restarted during execution. Completed work is preserved. Trigger it again if the "
+            "work still needs doing.",
+        ),
+        (
+            "harness.run.interrupted.orphaned",
+            "zh",
+            "[Avibe Harness] 本次 run 没有任何执行在推进它，通常是服务在它执行途中"
+            "重启导致的。已执行的部分不会丢失，如果这项工作仍需完成，请重新触发。",
+        ),
+    ],
+)
+def test_interrupted_run_detail_copy_matches_product_language(
+    key: str,
+    language: str,
+    expected: str,
+) -> None:
+    assert t(key, language) == expected
 
 
 def test_sweep_reason_i18n_map_covers_every_store_sweep_reason() -> None:

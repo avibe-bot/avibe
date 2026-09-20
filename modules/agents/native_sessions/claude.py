@@ -10,6 +10,7 @@ from pathlib import Path
 from .base import (
     NativeSessionProvider,
     build_tail_preview,
+    derive_first_prompt_title,
     dt_from_ts,
     normalize_title_text,
     normalize_preview_text,
@@ -348,13 +349,11 @@ class ClaudeNativeSessionProvider(NativeSessionProvider):
         working_path: str,
         first_user_message: str = "",
     ) -> BackendSessionTitle | None:
-        title = normalize_title_text(first_user_message, limit=10)
-        if not title:
+        title_text = normalize_title_text(first_user_message)
+        if not title_text:
             for item in self.list_metadata(working_path):
                 if item.native_session_id != native_session_id:
                     continue
-                title = normalize_title_text(str(item.locator.get("first_prompt") or ""), limit=10)
+                title_text = str(item.locator.get("first_prompt") or "")
                 break
-        if not title:
-            return None
-        return BackendSessionTitle(title=title, source="derived_first_prompt", confidence="low")
+        return derive_first_prompt_title(title_text)

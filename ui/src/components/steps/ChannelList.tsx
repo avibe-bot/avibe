@@ -1,3 +1,5 @@
+import { platformText } from '@/lib/platforms';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
@@ -22,6 +24,7 @@ import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { getEnabledPlatforms, platformSupportsChannels, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { hasUsableSecret } from '../../lib/secretFields';
+import { setConfigField } from '../../lib/configMutations';
 import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
 import { CompactSelect, SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
@@ -105,6 +108,8 @@ const addDiscordGuildToAllowlist = (allowlist: string[], selectedGuild: string):
 };
 
 export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onBack, isPage, forcedPlatform, wizardPlatforms }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -125,13 +130,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const [threadConfigs, setThreadConfigs] = useState<Record<string, Record<string, ChannelConfig>>>({});
   const [config, setConfig] = useState<any>(data);
   const [pagePlatform, setPagePlatform] = useState<string>(forcedPlatform || data.platform || 'slack');
-  const [opencodeOptionsByCwd, setOpencodeOptionsByCwd] = useState<Record<string, any>>({});
-  const [claudeAgentsByCwd, setClaudeAgentsByCwd] = useState<Record<string, { id: string; name: string; path: string; source?: string }[]>>({});
-  const [codexAgentsByCwd, setCodexAgentsByCwd] = useState<Record<string, { id: string; name: string; path: string; source?: string; description?: string }[]>>({});
-  const [claudeModels, setClaudeModels] = useState<string[]>([]);
-  const [claudeModelLabels, setClaudeModelLabels] = useState<Record<string, string>>({});
-  const [claudeReasoningOptions, setClaudeReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
-  const [codexModels, setCodexModels] = useState<string[]>([]);
   const [guilds, setGuilds] = useState<any[]>([]);
   const [selectedGuildIds, setSelectedGuildIds] = useState<string[]>(getDiscordGuildAllowlist(data));
   const [selectedGuild, setSelectedGuild] = useState<string>(getDiscordGuildAllowlist(data)[0] || '');
@@ -190,9 +188,18 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     return configVersionRef.current;
   };
 
-  const saveLatestConfig = async (): Promise<boolean> => {
+  // Patch-write shape: send only the platform flag being toggled. A
+  // full ``configRef`` snapshot round-trip would treat every stale field
+  // it carries as intentional inside the locked merge and could revert
+  // concurrent cross-process writes (installer cli_path updates, auth
+  // saves, unrelated platform edits).
+  const savePlatformFlagPatch = async (
+    key: string,
+    field: string,
+    value: boolean
+  ): Promise<boolean> => {
     const saveTask = configSaveQueueRef.current.then(async () => {
-      await api.saveConfig(configRef.current);
+      await api.mutateConfig([setConfigField([key, field], value)]);
     });
     configSaveQueueRef.current = saveTask.catch(() => {});
     try {
@@ -546,63 +553,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     }
   };
 
-  const loadOpenCodeOptions = async (cwd: string) => {
-    try {
-      const result = await api.opencodeOptions(cwd);
-      if (result.ok) {
-        setOpencodeOptionsByCwd((prev) => ({ ...prev, [cwd]: result.data }));
-      }
-    } catch (e) {
-      console.error('Failed to load OpenCode options:', e);
-    }
-  };
-
-  const loadClaudeAgents = async (cwd: string) => {
-    try {
-      const result = await api.claudeAgents(cwd);
-      if (result.ok) {
-        setClaudeAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-      }
-    } catch (e) {
-      console.error('Failed to load Claude agents:', e);
-    }
-  };
-
-  const loadClaudeModels = async () => {
-    try {
-      const result = await api.claudeModels();
-      if (result.ok) {
-        setClaudeModels(result.models || []);
-        setClaudeModelLabels(result.model_labels || {});
-        setClaudeReasoningOptions(result.reasoning_options || {});
-      }
-    } catch (e) {
-      console.error('Failed to load Claude models:', e);
-    }
-  };
-
-  const loadCodexModels = async () => {
-    try {
-      const result = await api.codexModels();
-      if (result.ok) {
-        setCodexModels(result.models || []);
-      }
-    } catch (e) {
-      console.error('Failed to load Codex models:', e);
-    }
-  };
-
-  const loadCodexAgents = async (cwd: string) => {
-    try {
-      const result = await api.codexAgents(cwd);
-      if (result.ok) {
-        setCodexAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-      }
-    } catch (e) {
-      console.error('Failed to load Codex agents:', e);
-    }
-  };
-
   useEffect(() => {
     if (platform === 'lark') {
       if (larkAppId && hasChannelCredentials('lark')) {
@@ -687,71 +637,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       setRemovingChannelId(null);
     }
   };
-
-  useEffect(() => {
-    if (config.agents?.claude?.enabled) {
-      loadClaudeModels();
-    }
-  }, [config.agents?.claude?.enabled]);
-
-  useEffect(() => {
-    if (config.agents?.codex?.enabled) {
-      loadCodexModels();
-    }
-  }, [config.agents?.codex?.enabled]);
-
-  useEffect(() => {
-    if (!channels.length) return;
-    const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultAgent = agentByName[defaultAgentName || ''] || null;
-
-    const neededOpenCodeCwds = new Set<string>();
-    const neededClaudeCwds = new Set<string>();
-    const neededCodexCwds = new Set<string>();
-
-    const collectBackendCwd = (raw: ChannelConfig | undefined) => {
-      if (!raw || raw.enabled === false) return;
-      const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
-      const routing = raw.routing || {};
-      const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-
-      if (backend === 'opencode' && config.agents?.opencode?.enabled) {
-        neededOpenCodeCwds.add(effectiveCwd);
-      }
-      if (backend === 'claude' && config.agents?.claude?.enabled) {
-        neededClaudeCwds.add(effectiveCwd);
-      }
-      if (backend === 'codex' && config.agents?.codex?.enabled) {
-        neededCodexCwds.add(effectiveCwd);
-      }
-    };
-
-    channels.forEach((channel) => {
-      collectBackendCwd(configs[channel.id]);
-    });
-    Object.values(threadConfigs).forEach((topics) => {
-      Object.values(topics).forEach(collectBackendCwd);
-    });
-
-    neededOpenCodeCwds.forEach((cwd) => {
-      if (!opencodeOptionsByCwd[cwd]) {
-        void loadOpenCodeOptions(cwd);
-      }
-    });
-
-    neededClaudeCwds.forEach((cwd) => {
-      if (!claudeAgentsByCwd[cwd]) {
-        void loadClaudeAgents(cwd);
-      }
-    });
-
-    neededCodexCwds.forEach((cwd) => {
-      if (!codexAgentsByCwd[cwd]) {
-        void loadCodexAgents(cwd);
-      }
-    });
-  }, [channels, configs, threadConfigs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
 
   const isChannelEnabled = (channelId: string) => {
     const channel = configs[channelId];
@@ -1086,7 +971,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               <p className="text-[14px] leading-[1.55] text-muted">{t('wechat.noChannels')}</p>
             </div>
             <div className="flex flex-col items-center gap-3 rounded-xl border border-cyan/30 bg-cyan/[0.06] px-6 py-10 text-center">
-              <div className="flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan">
+              <div className="flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.08] text-cyan-ink">
                 <MessageSquare size={26} />
               </div>
               <p className="text-[12px] text-muted">{t('wechat.noChannels')}</p>
@@ -1128,7 +1013,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           </div>
         </div>
         <div className="rounded-2xl border border-border bg-surface-2/40 p-8 text-center shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
-          <div className="w-16 h-16 bg-accent/10 text-accent rounded-full flex items-center justify-center border border-accent/20 mx-auto mb-4">
+          <div className="w-16 h-16 bg-accent/10 text-accent-ink rounded-full flex items-center justify-center border border-accent/20 mx-auto mb-4">
             <MessageSquare size={32} />
           </div>
           <p className="text-muted mb-6">{t('wechat.noChannels')}</p>
@@ -1136,7 +1021,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             type="button"
             variant="brand"
             size="default"
-            onClick={() => navigate('/admin/users')}
+            onClick={() => navigate('/settings/platforms/users')}
           >
             <Users size={18} />
             {t('wechat.manageUserSettings')}
@@ -1201,7 +1086,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       [key]: { ...(currentConfig as any)[key], [field]: !current },
     };
     const version = applyConfig(updated);
-    const saved = await saveLatestConfig();
+    const saved = await savePlatformFlagPatch(key, field, !current);
     if (saved) {
       showToast(t('common.saved'), 'success');
     } else {
@@ -1315,12 +1200,12 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   : 'border-transparent text-muted hover:text-foreground'
               )}
             >
-              <Globe size={16} className={pageTab === 'all' ? 'text-mint' : 'text-muted'} />
+              <Globe size={16} className={pageTab === 'all' ? 'text-mint-ink' : 'text-muted'} />
               <span>{t('channelList.allChannelsTab')}</span>
               <span
                 className={clsx(
                   'rounded-full px-1.5 py-0.5 font-mono text-[10px]',
-                  pageTab === 'all' ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.06] text-muted'
+                  pageTab === 'all' ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.06] text-muted'
                 )}
               >
                 {allTabCounts.active}
@@ -1342,11 +1227,11 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   )}
                 >
                   <PlatformIcon platform={p} size={16} />
-                  <span>{t(`platform.${p}.title`)}</span>
+                  <span>{platformText(t, p, 'title')}</span>
                   <span
                     className={clsx(
                       'rounded-full px-1.5 py-0.5 font-mono text-[10px]',
-                      active ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.06] text-muted'
+                      active ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.06] text-muted'
                     )}
                   >
                     {counts.active}
@@ -1378,6 +1263,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 <label className="inline-flex items-center gap-2 text-[13px] text-foreground">
                   <span>{t('channelList.requireBind')}</span>
                   <ToggleSwitch
+                    disabled={!canManageAccessMembers}
                     enabled={!!(config as any)[pageTab]?.require_bind}
                     onClick={() => savePlatformFlag(pageTab, 'require_bind')}
                   />
@@ -1424,7 +1310,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         >
                           <input
                             type="checkbox"
-                            checked={selectedGuildIds.includes(g.id)}
+                            disabled={!canManageAccessMembers}
+                          checked={selectedGuildIds.includes(g.id)}
                             onChange={(e) => toggleAllowedGuild(g.id, e.target.checked)}
                             className="h-3.5 w-3.5 accent-accent"
                           />
@@ -1496,7 +1383,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               {pageTab === 'all'
                 ? t('channelList.headerSummary', { active: summary.active, discovered: summary.total })
                 : t('channelList.headerSummaryPlatform', {
-                    platform: t(`platform.${pageTab}.title`),
+                    platform: platformText(t, pageTab, 'title'),
                     active: summary.active,
                     discovered: summary.total,
                   })}
@@ -1552,10 +1439,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const expanded = expandedChannelId === rowKey;
               const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || agentByName[defaultAgentName || ''];
               const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-              const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-              const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-              const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-              const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
 
               const updateRow = (patch: Partial<ChannelConfig>) => {
                 void updateConfigForPlatform(channelPlatform, channel.id, patch);
@@ -1576,7 +1459,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
                   patch.require_mention = !!platformDefaults.require_mention;
                 }
-                if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                if (canManageAccessMembers && (rawConfig.require_bind === null || rawConfig.require_bind === undefined)) {
                   patch.require_bind = !!platformDefaults.require_bind;
                 }
                 updateRow(patch);
@@ -1599,7 +1482,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-[0_0_32px_-8px_rgba(91,255,160,0.45)]'
+                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
                       : 'border-border bg-background hover:border-border-strong'
                   )}
                 >
@@ -1659,14 +1542,14 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         className={clsx(
                           'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
                           channelEnabled
-                            ? 'border-mint/40 bg-mint-soft text-mint'
+                            ? 'border-mint/40 bg-mint-soft text-mint-ink'
                             : 'border-border bg-foreground/[0.04] text-muted'
                         )}
                       >
                         <span
                           className={clsx(
                             'size-1.5 rounded-full',
-                            channelEnabled ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
+                            channelEnabled ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
                           )}
                         />
                         {channelEnabled ? t('common.enabled') : t('common.disabled')}
@@ -1711,13 +1594,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         availableMessageTypes={availableMessageTypes(channelPlatform)}
                         showRequireMention={true}
                         inheritsFromKey={channelPlatform}
-                        opencodeOptions={opencodeOptions}
-                        claudeAgents={claudeAgents}
-                        claudeModels={claudeModels}
-                        claudeModelLabels={claudeModelLabels}
-                        claudeReasoningOptions={claudeReasoningOptions}
-                        codexAgents={codexAgents}
-                        codexModels={codexModels}
                       />
                       {channelPlatform === 'telegram' && channel.supports_topics && (
                         <TelegramTopicList<ChannelConfig>
@@ -1747,7 +1623,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                             if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, enabled });
                           }}
                           renderEditor={(topicId, topicConfig) => {
-                            const topicCwd = topicConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
                             return (
                               <RoutingConfigPanel
                                 value={topicConfig}
@@ -1759,13 +1634,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                                 availableMessageTypes={availableMessageTypes('telegram')}
                                 showRequireMention={true}
                                 inheritsFromKey="telegram"
-                                opencodeOptions={opencodeOptionsByCwd[topicCwd]}
-                                claudeAgents={claudeAgentsByCwd[topicCwd] || []}
-                                claudeModels={claudeModels}
-                                claudeModelLabels={claudeModelLabels}
-                                claudeReasoningOptions={claudeReasoningOptions}
-                                codexAgents={codexAgentsByCwd[topicCwd] || []}
-                                codexModels={codexModels}
                                 containerClass="border-t border-cyan/20 bg-background/35"
                               />
                             );
@@ -1837,12 +1705,12 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
 
         {isPage && (
           <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-surface-2/40 px-4 py-3 text-sm text-muted shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
-            <span className="rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 text-xs font-medium text-mint">
+            <span className="rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 text-xs font-medium text-mint-ink">
               {t('channelList.enabledCount', { count: selectedCount })}
             </span>
             <span>{t('dashboard.metricGroupsHint', { count: channels.length })}</span>
             <span className="hidden h-1 w-1 rounded-full bg-border md:inline-block" />
-            <span className="font-mono text-xs uppercase tracking-[0.18em]">{t(`platform.${platform}.title`)}</span>
+            <span className="font-mono text-xs uppercase tracking-[0.18em]">{platformText(t, platform, 'title')}</span>
           </div>
         )}
       </div>
@@ -1857,11 +1725,11 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               className={clsx(
                 'rounded-full border px-3 py-1.5 text-[12px] font-medium transition-colors',
                 platform === candidate
-                  ? 'border-mint/50 bg-mint/[0.16] text-mint shadow-[0_0_20px_-4px_rgba(91,255,160,0.4)]'
+                  ? 'border-mint/50 bg-mint/[0.16] text-mint-ink shadow-glow-md-mint'
                   : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
               )}
             >
-              {t(`platform.${candidate}.title`)}
+              {platformText(t, candidate, 'title')}
             </button>
           ))}
         </div>
@@ -1914,7 +1782,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               </span>
             </span>
             {channels.length === 0 && !loading && (
-              <span className="text-sm text-warning">{t('channelList.noChannelsFound')}</span>
+              <span className="text-sm text-gold-ink">{t('channelList.noChannelsFound')}</span>
             )}
           </div>
           <span className="text-sm text-muted font-mono">{t('channelList.enabledCount', { count: selectedCount })}</span>
@@ -1956,6 +1824,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       >
                         <input
                           type="checkbox"
+                          disabled={!canManageAccessMembers}
                           checked={selectedGuildIds.includes(g.id)}
                           onChange={(e) => toggleAllowedGuild(g.id, e.target.checked)}
                           className="h-3.5 w-3.5 accent-accent"
@@ -2023,10 +1892,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             require_mention: rawConfig.require_mention !== undefined ? rawConfig.require_mention : def.require_mention,
             require_bind: rawConfig.require_bind !== undefined ? rawConfig.require_bind : def.require_bind,
           };
-          const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-          const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-          const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-          const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
           return (
             <div key={channel.id} className="rounded-xl border border-border bg-surface-3/60 p-4 transition-colors hover:border-border-strong hover:bg-surface-2/70">
               <div className="flex items-center justify-between gap-2">
@@ -2044,12 +1909,12 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
                         patch.require_mention = !!platformDefaults.require_mention;
                       }
-                      if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                      if (canManageAccessMembers && (rawConfig.require_bind === null || rawConfig.require_bind === undefined)) {
                         patch.require_bind = !!platformDefaults.require_bind;
                       }
                       updateConfig(channel.id, patch);
                     }}
-                    className={clsx('shrink-0', channelConfig.enabled ? 'text-accent' : 'text-muted')}
+                    className={clsx('shrink-0', channelConfig.enabled ? 'text-accent-ink' : 'text-muted')}
                   >
                     {channelConfig.enabled ? <CheckSquare size={20} /> : <Square size={20} />}
                   </button>
@@ -2075,15 +1940,15 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       ? 'bg-surface text-foreground border-border'
                       : platform === 'telegram'
                         ? channel.supports_topics
-                          ? 'bg-accent/10 text-accent border-accent/20'
+                          ? 'bg-accent/10 text-accent-ink border-accent/20'
                           : channel.type === 'supergroup'
-                            ? 'bg-success/10 text-success border-success/20'
+                            ? 'bg-mint/10 text-mint-ink border-mint/20'
                             : channel.is_private
-                              ? 'bg-warning/10 text-warning border-warning/20'
+                              ? 'bg-gold/10 text-gold-ink border-gold/20'
                               : 'bg-surface text-foreground border-border'
                       : channel.is_private
-                        ? 'bg-warning/10 text-warning border-warning/20'
-                        : 'bg-success/10 text-success border-success/20'
+                        ? 'bg-gold/10 text-gold-ink border-gold/20'
+                        : 'bg-mint/10 text-mint-ink border-mint/20'
                   )}
                 >
                   {platform === 'discord'
@@ -2113,13 +1978,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   availableMessageTypes={availableMessageTypes(platform)}
                   showRequireMention={true}
                   inheritsFromKey={platform}
-                  opencodeOptions={opencodeOptions}
-                  claudeAgents={claudeAgents}
-                  claudeModels={claudeModels}
-                  claudeModelLabels={claudeModelLabels}
-                  claudeReasoningOptions={claudeReasoningOptions}
-                  codexAgents={codexAgents}
-                  codexModels={codexModels}
                   containerClass="mt-4 pl-8"
                 />
               )}

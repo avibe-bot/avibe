@@ -15,13 +15,19 @@ Current product shape:
 - multi-backend agent routing across OpenCode, Claude Code, and Codex
 - local Incus-based unified regression environment for real cross-platform verification
 
-Default mindset:
-
-- treat the system as **multi-platform, multi-backend** first
-- prefer root-cause fixes over narrow patches
-- preserve user-visible behavior unless the task explicitly changes product behavior
-
 ## 2. Design Philosophy and Architecture
+
+### Product and Technical Decision-Making
+
+- Start from one coherent user mental model. Avibe absorbs backend and
+  implementation differences; users and agents see only what they need to act.
+- Establish hard constraints before choosing scope. Build the smallest complete
+  solution that works within them, and leave concepts undefined until they have
+  a clear responsibility.
+- Prefer compatibility, permissive adoption, and subtraction. Add validation,
+  metadata, state, or isolation only when it protects a demonstrated outcome.
+- Reuse existing ownership and lifecycle before adding mechanisms. Keep the
+  path simple and stateless, then optimize from measured evidence.
 
 ### Core Rule: Fix at the Highest Appropriate Layer
 
@@ -40,6 +46,11 @@ Decision checklist before writing code:
 
 - `main.py` - entry point wiring `config.V2Config` into `core/controller.py`
 - `core/controller.py` - orchestration and dependency wiring
+- `vibe/ui_server.py` and `vibe/api.py` run in a separate process from the
+  controller and reach controller-owned state over the internal socket;
+  `vibe/api.py` builds its own `AgentAuthService`. In-memory registries therefore
+  cannot span IM and Web surfaces: cross-surface exclusion needs an explicit IPC
+  hop or a documented per-instance scope. See PR #1417's Known-by-design ledger.
 - `core/handlers/` - platform/backend-agnostic business workflows
 - `core/message_dispatcher.py` - outbound message routing and reply enhancement flow
 - `core/reply_enhancer.py` - file-link and quick-reply prompt injection helpers
@@ -107,9 +118,32 @@ Hard rules:
   preparation, readiness checks, Show Runtime setup, metadata, and cleanup
 - `master` is the long-running unified four-platform environment; keep it online,
   preserve product state, sync source, and restart the service in place
-- `worktree` targets are temporary isolated environments; delete with
-  `python3 scripts/incus_regression.py delete --target worktree --yes` or
-  `cleanup-stale --yes` when merged, abandoned, or stale
+- `worktree` targets are temporary isolated environments; delete each one
+  explicitly with
+  `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
+  when merged, abandoned, or stale
+- `reconcile` lists every worktree environment Incus holds — including ones
+  created outside the runner, which no metadata-driven command can see — and
+  forgets metadata rows whose environment is already gone. It never deletes an
+  environment: no recorded field can prove one is unwanted, so that call stays
+  with the operator. It reports the names the daemon gave, never re-derived from
+  the slug, because a discovered name is bounded by what Incus accepts and
+  `--slug` is stricter; one it would reject gets its objects named for a manual
+  reclamation instead of a command that would exit on its own argument
+- a metadata row is dropped only when the daemon that owns it completed a
+  listing whose every entry was readable, that listing held neither its project
+  nor its instance, and the row is not a reservation whose `up` may still be
+  running. A reservation lives exactly as long as its run: an `up` that fails
+  gives its row back while the daemon reports no project for that slug and the
+  row is still the one that run wrote, both read at that moment rather than
+  remembered from an earlier one — so a project that may bind the port, a
+  listing that cannot answer, and a concurrent `up` that took the slug over all
+  keep the row. `worktrees.json` is reached only through an accessor bound to the
+  daemon it describes — it reserves host ports on this machine and records what
+  this machine's daemon holds — so a `--remote` command cannot name it and
+  neither reads nor writes it: `reconcile --remote` reports the remote inventory
+  with no local provenance, `delete --remote` keeps the local row, and
+  `up --remote` requires `--host-port`
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success
@@ -120,7 +154,7 @@ State and lookup notes:
 - metadata lives under the primary checkout's `.runtime/incus-regression/`, even
   when the runner is invoked from a task worktree
 - `.env.regression` is read from the current worktree first, then the primary checkout
-- branch/master source checkouts default `REGRESSION_SHOW_RUNTIME_SOURCE=github-source`; packaged release installs should use the packaged manifest path
+- branch/master regression defaults to a locally built Show Runtime archive; packaged release installs use the packaged manifest path
 
 ## 4. Configuration and Routing Model
 
@@ -135,12 +169,32 @@ High-level V2 config areas:
 
 Agent routing model:
 
+- Avibe owns model selection for every backend. Never read or delegate to a
+  backend-native default model; see `docs/plans/avibe-owned-model-selection.md`.
+
 - global default: the enabled Vibe Agent recorded in SQLite `state_meta.default_agent_name`
 - backend availability and CLI path: `agents.<backend>.enabled` and `agents.<backend>.cli_path`
 - per-channel overrides: configured via the Web UI Agent Settings / channel settings
 - deprecated fields: `agents.default_backend` and scope-level `routing.agent_backend` /
   `scope_settings.agent_backend` are not route selectors; new routing must follow
   the selected Vibe Agent and its backend
+
+Persisted-shape rule:
+
+- on-disk artifacts written by any released version are a shipped surface, even
+  behind a feature flag
+- a schema change must load older releases' files via migration or safe
+  degradation (a broken optional-feature section disables that feature and
+  warns; startup never fails), with load fixtures covering the released shapes
+- Memory package upgrades are forward-only: success follows the ordinary restart
+  path, while install, upgrade, or restart failures are structured terminal
+  results and do not prevent a later explicit attempt. Do not add automatic
+  package rollback, rollback plans, lifecycle reservations, quarantine, Gate 5
+  verification, or recovery bootstrap.
+- Memory Runtime manifest/hash/fetch/verify and backup safeguards protect
+  published artifact availability. They are not installed-package rollback
+  machinery; existing backup creation and manual restore primitives remain
+  manual recovery tools.
 
 Source-of-truth rule:
 
@@ -153,16 +207,6 @@ Source-of-truth rule:
 
 ## 5. Development Workflow
 
-### Branching and Scope
-
-- when starting a new feature or bug fix yourself, branch from the latest `master`
-- desktop initiative exception: branch desktop work from the latest
-  `origin/desktop` and open every desktop-related PR against the long-lived
-  `desktop` integration branch, never directly against `master`; opening a
-  final `desktop` -> `master` integration PR requires explicit owner direction
-- if the user already put you on an existing branch/worktree, continue there unless asked to move
-- keep commits small and focused; avoid mixing unrelated changes
-
 ### Planning and Documentation
 
 - if the task is complex or ambiguous, create a short plan before large changes
@@ -172,37 +216,25 @@ Source-of-truth rule:
 - update user documentation alongside user-visible features or changed workflows
 - keep project-specific plans, investigations, and summaries under `docs/`, never in the repo root
 
-### Worktrees
+### PR Delivery
 
-- use git worktree for long-running, parallel, or workspace-blocking efforts
-- if detailed worktree workflow is needed, load the dedicated worktree skill
-
-### Review Loop for PRs
-
-- the rules in this section are the self-sufficient baseline for every PR; use
-  the `pr-delivery-loop` skill for every implementation task to apply the fuller
-  standard for roles, authority, contracts, and close-out
-- open PRs non-draft; draft PRs do not trigger the Codex bot review
-- the GitHub Codex bot is the review gate: after every push confirm a review
-  of the new head starts, comment `@codex review` if none appears, and treat a
-  trigger as accepted only once the bot reacts 👀 to that comment
-- a bot pass is either an authenticated Codex-bot issue comment with the pass
-  phrase and exact reviewed commit, or a head-bound Codex-bot `+1` captured as
-  new waiter activity after the prior review was terminal; close-out requires
-  zero unresolved review threads across the entire PR, including earlier and
-  outdated heads, not just a 0-finding latest review
-- after opening a PR, use the `background-watch-hook` skill to keep a
-  review-fix loop running until the review passes; use that skill's bundled PR
-  and Actions waiters rather than hand-rolling one, and create the watch
-  immediately without waiting to be reminded
-- PR descriptions must name the changed capability, list affected scenario IDs
-  when a catalog exists, and state which evidence layers were updated: unit,
-  contract, scenario, and residual manual checks
-- do not merge on your own initiative: the orchestrator (or the user) does the
-  final review and merge; an explicit merge instruction from them is carried
-  out directly after a mechanical `mergeStateStatus == CLEAN` check, never by
-  spawning another agent to re-review
-- require the GitHub CI checks to pass before merge
+- Codex review is triggered automatically by cyhhao after pushes; never post manual review triggers, and report automation gaps to the orchestrator while retaining the exact-head review gate.
+- load and follow the `pr-delivery-loop` skill for every implementation task;
+  it owns the detailed procedure, but cannot weaken the baseline below
+- regardless of Skill resolution, use a task branch/worktree, record the change
+  contract, require an exact-head Codex review, zero unresolved review threads,
+  and passing CI before close-out, apply the review-loop circuit breaker, and
+  never merge without explicit owner instruction
+- the fallback change contract names the intended behavior, affected boundaries,
+  and validation evidence; pause patching when one root-cause class appears on
+  two reviewed heads, or after three findings-bearing heads following an
+  architecture or data-model rewrite, then diagnose the whole class before
+  continuing
+- use the `background-watch-hook` skill for managed review and CI waits
+- keep one durable `--forever` combined PR/CI Watch and disable the Watch's per-cycle timeout
+- only an explicit owner decision may make Codex findings advisory for an
+  architecture/spec-only PR; ordinary documentation and every product or test
+  code PR retain the Skill's normal gates
 
 ### Pre-Push Requirements
 
@@ -275,7 +307,9 @@ Source-of-truth rule:
 ## 9. Release Notes
 
 - tags follow the latest version number +1 (for example `v1.0.1` -> `v1.0.2`)
-- before publishing a release, explicitly decide whether the version should notify users; add `<!-- avibe:update-notification=none -->` to the GitHub Release body when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The legacy `vibe-remote` marker is still parsed for compatibility.
+- before publishing a release, explicitly decide whether the version should notify users; put `<!-- avibe:update-notification=none -->` in the annotated tag message when update and post-update notifications should be suppressed while automatic update behavior remains enabled. The workflow emits both the current and legacy `vibe-remote` markers into the GitHub Release body for installed-client compatibility.
+- for an official `v*` release, the annotated tag is the operator's only release-state input: put silent-update intent in the tag annotation, push the tag, and do not pre-create or manually edit a GitHub Release
+- the official workflows stage assets and generated notes in a Draft; `Release (AI Notes)` may update notes but never publishes. The `Publish to PyPI` workflow is the single finalizer: it verifies the exact notes run, publishes the asset-complete GitHub Release, and only then allows PyPI publication so package manifests never point at private Draft assets
 - GitHub-only pre-releases should use the `gh-vX.Y.ZrcN` format (for example `gh-v2.2.8rc2`) so they stay distinct from PyPI-triggering `v*` tags
 - GitHub-only pre-releases must include installable artifacts in the GitHub release assets: a wheel built with `ui/dist` and bundled `vibe/show_runtime/*.tgz`, plus the sdist
 - releases are published automatically by workflow after tagging/push

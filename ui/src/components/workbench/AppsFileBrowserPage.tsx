@@ -34,10 +34,12 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
-import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { sortProjectsByRecent } from '../../lib/projectOrder';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
@@ -78,6 +80,7 @@ import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { FilePreview } from '../ui/file-preview';
 import { InlineNameInput } from '../ui/inline-name-input';
+import { MobileAppHeader } from '../apps/MobileAppHeader';
 import { FilePicker } from './FilePicker';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
@@ -210,7 +213,9 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // A single-app browser tab (`?standalone=1`) frames the app exactly like a window body —
   // full-bleed, no page header or card border — since the shell drops its chrome there too.
   const standalone = useStandaloneAppTab();
-  const fullBleed = windowed || standalone;
+  const isDesktop = useIsDesktop();
+  const mobileRoute = !windowed && !standalone && !isDesktop;
+  const fullBleed = windowed || standalone || mobileRoute;
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -228,15 +233,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     selectionAnchorRef.current = null;
   }, []);
 
-  // Escape is the universal way out of a selection. Preview/dialog handlers still own their own
-  // Escape behavior; clearing a background selection at the same time is harmless and predictable.
-  useEffect(() => {
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') clearSelection();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [clearSelection]);
+  // Escape is the universal way out of a selection while this route owns the foreground.
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (event.key === 'Escape') clearSelection();
+  });
 
   // Long-press is only a selection gesture on coarse pointers. Movement beyond a small slop cancels
   // it so scrolling the list never unexpectedly enters selection mode.
@@ -258,17 +258,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // Mobile quick look stays inside the Files surface because phones have no window layer. Keep the
   // edit capability with the preview so editable formats can switch surfaces from its toolbar.
   const [preview, setPreview] = useState<{ path: string; name: string; mtime: number | null; editable: boolean } | null>(null);
-  useEffect(() => {
-    if (!preview) return;
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        ev.preventDefault();
-        setPreview(null);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [preview]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setPreview(null);
+    }
+  }, preview !== null);
 
   const navSeq = useRef(0);
   const navigate = useCallback(
@@ -300,7 +295,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   useEffect(() => {
     if (cwd) return;
     if (projects === null) return;
-    const initial = projects?.[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
+    const initial = sortProjectsByRecent(projects)[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
     if (initial) navigate(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, sysFavs]);
@@ -1327,7 +1322,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     : 0;
 
   return (
-    <div className={fullBleed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
+    <div className={fullBleed ? 'relative flex h-full w-full flex-col bg-surface pb-[env(safe-area-inset-bottom)]' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
+      {mobileRoute && <MobileAppHeader title={t('apps.fileBrowser.label')} icon={Folder} />}
       {!fullBleed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
@@ -1337,8 +1333,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
       <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-border')}>
         {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
-        <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
-          <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+        <div className={clsx(
+          'flex items-center gap-2 border-b border-border bg-surface-2/60',
+          mobileRoute ? 'flex-wrap px-2 py-2' : 'px-3 py-2',
+        )}>
+          <div className={clsx(
+            'flex min-w-0 items-center gap-0.5 overflow-x-auto',
+            mobileRoute ? 'order-1 w-full' : 'flex-1',
+          )}>
             <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('apps.fileBrowser.refresh')} onClick={() => cwd && refreshAll()}>
               <RefreshCw className={clsx('size-3.5', (loading || searchBusy) && 'animate-spin')} />
             </Button>
@@ -1362,13 +1364,19 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               </span>
             ))}
           </div>
-          <label className="flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1">
+          <label className={clsx(
+            'flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1',
+            mobileRoute ? 'order-2 w-full' : 'shrink-0',
+          )}>
             {searchBusy ? <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" /> : <Search className="size-3.5 shrink-0 text-muted" />}
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t(searchMode === 'content' ? 'apps.fileBrowser.searchContentPlaceholder' : 'apps.fileBrowser.searchPlaceholder')}
-              className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
+              className={clsx(
+                'min-w-0 flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none',
+                !mobileRoute && 'w-28 flex-none',
+              )}
             />
             {/* Mode toggle: file/folder NAME search (default) ⇄ file CONTENT search; pressed = content. */}
             <button
@@ -1379,7 +1387,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               onClick={() => setSearchMode((m) => (m === 'content' ? 'name' : 'content'))}
               className={clsx(
                 'grid size-5 shrink-0 place-items-center rounded transition',
-                searchMode === 'content' ? 'bg-cyan-soft text-cyan' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
+                searchMode === 'content' ? 'bg-cyan-soft text-cyan-ink' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
               )}
             >
               <FileSearch className="size-3.5" />
@@ -1391,54 +1399,60 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             )}
           </label>
           <input ref={uploadInputRef} type="file" multiple className="hidden" onChange={onUploadPick} />
-          {selectedItems.length > 1 || touchSelectionMode ? (
-            <div className="flex shrink-0 items-center gap-1 overflow-x-auto">
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => copyRowsToClipboard(selectedItems)} disabled={selectedItems.length === 0}>
-                <Copy className="size-3.5" /> {t('apps.fileBrowser.copy')}
-              </Button>
-              {clipboard.length > 0 && (
-                <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px]" disabled={!cwd} onClick={() => void pasteRows(clipboard, cwd)}>
-                  <ClipboardPaste className="size-3.5" /> {t('apps.fileBrowser.paste')}
+          <div className={clsx(
+            'flex shrink-0 items-center gap-1 overflow-x-auto',
+            mobileRoute ? 'order-3 w-full justify-end' : 'ml-auto',
+          )}>
+            {selectedItems.length > 1 || touchSelectionMode ? (
+              <>
+                <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.copy')} className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => copyRowsToClipboard(selectedItems)} disabled={selectedItems.length === 0}>
+                  <Copy className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.copy')}</span>
                 </Button>
-              )}
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => setMovePickerItems(selectedItems)} disabled={selectedItems.length === 0}>
-                <FolderInput className="size-3.5" /> {t('apps.fileBrowser.move')}
-              </Button>
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => void downloadItems(selectedItems)} disabled={selectedItems.length === 0}>
-                <Download className="size-3.5" /> {t('apps.fileBrowser.download')}
-              </Button>
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1.5 px-2 text-[12px] text-destructive" onClick={() => removeItems(selectedItems)} disabled={selectedItems.length === 0}>
-                <Trash2 className="size-3.5" /> {t('apps.fileBrowser.delete')}
-              </Button>
-              <Button type="button" size="icon" variant="ghost" className="size-7 text-muted" aria-label={t('apps.fileBrowser.clearSelection')} onClick={clearSelection}>
-                <X className="size-4" />
-              </Button>
-            </div>
-          ) : (
-            <>
-              {clipboard.length > 0 && (
-                <Button type="button" size="sm" variant="ghost" className="h-7 shrink-0 gap-1.5 px-2 text-[12px]" disabled={!cwd} onClick={() => void pasteRows(clipboard, cwd)}>
-                  <ClipboardPaste className="size-3.5" /> {t('apps.fileBrowser.paste')}
+                {clipboard.length > 0 && (
+                  <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.paste')} className="h-7 gap-1.5 px-2 text-[12px]" disabled={!cwd} onClick={() => void pasteRows(clipboard, cwd)}>
+                    <ClipboardPaste className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.paste')}</span>
+                  </Button>
+                )}
+                <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.move')} className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => setMovePickerItems(selectedItems)} disabled={selectedItems.length === 0}>
+                  <FolderInput className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.move')}</span>
                 </Button>
-              )}
-              <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={onNewFile}>
-                <FilePlus className="size-3.5" /> {t('apps.fileBrowser.newFile')}
-              </Button>
-              <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={() => startNewEntry('folder')}>
-                <FolderPlus className="size-3.5" /> {t('apps.fileBrowser.newFolder')}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]"
-                disabled={!cwd || uploadProgress !== null}
-                onClick={() => uploadInputRef.current?.click()}
-              >
-                {uploadProgress ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />} {t('apps.fileBrowser.upload')}
-              </Button>
-            </>
-          )}
+                <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.download')} className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => void downloadItems(selectedItems)} disabled={selectedItems.length === 0}>
+                  <Download className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.download')}</span>
+                </Button>
+                <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.delete')} className="h-7 gap-1.5 px-2 text-[12px] text-destructive-ink" onClick={() => removeItems(selectedItems)} disabled={selectedItems.length === 0}>
+                  <Trash2 className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.delete')}</span>
+                </Button>
+                <Button type="button" size="icon" variant="ghost" className="size-7 text-muted" aria-label={t('apps.fileBrowser.clearSelection')} onClick={clearSelection}>
+                  <X className="size-4" />
+                </Button>
+              </>
+            ) : (
+              <>
+                {clipboard.length > 0 && (
+                  <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.paste')} className="h-7 shrink-0 gap-1.5 px-2 text-[12px]" disabled={!cwd} onClick={() => void pasteRows(clipboard, cwd)}>
+                    <ClipboardPaste className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.paste')}</span>
+                  </Button>
+                )}
+                <Button type="button" size="sm" variant="brand" title={t('apps.fileBrowser.newFile')} className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={onNewFile}>
+                  <FilePlus className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.newFile')}</span>
+                </Button>
+                <Button type="button" size="sm" variant="outline" title={t('apps.fileBrowser.newFolder')} className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={() => startNewEntry('folder')}>
+                  <FolderPlus className="size-3.5" /> <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.newFolder')}</span>
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  title={t('apps.fileBrowser.upload')}
+                  className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]"
+                  disabled={!cwd || uploadProgress !== null}
+                  onClick={() => uploadInputRef.current?.click()}
+                >
+                  {uploadProgress ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />} <span className={mobileRoute ? 'sr-only' : undefined}>{t('apps.fileBrowser.upload')}</span>
+                </Button>
+              </>
+            )}
+          </div>
         </div>
 
         {/* Mobile favorites/projects strip: the rail (below) is hidden under md, so surface the same
@@ -1484,7 +1498,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                     active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
                   )}
                 >
-                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan' : 'text-cyan/70')} />
+                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan-ink' : 'text-cyan-ink/70')} />
                   <span className="max-w-[140px] truncate">{f.label}</span>
                 </button>
               );
@@ -1492,7 +1506,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         )}
 
-        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
+        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">{error}</div>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Rail: Favorites THEN Projects (design nknn2 order). Folders here are drop targets too. */}
@@ -1519,7 +1533,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             {projectFavs.map((f) => (
               <RailRow
                 key={f.path}
-                icon={<Folder className="size-3.5 text-cyan" />}
+                icon={<Folder className="size-3.5 text-cyan-ink" />}
                 label={f.label}
                 active={cwd === f.path}
                 dropActive={dropTarget === f.path}
@@ -1546,11 +1560,11 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 <span className="truncate">{t('apps.fileBrowser.colName')}</span>
                 {sort?.col === 'name' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
               </button>
-              <button type="button" onClick={() => cycleSort('size')} className={clsx('flex w-20 shrink-0 items-center justify-end gap-1 transition hover:text-foreground', sort?.col === 'size' && 'text-foreground')}>
+              <button type="button" onClick={() => cycleSort('size')} className={clsx('hidden w-20 shrink-0 items-center justify-end gap-1 transition hover:text-foreground sm:flex', sort?.col === 'size' && 'text-foreground')}>
                 {t('apps.fileBrowser.colSize')}
                 {sort?.col === 'size' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
               </button>
-              <button type="button" onClick={() => cycleSort('modified')} className={clsx('flex w-36 shrink-0 items-center gap-1 pl-4 transition hover:text-foreground', sort?.col === 'modified' && 'text-foreground')}>
+              <button type="button" onClick={() => cycleSort('modified')} className={clsx('hidden w-36 shrink-0 items-center gap-1 pl-4 transition hover:text-foreground sm:flex', sort?.col === 'modified' && 'text-foreground')}>
                 {t('apps.fileBrowser.colModified')}
                 {sort?.col === 'modified' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
               </button>
@@ -1565,7 +1579,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 // menu (paste) instead of our blank-space New menu from the container below.
                 <div className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
                   <span className="flex min-w-0 flex-1 items-center gap-2">
-                    {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
+                    {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan-ink" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
                     <InlineNameInput
                       initial=""
                       placeholder={t(newEntry.kind === 'folder' ? 'apps.fileBrowser.newFolderPlaceholder' : 'apps.fileBrowser.newFilePrompt')}
@@ -1690,8 +1704,8 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                         </span>
                       )}
                     </span>
-                    <span className="w-20 shrink-0 text-right font-mono text-[11px] text-muted">{isDir ? '—' : formatSize(item.entry.size)}</span>
-                    <span className="w-36 shrink-0 pl-4 font-mono text-[11px] text-muted">{formatMtime(item.entry.mtime)}</span>
+                    <span className="hidden w-20 shrink-0 text-right font-mono text-[11px] text-muted sm:block">{isDir ? '—' : formatSize(item.entry.size)}</span>
+                    <span className="hidden w-36 shrink-0 pl-4 font-mono text-[11px] text-muted sm:block">{formatMtime(item.entry.mtime)}</span>
                   </button>
                 );
               })}
@@ -1719,7 +1733,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               type="button"
               size="sm"
               variant="ghost"
-              className="h-6 shrink-0 gap-1 px-2 text-[12px] text-cyan"
+              className="h-6 shrink-0 gap-1 px-2 text-[12px] text-cyan-ink"
               disabled={undoBusy}
               onClick={() => void performUndo()}
             >
@@ -1744,7 +1758,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             {t('apps.fileBrowser.showHidden')}
           </label>
           {uploadProgress && (
-            <span className="flex items-center gap-1.5 text-cyan">
+            <span className="flex items-center gap-1.5 text-cyan-ink">
               <Loader2 className="size-3 animate-spin" />
               {t('apps.fileBrowser.uploading', { done: uploadProgress.done, total: uploadProgress.total })}
             </span>
@@ -1773,7 +1787,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       {/* MOBILE-ONLY quick-look overlay: on mobile there's no window layer, so a previewable file
           opens here in-page instead of the standalone Preview window (desktop uses the window). */}
       {preview && (
-        <div className="absolute inset-0 z-20 flex flex-col bg-surface">
+        <div className={clsx(
+          'absolute inset-x-0 bottom-0 z-20 flex flex-col bg-surface',
+          mobileRoute ? 'top-[calc(3rem+env(safe-area-inset-top))]' : 'top-0',
+        )}>
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
             <FileText className="size-4 shrink-0 text-muted" />
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
@@ -1798,7 +1815,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               type="button"
               size="icon"
               variant="ghost"
-              className="size-7 shrink-0 text-mint"
+              className="size-7 shrink-0 text-mint-ink"
               aria-label={t('apps.fileBrowser.download')}
               onClick={() => downloadFile(preview.path)}
             >
@@ -1903,7 +1920,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   onClick={() => copyRowsToClipboard(menu.items)}
                 />
                 <ContextMenuItem
-                  icon={<FolderInput className="size-3.5 text-cyan" />}
+                  icon={<FolderInput className="size-3.5 text-cyan-ink" />}
                   label={t('apps.fileBrowser.move')}
                   onClick={() => {
                     const items = menu.items;
@@ -1912,7 +1929,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   }}
                 />
                 <ContextMenuItem
-                  icon={<Download className="size-3.5 text-mint" />}
+                  icon={<Download className="size-3.5 text-mint-ink" />}
                   label={t('apps.fileBrowser.download')}
                   onClick={() => void downloadItems(menu.items)}
                 />
@@ -1921,7 +1938,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             ) : (
               <>
                 <ContextMenuItem
-                  icon={menu.item.entry.kind === 'dir' ? <Folder className="size-3.5 text-cyan" /> : <FileText className="size-3.5 text-cyan" />}
+                  icon={menu.item.entry.kind === 'dir' ? <Folder className="size-3.5 text-cyan-ink" /> : <FileText className="size-3.5 text-cyan-ink" />}
                   label={t('apps.fileBrowser.open')}
                   onClick={() => {
                     const it = menu.item as RowItem;
@@ -1931,7 +1948,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 />
                 {menuPreviewable && menuEntry && (
                   <ContextMenuItem
-                    icon={<Eye className="size-3.5 text-cyan" />}
+                    icon={<Eye className="size-3.5 text-cyan-ink" />}
                     label={t('apps.fileBrowser.preview')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1944,7 +1961,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menuEditable && (
                   <ContextMenuItem
-                    icon={<FileCode2 className="size-3.5 text-mint" />}
+                    icon={<FileCode2 className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.openInEditor')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1956,7 +1973,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menu.item.entry.kind === 'dir' && (
                   <ContextMenuItem
-                    icon={<SquareTerminal className="size-3.5 text-mint" />}
+                    icon={<SquareTerminal className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.openTerminalHere')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1967,7 +1984,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 )}
                 {menu.item.entry.kind !== 'dir' && (
                   <ContextMenuItem
-                    icon={<Download className="size-3.5 text-mint" />}
+                    icon={<Download className="size-3.5 text-mint-ink" />}
                     label={t('apps.fileBrowser.download')}
                     onClick={() => {
                       const it = menu.item as RowItem;
@@ -1977,7 +1994,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   />
                 )}
                 <ContextMenuItem icon={<Copy className="size-3.5" />} label={t('apps.fileBrowser.copy')} onClick={() => copyRowsToClipboard(menu.items)} />
-                <ContextMenuItem icon={<Copy className="size-3.5 text-gold" />} label={t('apps.fileBrowser.duplicate')} onClick={() => void duplicateItem(menu.item as RowItem)} />
+                <ContextMenuItem icon={<Copy className="size-3.5 text-gold-ink" />} label={t('apps.fileBrowser.duplicate')} onClick={() => void duplicateItem(menu.item as RowItem)} />
                 <ContextMenuItem
                   icon={<Pencil className="size-3.5" />}
                   label={t('apps.fileBrowser.rename')}
@@ -1993,10 +2010,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           ) : (
             <>
               {clipboard.length > 0 && cwd && (
-                <ContextMenuItem icon={<ClipboardPaste className="size-3.5 text-cyan" />} label={t('apps.fileBrowser.paste')} onClick={() => void pasteRows(clipboard, cwd)} />
+                <ContextMenuItem icon={<ClipboardPaste className="size-3.5 text-cyan-ink" />} label={t('apps.fileBrowser.paste')} onClick={() => void pasteRows(clipboard, cwd)} />
               )}
               <ContextMenuItem
-                icon={<FilePlus className="size-3.5 text-mint" />}
+                icon={<FilePlus className="size-3.5 text-mint-ink" />}
                 label={t('apps.fileBrowser.newFile')}
                 onClick={() => {
                   closeMenu();
@@ -2004,7 +2021,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 }}
               />
               <ContextMenuItem
-                icon={<FolderPlus className="size-3.5 text-gold" />}
+                icon={<FolderPlus className="size-3.5 text-gold-ink" />}
                 label={t('apps.fileBrowser.newFolder')}
                 onClick={() => {
                   closeMenu();
@@ -2013,7 +2030,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               />
               {cwd && (
                 <ContextMenuItem
-                  icon={<SquareTerminal className="size-3.5 text-mint" />}
+                  icon={<SquareTerminal className="size-3.5 text-mint-ink" />}
                   label={t('apps.fileBrowser.openTerminalHere')}
                   onClick={() => {
                     closeMenu();

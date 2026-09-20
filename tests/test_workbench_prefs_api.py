@@ -7,7 +7,7 @@ Mutations run at the ``vibe.api`` layer (like the Dock tests); the GET routes an
 the session filter are exercised through the Flask-compat test client.
 """
 
-from tests.test_ui_remote_access_auth import _save_config
+from tests.ui_server_test_helpers import _save_config
 from vibe import api
 from vibe.ui_server import app
 

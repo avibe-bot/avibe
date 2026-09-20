@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -31,10 +32,10 @@ export type MemoryResource<T, A extends unknown[] = []> = {
 export type UseMemoryResourceOptions<A extends unknown[]> = {
   /** Must be referentially stable — it is a `reload` dependency. */
   read: (...args: A) => Promise<unknown>;
-  /** Success predicate; defaults to the `status: 'ok'` envelope. Must be stable. */
+  /** Compatibility success predicate; current Memory routes use the default `status: 'ok'` envelope. */
   accept?: (value: unknown) => boolean;
   /** i18n key used when the request itself throws, so there is no closed code. */
-  failureMessageKey: string;
+  failureMessageKey: TranslationKey;
   /** When false, `reload` is a no-op — Memory being off is not a failure. */
   enabled?: boolean;
 } & Partial<MemoryRetryPolicy>;

@@ -85,6 +85,83 @@ scenarios:
     layer: scenario
     backend: claude
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_native_reauth_reuses_a_pending_flow_and_cancel_commits_a_finished_one
+  - id: AUTH-SETUP-108
+    name: Duplicate native Source is rejected before another CLI login starts
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_duplicate_native_source_is_rejected_before_login_starts
+  - id: AUTH-SETUP-109
+    name: Hub re-auth requires acknowledgement and converges its repaired Source projection
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal
+  - id: AUTH-SETUP-110
+    name: Codex OAuth round trip keeps the relay base URL through settings save and relaunch config
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_oauth_api_key_relay_round_trip_scenario
+  - id: AUTH-SETUP-111
+    name: Catalog API-key observe and confirm-create repeat the pinned probe, and auth failure persists nothing
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_catalog_api_key_setup_observe_then_create_closed_loop
+  - id: AUTH-SETUP-112
+    name: API-key setup verifies from a credential-gated model list, or saves unverified with best-effort inventory, and never schedules a model
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_api_key_setup_does_not_schedule_a_model
+  - id: AUTH-SETUP-113
+    name: Hub OAuth retains completed credentials as unverified and preserves explicit rejection state
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_model_free_observation_closed_loop
+  - id: AUTH-SETUP-114
+    name: Auto policy responses neither reject credentials nor falsely exclude competing protocols
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_custom_auto_policy_response_cannot_reject_or_exclude_credentials
+  - id: AUTH-SETUP-115
+    name: Hub-only subscription vendors start a hub-channel flow carrying the engine-declared presentation form
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-116
+    name: Hub-only subscription vendors refuse native_cli custody before any CLI login starts
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_only_subscription_vendors_start_a_hub_flow_and_refuse_native_custody
+  - id: AUTH-SETUP-117
+    name: Unproven hub-only subscription grant refuses cleanly, revoking the credential and leaving no Source
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_unproven_hub_subscription_grant_refuses_and_leaves_no_source
+  - id: AUTH-SETUP-118
+    name: Hub-only subscription grant binds to a Gateway Source and supplies its models
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_subscription_grant_binds_a_source_and_supplies_its_models
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
@@ -148,6 +225,52 @@ scenarios:
     layer: scenario
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_remote_web_oauth_cold_launch_retry_is_single_owner
+  - id: AUTH-SETUP-402
+    name: Personal remote activity slides past the original identity deadline without another authorization prompt
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_remote_session_slides_without_interactive_reauthorization
+  - id: AUTH-SETUP-403
+    name: Organization remote access enters grace, recovers silently, and enforces confirmed revocation without OAuth
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_organization_remote_session_recovers_and_revokes_without_oauth
+  - id: AUTH-SETUP-404
+    name: Verified limited Show Page identity admits and denies a revoked guest lease
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: show_identity
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_limited_show_identity_closed_loop_installs_guest_lease
+  - id: AUTH-SETUP-405
+    name: Local and authenticated remote managers complete the same setup flow without changing pairing
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_uses_the_same_authorized_config_flow
+    supporting_tests:
+      - ui/src/App.remoteAuth.test.tsx
+      - ui/src/components/AppShell.test.tsx
+  - id: AUTH-SETUP-210
+    name: Lost Model Hub OAuth start response converges on one provider flow
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_lost_model_hub_oauth_start_response_reuses_nonce_flow
+  - id: AUTH-SETUP-211
+    name: Same-service-instance native login conflict returns a localized recovery path
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    scope: same_service_instance
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_same_service_instance_native_login_conflict_is_localized
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
@@ -190,5 +313,39 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_codex_connection_probe_reuses_persistent_app_server
-next_priority:
-  - AUTH-SETUP-301
+  - id: AUTH-SETUP-301
+    name: Instance Member saves backend credentials through signed remote HTTP
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_instance_manager_backend_credentials_round_trip
+  - id: AUTH-SETUP-907
+    name: Cloud pairing origin consumers reach the effective UI listener in its address family
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_origin_reaches_effective_ui_listener
+  - id: AUTH-SETUP-119
+    name: Runtime manual provider code reaches native persistence and controller-confirmed readiness
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_manual_provider_connection_reaches_controller_confirmed_readiness
+  - id: AUTH-SETUP-120
+    name: Explicit completion preserves canonical no-IM setup and invalid legacy IM recovery
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_completion_preserves_canonical_and_legacy_platform_configuration
+  - id: AUTH-SETUP-121
+    name: Native and registered custom OpenCode models preserve Agent ownership and complete setup
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: opencode
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_explicit_opencode_model_recovery_preserves_agent_and_completes
+next_priority: []

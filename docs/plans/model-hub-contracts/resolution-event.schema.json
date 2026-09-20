@@ -21,7 +21,8 @@
         "skip",
         "channel_switch",
         "needs_action",
-        "supply_interrupted"
+        "supply_interrupted",
+        "reasoning_efforts_override"
       ]
     },
     "model_id": {
@@ -46,18 +47,21 @@
         "network",
         "recovery",
         "manual",
+        "upstream_tiers",
+        "catalog_tiers",
         "credential_expired",
         "credential_revoked",
         "balance_exhausted",
         "account_banned",
-        "permission_denied",
         "unclassified_error",
         "no_enabled_source",
         "no_eligible_source",
-        "model_unsupported"
+        "route_unconfigured",
+        "source_missing",
+        "model_unsupported",
+        "native_cli_unavailable"
       ],
-      "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. permission_denied is request-scoped and has no Source-state mirror. The machine-readable mirror registry enforces the attempt-failure relation.",
-      "$comment": "permission_denied preserves a request-scoped denial while redacting arbitrary upstream bodies; it does not claim Source-global credential state."
+      "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. The machine-readable mirror registry enforces the attempt-failure relation."
     },
     "billing_note": {
       "enum": [null, "entered_metered", "left_metered"]
@@ -72,7 +76,7 @@
   },
   "allOf": [
     {
-      "$comment": "Backend-scoped supply interruption: no source endpoint, a real backend, a real model, and one of the three structural causes.",
+      "$comment": "Backend-scoped supply interruption: no source endpoint, a real backend, a real model, and one exact structural cause from the configured chain.",
       "if": {
         "properties": { "kind": { "const": "supply_interrupted" } },
         "required": ["kind"]
@@ -89,7 +93,10 @@
             "enum": [
               "no_enabled_source",
               "no_eligible_source",
-              "model_unsupported"
+              "route_unconfigured",
+              "source_missing",
+              "model_unsupported",
+              "native_cli_unavailable"
             ]
           }
         }
@@ -102,7 +109,10 @@
             "enum": [
               "no_enabled_source",
               "no_eligible_source",
-              "model_unsupported"
+              "route_unconfigured",
+              "source_missing",
+              "model_unsupported",
+              "native_cli_unavailable"
             ]
           }
         },
@@ -111,17 +121,6 @@
       "then": {
         "required": ["kind"],
         "properties": { "kind": { "const": "supply_interrupted" } }
-      }
-    },
-    {
-      "$comment": "Request-scoped permission_denied can explain only a successful fallback switch. It cannot create Source-global cooldown, recovery, skip, or needs_action state.",
-      "if": {
-        "properties": { "reason": { "const": "permission_denied" } },
-        "required": ["reason"]
-      },
-      "then": {
-        "required": ["kind"],
-        "properties": { "kind": { "const": "switch" } }
       }
     },
     {
@@ -158,7 +157,8 @@
               "cooldown",
               "recover",
               "skip",
-              "channel_switch"
+              "channel_switch",
+              "reasoning_efforts_override"
             ]
           }
         },
@@ -187,6 +187,35 @@
         "properties": {
           "kind": { "not": { "enum": ["cooldown", "recover"] } }
         }
+      }
+    },
+    {
+      "$comment": "A refresh that replaces a non-empty user declaration with a managed rung records one source/model-scoped informational event after commit.",
+      "if": {
+        "properties": { "kind": { "const": "reasoning_efforts_override" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["agent", "model_id", "from_source", "to_source", "reason", "severity"],
+        "properties": {
+          "agent": { "const": "system" },
+          "model_id": { "type": "string" },
+          "from_source": { "type": "string" },
+          "to_source": { "type": "null" },
+          "reason": { "enum": ["upstream_tiers", "catalog_tiers"] },
+          "severity": { "const": "info" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "reason": { "enum": ["upstream_tiers", "catalog_tiers"] }
+        },
+        "required": ["reason"]
+      },
+      "then": {
+        "properties": { "kind": { "const": "reasoning_efforts_override" } }
       }
     },
     {
@@ -257,7 +286,8 @@
               "recover",
               "skip",
               "needs_action",
-              "channel_switch"
+              "channel_switch",
+              "reasoning_efforts_override"
             ]
           }
         }
@@ -278,7 +308,8 @@
               "recover",
               "skip",
               "needs_action",
-              "channel_switch"
+              "channel_switch",
+              "reasoning_efforts_override"
             ]
           }
         }
@@ -315,18 +346,18 @@
       "human_en": "Relay balance is exhausted and needs attention"
     },
     {
-      "id": "evt_20260730c",
-      "ts": "2026-07-30T05:55:00Z",
-      "agent": "claude",
-      "kind": "switch",
-      "model_id": "claude-opus-4-6",
-      "from_source": "src_primary01",
-      "to_source": "src_backup001",
-      "reason": "permission_denied",
+      "id": "evt_20260903c",
+      "ts": "2026-09-03T06:32:00Z",
+      "agent": "system",
+      "kind": "reasoning_efforts_override",
+      "model_id": "gpt-5.6-sol",
+      "from_source": "src_relay9c1x",
+      "to_source": null,
+      "reason": "catalog_tiers",
       "billing_note": null,
       "severity": "info",
-      "human_zh": "Primary：请求权限被拒绝 -> 已切到 Backup",
-      "human_en": "Primary: request permission denied -> switched to Backup"
+      "human_zh": "Relay：gpt-5.6-sol 的推理强度现按 Avibe 内置模型目录管理",
+      "human_en": "Relay: gpt-5.6-sol reasoning tiers now follow Avibe's built-in model catalog"
     }
   ]
 }

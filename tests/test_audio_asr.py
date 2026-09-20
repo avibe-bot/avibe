@@ -507,7 +507,7 @@ class MessageHandlerAudioAsrTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", message_id="M1", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 await handler.handle_user_message(context, "please transcribe")
 
         return controller

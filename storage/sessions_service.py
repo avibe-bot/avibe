@@ -30,6 +30,7 @@ from storage.agent_session_rows import (
 )
 from storage.models import (
     agents,
+    agent_events,
     agent_runs,
     agent_sessions,
     message_deliveries,
@@ -72,6 +73,53 @@ def _publish_definition_reclaim_hint() -> None:
         publish_definitions_updated(definition_type="watch")
     except Exception:
         logger.debug("session definition reclaim wake failed", exc_info=True)
+
+
+def require_reservation_access(
+    conn: Connection,
+    authorization_context: Any,
+    *,
+    scope_id: str | None,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> None:
+    """Hold a new reservation to the caller's Project-placement and Agent authority.
+
+    A caller that HAS a context — an explicit argument, or the authority the
+    running invocation was entered under — is held to the same rule the Workbench
+    applies when it creates or re-places a session, so a Project the caller cannot
+    chat in, a standalone Session below runtime management, and an Agent they may
+    not select are all refused before the row exists.
+
+    With neither, this is the historical local entry point: the controller's own
+    IM flows and a local CLI invocation keep Owner semantics and reserve exactly
+    as before. Reading the invocation authority here is what makes the several
+    reservation paths — a direct run, a fork, a Task/Watch/Hook definition —
+    carry the caller without each one threading a parameter.
+    """
+
+    if authorization_context is None:
+        from vibe.authorization import current_invocation_authority
+
+        authorization_context = current_invocation_authority()
+    if authorization_context is None:
+        return
+
+    from core.vibe_agents import ensure_agent_selection_access
+    from storage import project_access_service
+    from storage.workbench_sessions_service import ProjectAccessDeniedError
+    from vibe.authorization import require_instance_role
+
+    context = require_instance_role(authorization_context, "editor")
+    if not context.can_manage_instance:
+        project_id = project_access_service.project_id_from_scope_id(scope_id)
+        if project_id is None or not project_access_service.can_chat_project(
+            conn, context, project_id
+        ):
+            raise ProjectAccessDeniedError
+    ensure_agent_selection_access(
+        conn, agent_id=agent_id, agent_name=agent_name, user_context=context
+    )
 
 
 def _require_enabled_agent_identity(
@@ -306,6 +354,91 @@ class SQLiteSessionsService:
             ).mappings().first()
             return dict(row) if row else None
 
+    def get_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+    ) -> Any:
+        """Read one backend marker only from the exact active native binding."""
+
+        marker_key = str(key or "").strip()
+        if not marker_key:
+            raise ValueError("runtime marker key is required")
+        expected_native = encode_session_value(native_session_id)
+        with self.engine.connect() as conn:
+            raw_metadata = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(agent_sessions.c.agent_backend == str(backend))
+                .where(agent_sessions.c.native_session_id == expected_native)
+                .limit(1)
+            ).scalar_one_or_none()
+        metadata_value = _json_loads(raw_metadata, {})
+        if not isinstance(metadata_value, dict):
+            return None
+        return metadata_value.get(marker_key)
+
+    def set_agent_session_runtime_marker(
+        self,
+        session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+        value: Any,
+    ) -> bool:
+        """Merge one backend marker into the exact active native binding.
+
+        The writer reservation makes the read/merge/write atomic, so unrelated
+        Session metadata cannot be lost and a replaced native binding cannot
+        inherit state that belonged to its predecessor.
+        """
+
+        marker_key = str(key or "").strip()
+        if not marker_key:
+            raise ValueError("runtime marker key is required")
+        expected_native = encode_session_value(native_session_id)
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(
+                    agent_sessions.c.metadata_json,
+                    agent_sessions.c.status,
+                    agent_sessions.c.agent_backend,
+                    agent_sessions.c.native_session_id,
+                )
+                .where(agent_sessions.c.id == str(session_id))
+                .limit(1)
+            ).mappings().first()
+            if (
+                row is None
+                or str(row["status"] or "") == "archived"
+                or str(row["agent_backend"] or "") != str(backend)
+                or str(row["native_session_id"] or "") != expected_native
+            ):
+                return False
+            metadata_value = _json_loads(row["metadata_json"], {})
+            metadata_object = dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            if metadata_object.get(marker_key) == value:
+                return True
+            metadata_object[marker_key] = value
+            result = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(agent_sessions.c.agent_backend == str(backend))
+                .where(agent_sessions.c.native_session_id == expected_native)
+                .values(
+                    metadata_json=_json_dumps(metadata_object),
+                    updated_at=_utc_now_iso(),
+                )
+            )
+            return bool(result.rowcount)
+
     def reserve_agent_session(
         self,
         *,
@@ -321,6 +454,7 @@ class SQLiteSessionsService:
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
         expected_reference_agent_id: str | None = None,
+        authorization_context: Any = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
@@ -344,6 +478,13 @@ class SQLiteSessionsService:
             scope_id = resolve_scope_from_legacy_key(conn, str(scope_key), now=now)
             if scope_id is None:
                 return None
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=scope_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
             return create_agent_session_row(
                 conn,
                 scope_id=scope_id,
@@ -362,6 +503,37 @@ class SQLiteSessionsService:
                 require_workdir=False,
             )
 
+    def require_placement_access(
+        self,
+        *,
+        scope_key: str,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
+        authorization_context: Any = None,
+    ) -> None:
+        """Admit a placement whose Sessions are reserved later, under the same rule.
+
+        A stored definition that creates one Session per run describes a placement
+        without performing it, so nothing reaches ``reserve_agent_session`` while the
+        caller is still here. Asking the identical question now means the definition
+        is refused where someone is waiting for the answer, instead of every future
+        fire being refused where nobody is.
+
+        Nothing is committed: resolving a legacy key can materialise its scope, and a
+        check has no business leaving that behind.
+        """
+
+        now = _utc_now_iso()
+        with self.engine.connect() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, str(scope_key or ""), now=now)
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=scope_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
+
     def reserve_standalone_agent_session(
         self,
         *,
@@ -376,6 +548,7 @@ class SQLiteSessionsService:
         metadata: dict[str, Any] | None = None,
         require_enabled_agent: bool = False,
         expected_reference_agent_id: str | None = None,
+        authorization_context: Any = None,
     ) -> str:
         """Reserve a session with no Scope and its own lazy Show workspace."""
         now = _utc_now_iso()
@@ -397,6 +570,15 @@ class SQLiteSessionsService:
                 agent_id = identity["id"]
                 agent_name = identity["name"]
                 backend = identity["backend"]
+            # Ahead of the id claim and the mkdir below: a refused reservation
+            # must leave no session row and no workspace directory behind.
+            require_reservation_access(
+                conn,
+                authorization_context,
+                scope_id=None,
+                agent_id=agent_id,
+                agent_name=agent_name,
+            )
             session_id = new_session_id(conn)
             resolved_workdir = normalize_workdir(workdir)
             if resolved_workdir is None:
@@ -1137,6 +1319,89 @@ class SQLiteSessionsService:
             )
             return str(session_id) if result.rowcount else None
 
+    def replace_agent_session_native(
+        self,
+        *,
+        session_id: str,
+        expected_native_session_id: Any,
+        replacement_native_session_id: Any,
+    ) -> str | None:
+        """Supersede one native binding while preserving the public Session id.
+
+        Native ids remain write-once on ordinary bind paths. A backend repair is
+        different: it first snapshots the old binding as an inert superseded row,
+        then atomically replaces the active row's binding. Keeping the active row
+        id preserves its transcript, deliveries, definitions, and Workbench URL.
+        """
+
+        expected = encode_session_value(expected_native_session_id)
+        replacement = encode_session_value(replacement_native_session_id)
+        if not expected or not replacement:
+            raise ValueError("expected and replacement native session ids are required")
+
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == str(session_id)).limit(1)
+            ).mappings().first()
+            if row is None or str(row["status"] or "") == "archived":
+                return None
+
+            current = str(row["native_session_id"] or "")
+            if current == replacement:
+                return str(session_id)
+            if current != expected:
+                return None
+
+            snapshot_id = new_session_id(conn)
+            anchor = str(row["session_anchor"] or "")
+            superseded_anchor = f"{anchor}{SUPERSEDED_ANCHOR_INFIX}{snapshot_id}"
+            metadata_value = _json_loads(row["metadata_json"], {})
+            snapshot_metadata = (
+                dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            )
+            snapshot_metadata["superseded_native_binding"] = {
+                "active_session_id": str(session_id),
+                "replaced_at": now,
+            }
+            snapshot = dict(row)
+            snapshot.update(
+                {
+                    "id": snapshot_id,
+                    "session_anchor": superseded_anchor,
+                    "status": "archived",
+                    "visibility": "background",
+                    "pinned": 0,
+                    "agent_status": "idle",
+                    "composer_draft_text": None,
+                    "composer_draft_updated_at": None,
+                    "metadata_json": json.dumps(
+                        snapshot_metadata,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
+                    "updated_at": now,
+                }
+            )
+            conn.execute(agent_sessions.insert().values(**snapshot))
+            replaced = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .where(func.coalesce(agent_sessions.c.native_session_id, "") == current)
+                .values(
+                    native_session_id=replacement,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+            if not replaced.rowcount:
+                raise RuntimeError(
+                    f"lost native session replacement for Avibe session {session_id}"
+                )
+            return str(session_id)
+
     def find_session_for_anchor(self, *, scope_key: str, session_anchor: str) -> dict[str, Any] | None:
         """Latest ``agent_sessions`` row for ``(scope, anchor)``, any backend.
 
@@ -1845,7 +2110,12 @@ class SQLiteSessionsService:
                                     "status": stmt.excluded.status,
                                     "metadata_json": stmt.excluded.metadata_json,
                                     "updated_at": stmt.excluded.updated_at,
-                                    "last_active_at": stmt.excluded.last_active_at,
+                                    # ``last_active_at`` is deliberately absent: it is the
+                                    # session-list ranking column and only real activity may
+                                    # move it. ``now`` is computed once per call, so writing it
+                                    # here stamped every reconciled row with one identical
+                                    # value and collapsed the ranking to its tiebreakers.
+                                    # New rows still get their stamp from ``values()`` above.
                                 },
                             )
                         )
@@ -2294,9 +2564,11 @@ def _delete_agent_session_rows(
         # the read pins a snapshot, and the reclaim's UPDATE then fails outright with
         # ``SQLITE_BUSY_SNAPSHOT`` ("database is locked") on exactly the interleaving this
         # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
-        # place is also the recoverable half: the definitions were bound to the session
+        # place is also the recoverable half: the definitions were owned by the session
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
-        # a superseded one the thread has already moved off.
+        # a superseded one the thread has already moved off. Owner-only Tasks briefly
+        # receive the same orphan marker as a successful teardown; the refused-claim
+        # branch removes it again once it proves the owner row is still live.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
         claimed = bool(
             conn.execute(
@@ -2307,6 +2579,10 @@ def _delete_agent_session_rows(
             ).rowcount
         )
         if not claimed:
+            if reclaim_mode == RECLAIM_PAUSE:
+                from storage.background import clear_task_resume_blocks_for_available_owner
+
+                clear_task_resume_blocks_for_available_owner(conn, session_id)
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",
@@ -2408,6 +2684,14 @@ def _delete_agent_session_rows(
                 )
             deleted += 1
             continue
+        # Skill traces must not survive as unassociated rows after FK SET NULL.
+        from storage.skill_observability import EVENT_TYPES
+
+        conn.execute(agent_events.delete().where(
+            agent_events.c.session_id == session_id,
+            agent_events.c.visibility == "trace",
+            agent_events.c.event_type.in_(EVENT_TYPES),
+        ))
         removed = bool(
             conn.execute(
                 agent_sessions.delete().where(agent_sessions.c.id == session_id)

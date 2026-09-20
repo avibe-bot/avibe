@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v5 (2026-08-09).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v10 (2026-09-06).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -10,11 +10,25 @@ orchestrator and land with every affected consumer on the same tested head.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
 
-# authority-consumer: protocol anthropic openai_responses openai_chat
+from .stream_wire import ProtocolSSEState, ProtocolUsageReport
+
+ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
+SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
+OBSERVATION_OUTCOMES = (
+    "observed",
+    "ambiguous",
+    "unreachable",
+    "authentication_failed",
+    "adapter_error",
+    "timeout",
+)
+OBSERVATION_DISCOVERY_OUTCOMES = ("succeeded", "failed", "not_attempted")
 
 
 class EngineHealth(str, Enum):
@@ -23,6 +37,7 @@ class EngineHealth(str, Enum):
     DOWN = "down"
     NOT_STARTED = "not_started"
     NOT_INSTALLED = "not_installed"
+    INSTALLING = "installing"
 
 
 @dataclass(frozen=True)
@@ -33,6 +48,18 @@ class EngineStatus:
     listen_host: str  # always "127.0.0.1"
     listen_port: int | None
     last_check_iso: str | None
+    host_platform: str | None = None
+    error_key: str | None = None
+
+
+@dataclass(frozen=True)
+class EngineEnsureResult:
+    status: EngineStatus
+    changed: bool
+
+
+class RuntimePlatformUnsupportedError(RuntimeError):
+    """The pinned managed runtime has no asset for the server host."""
 
 
 @dataclass(frozen=True)
@@ -48,15 +75,28 @@ class SourceBinding:
     # source. Empty tuple = unrestricted (api_key default). Subscription
     # sources MUST be non-empty (README invariant 3); L2 populates, L1
     # enforces as backstop.
-    model_ids: tuple[str, ...]  # declared supply list (discovered + manual
-    # custom entries); required by the engine's generic/API-key config. Bare
-    # model ids, no provider prefix.
+    model_ids: tuple[str, ...]  # truthful inventory evidence (discovered + manual).
+    # May be empty; API-key invocation need not be listed. Bare ids, no prefix.
+    model_reasoning_efforts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # Per-model levels declared by the Source. CLIProxyAPI needs these on its
+    # model registration or it removes an otherwise valid reasoning effort.
+    route_model_ids: tuple[str, ...] = ()
+    # Sorted API-key transport targets derived from effective routes, never
+    # inventory or capability evidence. Independent of live health and mode.
 
 
 class OriginNotAllowedError(Exception):
     """Raised by the adapter when ``invoke(origin=...)`` violates the source's
     ``allowed_origins``. A programming/policy error — never converted into a
     ``RawCallOutcome`` and never triggers fallback."""
+
+
+class InvokeCancelledError(asyncio.CancelledError):
+    """Owner cancellation carrying wire facts observed before transport cleanup."""
+
+    def __init__(self, observed: ProtocolSSEState) -> None:
+        super().__init__()
+        self.observed = observed
 
 
 class RawOutcomeKind(str, Enum):
@@ -78,6 +118,199 @@ class RawCallOutcome:
     stream_started: bool
     model_id: str
     source_id: str
+    error_type: str | None = None  # raw upstream error type, if present
+    error_candidates: tuple[str, ...] = ()  # unsorted raw type/code candidates
+    # Tokens the upstream reported for this call, when the response carried a
+    # readable report. A call that settles before it can hand its body onward
+    # would otherwise take its token report with it, and a vendor that reported
+    # tokens billed for them whether or not the call ended well.
+    usage: ProtocolUsageReport | None = None
+    # Only failed HTTP responses supply retry advice: ASCII, at most 128
+    # characters, unparsed. L2 owns validation and the resulting retry policy.
+    retry_after: str | None = None
+    # Aware UTC receipt time of those headers, before reading the error body.
+    response_received_at: datetime | None = None
+    # Recognized model output or protocol success, independently of permissive
+    # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
+    recovery_verified: bool = False
+
+
+class ObservationOutcome(str, Enum):
+    OBSERVED = OBSERVATION_OUTCOMES[0]
+    AMBIGUOUS = OBSERVATION_OUTCOMES[1]
+    UNREACHABLE = OBSERVATION_OUTCOMES[2]
+    AUTHENTICATION_FAILED = OBSERVATION_OUTCOMES[3]
+    ADAPTER_ERROR = OBSERVATION_OUTCOMES[4]
+    TIMEOUT = OBSERVATION_OUTCOMES[5]
+
+
+class ObservationDiscovery(str, Enum):
+    SUCCEEDED = OBSERVATION_DISCOVERY_OUTCOMES[0]
+    FAILED = OBSERVATION_DISCOVERY_OUTCOMES[1]
+    NOT_ATTEMPTED = OBSERVATION_DISCOVERY_OUTCOMES[2]
+
+
+@dataclass(frozen=True)
+class DiscoveredModel:
+    """One model inventory row and the only upstream metadata v1 retains."""
+
+    id: str
+    supported_parameters: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class SourceObservation:
+    """Response-backed result of an unsaved Source observation."""
+
+    outcome: ObservationOutcome
+    reachable: bool | None
+    authenticated: bool | None
+    protocol: str | None
+    discovery: ObservationDiscovery
+    models: tuple[DiscoveredModel, ...]
+
+    @property
+    def model_ids(self) -> tuple[str, ...]:
+        return tuple(model.id for model in self.models)
+
+
+@dataclass(frozen=True)
+class ObservationTerminalRule:
+    """Complete legal product for one response-backed observation outcome."""
+
+    reachable: frozenset[bool | None]
+    authenticated: frozenset[bool | None]
+    protocols: frozenset[str | None]
+    discoveries: frozenset[ObservationDiscovery]
+    models_must_be_empty: bool
+
+
+OBSERVATION_TERMINAL_RULES: Mapping[
+    ObservationOutcome,
+    ObservationTerminalRule,
+] = {
+    ObservationOutcome.OBSERVED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True}),
+        protocols=frozenset(SOURCE_PROTOCOLS),
+        discoveries=frozenset(
+            {
+                ObservationDiscovery.SUCCEEDED,
+                ObservationDiscovery.FAILED,
+            }
+        ),
+        models_must_be_empty=False,
+    ),
+    ObservationOutcome.AMBIGUOUS: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True, None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.UNREACHABLE: ObservationTerminalRule(
+        reachable=frozenset({False}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.AUTHENTICATION_FAILED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({False}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.ADAPTER_ERROR: ObservationTerminalRule(
+        reachable=frozenset({True, None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.TIMEOUT: ObservationTerminalRule(
+        reachable=frozenset({None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+}
+
+
+def validate_source_observation(observation: object) -> SourceObservation:
+    """Validate an adapter result against the sole terminal-product authority."""
+
+    if not isinstance(observation, SourceObservation):
+        raise TypeError("invalid SourceObservation")
+    if not isinstance(observation.outcome, ObservationOutcome):
+        raise ValueError("invalid SourceObservation outcome")
+    if not isinstance(observation.discovery, ObservationDiscovery):
+        raise ValueError("invalid SourceObservation discovery")
+    if observation.reachable is not None and not isinstance(observation.reachable, bool):
+        raise ValueError("invalid SourceObservation reachability")
+    if observation.authenticated is not None and not isinstance(
+        observation.authenticated,
+        bool,
+    ):
+        raise ValueError("invalid SourceObservation authentication")
+    if not isinstance(observation.models, tuple) or any(
+        not isinstance(model, DiscoveredModel)
+        or not isinstance(model.id, str)
+        or not model.id
+        or (
+            model.supported_parameters is not None
+            and (
+                not isinstance(model.supported_parameters, tuple)
+                or any(
+                    not isinstance(parameter, str) or not parameter
+                    for parameter in model.supported_parameters
+                )
+                or len(set(model.supported_parameters))
+                != len(model.supported_parameters)
+            )
+        )
+        for model in observation.models
+    ):
+        raise ValueError("invalid SourceObservation inventory")
+    if len(set(observation.model_ids)) != len(observation.model_ids):
+        raise ValueError("invalid SourceObservation inventory")
+
+    rule = OBSERVATION_TERMINAL_RULES[observation.outcome]
+    if (
+        observation.reachable not in rule.reachable
+        or observation.authenticated not in rule.authenticated
+        or observation.protocol not in rule.protocols
+        or observation.discovery not in rule.discoveries
+        or (rule.models_must_be_empty and observation.model_ids)
+        or (observation.discovery is ObservationDiscovery.FAILED and observation.model_ids)
+    ):
+        raise ValueError("invalid SourceObservation terminal product")
+    return observation
+
+
+def make_source_observation(
+    *,
+    outcome: ObservationOutcome,
+    reachable: bool | None,
+    authenticated: bool | None,
+    protocol: str | None,
+    discovery: ObservationDiscovery,
+    models: Sequence[DiscoveredModel],
+) -> SourceObservation:
+    """Construct an adapter result through the terminal-product authority."""
+
+    return validate_source_observation(
+        SourceObservation(
+            outcome=outcome,
+            reachable=reachable,
+            authenticated=authenticated,
+            protocol=protocol,
+            discovery=discovery,
+            models=tuple(models),
+        )
+    )
 
 
 class RetainedMaterialDisposition(str, Enum):
@@ -137,23 +370,56 @@ class OAuthFlowState:
 class InvokeHandle(Protocol):
     """One in-flight upstream call.
 
-    ``stream`` is None iff the call failed before the first byte (outcome is
-    then immediately awaitable). When ``stream`` is not None, the caller must
-    consume it; ``outcome()`` resolves after the stream ends and reports
-    ``stream_started=True`` — per spec §4.2 no transparent retry then.
+    ``stream`` is None when a streaming failure settles before its first model
+    output (the outcome is then immediately awaitable). When ``stream`` is not
+    None, the settlement owner closes it before reading the outcome. A
+    never-started stream may have no outcome after closing;
+    ``outcome_available`` is the non-blocking guard.
+    For streaming calls, ``stream_started`` becomes true only when the
+    protocol taxonomy observes the first model output; transport metadata and
+    error frames remain pre-output. ``close_stream()`` is idempotent.
+
+    ``observed`` carries what the adapter itself read of this body, and it is
+    the handle's only member that answers before the body is consumed. A
+    streaming adapter has already read the head of the stream to decide there
+    was one — Anthropic reports the input tokens it billed in that head — and it
+    keeps reading as the body is yielded, so its tracker is never behind a
+    consumer's. Without it the facts of a call would exist only in bytes the
+    consumer has already pulled, and everything that can end a turn before the
+    first pull would see a call that never happened. It is None only when the
+    adapter tokenized no stream for this call.
     """
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None: ...
+
+    @property
+    def observed(self) -> ProtocolSSEState | None: ...
+
+    @property
+    def outcome_available(self) -> bool: ...
+
+    async def close_stream(self) -> None: ...
 
     async def outcome(self) -> RawCallOutcome: ...
 
 
 class EngineAdapter(Protocol):
     # --- lifecycle -------------------------------------------------------
-    async def ensure_installed(self) -> EngineStatus: ...
+    async def install(self) -> EngineStatus: ...
+
+    async def recover_installation(self) -> EngineStatus: ...
+
+    async def ensure_installed(
+        self,
+        *,
+        force: bool = False,
+        offline: bool = False,
+    ) -> EngineEnsureResult: ...
 
     async def start(self) -> EngineStatus: ...
+
+    async def stop_runtime(self) -> EngineStatus: ...
 
     async def stop(self) -> None: ...
 
@@ -186,8 +452,40 @@ class EngineAdapter(Protocol):
         remains CLI-owned and has no ref on this seam."""
         ...
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> str:
+        """Copy an API-key credential to a fresh ref with a new target.
+
+        The old ref remains valid until L2 commits the Source mutation and
+        explicitly revokes it. The secret never crosses this adapter boundary,
+        so Base URL replacement can be staged and rolled back transactionally.
+        """
+        ...
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        """Return the credential's actual engine-side refresh capability.
+
+        This is a property of the stored credential, not an inference from
+        vendor, Source kind, or an HTTP status.
+        """
+        ...
+
     async def revoke_credential(self, credential_ref: str) -> None:
         """Release the stored credential (source deletion / key replacement)."""
+        ...
+
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        """Provision an unbound credential for an unsaved observation."""
         ...
 
     async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:
@@ -214,10 +512,31 @@ class EngineAdapter(Protocol):
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> Sequence[str]:
-        """PROBE the upstream for supplyable model ids. Works before any
-        registration (test-and-add flow: provision → discover → persist →
-        sync); does not require or create a source binding."""
+    ) -> Sequence[DiscoveredModel]:
+        """Refresh supplyable models for a saved Source using its stored protocol."""
+        ...
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: Sequence[str],
+    ) -> SourceObservation:
+        """Observe connectivity, authentication, protocol, and inventory.
+
+        ``protocol_order`` either enumerates Auto-detect probes or names one
+        owner-constrained protocol. A returned protocol may be established by
+        a protocol-shaped upstream response, by a shipped API-key vendor pin,
+        or by a concrete `custom` declaration. Schema-validation errors,
+        altered-credential controls and public inventory cannot establish
+        authentication. A shaped success can; a bare status cannot. Auto still
+        requires response-backed proof; order alone never proves a protocol.
+        Explicit unverified API-key saving and completed Hub OAuth admission
+        belong to Source creation, not this non-persisting evidence result.
+        They retain a fixed protocol owner with verification pending and do
+        not turn an unknown/rejected observation into authentication proof.
+        """
         ...
 
     # --- subscription OAuth (channel-specific ownership) ------------------
@@ -239,8 +558,20 @@ class EngineAdapter(Protocol):
         request: Mapping[str, Any],
         stream: bool,
         origin: str,
+        *,
+        on_admitted: Callable[[], None] | None = None,
     ) -> InvokeHandle:
         """``origin`` = requesting agent name ("claude"|"codex"|"opencode"|...).
         Raises ``OriginNotAllowedError`` when the binding's ``allowed_origins``
-        excludes it (backstop; L2 must have filtered already)."""
+        excludes it (backstop; L2 must have filtered already). ``model_id`` is
+        the chosen canonical route target. API-key targets need not be listed;
+        subscriptions retain their existing exact inventory admission.
+        The adapter must keep exact source isolation without inventing inventory.
+        After validating source/origin, acquire the transport lease and call
+        ``on_admitted`` exactly once before any network wait. Callback failure
+        releases the lease without invoking upstream. Transport completion,
+        close, or cancellation releases the lease independently of settlement.
+        Cancellation before handle return raises ``InvokeCancelledError`` when
+        wire facts were observed, so L2 can meter them without inventing failure.
+        """
         ...

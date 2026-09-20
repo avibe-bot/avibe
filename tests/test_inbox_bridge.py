@@ -26,9 +26,11 @@ def test_inbox_bridge_publishes_controller_bridge_status(monkeypatch):
         asyncio.run(inbox_bridge.run_inbox_bridge())
 
     assert inbox_bridge.is_bridge_connected() is False
+    # The internal feed's own handshake is consumed, not relayed: the status
+    # frame beside it is the browser-facing expression of the same fact, and one
+    # fact announced twice made every controller recovery cost two catch-ups.
     assert published == [
         ("workbench.events.bridge.status", {"connected": True}),
-        ("connected", {}),
         ("runs.updated", {"run_id": "run_1", "status": "queued"}),
         ("workbench.events.bridge.status", {"connected": False}),
     ]

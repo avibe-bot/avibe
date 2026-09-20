@@ -17,7 +17,7 @@ import {
 // hint; everything else the neutral surface. Non-live nodes are dimmed by the
 // caller via ``faded``.
 function shellClass(node: AgentGraphNode, selected: boolean): string {
-  if (selected) return 'border-mint/70 bg-mint-soft shadow-[0_0_20px_-6px_rgba(91,255,160,0.55)]';
+  if (selected) return 'border-mint/70 bg-mint-soft shadow-glow-md-mint';
   const tone = statusMeta(node.status).tone;
   if (tone === 'destructive') return 'border-destructive/40 bg-destructive/[0.05]';
   if (node.status === 'active') return 'border-mint/40 bg-surface';
@@ -111,7 +111,7 @@ const StatusGlyph: React.FC<{ node: AgentGraphNode }> = ({ node }) => {
   const meta = statusMeta(node.status);
   if (meta.glyph === 'check') return <Check className="size-3 shrink-0 text-muted" />;
   if (meta.glyph === 'cross') {
-    return <X className={clsx('size-3 shrink-0', meta.tone === 'destructive' ? 'text-destructive' : 'text-muted')} />;
+    return <X className={clsx('size-3 shrink-0', meta.tone === 'destructive' ? 'text-destructive-ink' : 'text-muted')} />;
   }
   return <span className={clsx('size-2 shrink-0 rounded-full', meta.dotClass, node.status === 'active' && 'animate-pulse')} />;
 };

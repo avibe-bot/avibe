@@ -42,6 +42,7 @@ export function bindFrameChord(
   run: () => void,
 ): () => void {
   const onKeyDown = (event: KeyboardEvent) => {
+    if (event.defaultPrevented) return;
     let active: Element | null = null;
     try {
       active = iframe.contentDocument?.activeElement ?? null;

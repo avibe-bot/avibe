@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from core.agent_auth_service import (
     AgentAuthFlow,
     AgentAuthService,
+    BackendLoginInProgressError,
     classify_auth_error,
     verify_opencode_auth_list_output,
 )
@@ -27,6 +29,12 @@ class _IsolatedClaudeConfigDirMixin:
         self._claude_config_dir_tmp = tempfile.TemporaryDirectory()
         self._previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._claude_config_dir_tmp.name) / ".claude")
+        # V2Config writes go through the cross-process transaction, which
+        # resolves config.json from AVIBE_HOME — isolate it per test so
+        # no test touches the developer's real ~/.avibe.
+        self._avibe_home_tmp = tempfile.TemporaryDirectory()
+        self._previous_avibe_home = os.environ.get("AVIBE_HOME")
+        os.environ["AVIBE_HOME"] = self._avibe_home_tmp.name
 
     def tearDown(self):
         if self._previous_claude_config_dir is None:
@@ -34,6 +42,11 @@ class _IsolatedClaudeConfigDirMixin:
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._previous_claude_config_dir
         self._claude_config_dir_tmp.cleanup()
+        if self._previous_avibe_home is None:
+            os.environ.pop("AVIBE_HOME", None)
+        else:
+            os.environ["AVIBE_HOME"] = self._previous_avibe_home
+        self._avibe_home_tmp.cleanup()
         super().tearDown()
 
 
@@ -240,6 +253,164 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             terminal_error="❌ Codex error: 401 Unauthorized",
         )
 
+    async def test_auth_recovery_carries_primary_receipt_into_turn_settlement(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth",
+                "task_execution_id": "run-auth",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth"},
+        ):
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_auth_recovery_does_not_persist_an_undelivered_external_message(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-undelivered",
+                "task_execution_id": "run-auth-undelivered",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-undelivered"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_not_called()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-undelivered",
+                "ack_evidence": None,
+                "delivered": False,
+            },
+        )
+
+    async def test_auth_recovery_keeps_local_persistence_without_a_send_id(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-local",
+            platform="avibe",
+            platform_specific={
+                "turn_token": "turn-auth-local",
+                "task_execution_id": "run-auth-local",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-local"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_called_once()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-local",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_auth_recovery_sends_and_persists_to_delivery_override(self):
+        controller = _StubController()
+        source_client = controller.im_client
+        target_client = _StubIMClient()
+        controller.get_im_client_for_context = lambda context: (
+            target_client if context.platform == "telegram" else source_client
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U-source",
+            channel_id="C-source",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-routed",
+                "task_execution_id": "run-auth-routed",
+                "delivery_override": {
+                    "user_id": "U-target",
+                    "channel_id": "C-target",
+                    "platform": "telegram",
+                    "thread_id": "topic-target",
+                },
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-routed"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(source_client.sent_button_messages, [])
+        self.assertEqual(target_client.sent_button_messages[0][0], "C-target")
+        persisted_context = persist.call_args.args[0]
+        self.assertEqual(
+            (
+                persisted_context.platform,
+                persisted_context.channel_id,
+                persisted_context.thread_id,
+            ),
+            ("telegram", "C-target", "topic-target"),
+        )
+        terminal_call = controller.emit_agent_message.await_args
+        self.assertIs(terminal_call.args[0], context)
+        self.assertTrue(
+            terminal_call.kwargs["output"].metadata["turn_failure_notification"]["delivered"]
+        )
+
     async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
         from config.v2_compat import to_app_config
         from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
@@ -374,7 +545,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             waiter_task=done_task,
             claude_client=_client(501),
         )
-        service._flows[im_flow.flow_key] = im_flow
+        service._flow_registry.put(im_flow, flow_key=im_flow.flow_key)
         service._web_flows["web-flow"] = SimpleNamespace(
             backend="claude",
             claude_client=_client(502),
@@ -403,7 +574,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             waiter_task=done_task,
             claude_client=SimpleNamespace(),
         )
-        service._flows[flow.flow_key] = flow
+        service._flow_registry.put(flow, flow_key=flow.flow_key)
 
         self.assertEqual(service.active_claude_auth_client_pids(), set())
         self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
@@ -425,6 +596,26 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIn("Failed to clear Claude Code settings env", text)
         self.assertEqual(keyboard.buttons[0][0].callback_data, "auth_setup:claude")
         self.assertNotIn("C1:claude", service._flows)
+
+    async def test_start_setup_localizes_native_login_conflict(self):
+        controller = _StubController()
+        controller._get_lang = lambda: "zh"
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        service._start_auth_flow = AsyncMock(
+            side_effect=BackendLoginInProgressError("anthropic", "claude")
+        )
+
+        await service.start_setup(
+            context,
+            backend="claude",
+            force_reset=True,
+            claude_login_method="console",
+        )
+
+        _, text, _keyboard = controller.im_client.sent_button_messages[0]
+        self.assertIn("登录正在进行中", text)
+        self.assertNotIn("native_login_in_progress", text)
 
     async def test_start_claude_control_flow_restores_settings_on_auth_start_failure(self):
         controller = _StubController()
@@ -569,12 +760,51 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
     async def test_resolve_opencode_provider_prefers_override_model(self):
         controller = _StubController()
         controller.get_opencode_overrides = lambda context: ("build", "openai/gpt-5.4", None)
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="anthropic/claude-fixture")
+        )
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
 
         provider = await service._resolve_opencode_provider(context)
 
         self.assertEqual(provider, "openai")
+        controller.resolve_vibe_agent_for_context.assert_not_called()
+
+    async def test_resolve_opencode_provider_inherits_selected_avibe_agent(self):
+        controller = _StubController()
+        controller.get_opencode_overrides = lambda context: (None, None, None)
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="openai/gpt-fixture")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "openai")
+        controller.resolve_vibe_agent_for_context.assert_called_once_with(context, required=False)
+
+    async def test_resolve_opencode_provider_uses_avibe_provider_for_bare_model(self):
+        controller = _StubController()
+        controller.get_opencode_overrides = lambda context: (None, "local-model", None)
+        controller.config.agents.opencode.default_provider = "local-provider"
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="opencode", model="openai/other-model")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "local-provider")
+        controller.resolve_vibe_agent_for_context.assert_not_called()
+
+    async def test_resolve_opencode_provider_does_not_use_other_backends_agent_model(self):
+        controller = _StubController()
+        controller.resolve_vibe_agent_for_context = Mock(
+            return_value=SimpleNamespace(backend="codex", model="other/provider-model")
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        self.assertEqual(await service._resolve_opencode_provider(context), "opencode")
 
     async def test_resolve_opencode_provider_prefers_existing_session_runtime_provider(self):
         controller = _StubController()
@@ -1159,9 +1389,17 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             timeout=service.setup_timeout_seconds,
         )
         cleanup.assert_called()
-        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        # The persisted write goes through the cross-process config
+        # transaction; the live mirror fires only for fields the
+        # transaction decided to change, computed from the lock-fresh
+        # snapshot. The stub claude starts without auth_mode_set, so the
+        # marker mirror applies; auth_mode itself is asserted on the
+        # persisted file (the fresh snapshot already said "oauth").
         self.assertTrue(controller.config.agents.claude.auth_mode_set)
-        self.assertEqual(controller.config.save_calls, 1)
+        from config.v2_config import V2Config as _V2
+
+        self.assertEqual(_V2.load().agents.claude.auth_mode, "oauth")
+        self.assertTrue(_V2.load().agents.claude.auth_mode_set)
         service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(flow.claude_client)
         self.assertIn("login is active again", controller.im_client.sent_messages[0][1].lower())
@@ -1219,6 +1457,42 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertEqual(saved.agents.claude.auth_mode, "oauth")
         self.assertTrue(saved.agents.claude.auth_mode_set)
         self.assertTrue(controller.config.claude.auth_mode_set)
+
+    async def test_persist_backend_auth_mode_runs_config_transaction_off_event_loop(self):
+        controller = _StubController()
+        controller.config.agents.claude = SimpleNamespace(
+            auth_mode="api_key",
+            auth_mode_set=False,
+        )
+        service = AgentAuthService(controller)
+        service._clear_claude_settings_env_for_oauth = AsyncMock()
+
+        fresh_config = SimpleNamespace(
+            agents=SimpleNamespace(
+                claude=SimpleNamespace(auth_mode="api_key", auth_mode_set=False),
+            ),
+        )
+        transaction_thread = None
+
+        def fake_update_config_fields(mutator):
+            nonlocal transaction_thread
+            transaction_thread = threading.current_thread()
+            mutator(fresh_config)
+            return fresh_config
+
+        with patch(
+            "config.v2_config.update_config_fields",
+            side_effect=fake_update_config_fields,
+        ):
+            caller_thread = threading.current_thread()
+            await service._persist_backend_auth_mode("claude", "oauth")
+
+        self.assertIsNotNone(transaction_thread)
+        self.assertIsNot(transaction_thread, caller_thread)
+        self.assertEqual(fresh_config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(fresh_config.agents.claude.auth_mode_set)
+        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(controller.config.agents.claude.auth_mode_set)
 
     async def test_wait_for_claude_completion_reports_settings_cleanup_failure(self):
         controller = _StubController()
@@ -1376,6 +1650,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
     async def test_refresh_backend_runtime_registers_codex_when_enabled_after_startup(self):
         from config.v2_compat import CodexCompatConfig
+        from modules.agents.codex import CodexAgent
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -1391,9 +1666,15 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
 
-        await service._refresh_backend_runtime("codex")
+        with patch.object(
+            CodexAgent,
+            "prepare_model_hub_runtime",
+            new=AsyncMock(side_effect=RuntimeError("catalog export unavailable")),
+        ) as prepare_model_hub_runtime:
+            await service._refresh_backend_runtime("codex")
 
         service._load_backend_runtime_config.assert_called_once_with("codex")
+        prepare_model_hub_runtime.assert_not_awaited()
         controller.agent_service.register.assert_called_once()
         registered = controller.agent_service.agents["codex"]
         self.assertEqual(registered.name, "codex")
@@ -1430,6 +1711,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
     async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):
         from config.v2_compat import CodexCompatConfig
         from modules.agent_router import AgentRouter
+        from modules.agents.codex import CodexAgent
         from modules.agents.service import AgentService
 
         controller = _StubController()
@@ -1443,7 +1725,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 
-        await service._refresh_backend_runtime("codex")
+        with patch.object(
+            CodexAgent,
+            "prepare_model_hub_runtime",
+            new=AsyncMock(return_value=Path("/runtime/codex-hub.json")),
+        ):
+            await service._refresh_backend_runtime("codex")
 
         self.assertEqual(controller.agent_router.global_default, "claude")
         self.assertEqual(controller.agent_router.platform_routes["slack"].default, "claude")
@@ -1774,9 +2061,56 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         self.assertIs(result, server)
         server.ensure_running.assert_awaited_once()
+        self.assertNotIn(
+            "model_hub_overlay_required",
+            get_instance.await_args.kwargs,
+        )
         governor = get_instance.await_args.kwargs["resource_governor"]
         self.assertEqual(governor.mode, "enabled")
         self.assertEqual(governor.config["agent_group_name"], "web-oauth-agents")
+
+    async def test_web_opencode_server_requires_controller_overlay_in_hub_mode(self):
+        from config.v2_config import (
+            AgentsConfig,
+            RuntimeConfig,
+            SlackConfig,
+            V2Config,
+        )
+        from modules.agents.opencode.server import (
+            OpenCodeModelHubOverlayRequiredError,
+            OpenCodeServerManager,
+        )
+
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        v2_config = V2Config(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(),
+            agents=AgentsConfig(),
+            runtime=RuntimeConfig(default_cwd="."),
+        )
+        v2_config.model_hub.agents["opencode"].mode = "hub"
+        server = SimpleNamespace(
+            ensure_running=AsyncMock(
+                side_effect=OpenCodeModelHubOverlayRequiredError(
+                    "controller overlay is not ready"
+                )
+            )
+        )
+
+        with (
+            patch("config.v2_config.V2Config.load", return_value=v2_config),
+            patch.object(
+                OpenCodeServerManager,
+                "get_instance",
+                AsyncMock(return_value=server),
+            ),
+        ):
+            result = await service._opencode_server()
+
+        self.assertIsNone(result)
+        server.ensure_running.assert_awaited_once()
 
     async def test_opencode_agent_refresh_runtime_config_restarts_uncached_adopted_server_on_refresh_miss(self):
         from config.v2_compat import OpenCodeCompatConfig
@@ -1902,13 +2236,23 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         new_config = CodexCompatConfig(enabled=True, binary="/new/codex", extra_args=[])
         agent = CodexAgent.__new__(CodexAgent)
         agent.codex_config = old_config
+        agent._model_hub_catalog = SimpleNamespace(path=Path("/runtime/codex-old.json"), close=Mock())
+        agent._model_hub_catalog_lock = asyncio.Lock()
+        agent._model_hub_catalog_generation = 0
         agent.controller = SimpleNamespace(config=SimpleNamespace(codex=old_config))
         agent.refresh_auth_state = AsyncMock()
 
-        await agent.refresh_runtime_config(new_config)
+        with patch(
+            "vibe.backend_model_catalog.prepare_codex_hub_catalog",
+            side_effect=RuntimeError("catalog export must not run"),
+        ) as prepare_catalog:
+            await agent.refresh_runtime_config(new_config)
 
+        prepare_catalog.assert_not_called()
         self.assertIs(agent.codex_config, new_config)
         self.assertIs(agent.controller.config.codex, new_config)
+        self.assertIsNone(agent._model_hub_catalog)
+        self.assertEqual(agent._model_hub_catalog_generation, 1)
         agent.refresh_auth_state.assert_awaited_once()
 
     async def test_claude_runtime_config_reload_updates_cli_path_before_refresh(self):
@@ -2033,6 +2377,65 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
 
 class ClassifyAuthErrorTests(unittest.TestCase):
+    def test_status_evidence_requires_reset_for_every_backend(self):
+        diagnostics = (
+            "401",
+            "HTTP 401",
+            "HTTP/1.1 401",
+            "HTTP/2 401",
+            "HTTPError: 401",
+            "unexpected status 401",
+            "status code: 401",
+            'response {"status_code": 401}',
+            'response {"statusCode":401}',
+            'response {"status":"401"}',
+            "API Error: 401",
+            "Error code: 401",
+            "401 Client Error for url: https://example.test",
+            "Failed to send message: 401",
+            "Failed to start async prompt: 401",
+        )
+        for backend in ("claude", "codex", "opencode"):
+            for diagnostic in diagnostics:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertTrue(classify_auth_error(backend, diagnostic))
+
+    def test_identifiers_paths_and_numbers_are_not_http_statuses(self):
+        diagnostics = (
+            "Claude Code session not found in current working directory: "
+            "11111111-2222-4016-8444-555555555555 (/Users/example/ai-work)",
+            "Claude Code session not found in current working directory: "
+            "11111111-2222-5016-8444-555555555555 (/Users/example/ai-work)",
+            "session job-401-missing could not resume",
+            "file /tmp/401/session.jsonl not found",
+            "file /tmp/error:401/session.jsonl not found",
+            "connect failed at http://localhost:401",
+            "processed 401 records before failure",
+            "request_id=401",
+            "request_id=ab401cd",
+            "exit code 1401",
+            "API Error: 4016",
+            "status: 401.5",
+            "status: 401-session",
+            "temporary network timeout",
+        )
+        for backend in ("claude", "codex", "opencode"):
+            for diagnostic in diagnostics:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertFalse(classify_auth_error(backend, diagnostic))
+
+    def test_auth_messages_without_http_status_remain_supported(self):
+        diagnostics = {
+            "claude": ("OAuth token expired", "Please login", "logged out"),
+            "codex": ("not logged in", "login required", "authentication failed"),
+            "opencode": ("missing provider credential", "invalid api key", "authentication failed"),
+        }
+        for backend, messages in diagnostics.items():
+            for diagnostic in messages:
+                with self.subTest(backend=backend, diagnostic=diagnostic):
+                    self.assertTrue(classify_auth_error(backend, diagnostic))
+        self.assertFalse(classify_auth_error("unknown", "HTTP 401"))
+
     def test_codex_401_requires_reset(self):
         self.assertTrue(classify_auth_error("codex", "unexpected status 401 Unauthorized"))
 

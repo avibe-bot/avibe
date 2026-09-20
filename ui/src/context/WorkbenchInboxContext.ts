@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useEffect } from 'react';
 
 import type { InboxSession } from './ApiContext';
 
@@ -25,12 +25,31 @@ export interface InboxState {
   refresh: () => Promise<void>;
   loadMore: () => Promise<void>;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
+  /** Refcounted activation for the FEED (see ``useConsumerActivation``). The
+   *  unread map is unconditional — it badges the favicon and the app icon on
+   *  every route — but ``inboxSessions`` is only rendered by the sidebar and the
+   *  Inbox page, so the paged read waits for one of them. Consumers get this for
+   *  free from ``useWorkbenchInbox``. */
+  activateFeed: () => () => void;
 }
 
 export const WorkbenchInboxContext = createContext<InboxState | undefined>(undefined);
 
-export const useWorkbenchInbox = (): InboxState => {
+/** Read the shared Inbox state.
+ *
+ *  Pass ``feed: false`` when the component only reads the unread map (badges,
+ *  a session's own dot) and never renders ``inboxSessions``. That is what keeps
+ *  the 30-row page off routes that show no feed; declaring what you read, rather
+ *  than which route you are on, is what keeps the rule true for a route added
+ *  later. */
+export const useWorkbenchInbox = (options?: { feed?: boolean }): InboxState => {
   const ctx = useContext(WorkbenchInboxContext);
+  const feed = options?.feed ?? true;
+  const activateFeed = ctx?.activateFeed;
+  useEffect(() => {
+    if (!feed || !activateFeed) return;
+    return activateFeed();
+  }, [activateFeed, feed]);
   if (ctx === undefined) {
     throw new Error('useWorkbenchInbox must be used inside <WorkbenchInboxProvider>');
   }

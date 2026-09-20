@@ -1,19 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
-import tempfile
+import re
+import stat
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from config import paths
-from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from config.atomic_io import write_atomic
+from core.command_runner import run_supervised_command
+from vibe.claude_model_catalog import (
+    DEFAULT_CLAUDE_MODEL_ALIASES,
+    get_catalog_path as get_claude_catalog_path,
+    load_catalog_models,
+)
 from vibe.codex_config import get_codex_home
+
+if TYPE_CHECKING:
+    from storage.lock import MigrationFileLock
+
+
+logger = logging.getLogger(__name__)
 
 
 REMOTE_CATALOG_URL_ENV = "AVIBE_BACKEND_MODEL_CATALOG_URL"
@@ -24,13 +43,33 @@ REMOTE_CATALOG_REVALIDATE_SECONDS = 5 * 60
 REMOTE_CATALOG_FAILURE_TTL_SECONDS = 10 * 60
 REMOTE_CATALOG_TIMEOUT_SECONDS = 3.0
 REMOTE_CATALOG_USER_AGENT = "avibe/backend-model-catalog"
+REMOTE_CATALOG_CACHE_VERSION = 2
+CODEX_HUB_CATALOG_TIMEOUT_SECONDS = 15.0
+CODEX_HUB_CATALOG_MAX_BYTES = 8 * 1024 * 1024
+CODEX_HUB_CATALOG_HISTORY_LIMIT = 1
+_CODEX_HUB_CATALOG_NAME = re.compile(r"standard-responses-[0-9a-f]{16}\.json")
 
 _HIDDEN_VISIBILITIES = {"hide", "hidden"}
+_VISIBLE_VISIBILITIES = {"visible", "list"}
 _SUPPORTED_BACKENDS = {"claude", "codex"}
-_SUPPORTED_VISIBILITIES = {"visible", "list", *_HIDDEN_VISIBILITIES}
+_SUPPORTED_VISIBILITIES = {*_VISIBLE_VISIBILITIES, *_HIDDEN_VISIBILITIES}
 _DEFAULT_REASONING_EFFORTS = {
     "claude": ["low", "medium", "high"],
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
+}
+REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
+PROTOCOL_REASONING_EFFORT_DEFAULTS: Final[dict[str, tuple[str, ...]]] = {
+    "openai_responses": ("minimal", "low", "medium", "high", "xhigh"),
+    "openai_chat": ("minimal", "low", "medium", "high", "xhigh"),
+    "anthropic": ("low", "medium", "high", "xhigh", "max"),
 }
 _CODEX_BUILT_IN_MODELS = [
     "gpt-5.5",
@@ -57,9 +96,35 @@ _REASONING_LABELS = {
     "ultra": "Ultra",
 }
 
+# A custom model needs Codex's agent/runtime shape, but it must not inherit
+# provider metadata from whichever native model happens to be first.
+_CODEX_CUSTOM_SCAFFOLD_KEYS = (
+    "shell_type",
+    "model_messages",
+    "base_instructions",
+    "include_skills_usage_instructions",
+    "include_plugin_usage_instructions",
+    "include_apps_usage_instructions",
+    "apply_patch_tool_type",
+    "truncation_policy",
+    "effective_context_window_percent",
+    "node_repl_auto_review_required",
+    "node_repl_disabled",
+    "use_responses_lite",
+    "multi_agent_version",
+    "tool_mode",
+    "prefer_websockets",
+)
+_CODEX_CUSTOM_REQUIRED_DEFAULTS: dict[str, Any] = {
+    "support_verbosity": False,
+    "experimental_supported_tools": [],
+    "supports_parallel_tool_calls": False,
+}
+
 _REMOTE_LOCK = threading.Lock()
 _REMOTE_REFRESH_IN_FLIGHT = False
-_REMOTE_MEMORY_CACHE: dict[str, Any] = {}
+_REMOTE_MEMORY_CACHE: dict[str, dict[str, Any]] = {}
+_REMOTE_REFRESH_COMPLETED: Callable[[], None] | None = None
 
 
 def get_bundled_catalog_path(repo_root: Path | None = None) -> Path:
@@ -71,20 +136,455 @@ def get_cached_catalog_path() -> Path:
     return paths.get_state_dir() / "backend_model_catalog.json"
 
 
+def _codex_hub_catalog_path(catalog: bytes) -> Path:
+    digest = hashlib.sha256(catalog).hexdigest()[:16]
+    return paths.get_runtime_dir() / "model-hub" / "codex" / f"standard-responses-{digest}.json"
+
+
+class CodexHubCatalog:
+    """One owner's pin on an immutable catalog generation.
+
+    Caches, pending launches and transports acquire independent pins and close
+    them at their lifecycle boundary. Finalization is only an abandoned-owner
+    fallback: exception tracebacks must not delay ordinary release.
+    """
+
+    def __init__(self, path: Path, descriptor: int) -> None:
+        self.path = path
+        self.descriptor = descriptor
+        self._release = weakref.finalize(self, _release_codex_hub_catalog, path, descriptor)
+
+    def retain(self) -> CodexHubCatalog:
+        """Acquire an independent pin before giving up this owner's pin."""
+        if not self._release.alive:
+            raise RuntimeError("Cannot retain a released Codex catalog")
+        with _codex_hub_catalog_lock(self.path.parent):
+            return _pin_codex_hub_catalog(self.path)
+
+    def close(self) -> None:
+        self._release()
+
+    def __enter__(self) -> CodexHubCatalog:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    @contextmanager
+    def inherited_subprocess_kwargs(self):
+        """Keep the file pinned in the child even if its Avibe parent exits."""
+        if not self._release.alive:
+            raise RuntimeError("Cannot launch with a released Codex catalog")
+        if os.name != "nt":
+            yield {"pass_fds": (self.descriptor,)}
+            return
+        import msvcrt
+
+        # Each spawn gets its own temporary inheritable handle, so simultaneous
+        # launches cannot reset one another's inheritance flags.
+        descriptor = os.dup(self.descriptor)
+        try:
+            os.set_inheritable(descriptor, True)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {"handle_list": [msvcrt.get_osfhandle(descriptor)]}
+            yield {"startupinfo": startupinfo, "close_fds": True}
+        finally:
+            os.close(descriptor)
+
+
+def _codex_hub_catalog_lock(directory: Path, *, timeout_seconds: float = 30.0) -> MigrationFileLock:
+    # Lightweight catalog/handler imports must not initialize SQLite storage.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(directory / ".catalog.lock", timeout_seconds=timeout_seconds)
+
+
+def _open_codex_hub_catalog(path: Path) -> int:
+    """Open only an ordinary file without following a candidate symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        named = path.lstat()
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise OSError(f"Codex catalog is not an exclusive regular file: {path}")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _pin_codex_hub_catalog(path: Path) -> CodexHubCatalog:
+    descriptor = _open_codex_hub_catalog(path)
+    try:
+        if os.name != "nt":
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return CodexHubCatalog(path, descriptor)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _prune_codex_hub_catalogs_locked(directory: Path) -> None:
+    """Keep every pinned generation and at most one unpinned history file.
+
+    Caller holds the publication lock. Name order only chooses the spare;
+    neither timestamps nor age establish that a generation is unused.
+    """
+    spare = 0
+    for path in sorted(directory.iterdir()):
+        if not _CODEX_HUB_CATALOG_NAME.fullmatch(path.name):
+            continue
+        descriptor = None
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode) or path.lstat().st_nlink != 1:
+                continue
+            descriptor = _open_codex_hub_catalog(path)
+            if os.name != "nt":
+                import fcntl
+
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+            # On Windows the deletion itself is the non-blocking pin probe:
+            # any reader's open handle denies deletion. Close our probe first,
+            # while the publication lock still excludes a new reader.
+            if os.name == "nt":
+                os.close(descriptor)
+                descriptor = None
+            if spare < CODEX_HUB_CATALOG_HISTORY_LIMIT:
+                spare += 1
+                continue
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 32:
+                # ERROR_SHARING_VIOLATION: a cache/child still owns its pin.
+                continue
+            logger.warning("Could not reclaim Codex Model Hub catalog %s", path, exc_info=True)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+
+def prune_codex_hub_catalogs(directory: Path) -> None:
+    """Best-effort reclamation at publication and reference-release boundaries."""
+    from storage.lock import MigrationLockTimeout
+
+    try:
+        if not directory.is_dir():
+            return
+        with _codex_hub_catalog_lock(directory, timeout_seconds=0):
+            _prune_codex_hub_catalogs_locked(directory)
+    except MigrationLockTimeout:
+        # A publisher/cleaner already owns this directory. Its sweep, or the
+        # next lifecycle boundary, retries reclamation.
+        logger.debug("Codex catalog cleanup deferred while publication is in progress")
+    except OSError:
+        logger.warning("Could not clean Codex Model Hub catalogs in %s", directory, exc_info=True)
+
+
+def _release_codex_hub_catalog(path: Path, descriptor: int) -> None:
+    # Close, do not LOCK_UN: a spawned app-server inherits the same open file
+    # description and must keep its lock even if the Avibe parent goes away.
+    os.close(descriptor)
+    prune_codex_hub_catalogs(path.parent)
+
+
+def _codex_hub_catalog_bytes(
+    raw_catalog: bytes,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
+) -> bytes:
+    """Project a complete Codex catalog onto generic Responses semantics."""
+
+    try:
+        payload = json.loads(raw_catalog)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError("Codex returned an invalid bundled model catalog") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        raise ValueError("Codex bundled model catalog has no models list")
+    models = payload["models"]
+    if not models:
+        raise ValueError("Codex bundled model catalog is empty")
+
+    provider_private_defaults: dict[str, object] = {
+        "use_responses_lite": False,
+        "multi_agent_version": None,
+        "tool_mode": None,
+        "prefer_websockets": False,
+    }
+    native_rows: list[dict[str, Any]] = []
+    for model in models:
+        if not isinstance(model, dict) or not isinstance(model.get("slug"), str):
+            raise ValueError("Codex bundled model catalog contains an invalid model")
+        row = dict(model)
+        for key, value in provider_private_defaults.items():
+            if key in row:
+                row[key] = value
+        native_rows.append(row)
+    if configured_models is None:
+        projected = native_rows
+    else:
+        native_by_slug = {row["slug"]: row for row in native_rows}
+        template = native_rows[0]
+        projected = []
+        for priority, configured in enumerate(configured_models, start=1):
+            model_id = configured.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                raise ValueError("Configured Codex catalog contains an invalid model")
+            native_row = native_by_slug.get(model_id)
+            if native_row is not None:
+                row = dict(native_row)
+            else:
+                row = {
+                    key: template[key]
+                    for key in _CODEX_CUSTOM_SCAFFOLD_KEYS
+                    if key in template
+                }
+                # Required in some Codex catalog versions, with no matching
+                # user-authored BackendModel field. Codex 0.146.0 also requires
+                # supports_parallel_tool_calls.
+                row.update(_CODEX_CUSTOM_REQUIRED_DEFAULTS)
+            row["slug"] = model_id
+            display_name = configured.get("display_name")
+            row["display_name"] = (
+                display_name
+                if isinstance(display_name, str) and display_name
+                else model_id
+            )
+            row["priority"] = priority
+            row["visibility"] = "list"
+            row["supported_in_api"] = True
+            context_window = configured.get("context_window")
+            if (
+                isinstance(context_window, int)
+                and not isinstance(context_window, bool)
+                and context_window > 0
+            ):
+                row["context_window"] = context_window
+                # This saved planning value is not an independently known hard
+                # ceiling. Codex clamps explicit model_context_window overrides
+                # to max_context_window, so duplicating it here silently defeats
+                # a user's larger native setting.
+                row.pop("max_context_window", None)
+                # Codex derives this from the active window when omitted; a
+                # bundled value belongs to the native window we just replaced.
+                row.pop("auto_compact_token_limit", None)
+            input_modalities = configured.get("input_modalities")
+            # Empty lists in released rows mean "not overridden". Codex's
+            # omitted-modality default accepts text and images; narrowing that
+            # to text would discard supplied images merely for lack of metadata.
+            # Original-resolution detail is a separate provider capability.
+            if native_row is None:
+                row["supports_image_detail_original"] = False
+            if isinstance(input_modalities, list) and input_modalities:
+                supported_modalities = [
+                    modality
+                    for modality in input_modalities
+                    if modality in {"text", "image"}
+                ]
+                row["input_modalities"] = supported_modalities or ["text"]
+                row["supports_image_detail_original"] = "image" in supported_modalities
+            efforts = configured.get("reasoning_efforts")
+            supports_reasoning = configured.get("supports_reasoning")
+            if supports_reasoning is False:
+                settled_efforts = ["none"]
+            elif isinstance(efforts, list) and efforts:
+                settled_efforts = [
+                    effort
+                    for effort in efforts
+                    if isinstance(effort, str) and effort
+                ]
+            elif native_row is None:
+                # The list is required by Codex's schema, but an unknown model
+                # has neither an advertised ladder nor a default effort. Codex
+                # can still carry the effort explicitly supplied with a turn.
+                settled_efforts = []
+            else:
+                settled_efforts = None
+            if settled_efforts is not None:
+                native_default = row.get("default_reasoning_level")
+                if not settled_efforts:
+                    row.pop("default_reasoning_level", None)
+                elif not (
+                    isinstance(native_default, str)
+                    and native_default in settled_efforts
+                ):
+                    native_default = (
+                        "medium"
+                        if "medium" in settled_efforts
+                        else settled_efforts[0]
+                    )
+                if settled_efforts:
+                    row["default_reasoning_level"] = native_default
+                row["supported_reasoning_levels"] = [
+                    {
+                        "effort": effort,
+                        "description": (
+                            _REASONING_LABELS.get(effort)
+                            or effort.replace("_", " ").title()
+                        ),
+                    }
+                    for effort in settled_efforts
+                ]
+            for key, value in provider_private_defaults.items():
+                if key in row:
+                    row[key] = value
+            projected.append(row)
+    payload["models"] = projected
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+
+
+def _publish_codex_hub_catalog(
+    raw_catalog: bytes,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
+) -> CodexHubCatalog:
+    catalog = _codex_hub_catalog_bytes(raw_catalog, configured_models)
+    path = _codex_hub_catalog_path(catalog)
+    with _codex_hub_catalog_lock(path.parent):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            write_atomic(path, catalog)
+        pinned = _pin_codex_hub_catalog(path)
+        try:
+            if os.read(pinned.descriptor, len(catalog) + 1) != catalog:
+                raise ValueError("Codex catalog digest path contains different bytes")
+        except BaseException:
+            pinned.close()
+            raise
+        try:
+            _prune_codex_hub_catalogs_locked(path.parent)
+        except OSError:
+            logger.warning("Could not clean Codex Model Hub catalogs in %s", path.parent, exc_info=True)
+        return pinned
+
+
+def _export_codex_bundled_catalog(
+    binary: str,
+    base_env: dict[str, str] | None = None,
+) -> bytes:
+    from vibe.upgrade import get_safe_cwd
+
+    env = dict(base_env or {})
+    removed_env = (
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_BASE",
+        "CODEX_API_KEY",
+        "AVIBE_MODEL_HUB_TOKEN",
+    )
+    result = asyncio.run(
+        run_supervised_command(
+            command=[
+                binary,
+                "debug",
+                "models",
+                "--bundled",
+                "-c",
+                "model_catalog_json=null",
+            ],
+            cwd=get_safe_cwd(),
+            timeout_seconds=CODEX_HUB_CATALOG_TIMEOUT_SECONDS,
+            label="Codex model catalog export",
+            max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
+            extra_env=env,
+            remove_env=removed_env,
+            discard_stderr=True,
+        )
+    )
+    if result.timed_out:
+        raise RuntimeError("Codex bundled model catalog timed out")
+    if result.stdout_truncated:
+        raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
+    if result.exit_code != 0:
+        raise RuntimeError("Codex could not export its bundled model catalog")
+    return result.stdout.encode()
+
+
+def prepare_codex_hub_catalog(
+    binary: str,
+    base_env: dict[str, str] | None = None,
+    configured_models: Sequence[Mapping[str, Any]] | None = None,
+) -> CodexHubCatalog:
+    """Prepare the exact binary's catalog immediately before a Hub launch."""
+
+    return _publish_codex_hub_catalog(
+        _export_codex_bundled_catalog(binary, base_env),
+        configured_models,
+    )
+
+
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
     return _read_catalog(path or get_bundled_catalog_path()) or {}
 
 
-def load_cached_remote_catalog(*, schedule_refresh: bool = True) -> dict[str, Any]:
-    cached = _cached_remote_payload()
-    if schedule_refresh and _remote_cache_stale(cached):
+def bundled_catalog_reasoning_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
+    """Index bundled reasoning-effort rows without changing their declarations."""
+
+    efforts_by_model: dict[str, tuple[str, ...]] = {}
+    backends = load_bundled_catalog().get("backends")
+    if not isinstance(backends, dict):
+        return MappingProxyType(efforts_by_model)
+    for backend in backends.values():
+        models = backend.get("models") if isinstance(backend, dict) else None
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            model_id = model.get("id")
+            efforts = model.get("reasoning_efforts")
+            if (
+                isinstance(model_id, str)
+                and model_id not in efforts_by_model
+                and isinstance(efforts, list)
+            ):
+                efforts_by_model[model_id] = tuple(efforts)
+    return MappingProxyType(efforts_by_model)
+
+
+def bundled_catalog_reasoning_efforts_for_model(
+    model_id: str,
+) -> tuple[str, ...] | None:
+    """Return one bundled catalog row's exact declared effort list."""
+
+    return bundled_catalog_reasoning_efforts_by_model().get(model_id)
+
+
+def load_cached_remote_catalog(
+    *,
+    schedule_refresh: bool = True,
+    source_key: str | None = None,
+) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
+    cached = _cached_remote_payload(source_key=current_source_key)
+    if schedule_refresh and _remote_cache_stale(
+        cached,
+        source_key=current_source_key,
+    ):
         schedule_remote_catalog_refresh()
     catalog = cached.get("catalog")
     return catalog if isinstance(catalog, dict) else {}
 
 
-def remote_catalog_token() -> tuple[float | None, float | None]:
-    payload = _cached_remote_payload()
+def remote_catalog_token(
+    *,
+    source_key: str | None = None,
+) -> tuple[float | None, float | None]:
+    payload = _cached_remote_payload(source_key=source_key)
     fetched_at = payload.get("fetched_at")
     failed_at = payload.get("failed_at")
     return (
@@ -93,10 +593,24 @@ def remote_catalog_token() -> tuple[float | None, float | None]:
     )
 
 
-def remote_catalog_refresh_pending(since: tuple[float | None, float | None]) -> bool:
+def remote_catalog_refresh_pending(
+    since: tuple[float | None, float | None],
+    *,
+    source_key: str | None = None,
+) -> bool:
     with _REMOTE_LOCK:
         refresh_in_flight = _REMOTE_REFRESH_IN_FLIGHT
-    return refresh_in_flight or remote_catalog_token() != since
+    return refresh_in_flight or remote_catalog_token(source_key=source_key) != since
+
+
+def set_remote_catalog_refresh_completed(
+    callback: Callable[[], None] | None,
+) -> None:
+    """Set the controller-owned completion signal for this process."""
+
+    global _REMOTE_REFRESH_COMPLETED
+    with _REMOTE_LOCK:
+        _REMOTE_REFRESH_COMPLETED = callback
 
 
 def schedule_remote_catalog_refresh() -> bool:
@@ -107,8 +621,11 @@ def schedule_remote_catalog_refresh() -> bool:
             return False
         _REMOTE_REFRESH_IN_FLIGHT = True
 
+    request_url = _remote_catalog_url()
+    source_key = _remote_catalog_source_key(request_url)
     thread = threading.Thread(
         target=_refresh_remote_catalog_worker,
+        args=(request_url, source_key),
         name="avibe-model-catalog-refresh",
         daemon=True,
     )
@@ -117,14 +634,13 @@ def schedule_remote_catalog_refresh() -> bool:
 
 
 def refresh_remote_catalog_now(url: str | None = None) -> dict[str, Any]:
-    previous = _cached_remote_payload()
     request_url = _remote_catalog_url(url)
     source_key = _remote_catalog_source_key(request_url)
-    same_source = previous.get("source_key") == source_key
+    previous = _cached_remote_payload(source_key=source_key)
     catalog, validators = _fetch_remote_catalog_response(
         url=request_url,
-        etag=previous.get("etag") if same_source else None,
-        last_modified=previous.get("last_modified") if same_source else None,
+        etag=previous.get("etag"),
+        last_modified=previous.get("last_modified"),
     )
     now = time.time()
     not_modified = catalog is None
@@ -149,7 +665,7 @@ def refresh_remote_catalog_now(url: str | None = None) -> dict[str, Any]:
             value = previous.get(key)
         if isinstance(value, str) and value:
             payload[key] = value
-    _write_cached_remote_payload(payload)
+    _write_cached_remote_payload(payload, source_key=source_key)
     return catalog
 
 
@@ -228,8 +744,12 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
     if backend_key not in _SUPPORTED_BACKENDS:
         return {"ok": False, "backend": backend_key, "error": f"unsupported backend '{backend}'"}
 
-    refresh_token = remote_catalog_token()
-    remote_catalog = load_cached_remote_catalog(schedule_refresh=schedule_refresh)
+    remote_source_key = _remote_catalog_source_key(_remote_catalog_url())
+    refresh_token = remote_catalog_token(source_key=remote_source_key)
+    remote_catalog = load_cached_remote_catalog(
+        schedule_refresh=schedule_refresh,
+        source_key=remote_source_key,
+    )
     bundled_catalog = load_bundled_catalog()
 
     if backend_key == "claude":
@@ -238,11 +758,11 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
     else:
         local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
-        blocked = {
-            entry["id"]
-            for entry in [*local_catalog, *remote_entries]
-            if _model_hidden(entry)
-        }
+        blocked = _codex_blocked_model_ids(
+            remote_entries,
+            local_catalog,
+            bundled_catalog,
+        )
         sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
 
     merged = merge_model_sources(sources, blocked_model_ids=blocked)
@@ -258,7 +778,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         efforts = entry.get("reasoning_efforts") or default_efforts
         reasoning_options[entry["id"]] = _reasoning_option_items(efforts)
 
-    cached_payload = _cached_remote_payload()
+    cached_payload = _cached_remote_payload(source_key=remote_source_key)
     notes = []
     error = cached_payload.get("error")
     if isinstance(error, str) and error:
@@ -274,8 +794,121 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         "source": " + ".join(name for name, entries in sources if entries),
         "live": False,
         "notes": notes or None,
-        "catalog_refresh_pending": remote_catalog_refresh_pending(refresh_token),
+        "catalog_refresh_pending": remote_catalog_refresh_pending(
+            refresh_token,
+            source_key=remote_source_key,
+        ),
     }
+
+
+def backend_builtin_models(
+    backend: str,
+    *,
+    schedule_refresh: bool = True,
+) -> list[dict[str, Any]]:
+    """Return the backend-owned model snapshot used by Model Hub catalogs."""
+
+    return backend_builtin_snapshot(
+        backend,
+        schedule_refresh=schedule_refresh,
+    )["models"]
+
+
+def backend_builtin_snapshot(
+    backend: str,
+    *,
+    cli_installed: bool = False,
+    schedule_refresh: bool = True,
+) -> dict[str, Any]:
+    """Read every built-in source once and report whether the baseline is complete."""
+
+    backend_key = (backend or "").strip().lower()
+    if backend_key == "opencode":
+        return _versioned_builtin_snapshot(complete=True, models=[])
+    if backend_key not in _SUPPORTED_BACKENDS:
+        return _versioned_builtin_snapshot(complete=False, models=[])
+
+    remote_source_key = _remote_catalog_source_key(_remote_catalog_url())
+    cached_remote = _read_cached_remote_payload(
+        get_cached_catalog_path(),
+        source_key=remote_source_key,
+    )
+    if schedule_refresh and _remote_cache_stale(
+        cached_remote,
+        source_key=remote_source_key,
+    ):
+        schedule_remote_catalog_refresh()
+    remote_catalog = cached_remote.get("catalog")
+    remote_complete = (
+        cached_remote.get("source_key") == remote_source_key
+        and isinstance(remote_catalog, dict)
+    )
+    if not remote_complete:
+        remote_catalog = {}
+
+    bundled_catalog = _read_complete_catalog(get_bundled_catalog_path())
+    bundled_complete = isinstance(bundled_catalog, dict)
+    if not bundled_complete:
+        bundled_catalog = {}
+    if backend_key == "claude":
+        claude_catalog_present = get_claude_catalog_path().is_file()
+        local_models = load_catalog_models()
+        local_complete = not cli_installed or claude_catalog_present
+        sources = _claude_sources(
+            remote_catalog,
+            bundled_catalog,
+            local_models=local_models,
+        )
+        blocked: set[str] = set()
+    else:
+        local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
+        local_complete = not cli_installed or local_catalog_read
+        remote_entries = backend_model_entries("codex", remote_catalog)
+        blocked = _codex_blocked_model_ids(
+            remote_entries,
+            local_catalog,
+            bundled_catalog,
+        )
+        sources = _codex_sources(remote_entries, local_catalog, bundled_catalog)
+
+    merged = merge_model_sources(sources, blocked_model_ids=blocked)
+    return _versioned_builtin_snapshot(
+        complete=bundled_complete and remote_complete and local_complete,
+        models=[
+            {
+                "id": entry["id"],
+                "display_name": (
+                    entry.get("label")
+                    if isinstance(entry.get("label"), str)
+                    and entry["label"] != entry["id"]
+                    else None
+                ),
+                "reasoning_efforts": list(
+                    entry.get("reasoning_efforts")
+                    or _DEFAULT_REASONING_EFFORTS[backend_key]
+                ),
+            }
+            for entry in merged
+            if not (backend_key == "claude" and entry["id"] == "default")
+        ],
+    )
+
+
+def _versioned_builtin_snapshot(
+    *,
+    complete: bool,
+    models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    content = {"complete": complete, "models": models}
+    generation = hashlib.sha256(
+        json.dumps(
+            content,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return {**content, "generation": generation}
 
 
 def catalog_reasoning_efforts_for_model(backend: str, model: str | None) -> list[str] | None:
@@ -337,11 +970,16 @@ def merge_model_sources(
 def _claude_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
+    *,
+    local_models: Sequence[str] | None = None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     from modules.agents.opencode.utils import format_claude_model_label
 
     legacy_entries = []
-    for model in [*load_catalog_models(), *DEFAULT_CLAUDE_MODEL_ALIASES]:
+    for model in [
+        *(local_models if local_models is not None else load_catalog_models()),
+        *DEFAULT_CLAUDE_MODEL_ALIASES,
+    ]:
         entry = {
             "id": model,
             "reasoning_efforts": _legacy_claude_reasoning_efforts(model),
@@ -354,7 +992,6 @@ def _claude_sources(
         ("remote", backend_model_entries("claude", remote_catalog)),
         ("bundled", backend_model_entries("claude", bundled_catalog)),
         ("legacy", legacy_entries),
-        ("config", _read_claude_settings_models()),
     ]
 
 
@@ -381,7 +1018,6 @@ def _codex_sources(
         ("bundled", _overlay_local_reasoning_efforts(bundled_entries, local_by_id)),
         ("local", visible_local),
         ("legacy", built_in),
-        ("config", _read_codex_config_models()),
     ]
 
 
@@ -399,63 +1035,21 @@ def _overlay_local_reasoning_efforts(
     return overlaid
 
 
-def _read_claude_settings_models() -> list[dict[str, Any]]:
-    settings_path = Path.home() / ".claude" / "settings.json"
-    try:
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    values = [payload.get("model")]
-    env = payload.get("env")
-    if isinstance(env, dict):
-        values.extend((env.get("ANTHROPIC_MODEL"), env.get("ANTHROPIC_SMALL_FAST_MODEL")))
-    return [{"id": value.strip()} for value in values if isinstance(value, str) and value.strip()]
-
-
 def _read_codex_models_cache() -> list[dict[str, Any]]:
+    return _read_codex_models_cache_with_status()[0]
+
+
+def _read_codex_models_cache_with_status() -> tuple[list[dict[str, Any]], bool]:
     cache_path = get_codex_home() / "models_cache.json"
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return []
+        return [], False
     raw_models = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(raw_models, list):
-        return []
+        return [], False
     entries = [_normalize_model_entry(item) for item in raw_models]
-    return [entry for entry in entries if entry]
-
-
-def _read_codex_config_models() -> list[dict[str, Any]]:
-    config_path = get_codex_home() / "config.toml"
-    try:
-        payload = _parse_toml(config_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    values = [payload.get("model")]
-    notice = payload.get("notice")
-    migrations = notice.get("model_migrations") if isinstance(notice, dict) else None
-    if isinstance(migrations, dict):
-        for source, target in migrations.items():
-            values.extend((source, target))
-    return [
-        {"id": value.strip(), "reasoning_efforts": _DEFAULT_REASONING_EFFORTS["codex"]}
-        for value in values
-        if isinstance(value, str) and value.strip()
-    ]
-
-
-def _parse_toml(raw: str) -> dict[str, Any]:
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-        import tomli as tomllib
-
-    payload = tomllib.loads(raw)
-    return payload if isinstance(payload, dict) else {}
+    return [entry for entry in entries if entry], True
 
 
 def _legacy_claude_reasoning_efforts(model: str) -> list[str]:
@@ -480,6 +1074,31 @@ def _model_hidden(entry: dict[str, Any]) -> bool:
     return isinstance(visibility, str) and visibility.strip().lower() in _HIDDEN_VISIBILITIES
 
 
+def _model_explicitly_visible(entry: dict[str, Any]) -> bool:
+    visibility = entry.get("visibility")
+    return isinstance(visibility, str) and visibility.strip().lower() in _VISIBLE_VISIBILITIES
+
+
+def _codex_blocked_model_ids(
+    remote_entries: Sequence[dict[str, Any]],
+    local_catalog: Sequence[dict[str, Any]],
+    bundled_catalog: dict[str, Any],
+) -> set[str]:
+    bundled_entries = backend_model_entries("codex", bundled_catalog)
+    explicit_catalog_models = {
+        entry["id"]
+        for entry in [*remote_entries, *bundled_entries]
+        if _model_explicitly_visible(entry)
+    }
+    return {
+        entry["id"] for entry in remote_entries if _model_hidden(entry)
+    } | {
+        entry["id"]
+        for entry in local_catalog
+        if _model_hidden(entry) and entry["id"] not in explicit_catalog_models
+    }
+
+
 def _ordered_entries(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     indexed = []
     for index, entry in enumerate(entries):
@@ -491,19 +1110,34 @@ def _ordered_entries(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return [entry for _, _, entry in sorted(indexed, key=lambda value: (value[0], value[1]))]
 
 
-def _cached_remote_payload() -> dict[str, Any]:
+def _cached_remote_payload(*, source_key: str | None = None) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
     with _REMOTE_LOCK:
-        if _REMOTE_MEMORY_CACHE:
-            return dict(_REMOTE_MEMORY_CACHE)
+        cached = _REMOTE_MEMORY_CACHE.get(current_source_key)
+        if isinstance(cached, dict):
+            return dict(cached)
 
-    payload = _read_cached_remote_payload(get_cached_catalog_path())
+    payload = _read_cached_remote_payload(
+        get_cached_catalog_path(),
+        source_key=current_source_key,
+    )
     with _REMOTE_LOCK:
-        _REMOTE_MEMORY_CACHE.clear()
-        _REMOTE_MEMORY_CACHE.update(payload)
+        _REMOTE_MEMORY_CACHE[current_source_key] = dict(payload)
     return payload
 
 
-def _remote_cache_stale(payload: dict[str, Any]) -> bool:
+def _remote_cache_stale(
+    payload: dict[str, Any],
+    *,
+    source_key: str | None = None,
+) -> bool:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
+    if payload.get("source_key") != current_source_key:
+        return True
     fetched_at = payload.get("fetched_at")
     checked_at = payload.get("checked_at")
     last_success_at = checked_at if isinstance(checked_at, (int, float)) else fetched_at
@@ -517,16 +1151,22 @@ def _remote_cache_stale(payload: dict[str, Any]) -> bool:
     return time.time() - float(last_success_at) >= REMOTE_CATALOG_REVALIDATE_SECONDS
 
 
-def _refresh_remote_catalog_worker() -> None:
+def _refresh_remote_catalog_worker(
+    request_url: str | None = None,
+    source_key: str | None = None,
+) -> None:
     global _REMOTE_REFRESH_IN_FLIGHT
+    request_url = request_url or _remote_catalog_url()
+    source_key = source_key or _remote_catalog_source_key(request_url)
     try:
-        refresh_remote_catalog_now()
+        refresh_remote_catalog_now(request_url)
     except Exception as exc:
-        previous = _cached_remote_payload()
+        previous = _cached_remote_payload(source_key=source_key)
         payload = {
             "failed_at": time.time(),
             "catalog": previous.get("catalog"),
             "error": str(exc),
+            "source_key": source_key,
         }
         if isinstance(previous.get("fetched_at"), (int, float)):
             payload["fetched_at"] = previous["fetched_at"]
@@ -536,13 +1176,19 @@ def _refresh_remote_catalog_worker() -> None:
             value = previous.get(key)
             if isinstance(value, str) and value:
                 payload[key] = value
-        source_key = previous.get("source_key")
-        if isinstance(source_key, str) and source_key:
-            payload["source_key"] = source_key
-        _write_cached_remote_payload(payload)
+        _write_cached_remote_payload(payload, source_key=source_key)
     finally:
         with _REMOTE_LOCK:
             _REMOTE_REFRESH_IN_FLIGHT = False
+            completed = _REMOTE_REFRESH_COMPLETED
+        if completed is not None:
+            try:
+                completed()
+            except Exception:
+                logger.warning(
+                    "Backend model catalog refresh completion callback failed",
+                    exc_info=True,
+                )
 
 
 def _read_catalog(path: Path) -> dict[str, Any] | None:
@@ -553,15 +1199,29 @@ def _read_catalog(path: Path) -> dict[str, Any] | None:
     return _normalize_catalog(payload)
 
 
-def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
+def _read_complete_catalog(path: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-        return {}
+        return _normalize_catalog(payload, strict=True)
+    except (
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ):
+        return None
+
+
+def _normalize_remote_cache_record(
+    payload: object,
+    *,
+    source_key: str,
+) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
 
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"source_key": source_key}
     catalog_valid = False
     raw_catalog = payload.get("catalog")
     if isinstance(raw_catalog, dict):
@@ -575,7 +1235,7 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
         if isinstance(value, (int, float)) and (key not in {"fetched_at", "checked_at"} or catalog_valid):
             normalized[key] = value
     if catalog_valid:
-        for key in ("etag", "last_modified", "source_key"):
+        for key in ("etag", "last_modified"):
             value = payload.get(key)
             if isinstance(value, str) and value:
                 normalized[key] = value
@@ -585,20 +1245,75 @@ def _read_cached_remote_payload(path: Path) -> dict[str, Any]:
     return normalized
 
 
-def _write_cached_remote_payload(payload: dict[str, Any]) -> None:
-    cache_path = get_cached_catalog_path()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{cache_path.name}.", suffix=".tmp", dir=str(cache_path.parent))
+def _read_remote_cache_file(path: Path) -> dict[str, Any]:
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        Path(tmp_name).replace(cache_path)
-    finally:
-        Path(tmp_name).unlink(missing_ok=True)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_cached_remote_payload(
+    path: Path,
+    *,
+    source_key: str | None = None,
+) -> dict[str, Any]:
+    current_source_key = source_key or _remote_catalog_source_key(
+        _remote_catalog_url()
+    )
+    payload = _read_remote_cache_file(path)
+    raw_sources = payload.get("sources")
+    if isinstance(raw_sources, dict):
+        raw_record = raw_sources.get(current_source_key)
+    elif payload.get("source_key") == current_source_key:
+        raw_record = payload
+    else:
+        return {}
+    return _normalize_remote_cache_record(
+        raw_record,
+        source_key=current_source_key,
+    )
+
+
+def _write_cached_remote_payload(
+    payload: dict[str, Any],
+    *,
+    source_key: str | None = None,
+) -> None:
+    current_source_key = source_key or (
+        payload.get("source_key")
+        if isinstance(payload.get("source_key"), str) and payload["source_key"]
+        else _remote_catalog_source_key(_remote_catalog_url())
+    )
+    record = _normalize_remote_cache_record(
+        payload,
+        source_key=current_source_key,
+    )
+    stored_record = {
+        key: value for key, value in record.items() if key != "source_key"
+    }
     with _REMOTE_LOCK:
-        _REMOTE_MEMORY_CACHE.clear()
-        _REMOTE_MEMORY_CACHE.update(payload)
+        path = get_cached_catalog_path()
+        previous = _read_remote_cache_file(path)
+        raw_sources = previous.get("sources")
+        if isinstance(raw_sources, dict):
+            stored_sources = dict(raw_sources)
+        else:
+            legacy_source_key = previous.get("source_key")
+            stored_sources = {}
+            if isinstance(legacy_source_key, str) and legacy_source_key:
+                stored_sources[legacy_source_key] = {
+                    key: value
+                    for key, value in previous.items()
+                    if key != "source_key"
+                }
+        stored_sources[current_source_key] = stored_record
+        stored = {
+            "cache_version": REMOTE_CATALOG_CACHE_VERSION,
+            "sources": stored_sources,
+        }
+        write_atomic(path, json.dumps(stored, indent=2, sort_keys=True) + "\n")
+        _REMOTE_MEMORY_CACHE[current_source_key] = record
 
 
 def _normalize_catalog(payload: object, *, strict: bool = False) -> dict[str, Any]:
@@ -684,10 +1399,11 @@ def _normalize_model_entry(item: object) -> dict[str, Any]:
     visibility = item.get("visibility")
     if isinstance(visibility, str) and visibility.strip():
         entry["visibility"] = visibility.strip().lower()
-    efforts = _coerce_reasoning_efforts(
-        item.get("reasoning_efforts") or item.get("supported_reasoning_levels")
-    )
-    if efforts:
+    raw_efforts = item.get("reasoning_efforts")
+    if raw_efforts is None:
+        raw_efforts = item.get("supported_reasoning_levels")
+    efforts = _coerce_reasoning_efforts(raw_efforts)
+    if raw_efforts is not None:
         entry["reasoning_efforts"] = efforts
     return entry
 

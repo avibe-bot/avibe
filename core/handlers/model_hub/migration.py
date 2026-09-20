@@ -10,17 +10,26 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional, Protocol
+from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubSourceConfig,
-    ModelHubSourceStateConfig,
-    ModelHubSourceUsageConfig,
+)
+from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
+    ObservationDiscovery,
+    SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
-from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+from core.handlers.model_hub.identifiers import canonical_model_id
+from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
+from vibe.backend_model_catalog import (
+    backend_model_entries,
+    bundled_catalog_reasoning_efforts_by_model,
+    load_bundled_catalog,
+)
 from vibe.claude_config import read_claude_oauth_signed_in, read_claude_settings_env
 from vibe.codex_config import _load_auth, get_codex_config_paths, read_codex_auth_state
 from vibe.opencode_config import (
@@ -54,9 +63,13 @@ class MigrationHost(Protocol):
     _mutation_lock: Any
     now: Callable[[], datetime]
     migration_claude_oauth_probe: Optional[Callable[[], bool]]
+    migration_home: Optional[Path]
 
     @staticmethod
     def _clone_config(config: ModelHubConfig) -> ModelHubConfig: ...
+
+    @staticmethod
+    def _mark_source_unverified(source: ModelHubSourceConfig) -> None: ...
 
     async def _engine_call(self, awaitable: Awaitable[Any]) -> Any: ...
 
@@ -72,12 +85,28 @@ class MigrationHost(Protocol):
         credential_ref: str,
     ) -> None: ...
 
+    async def _require_proven_source_payload(
+        self,
+        payload: dict[str, object],
+    ) -> SourceObservation: ...
+
     def _apply_discovered_models(
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
-        discovered: list[str],
+        discovered: list[DiscoveredModel],
+        *,
+        allow_empty: bool = False,
+        catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]: ...
+
+    def _apply_source_placement(
+        self,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
     ) -> None: ...
+
+    def _added_to(self, source_id: str) -> list[dict]: ...
 
 
 @dataclass(frozen=True)
@@ -107,8 +136,18 @@ class NativeMigrationItem:
     secret: Optional[str] = field(default=None, repr=False)
     account_label: Optional[str] = None
     manual_models: tuple[NativeManualModel, ...] = ()
+    # Already-masked credential text, produced by the same `mask_credential` the
+    # producer used for `masked_detail`. Carried as its own field so a client can
+    # render provider and key as separate elements without re-parsing the
+    # composed detail string; never holds plaintext.
+    masked_credential: Optional[str] = None
 
     def to_payload(self) -> dict[str, object]:
+        # Presentation metadata is additive: `vendor` and `display_name` let a
+        # client name and draw the provider instead of inferring identity from
+        # `backend` (which cannot tell an OpenCode config key from an auth.json
+        # one). Every pre-existing key keeps its exact value so the broader
+        # settings migration surface is untouched.
         return {
             "id": self.id,
             "backend": self.backend,
@@ -117,6 +156,9 @@ class NativeMigrationItem:
             "proposed_action": self.proposed_action,
             "selected": self.selected,
             "notes_key": self.notes_key,
+            "vendor": self.vendor,
+            "display_name": self.display_name,
+            "masked_credential": self.masked_credential,
         }
 
 
@@ -192,6 +234,7 @@ def _claude_items(
                 display_name="Anthropic",
                 base_url=base_url,
                 secret=api_key,
+                masked_credential=detail,
             )
         )
 
@@ -219,6 +262,7 @@ def _claude_items(
                 protocol="anthropic",
                 display_name="Anthropic",
                 base_url=base_url,
+                masked_credential=detail,
             )
         )
 
@@ -306,6 +350,7 @@ def _codex_items(
                 display_name="OpenAI",
                 base_url=base_url,
                 secret=api_key,
+                masked_credential=detail,
             )
         )
 
@@ -402,11 +447,8 @@ def _opencode_manual_models(
         return ()
     models: list[NativeManualModel] = []
     for model_id, model_config in raw_models.items():
-        if (
-            not isinstance(model_id, str)
-            or not model_id.strip()
-            or contains_credential_material(model_id.strip())
-        ):
+        model_id = canonical_model_id(model_id)
+        if model_id is None or contains_credential_material(model_id):
             continue
         raw_name = model_config.get("name") if isinstance(model_config, dict) else None
         display_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
@@ -414,7 +456,7 @@ def _opencode_manual_models(
             display_name = None
         models.append(
             NativeManualModel(
-                id=model_id.strip(),
+                id=model_id,
                 display_name=display_name,
             )
         )
@@ -504,7 +546,8 @@ def _opencode_items(
                 *(f"{model.id}\0{model.display_name or ''}" for model in manual_models),
             ),
         )
-        detail = f"{provider_id} · {mask_credential(secret)}"
+        masked_secret = mask_credential(secret)
+        detail = f"{provider_id} · {masked_secret}"
         items.append(
             NativeMigrationItem(
                 id=item_id,
@@ -521,6 +564,7 @@ def _opencode_items(
                 base_url=base_url,
                 secret=secret,
                 manual_models=manual_models,
+                masked_credential=masked_secret,
             )
         )
     return items
@@ -571,43 +615,79 @@ def scan_native_configs(
     ]
 
 
-def _new_source(
+def _validated_source(
+    item: NativeMigrationItem,
+    *,
+    now: datetime,
+    protocol: Literal["anthropic", "openai_responses", "openai_chat"],
+    validate_base_url: Callable[[object], Optional[str]],
+    credential_ref: str | None = None,
+    masked_credential: str | None = None,
+    catalog_efforts_by_model: Mapping[str, tuple[str, ...]],
+) -> ModelHubSourceConfig:
+    keep_native = item.proposed_action == "keep_native"
+    controlled = item.proposed_action == "controlled_import"
+    discovered_at = now.isoformat()
+    models = []
+    if keep_native:
+        for model_id in _native_model_ids(item.backend):
+            resolution = resolve_reasoning_tiers(
+                protocol=protocol,
+                model_id=model_id,
+                catalog_efforts_by_model=catalog_efforts_by_model,
+            )
+            models.append(
+                {
+                    "id": model_id,
+                    "display_name": None,
+                    "origin": "discovered",
+                    "reasoning_efforts": list(resolution.efforts),
+                    "reasoning_efforts_source": resolution.source,
+                    "discovered_at": discovered_at,
+                }
+            )
+    payload: dict[str, object] = {
+        "id": item.source_id,
+        "created_at": discovered_at,
+        "last_discovered_at": discovered_at if models else None,
+        "kind": "subscription" if keep_native or controlled else "api_key",
+        "vendor": item.vendor,
+        "display_name": item.display_name,
+        "protocol": protocol,
+        "base_url": validate_base_url(item.base_url),
+        "supply_channel": "native_cli" if keep_native else "hub",
+        "billing": "monthly" if keep_native or controlled else "metered",
+        "state": {"status": "standby", "retry_at": None, "detail_key": None},
+        "usage": {
+            "cycle_used_pct": None,
+            "month_spend_cents": None,
+            "currency": None,
+            "projected_exhaust_at": None,
+        },
+        "models": models,
+        "credential_ref": credential_ref,
+        "account_label": item.account_label,
+        "masked_credential": masked_credential,
+    }
+    return ModelHubSourceConfig.from_payload(payload)
+
+
+def build_native_migration_source(
     item: NativeMigrationItem,
     *,
     now: datetime,
     validate_base_url: Callable[[object], Optional[str]],
 ) -> ModelHubSourceConfig:
-    keep_native = item.proposed_action == "keep_native"
-    controlled = item.proposed_action == "controlled_import"
-    discovered_at = now.isoformat()
-    models = (
-        [
-            ModelHubModelConfig(
-                id=model_id,
-                provenance="discovered",
-                discovered_at=discovered_at,
-            )
-            for model_id in _native_model_ids(item.backend)
-        ]
-        if keep_native
-        else []
-    )
-    return ModelHubSourceConfig(
-        id=item.source_id,
-        created_at=discovered_at,
-        last_discovered_at=discovered_at if models else None,
-        kind="subscription" if keep_native or controlled else "api_key",
-        vendor=item.vendor,
-        display_name=item.display_name,
+    """Build the Source represented by one recognized native-login item."""
+
+    if item.proposed_action != "keep_native":
+        raise MigrationConflictError
+    return _validated_source(
+        item,
+        now=now,
         protocol=item.protocol,
-        base_url=validate_base_url(item.base_url),
-        supply_channel="native_cli" if keep_native else "hub",
-        experimental_consent_at=discovered_at if controlled else None,
-        billing="monthly" if keep_native or controlled else "metered",
-        state=ModelHubSourceStateConfig(status="standby"),
-        usage=ModelHubSourceUsageConfig(),
-        models=models,
-        account_label=item.account_label,
+        validate_base_url=validate_base_url,
+        catalog_efforts_by_model=bundled_catalog_reasoning_efforts_by_model(),
     )
 
 
@@ -621,7 +701,7 @@ async def apply_native_migration(
     *,
     mask_credential: Callable[[str], str],
     validate_base_url: Callable[[object], Optional[str]],
-) -> int:
+) -> tuple[int, list[dict]]:
     """Provision, probe, and atomically persist a selected migration batch."""
 
     if (
@@ -631,7 +711,7 @@ async def apply_native_migration(
     ):
         raise MigrationConflictError
     if not item_ids:
-        return 0
+        return 0, []
 
     async with host._mutation_lock:
         previous = host.store.load()
@@ -639,6 +719,7 @@ async def apply_native_migration(
             scan_native_configs,
             previous,
             mask_credential=mask_credential,
+            home=host.migration_home,
             claude_oauth_probe=host.migration_claude_oauth_probe,
             validate_base_url=validate_base_url,
         )
@@ -658,51 +739,127 @@ async def apply_native_migration(
 
         provisioned: list[tuple[str, str]] = []
         persisted = False
+        catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
         try:
             for item in selected:
-                source = _new_source(
-                    item,
-                    now=host.now(),
-                    validate_base_url=validate_base_url,
-                )
+                protocol = item.protocol
+                observation: SourceObservation | None = None
                 if item.proposed_action == "import":
                     if not item.secret:
                         raise MigrationConflictError
+                    observation = await host._require_proven_source_payload(
+                        {
+                            "vendor": item.vendor,
+                            "base_url": validate_base_url(item.base_url),
+                            "key": item.secret,
+                        }
+                    )
+                    protocol = cast(
+                        Literal[
+                            "anthropic",
+                            "openai_responses",
+                            "openai_chat",
+                        ],
+                        observation.protocol,
+                    )
+                if item.proposed_action == "import":
+                    assert item.secret is not None
+                    assert observation is not None
                     credential_ref = await host._engine_call(
                         host.adapter.provision_credential(
                             item.vendor,
-                            item.protocol,
+                            protocol,
                             item.secret,
-                            source.base_url,
+                            validate_base_url(item.base_url),
                         )
                     )
-                    provisioned.append((source.id, credential_ref))
-                    source.credential_ref = credential_ref
-                    source.masked_credential = mask_credential(item.secret)
-                    discovered = list(
-                        await host._engine_call(
-                            host.adapter.discover_models(
-                                item.vendor,
-                                item.protocol,
-                                source.base_url,
-                                credential_ref,
+                    provisioned.append((item.source_id, credential_ref))
+                    try:
+                        source = _validated_source(
+                            item,
+                            now=host.now(),
+                            protocol=protocol,
+                            validate_base_url=validate_base_url,
+                            credential_ref=credential_ref,
+                            masked_credential=mask_credential(item.secret),
+                            catalog_efforts_by_model=catalog_efforts_by_model,
+                        )
+                        manual_models = [
+                            ModelHubModelConfig.from_payload(
+                                {
+                                    "id": model.id,
+                                    "display_name": model.display_name,
+                                    "origin": "manual",
+                                    "reasoning_efforts": [],
+                                    "discovered_at": None,
+                                }
                             )
+                            for model in item.manual_models
+                        ]
+                        for model in manual_models:
+                            resolution = resolve_reasoning_tiers(
+                                protocol=protocol,
+                                model_id=model.id,
+                                existing_efforts=model.reasoning_efforts,
+                                existing_source=model.reasoning_efforts_source,
+                                catalog_efforts_by_model=catalog_efforts_by_model,
+                            )
+                            model.reasoning_efforts = list(resolution.efforts)
+                            model.reasoning_efforts_source = resolution.source
+                        if observation.discovery is ObservationDiscovery.SUCCEEDED:
+                            host._apply_discovered_models(
+                                source,
+                                manual_models,
+                                list(observation.models),
+                                allow_empty=True,
+                                catalog_efforts_by_model=catalog_efforts_by_model,
+                            )
+                        else:
+                            failed_payload = source.to_payload()
+                            failed_payload["models"] = [
+                                model.to_payload() for model in manual_models
+                            ]
+                            failed_payload["state"] = {
+                                "status": "error",
+                                "retry_at": None,
+                                "detail_key": "models.source.error.unclassified",
+                            }
+                            source = ModelHubSourceConfig.from_payload(
+                                failed_payload
+                            )
+                        source = ModelHubSourceConfig.from_payload(
+                            source.to_payload()
                         )
-                    )
-                    manual_models = [
-                        ModelHubModelConfig(
-                            id=model.id,
-                            display_name=model.display_name,
-                            provenance="manual",
+                    except (TypeError, ValueError):
+                        raise MigrationConflictError from None
+                else:
+                    try:
+                        source = _validated_source(
+                            item,
+                            now=host.now(),
+                            protocol=item.protocol,
+                            validate_base_url=validate_base_url,
+                            catalog_efforts_by_model=catalog_efforts_by_model,
                         )
-                        for model in item.manual_models
-                    ]
-                    host._apply_discovered_models(source, manual_models, discovered)
+                    except (TypeError, ValueError):
+                        raise MigrationConflictError from None
+                if source.supply_channel == "hub":
+                    host._mark_source_unverified(source)
                 updated.sources.append(source)
+                host._apply_source_placement(updated, source)
 
+            try:
+                updated = ModelHubConfig.from_payload(updated.to_payload())
+            except (TypeError, ValueError):
+                raise MigrationConflictError from None
             await host._commit_synced(previous, updated)
             persisted = True
-            return len(selected)
+            added_to = [
+                position
+                for item in selected
+                for position in host._added_to(item.source_id)
+            ]
+            return len(selected), added_to
         finally:
             if not persisted:
                 for source_id, credential_ref in reversed(provisioned):

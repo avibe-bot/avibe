@@ -1,0 +1,27 @@
+version: 1
+capability: memory_runtime_install
+observations:
+  - id: MEMORY-RUNTIME-INSTALL-OBS-001
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-001
+      - MEMORY-RUNTIME-INSTALL-002
+    observation: Final archive extraction and install staging execute the same bounded full import gate without suppressing bytecode, so release verification measures the path that warms first sidecar startup. The Web-job scenario uses a hermetic manifest-shaped fixture; a normal wheel consuming the real published linux-arm64 manifest and archive remains an explicit Incus check.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-002
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-003
+    observation: Failed staging is always reclaimed while a bounded status/reason record survives process replacement; malformed, oversized, or linked state grants no status authority and a successful install or reuse clears the record.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-003
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-004
+      - MEMORY-RUNTIME-INSTALL-005
+    observation: A core/companion upgrade can leave a healthy same-version native artifact on earlier release bytes. Previous Wake tests equated admission with manifest currency and did not cross both real release selections. Wake now converges proven manifest mismatches under its existing operation lease without toggling persistent settings. Scenarios use actual archive integrity, pointer activation/rollback and nonempty Unicode root checks, with deterministic native/provider execution. Availability after a failed update is distinct from successful convergence; the failed attempt remains in dependency status and the Wake result.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-004
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-004
+      - MEMORY-RUNTIME-INSTALL-005
+    observation: Review exposed three missing consumer boundaries. A timed-out writer join must restore future intake only while the original sidecar remains admitted/running; unproved stop or shutdown stays fenced and degraded. Manifest currency is meaningful only for installable selections, not the unavailable source manifest or rejected pins/contracts. The public Web allowlist and both Wake toast consumers must preserve and display an update failure independently of retained runtime availability. Regression tests now exercise all three boundaries; raw install diagnostics are not copied into the public result.
+  - id: MEMORY-RUNTIME-INSTALL-OBS-005
+    scenarios:
+      - MEMORY-RUNTIME-INSTALL-004
+      - MEMORY-RUNTIME-INSTALL-005
+    observation: A second reviewed head exposed the same authority class across time. Persisted failure evidence made the older Wake admission predicate false even though the identical fallback artifact remained verified; a later rejected or already-current selection therefore retried unnecessarily. The first rejected-manifest tests began from clean state and missed this composition. Wake now reuses its single verified active-identity check independently of attempt diagnostics, and the scenario matrix crosses clean/failed history, startup/running Wake and all rejected/current selections without clearing historical failure or weakening invalid-artifact repair.

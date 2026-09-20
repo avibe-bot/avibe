@@ -9,6 +9,7 @@ import { FilesApiError, contentUrl, downloadFile, fileMeta, joinPath, parentDir,
 import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { adjustEditorFontSize, resetEditorFontSize } from '../../lib/editorFontSize';
 import { IS_APPLE } from '../../lib/platform';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { forgetRecentFile, loadEditorRecents, recentPathLabel, rememberRecentFile, rememberRecentFolder, removeRecentFile, type EditorRecents, type RecentFile } from '../../lib/editorRecents';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
@@ -143,10 +144,12 @@ function languageLabel(filename: string | undefined): string | undefined {
 export const EditorApp: React.FC<{
   windowId?: string;
   params?: Record<string, unknown>;
+  /** Start with the explorer collapsed on the phone; the activity bar can reopen it. */
+  mobile?: boolean;
   /** Report whether ANY open tab has unsaved edits — the full-page route uses it for an unload guard
    *  (the window mount relies on useWindowCloseGuard instead). */
   onDirtyChange?: (dirty: boolean) => void;
-}> = ({ windowId, params, onDirtyChange }) => {
+}> = ({ windowId, params, mobile = false, onDirtyChange }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
@@ -159,6 +162,10 @@ export const EditorApp: React.FC<{
   const [status, setStatus] = useState<Record<string, PaneStatus>>({});
   const [picker, setPicker] = useState<PickerState | null>(null);
   const [view, setView] = useState<'files' | 'search'>('files');
+  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
+  // border). Width persists for the window's lifetime (state, not navigation).
+  const [explorerCollapsed, setExplorerCollapsed] = useState(mobile);
+  const [explorerWidth, setExplorerWidth] = useState(240);
   // A pending Monaco jump (from a cross-file search result), scoped to one tab. The nonce makes a
   // repeat jump to the same spot re-fire even when the tab is already open.
   const [reveal, setReveal] = useState<{ tabId: string; line: number; column: number; endColumn: number; nonce: number } | null>(null);
@@ -236,8 +243,9 @@ export const EditorApp: React.FC<{
       } catch {
         openFile(path, name, null, target);
       }
+      if (mobile) setExplorerCollapsed(true);
     },
-    [openFile],
+    [mobile, openFile],
   );
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
@@ -250,6 +258,7 @@ export const EditorApp: React.FC<{
       // markdown / code / json / csv stay editable (with a preview toggle inside the pane).
       if (previewOverlayKind(entry)) {
         openPreview(path, entry.name);
+        if (mobile) setExplorerCollapsed(true);
         return;
       }
       // Fetch fresh metadata (also content-sniffs `text`) and decide by CONTENT, not just the
@@ -259,6 +268,7 @@ export const EditorApp: React.FC<{
         const m = await fileMeta(path);
         if (isEditableMeta(m)) {
           openFile(path, entry.name, m.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
@@ -266,12 +276,13 @@ export const EditorApp: React.FC<{
         // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
         if (isEditableFile(entry)) {
           openFile(path, entry.name, entry.mtime);
+          if (mobile) setExplorerCollapsed(true);
         } else {
           downloadFile(path);
         }
       }
     },
-    [openFile, openPreview],
+    [mobile, openFile, openPreview],
   );
 
   // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
@@ -568,61 +579,53 @@ export const EditorApp: React.FC<{
 
   // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
   // be open). Capture phase + preventDefault so ⌘O doesn't fall through to the browser's open dialog.
-  useEffect(() => {
-    if (!windowId) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
-      // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
-      // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
-      if (picker || wm.focusedId !== windowId) return;
-      const k = e.key.toLowerCase();
-      // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
-      // Monaco's built-in in-file find widget when the editor has focus.)
-      if (e.shiftKey) {
-        if (k !== 'f') return;
-        e.preventDefault();
-        setView('search');
-        setExplorerCollapsed(false); // ⇧⌘F must reveal the panel even when it's collapsed
-        setSearchFocus((n) => n + 1);
-        return;
-      }
-      if (k !== 'o' && k !== 'n') return;
-      e.preventDefault();
-      if (k === 'o') openFolder();
-      else newFile();
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [windowId, openFolder, newFile, picker, wm.focusedId]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
+    // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
+    if (picker || wm.focusedId !== windowId) return;
+    const k = event.key.toLowerCase();
+    // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
+    // Monaco's built-in in-file find widget when the editor has focus.)
+    if (event.shiftKey) {
+      if (k !== 'f') return;
+      event.preventDefault();
+      setView('search');
+      setExplorerCollapsed(false); // ⇧⌘F must reveal the panel even when it's collapsed
+      setSearchFocus((n) => n + 1);
+      return;
+    }
+    if (k !== 'o' && k !== 'n') return;
+    event.preventDefault();
+    if (k === 'o') openFolder();
+    else newFile();
+  }, Boolean(windowId), true);
 
   // Claim browser-style zoom only for the focused Editor surface. A window additionally checks real
   // DOM focus so an Editor left open while the user works in the sidebar doesn't steal browser zoom.
   // The route stays inactive while a floating window is on top. Capture prevents Monaco's session-only
   // font zoom from also handling the key.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const focusedWindow = document.activeElement instanceof Element
-        ? document.activeElement.closest('[data-window-id]')?.getAttribute('data-window-id')
-        : null;
-      const foreground = windowId
-        ? wm.focusedId === windowId && focusedWindow === windowId
-        : wm.focusedId === null && !!rootRef.current?.contains(document.activeElement);
-      if (!foreground) return;
-      const zoom = fontZoomIntent(e);
-      if (!zoom) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (zoom === 'reset') resetEditorFontSize();
-      else adjustEditorFontSize(zoom === 'in' ? 1 : -1);
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [windowId, wm.focusedId]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    const focusedWindow = document.activeElement instanceof Element
+      ? document.activeElement.closest('[data-window-id]')?.getAttribute('data-window-id')
+      : null;
+    const foreground = windowId
+      ? wm.focusedId === windowId && focusedWindow === windowId
+      : wm.focusedId === null && !!rootRef.current?.contains(document.activeElement);
+    if (!foreground) return;
+    const zoom = fontZoomIntent(event);
+    if (!zoom) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (zoom === 'reset') resetEditorFontSize();
+    else adjustEditorFontSize(zoom === 'in' ? 1 : -1);
+  }, true, true);
 
-  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
-  // border). Width persists for the window's lifetime (state, not navigation).
-  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
-  const [explorerWidth, setExplorerWidth] = useState(240);
+  // Selecting a file from the mobile explorer returns the editor to the foreground. This keeps
+  // the narrow screen useful after every open while leaving the desktop panel behavior unchanged.
+  useEffect(() => {
+    if (mobile && active) setExplorerCollapsed(true);
+  }, [active, mobile]);
   // Holds the in-flight drag's teardown so an unmount mid-drag (window closed while dragging) can
   // still remove the window listeners and restore the body cursor / user-select.
   const resizeTeardown = useRef<(() => void) | null>(null);
@@ -698,7 +701,10 @@ export const EditorApp: React.FC<{
             active activity-bar icon; drag its right border to resize. Explorer is ALWAYS present in
             Files view (design w0qoC keeps it in the welcome state). */}
         {!explorerCollapsed && (
-        <div className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2" style={{ width: explorerWidth }}>
+        <div
+          className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2"
+          style={{ width: mobile ? 'min(240px, 72vw)' : explorerWidth }}
+        >
           {view === 'search' ? (
             <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
@@ -730,7 +736,7 @@ export const EditorApp: React.FC<{
                   <button
                     type="button"
                     onClick={openFolder}
-                    className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
+                    className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint-ink transition hover:bg-mint/[0.14]"
                   >
                     <FolderOpen className="size-3.5" />
                     {t('apps.editor.openFolder')}
@@ -783,9 +789,9 @@ export const EditorApp: React.FC<{
                         className="flex items-center gap-1.5"
                       >
                         {tab.kind === 'preview' ? (
-                          previewRenderKind(tab.name) === 'image' ? <ImageIcon className="size-3.5 text-violet" /> : <FileText className="size-3.5 text-violet" />
+                          previewRenderKind(tab.name) === 'image' ? <ImageIcon className="size-3.5 text-violet-ink" /> : <FileText className="size-3.5 text-violet-ink" />
                         ) : (
-                          <CodeXml className="size-3.5 text-cyan" />
+                          <CodeXml className="size-3.5 text-cyan-ink" />
                         )}
                         {tab.name}
                         {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
@@ -794,7 +800,7 @@ export const EditorApp: React.FC<{
                         type="button"
                         onClick={() => closeTab(tab.id)}
                         aria-label={t('common.close')}
-                        className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                        className="grid size-4 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground md:opacity-0 md:group-hover/tab:opacity-100"
                       >
                         <X className="size-3" strokeWidth={2.5} />
                       </button>
@@ -820,7 +826,8 @@ export const EditorApp: React.FC<{
                             path={tab.path}
                             filename={tab.name}
                             mtime={tab.mtime}
-                            chromeless
+                            chromeless={!mobile}
+                            forceDark
                             onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
                             onCursor={(line, col, indent) => setStatus((s) => ({ ...s, [tab.id]: { line, col, insertSpaces: indent.insertSpaces, tabSize: indent.tabSize } }))}
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
@@ -849,7 +856,7 @@ export const EditorApp: React.FC<{
           the left, but we have no real git/diagnostics data for an arbitrary folder — showing a
           hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
           right side (cursor / indentation / language) is real. */}
-      <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
+      <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-accent-foreground">
         {active && activeTab?.kind === 'preview' ? (
           <span className="ml-auto truncate">{t('preview.title')}</span>
         ) : active ? (
@@ -898,8 +905,8 @@ const Welcome: React.FC<{
   // needed. Kept in state only so a 404'd file can be dropped from the view below.
   const [recents, setRecents] = useState<EditorRecents>(() => loadEditorRecents());
   const actions: { Icon: typeof FolderOpen; color: string; label: string; onClick: () => void; sc?: string }[] = [
-    { Icon: FolderOpen, color: 'text-cyan', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
-    { Icon: FilePlus, color: 'text-mint', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
+    { Icon: FolderOpen, color: 'text-cyan-ink', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
+    { Icon: FilePlus, color: 'text-mint-ink', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
   ];
   const hasRecents = recents.folders.length > 0 || recents.files.length > 0;
 
@@ -918,7 +925,7 @@ const Welcome: React.FC<{
       <div className="flex max-h-full w-[440px] max-w-full flex-col gap-6 overflow-y-auto">
         <div className="flex items-center gap-3.5">
           <span className="grid size-14 place-items-center rounded-2xl border border-cyan/60 bg-cyan-soft">
-            <CodeXml className="size-7 text-cyan" />
+            <CodeXml className="size-7 text-cyan-ink" />
           </span>
           <div className="flex flex-col gap-1">
             <div className="text-[24px] font-bold text-foreground">{t('apps.editor.label')}</div>
@@ -941,10 +948,10 @@ const Welcome: React.FC<{
           // Folders first, then files — each a compact row: name + its containing directory (dimmed).
           <div className="flex flex-col gap-0.5">
             {recents.folders.map((path) => (
-              <RecentRow key={`d:${path}`} Icon={FolderOpen} iconColor="text-cyan" name={recentPathLabel(path)} dir={parentDir(path)} onClick={() => onOpenRecentFolder(path)} />
+              <RecentRow key={`d:${path}`} Icon={FolderOpen} iconColor="text-cyan-ink" name={recentPathLabel(path)} dir={parentDir(path)} onClick={() => onOpenRecentFolder(path)} />
             ))}
             {recents.files.map((file) => (
-              <RecentRow key={`f:${file.path}`} Icon={FileText} iconColor="text-violet" name={file.name} dir={parentDir(file.path)} onClick={() => void openRecentFile(file)} />
+              <RecentRow key={`f:${file.path}`} Icon={FileText} iconColor="text-violet-ink" name={file.name} dir={parentDir(file.path)} onClick={() => void openRecentFile(file)} />
             ))}
           </div>
         ) : (

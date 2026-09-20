@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import os
+import logging
 import secrets
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional
+
+from config.v2_config import ModelHubConfig
 
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
@@ -18,15 +20,30 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from vibe.i18n import t as i18n_t
 
 from .adapter import RawCallOutcome
-from .classification import ResolutionDecision, ResolutionReason
+from .classification import (
+    UPSTREAM_MACHINE_ERROR_CODES,
+    ResolutionDecision,
+    ResolutionReason,
+    machine_error_codes,
+)
+from .events import (
+    EVENT_REASON_AUTHORITY,
+    RETIRED_PERSISTED_REASON_DEGRADATIONS,
+    SOURCE_DETAIL_EVENT_REASONS,
+    event_reason_label,
+)
+from .resolver import ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
+from .state_file import write_state_document
 
 
 BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,14 +51,464 @@ class AttemptIdentity:
     source_id: str
     resolved_model_id: str
     channel: SupplyChannel
-    via_mapping: bool
+    stripped_reasoning_efforts: tuple[str, ...] = ()
+    declared_reasoning_efforts: tuple[str, ...] = ()
 
     def payload(self) -> dict:
-        return {
+        payload = {
             "source_id": self.source_id,
             "configured_model_id": self.resolved_model_id,
             "channel": self.channel,
         }
+        if self.stripped_reasoning_efforts:
+            payload["stripped_reasoning_efforts"] = list(
+                self.stripped_reasoning_efforts
+            )
+            payload["declared_reasoning_efforts"] = list(
+                self.declared_reasoning_efforts
+            )
+        return payload
+
+
+@dataclass(frozen=True)
+class ExactHopBlocker:
+    source_id: str
+    model_id: str
+    reason: str
+
+    def payload(self) -> dict:
+        return {
+            "source_id": self.source_id,
+            "model_id": self.model_id,
+            "reason": self.reason,
+        }
+
+
+def exact_hop_blockers(
+    resolution: ModelHubTurnResolution,
+) -> tuple[ExactHopBlocker, ...]:
+    """Project every blocked persisted hop from the canonical live inspection."""
+
+    blockers = []
+    for inspection in resolution.inspected_hops:
+        if (
+            inspection.runnable
+            or inspection.source_id is None
+            or inspection.model_id is None
+        ):
+            continue
+        reason = inspection.reason
+        if (
+            inspection.source is not None
+            and EVENT_REASON_AUTHORITY.get(str(reason)) != "structural"
+        ):
+            if inspection.backoff or inspection.recovery == "in_flight":
+                reason = "network" if inspection.backoff else "cooldown"
+            elif inspection.cooldown:
+                reason = "cooldown"
+            elif inspection.source.state.detail_key is not None:
+                reason = SOURCE_DETAIL_EVENT_REASONS.get(
+                    inspection.source.state.detail_key,
+                    reason,
+                )
+        if reason is None:
+            continue
+        blockers.append(
+            ExactHopBlocker(
+                source_id=inspection.source_id,
+                model_id=inspection.model_id,
+                reason=reason,
+            )
+        )
+    return tuple(blockers)
+
+
+@dataclass(frozen=True)
+class TurnSupplyBlocker:
+    source: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class TurnSupplyFacts:
+    backend: BackendName
+    model: str
+    supply_state: SupplyState
+    source: str = ""
+    retry_at: str = ""
+    blockers: tuple[TurnSupplyBlocker, ...] = ()
+
+
+@dataclass(frozen=True)
+class TurnOutcomeRenderingRule:
+    outcome: str
+    discriminator: str
+    copy_keys: tuple[tuple[str, str | None], ...]
+
+
+# This is the only executable projection of the authoritative section 4.5 matrix.
+TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
+    "turn.served": TurnOutcomeRenderingRule(
+        outcome="served",
+        discriminator="any",
+        copy_keys=(("default", None),),
+    ),
+    "turn.exhausted": TurnOutcomeRenderingRule(
+        outcome="exhausted",
+        discriminator="final_supply_state",
+        copy_keys=(
+            ("waiting", "modelHub.launch.waiting"),
+            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
+            ("interrupted", "modelHub.launch.interrupted"),
+        ),
+    ),
+    "turn.request_nonfallback": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="request_nonfallback",
+        copy_keys=(("default", "modelHub.launch.request_incompatible"),),
+    ),
+    "turn.engine_down": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="engine_down",
+        copy_keys=(
+            ("default", "modelHub.errors.engine_down"),
+            ("stream_started", "modelHub.errors.engine_down_streamed"),
+        ),
+    ),
+    "turn.streamed_fallback": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="streamed_fallback",
+        copy_keys=(
+            ("next_current", "modelHub.launch.retry"),
+            ("waiting", "modelHub.launch.waiting"),
+            ("interrupted", "modelHub.launch.interrupted"),
+            ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
+        ),
+    ),
+    "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="route_unconfigured",
+        copy_keys=(("interrupted", "modelHub.launch.route_unconfigured"),),
+    ),
+    "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="blocked_supply_state",
+        copy_keys=(
+            ("waiting", "modelHub.launch.waiting"),
+            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
+            ("interrupted", "modelHub.launch.interrupted"),
+        ),
+    ),
+    "turn.canceled": TurnOutcomeRenderingRule(
+        outcome="canceled",
+        discriminator="fsm_canceled",
+        copy_keys=(("default", None),),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class TurnOutcomeProjectionInput:
+    outcome: str
+    discriminator: str
+    supply_facts: TurnSupplyFacts | None = None
+    stream_started: bool = False
+    next_current_changed: bool = False
+    source_transition_persisted: bool | None = None
+
+
+class TurnOutcomeProductionError(ValueError):
+    """A terminal outcome is missing a fact required by the copy matrix."""
+
+
+def _turn_outcome_rule(
+    projection: TurnOutcomeProjectionInput,
+) -> TurnOutcomeRenderingRule:
+    matches = tuple(
+        rule
+        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
+        if rule.outcome == projection.outcome
+        and rule.discriminator == projection.discriminator
+    )
+    if len(matches) != 1:
+        raise TurnOutcomeProductionError(
+            "Turn outcome does not match its rendering discriminator"
+        )
+    return matches[0]
+
+
+def _turn_outcome_variant(
+    projection: TurnOutcomeProjectionInput,
+    rule: TurnOutcomeRenderingRule,
+) -> str:
+    copy_keys = dict(rule.copy_keys)
+    if (
+        projection.source_transition_persisted is False
+        and "transition_unpersisted" in copy_keys
+    ):
+        return "transition_unpersisted"
+    if projection.next_current_changed and "next_current" in copy_keys:
+        return "next_current"
+    if projection.stream_started and "stream_started" in copy_keys:
+        return "stream_started"
+    if (
+        projection.supply_facts is not None
+        and projection.supply_facts.supply_state == "waiting"
+        and not projection.supply_facts.retry_at
+        and "waiting_without_retry" in copy_keys
+    ):
+        return "waiting_without_retry"
+    if (
+        projection.supply_facts is not None
+        and projection.supply_facts.supply_state in copy_keys
+    ):
+        return projection.supply_facts.supply_state
+    return "default"
+
+
+def produce_turn_outcome(
+    decision: str,
+    *,
+    config: ModelHubConfig | None = None,
+    resolution: ModelHubTurnResolution | None = None,
+    attempted_hop: tuple[str, str] | None = None,
+    stream_started: bool = False,
+    source_transition_persisted: bool | None = None,
+) -> TurnOutcomeProjectionInput:
+    """Produce complete terminal facts from one authoritative matrix row."""
+
+    rule = TURN_OUTCOME_RENDERING_AUTHORITY.get(decision)
+    if rule is None:
+        raise TurnOutcomeProductionError("Unknown turn-outcome matrix decision")
+    variants = {variant for variant, _key in rule.copy_keys}
+    if decision == "turn.streamed_fallback" and source_transition_persisted is None:
+        raise TurnOutcomeProductionError(
+            "Streamed fallback is missing its Source-transition persistence fact"
+        )
+    requires_exact_supply = bool(
+        variants & {"next_current", "waiting", "interrupted"}
+    ) and source_transition_persisted is not False
+    if requires_exact_supply and (config is None or resolution is None):
+        raise TurnOutcomeProductionError(
+            "Turn outcome production is missing its exact-chain inspection"
+        )
+
+    next_current_changed = False
+    supply_facts = None
+    if requires_exact_supply:
+        assert config is not None and resolution is not None
+        if "next_current" in variants:
+            if attempted_hop is None:
+                raise TurnOutcomeProductionError(
+                    "Turn outcome production is missing its attempted hop"
+                )
+            next_hop = (
+                resolution.candidate_hops[0]
+                if resolution.candidate_hops
+                else None
+            )
+            if next_hop is not None:
+                next_identity = (next_hop.source_id, next_hop.model_id)
+                if next_identity == attempted_hop:
+                    raise TurnOutcomeProductionError(
+                        "Settled streamed fallback left the attempted hop current"
+                    )
+                next_current_changed = True
+        if not next_current_changed:
+            recovered_after_exhaustion = (
+                decision in {"turn.exhausted", "turn.no_candidate.blocked"}
+                and resolution.supply_status in {"ok", "degraded"}
+                and bool(resolution.candidate_hops)
+            )
+            if recovered_after_exhaustion:
+                supply_facts = TurnSupplyFacts(
+                    backend=resolution.backend,
+                    model=resolution.requested_model or resolution.target_model,
+                    supply_state="waiting",
+                )
+            elif resolution.supply_status not in {"waiting", "interrupted"}:
+                raise TurnOutcomeProductionError(
+                    "Turn outcome production requires a terminal supply state"
+                )
+            else:
+                supply_facts = turn_supply_facts(config, resolution)
+
+    projection = TurnOutcomeProjectionInput(
+        outcome=rule.outcome,
+        discriminator=rule.discriminator,
+        supply_facts=supply_facts,
+        stream_started=stream_started,
+        next_current_changed=next_current_changed,
+        source_transition_persisted=source_transition_persisted,
+    )
+    if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
+        raise TurnOutcomeProductionError(
+            "Turn outcome production is missing its required rendering fact"
+        )
+    return projection
+
+
+REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
+    "turn.request_nonfallback"
+)
+ENGINE_DOWN_TURN_OUTCOME = produce_turn_outcome("turn.engine_down")
+
+
+@dataclass(frozen=True)
+class TurnOutcomeCopy:
+    key: str
+    params: Mapping[str, Any]
+
+
+def supply_interruption_reason(
+    config: ModelHubConfig,
+    resolution: ModelHubTurnResolution,
+) -> str:
+    """Return the exact-chain structural reason used by events and copy facts."""
+
+    structural_reason = resolution.structural_blocker_reason
+    if structural_reason in {
+        "route_unconfigured",
+        "source_missing",
+        "model_unsupported",
+        "native_cli_unavailable",
+    }:
+        return structural_reason
+    order = config.effective_source_order(resolution.backend)
+    sources_by_id = {source.id: source for source in config.sources}
+    enabled_sources = [
+        sources_by_id[source_id]
+        for source_id in order
+        if source_id in sources_by_id
+    ]
+    if not enabled_sources:
+        if config.sources and not any(
+            source_eligible_for_backend(source, resolution.backend)
+            for source in config.sources
+        ):
+            return "no_eligible_source"
+        return "no_enabled_source"
+    if not any(
+        source_eligible_for_backend(source, resolution.backend)
+        for source in enabled_sources
+    ):
+        return "no_eligible_source"
+    return "model_unsupported"
+
+
+def turn_supply_facts(
+    config: ModelHubConfig,
+    resolution: ModelHubTurnResolution,
+) -> TurnSupplyFacts:
+    """Project user-visible facts from one canonical exact-chain inspection."""
+
+    model = resolution.requested_model or resolution.target_model
+    supply_state: SupplyState = (
+        "waiting" if resolution.supply_status == "waiting" else "interrupted"
+    )
+    cooling = tuple(
+        hop
+        for hop in resolution.inspected_hops
+        if hop.temporary_blocker and not hop.runnable
+    )
+    blockers: list[TurnSupplyBlocker] = []
+    for inspection in resolution.inspected_hops:
+        if inspection.runnable:
+            continue
+        source = inspection.source
+        reason = inspection.reason
+        if reason not in EVENT_REASON_AUTHORITY and source is not None:
+            reason = (
+                inspection.cooldown_reason
+                if inspection.cooldown_reason in EVENT_REASON_AUTHORITY
+                else SOURCE_DETAIL_EVENT_REASONS.get(source.state.detail_key or "", reason)
+            )
+        if reason not in EVENT_REASON_AUTHORITY:
+            continue
+        blockers.append(
+            TurnSupplyBlocker(
+                source=(
+                    source.display_name
+                    if source is not None
+                    else str(inspection.source_id or "")
+                ),
+                reason=reason,
+            )
+        )
+    if supply_state == "interrupted" and not blockers:
+        blockers.append(
+            TurnSupplyBlocker(
+                source="",
+                reason=supply_interruption_reason(config, resolution),
+            )
+        )
+    return TurnSupplyFacts(
+        backend=resolution.backend,
+        model=model,
+        supply_state=supply_state,
+        source=", ".join(hop.source.display_name for hop in cooling if hop.source is not None),
+        retry_at=min(
+            (hop.retry_at for hop in cooling if hop.retry_at),
+            key=parse_model_hub_timestamp,
+            default="",
+        ),
+        blockers=tuple(blockers),
+    )
+
+
+def project_turn_outcome_copy(
+    projection: TurnOutcomeProjectionInput,
+) -> TurnOutcomeCopy | None:
+    """Project copy from the recorded outcome and its sole matrix discriminator."""
+
+    rule = _turn_outcome_rule(projection)
+    copy_keys = dict(rule.copy_keys)
+    variant = _turn_outcome_variant(projection, rule)
+    if variant not in copy_keys:
+        raise TurnOutcomeProductionError(
+            "Turn outcome bypassed production without its required rendering fact"
+        )
+    key = copy_keys[variant]
+    if key is None:
+        return None
+    facts = projection.supply_facts
+    return TurnOutcomeCopy(
+        key=key,
+        params={
+            "model": facts.model if facts is not None else "",
+            "backend": facts.backend if facts is not None else "",
+            "source": facts.source if facts is not None else "",
+            "retry_at": facts.retry_at if facts is not None else "",
+            "blockers": facts.blockers if facts is not None else (),
+        },
+    )
+
+
+def render_turn_outcome_copy(
+    projection: TurnOutcomeProjectionInput,
+    language: str,
+) -> str | None:
+    copy = project_turn_outcome_copy(projection)
+    if copy is None:
+        return None
+    params = dict(copy.params)
+    blockers = params.get("blockers", ())
+    if isinstance(blockers, tuple):
+        rendered = []
+        for blocker in blockers:
+            if not isinstance(blocker, TurnSupplyBlocker):
+                continue
+            label = event_reason_label(blocker.reason, language)
+            rendered.append(
+                f"{blocker.source}: {label}" if blocker.source else label
+            )
+        params["blockers"] = ", ".join(rendered)
+    return i18n_t(copy.key, language, **params)
+
+
+# The request id for a turn's own single attempt: the native CLI path, where
+# the turn and the request really are one thing.
+TURN_REQUEST = "turn"
 
 
 @dataclass
@@ -53,12 +520,38 @@ class TurnTrace:
     failed_attempts: list[dict] = field(default_factory=list)
     served: Optional[dict] = None
     terminal_error: Optional[dict] = None
-    pending_attempt: Optional[AttemptIdentity] = None
+    # One entry per in-flight request, keyed by request id, in arrival order.
+    # An attempt identity describes a request, not a turn, and one launched
+    # process issues concurrent requests on one turn's credentials — so a
+    # single slot has each arrival overwrite the identity of whichever request
+    # is actually awaiting an upstream result, and the loser settles with no
+    # record of what served it.
+    pending_attempts: dict[str, AttemptIdentity] = field(default_factory=dict)
     model_supply_state: Optional[SupplyState] = None
+    blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
+    gateway_request_model_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
-    gateway_via_mapping: bool = False
     ambiguous: bool = False
+    terminal_outcome: TurnOutcomeProjectionInput | None = None
+    admission_closed: bool = False
+    outcome_frozen: bool = False
+    recovery_requests: dict[str, dict] = field(default_factory=dict)
+
+    @property
+    def pending_attempt(self) -> Optional[AttemptIdentity]:
+        """The in-flight attempt this turn has been waiting on longest.
+
+        Turn-terminal readers — cancellation, interruption, settlement — need
+        one identity for a turn that may hold several. The oldest is the only
+        stable choice: entries are removed as their requests settle, so
+        whatever is still first arrived before all the others and cannot be
+        displaced by a later one.
+        """
+
+        for identity in self.pending_attempts.values():
+            return identity
+        return None
 
 
 @dataclass
@@ -66,7 +559,41 @@ class ProcessScope:
     token: str
     active_turns: set[str] = field(default_factory=set)
     ambiguous_turns: set[str] = field(default_factory=set)
+    prepared_routes: dict[str, "PreparedGatewayRoute"] = field(default_factory=dict)
+    routing_conflicts: set[str] = field(default_factory=set)
     untracked_use: bool = False
+    request_scoped: bool = False
+    # The credential each route launched from this scope authenticates with,
+    # one per distinct route rather than one per launch. `token` identifies
+    # the process; these identify a route within it, which is what routing
+    # actually needs: an upstream model id is not unique across routes, so a
+    # credential that names only the process cannot answer which route a
+    # request for that model belongs to.
+    route_tokens: dict["PreparedGatewayRoute", str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PreparedGatewayRoute:
+    requested_model_id: str
+    resolved_model_id: str
+    source_id: str
+    gateway_request_model_id: str
+
+
+@dataclass(frozen=True)
+class GatewayCredential:
+    """What a gateway credential answers for: a process, and maybe a route."""
+
+    scope_key: ScopeKey
+    route: Optional[PreparedGatewayRoute] = None
+
+
+@dataclass(frozen=True)
+class GatewayRouting:
+    """Where a gateway request goes, and which turn — if any — owns it."""
+
+    caller_model_id: Optional[str]
+    owner_turn_id: Optional[str]
 
 
 class GatewayTurnTerminalizer:
@@ -78,44 +605,58 @@ class GatewayTurnTerminalizer:
         *,
         backend: str,
         token: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> None:
         self._registry = registry
         self._backend = backend
         self._token = token
+        self._request_metadata = (
+            dict(request_metadata) if isinstance(request_metadata, Mapping) else None
+        )
+        # One gateway request, one identity. Every attempt this terminalizer
+        # records is filed under it, so concurrent requests on one turn cannot
+        # overwrite each other's provenance.
+        self._request_id = secrets.token_hex(8)
         self.turn_id = registry._open_prepared_gateway_turn(
             backend=backend,
             token=token,
+            request_id=self._request_id,
+            request_metadata=self._request_metadata,
         )
         self._stream_started = False
+        self._attempt_started = False
+        self._downstream_canceled = False
+        self._recovery_closed = False
+        self.on_attribution_released: Callable[[], None] | None = None
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
         return self
 
-    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+    def __exit__(self, exc_type, _exc, _traceback) -> None:
+        if self._downstream_canceled or exc_type is asyncio.CancelledError:
+            return
         self._registry._terminalize_gateway_exit(
             self.turn_id,
+            request_id=self._request_id,
             stream_started=self._stream_started,
         )
 
-    def bind_request_model(self, model_id: str) -> Optional[str]:
-        if self.turn_id is None:
-            return None
-        matched = self._registry.begin_gateway_request(
+    def resolution_model(self, gateway_model_id: str) -> Optional[str]:
+        """Return the uniquely prepared caller model for this gateway request."""
+
+        routing = self._registry.claim_gateway_request(
             backend=self._backend,
             token=self._token,
-            requested_model_id=model_id,
+            prepared_turn_id=self.turn_id,
+            request_id=self._request_id,
+            gateway_model_id=gateway_model_id,
+            request_metadata=self._request_metadata,
         )
-        if matched != self.turn_id:
-            self.turn_id = None
-        return self.turn_id
-
-    def resolution_model(self, gateway_model_id: str) -> str:
-        """Return the caller model retained before the CLI rewrote its request."""
-
-        turn_id = self.bind_request_model(gateway_model_id)
-        if turn_id is None:
-            return gateway_model_id
-        return self._registry.gateway_requested_model(turn_id) or gateway_model_id
+        self.turn_id = routing.owner_turn_id
+        if self.turn_id is None and self.on_attribution_released is not None:
+            release, self.on_attribution_released = self.on_attribution_released, None
+            release()
+        return routing.caller_model_id
 
     def fail(
         self,
@@ -123,15 +664,31 @@ class GatewayTurnTerminalizer:
     ) -> None:
         self._registry._terminalize_gateway_exit(
             self.turn_id,
+            request_id=self._request_id,
             reason=reason,
             stream_started=self._stream_started,
             force=True,
         )
 
-    def mark_no_candidate(self, supply_state: SupplyState) -> None:
+    def engine_down(self) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            request_id=self._request_id,
+            reason="engine_down",
+            stream_started=self._stream_started,
+            force=True,
+        )
+
+    def mark_no_candidate(
+        self,
+        supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
+    ) -> None:
         self._registry.mark_gateway_no_candidate(
             self.turn_id,
             supply_state,
+            blockers,
+            request_id=self._request_id,
         )
 
     def begin_attempt(
@@ -141,13 +698,19 @@ class GatewayTurnTerminalizer:
         resolved_model_id: str,
         channel: SupplyChannel,
         via_mapping: bool,
+        stripped_reasoning_efforts: tuple[str, ...] = (),
+        declared_reasoning_efforts: tuple[str, ...] = (),
     ) -> None:
+        self._attempt_started = True
         self._registry.begin_attempt(
             self.turn_id,
             source_id=source_id,
             resolved_model_id=resolved_model_id,
             channel=channel,
             via_mapping=via_mapping,
+            stripped_reasoning_efforts=stripped_reasoning_efforts,
+            declared_reasoning_efforts=declared_reasoning_efforts,
+            request_id=self._request_id,
         )
 
     def finish_attempt(
@@ -156,14 +719,44 @@ class GatewayTurnTerminalizer:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
     ) -> None:
+        self._attempt_started = True
         self._registry.finish_attempt(
             self.turn_id,
             outcome=outcome,
             decision=decision,
+            request_id=self._request_id,
         )
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+
+    def update_recovery(self, snapshot: dict | None) -> None:
+        if self._recovery_closed:
+            return
+        if snapshot is None:
+            self._recovery_closed = True
+        self._registry.update_recovery(
+            self.turn_id, backend=self._backend, request_id=self._request_id, snapshot=snapshot,
+        )
+
+    def record_turn_outcome(
+        self,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> None:
+        """Keep the settlement projection attached to the correlated turn event."""
+
+        if self.turn_id is not None:
+            self._registry.record_turn_outcome(self.turn_id, turn_outcome)
+
+    def mark_downstream_canceled(self) -> None:
+        """Clear a prepared-only attempt before the outer stopped settlement."""
+
+        if not self._attempt_started:
+            self._registry.clear_prepared_attempt(
+                self.turn_id,
+                request_id=self._request_id,
+            )
+        self._downstream_canceled = True
 
 
 def _utc_now_iso() -> str:
@@ -174,11 +767,33 @@ def _terminal_reason(decision: ResolutionDecision) -> str:
     code = decision.error_code or ""
     if code == "stream_interrupted":
         return "stream_interrupted"
-    if code == "upstream_request_invalid":
+    if code in {"request_incompatible", "upstream_request_invalid"}:
         return "invalid_parameter"
     if code == "tool_incompatible":
         return "tool_incompatible"
     return "protocol_error"
+
+
+def _degrade_persisted_provenance(record: dict) -> dict:
+    degraded = dict(record)
+    attempts = degraded.get("failed_attempts")
+    if not isinstance(attempts, list):
+        return degraded
+    degraded_attempts = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            degraded_attempts.append(attempt)
+            continue
+        degraded_attempt = dict(attempt)
+        reason = degraded_attempt.get("reason")
+        if isinstance(reason, str):
+            degraded_attempt["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
+                reason,
+                reason,
+            )
+        degraded_attempts.append(degraded_attempt)
+    degraded["failed_attempts"] = degraded_attempts
+    return degraded
 
 
 class BoundedProvenanceStore:
@@ -199,30 +814,13 @@ class BoundedProvenanceStore:
             return []
         if not isinstance(payload, list):
             return []
-        return [item for item in payload if isinstance(item, dict)]
+        return [_degrade_persisted_provenance(item) for item in payload if isinstance(item, dict)]
 
     def _read(self) -> list[dict]:
         return self._read_path(self.path)
 
     def _write_path(self, path: Path, records: list[dict]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(
-            records[-self.max_entries :],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            delete=False,
-        ) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temporary_path = tmp.name
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, path)
+        write_state_document(path, records[-self.max_entries :])
 
     def _write(self, records: list[dict]) -> None:
         self._write_path(self.path, records)
@@ -251,17 +849,98 @@ class BoundedProvenanceStore:
                 None,
             )
 
+    def latest_for_model(self, backend: str, model_id: str) -> Optional[dict]:
+        with self._lock:
+            return next(
+                (
+                    dict(record)
+                    for record in reversed(self._read())
+                    if record.get("agent") == backend
+                    and record.get("requested_model_id") == model_id
+                ),
+                None,
+            )
+
 
 class TurnCorrelationRegistry:
     """Correlate process credentials to the existing Workbench turn token."""
 
-    def __init__(self, store: BoundedProvenanceStore):
+    def __init__(
+        self, store: BoundedProvenanceStore,
+        *, on_recovery_changed: Callable[[str], None] | None = None,
+    ):
         self.store = store
         self._lock = threading.RLock()
         self._scopes: dict[ScopeKey, ProcessScope] = {}
-        self._token_scopes: dict[str, ScopeKey] = {}
+        self._credentials: dict[str, GatewayCredential] = {}
         self._turn_scopes: dict[str, set[ScopeKey]] = {}
         self._traces: dict[str, TurnTrace] = {}
+        self.on_recovery_changed = on_recovery_changed
+
+    def _readable_trace(
+        self, turn_id: str, backend: str | None = None, *, allow_closed: bool = False,
+    ) -> TurnTrace | None:
+        """Called under the registry lock; attribution is never inferred."""
+
+        trace = self._traces.get(turn_id)
+        if (
+            trace is None or trace.ambiguous or trace.outcome_frozen
+            or (trace.admission_closed and not allow_closed)
+            or (backend is not None and trace.agent != backend)
+        ):
+            return None
+        keys = self._turn_scopes.get(turn_id, set())
+        if not keys or any(
+            key[0] != trace.agent or (scope := self._scopes.get(key)) is None
+            or scope.untracked_use or turn_id in scope.ambiguous_turns
+            or turn_id not in scope.active_turns
+            for key in keys
+        ):
+            return None
+        return trace
+
+    def terminal_projection(self, turn_id: str, *, backend: str) -> TurnOutcomeProjectionInput | None:
+        with self._lock:
+            trace = self._readable_trace(turn_id, backend, allow_closed=True)
+            if (
+                trace is None or trace.pending_attempts or trace.terminal_outcome is None
+                or trace.terminal_outcome.outcome in {"served", "canceled"}
+            ):
+                return None
+            return trace.terminal_outcome
+
+    def recovery_snapshot(self, turn_id: str) -> list[dict]:
+        with self._lock:
+            trace = self._readable_trace(turn_id)
+            return [dict(item) for item in trace.recovery_requests.values()] if trace else []
+
+    def update_recovery(
+        self, turn_id: str | None, *, backend: str, request_id: str, snapshot: dict | None,
+    ) -> None:
+        if turn_id is None:
+            return
+        changed = False
+        with self._lock:
+            trace = self._readable_trace(turn_id, backend)
+            if trace is None:
+                return
+            previous = trace.recovery_requests.get(request_id)
+            current = {**snapshot, "request_id": request_id} if snapshot is not None else None
+            if previous != current:
+                changed = True
+                if current is None:
+                    trace.recovery_requests.pop(request_id, None)
+                else:
+                    trace.recovery_requests[request_id] = current
+        if changed and self.on_recovery_changed is not None:
+            self._notify_recovery_changed(turn_id)
+
+    def _notify_recovery_changed(self, turn_id: str) -> None:
+        if self.on_recovery_changed is not None:
+            try:
+                self.on_recovery_changed(turn_id)
+            except Exception:
+                logger.exception("Could not publish Model Hub recovery activity")
 
     @staticmethod
     def _scope_key(backend: str, process_scope: str) -> ScopeKey:
@@ -272,11 +951,43 @@ class TurnCorrelationRegistry:
             raise ValueError("process scope is required")
         return backend, normalized  # type: ignore[return-value]
 
+    @staticmethod
+    def _request_identity(
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[str, str] | None:
+        if not isinstance(request_metadata, Mapping):
+            return None
+        route_id = request_metadata.get("avibe_route_id")
+        turn_id = request_metadata.get("avibe_turn_id")
+        if (
+            not isinstance(route_id, str)
+            or not route_id.strip()
+            or not isinstance(turn_id, str)
+            or (turn_id != "" and not turn_id.strip())
+        ):
+            return None
+        return route_id, turn_id
+
+    @staticmethod
+    def _register_explicit_turn(
+        *,
+        key: ScopeKey,
+        scope: ProcessScope,
+        turn_id: str | None,
+        turn_scopes: dict[str, set[ScopeKey]],
+    ) -> None:
+        if turn_id is None:
+            return
+        scope.active_turns.add(turn_id)
+        turn_scopes.setdefault(turn_id, set()).add(key)
+
     def credentials(
         self,
         backend: str,
         process_scope: str,
         turn_id: Optional[str],
+        *,
+        request_scoped: bool = False,
     ) -> str:
         key = self._scope_key(backend, process_scope)
         normalized_turn_id = str(turn_id or "").strip() or None
@@ -285,7 +996,29 @@ class TurnCorrelationRegistry:
             if scope is None:
                 scope = ProcessScope(token=secrets.token_urlsafe(32))
                 self._scopes[key] = scope
-                self._token_scopes[scope.token] = key
+                self._credentials[scope.token] = GatewayCredential(scope_key=key)
+
+            if backend == "codex" and request_scoped and not scope.request_scoped:
+                for active_turn_id in scope.active_turns:
+                    trace = self._traces.get(active_turn_id)
+                    if trace is not None and scope.untracked_use:
+                        trace.ambiguous = True
+                scope.request_scoped = True
+                scope.untracked_use = False
+                for route_token in scope.route_tokens.values():
+                    self._credentials.pop(route_token, None)
+
+            # Explicit Codex scopes never infer ownership from a sole active
+            # turn. Trusted dispatcher calls still register their own turn;
+            # HTTP requests must carry the route and turn metadata.
+            if backend == "codex" and scope.request_scoped:
+                self._register_explicit_turn(
+                    key=key,
+                    scope=scope,
+                    turn_id=normalized_turn_id,
+                    turn_scopes=self._turn_scopes,
+                )
+                return scope.token
 
             # Frozen v3 has no discriminator for the shared OpenCode server.
             if normalized_turn_id is None or backend == "opencode":
@@ -310,10 +1043,90 @@ class TurnCorrelationRegistry:
     def authenticates(self, backend: str, token: str) -> bool:
         with self._lock:
             authorized = False
-            for candidate, key in self._token_scopes.items():
+            for candidate, credential in self._credentials.items():
                 matches = secrets.compare_digest(candidate, token)
-                authorized = authorized or (matches and key[0] == backend)
+                authorized = authorized or (
+                    matches and credential.scope_key[0] == backend
+                )
             return authorized
+
+    def _credential(self, backend: str, token: str) -> Optional[GatewayCredential]:
+        """Resolve a token to what it answers for; call under `_lock`."""
+
+        credential = self._credentials.get(token)
+        if credential is None or credential.scope_key[0] != backend:
+            return None
+        return credential
+
+    def _route_credential(
+        self,
+        key: ScopeKey,
+        scope: ProcessScope,
+        route: PreparedGatewayRoute,
+    ) -> str:
+        """Return the credential a launch on this route authenticates with.
+
+        One credential per distinct route, not per launch: `authenticates`
+        compares against every credential in constant time, so the cost is
+        bounded by the routes a process actually uses rather than by how many
+        times it is launched. Re-launching the same route is the same routing
+        answer and reuses the same credential.
+        """
+
+        token = scope.route_tokens.get(route)
+        if token is None:
+            token = secrets.token_urlsafe(32)
+            scope.route_tokens[route] = token
+            if not scope.request_scoped:
+                self._credentials[token] = GatewayCredential(
+                    scope_key=key,
+                    route=route,
+                )
+        return token
+
+    def _explicit_route(
+        self,
+        *,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[ScopeKey, ProcessScope, PreparedGatewayRoute, str] | None:
+        credential = self._credential(backend, token)
+        if credential is None:
+            return None
+        key = credential.scope_key
+        scope = self._scopes.get(key)
+        if scope is None or not scope.request_scoped:
+            return None
+        identity = self._request_identity(request_metadata)
+        if identity is None:
+            return None
+        route_id, _turn_id = identity
+        route = next(
+            (
+                candidate
+                for candidate, candidate_id in scope.route_tokens.items()
+                if candidate_id == route_id
+            ),
+            None,
+        )
+        if route is None:
+            return None
+        return key, scope, route, route_id
+
+    @staticmethod
+    def _explicit_turn_owns_route(
+        scope: ProcessScope,
+        *,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        return (
+            turn_id in scope.active_turns
+            and turn_id not in scope.ambiguous_turns
+            and turn_id not in scope.routing_conflicts
+            and scope.prepared_routes.get(turn_id) == route
+        )
 
     def retire_scope(
         self,
@@ -330,17 +1143,24 @@ class TurnCorrelationRegistry:
             scope = self._scopes.pop(key, None)
             if scope is None:
                 return
-            self._token_scopes.pop(scope.token, None)
+            self._credentials.pop(scope.token, None)
+            for route_token in scope.route_tokens.values():
+                self._credentials.pop(route_token, None)
             for turn_id in scope.active_turns:
                 trace = self._traces.get(turn_id)
                 terminal_is_exact = (
-                    turn_id == normalized_terminal_turn_id
-                    and trace is not None
+                    trace is not None
+                    and (
+                        scope.request_scoped or scope.active_turns == {turn_id}
+                    )
+                    and (
+                        turn_id == normalized_terminal_turn_id
+                        or trace.admission_closed
+                    )
                     and not trace.ambiguous
                     and not scope.untracked_use
-                    and scope.active_turns == {turn_id}
                     and turn_id not in scope.ambiguous_turns
-                    and bool(trace.failed_attempts or trace.terminal_error)
+                    and bool(trace.failed_attempts or trace.terminal_error or (trace.admission_closed and trace.served))
                 )
                 if terminal_is_exact:
                     turn_scopes = self._turn_scopes.get(turn_id)
@@ -350,10 +1170,13 @@ class TurnCorrelationRegistry:
                     trace.ambiguous = True
 
     def _exact_turn(self, backend: str, token: str) -> tuple[str, ScopeKey] | None:
-        key = self._token_scopes.get(token)
-        if key is None or key[0] != backend:
+        credential = self._credential(backend, token)
+        if credential is None:
             return None
-        scope = self._scopes[key]
+        key = credential.scope_key
+        scope = self._scopes.get(key)
+        if scope is None or scope.request_scoped:
+            return None
         if scope.untracked_use or len(scope.active_turns) != 1:
             for turn_id in scope.active_turns:
                 trace = self._traces.get(turn_id)
@@ -364,9 +1187,35 @@ class TurnCorrelationRegistry:
         if turn_id in scope.ambiguous_turns:
             return None
         trace = self._traces.get(turn_id)
-        if trace is not None and trace.ambiguous:
+        if trace is not None and (trace.ambiguous or trace.admission_closed):
             return None
         return turn_id, key
+
+    def _trusted_turn(
+        self,
+        *,
+        backend: str,
+        token: str,
+        turn_id: str,
+    ) -> tuple[str, ScopeKey] | None:
+        """Resolve a dispatcher-owned turn without HTTP turn inference."""
+
+        credential = self._credential(backend, token)
+        if credential is None:
+            return None
+        key = credential.scope_key
+        scope = self._scopes.get(key)
+        if scope is None:
+            return None
+        if scope.request_scoped:
+            if turn_id not in scope.active_turns or turn_id in scope.ambiguous_turns:
+                return None
+            trace = self._traces.get(turn_id)
+            if trace is not None and (trace.ambiguous or trace.admission_closed):
+                return None
+            return turn_id, key
+        exact = self._exact_turn(backend, token)
+        return exact if exact is not None and exact[0] == turn_id else None
 
     def begin_gateway_request(
         self,
@@ -390,75 +1239,381 @@ class TurnCorrelationRegistry:
                 )
                 self._traces[turn_id] = trace
             elif (
-                trace.gateway_model_id is not None
-                and trace.gateway_model_id != requested_model_id
+                trace.gateway_request_model_id is not None
+                and requested_model_id not in {
+                    trace.gateway_request_model_id,
+                    trace.gateway_model_id,
+                }
             ):
                 trace.ambiguous = True
                 self._scopes[key].ambiguous_turns.add(turn_id)
                 return None
             return turn_id
 
+    def _register_prepared_gateway_route(
+        self,
+        *,
+        scope: ProcessScope,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        existing = scope.prepared_routes.get(turn_id)
+        if existing is not None and existing != route:
+            scope.prepared_routes.pop(turn_id, None)
+            scope.routing_conflicts.add(turn_id)
+            return False
+        if turn_id in scope.routing_conflicts:
+            return False
+        scope.prepared_routes[turn_id] = route
+        return True
+
+    def _record_prepared_gateway_trace(
+        self,
+        *,
+        key: ScopeKey,
+        scope: ProcessScope,
+        turn_id: str,
+        route: PreparedGatewayRoute,
+    ) -> bool:
+        trace = self._traces.setdefault(
+            turn_id,
+            TurnTrace(
+                turn_id=turn_id,
+                agent=key[0],
+                requested_model_id=route.requested_model_id,
+                scope_key=key,
+            ),
+        )
+        if (
+            trace.requested_model_id != route.requested_model_id
+            or (
+                trace.gateway_source_id is not None
+                and trace.gateway_source_id != route.source_id
+            )
+            or (
+                trace.gateway_request_model_id is not None
+                and trace.gateway_request_model_id
+                != route.gateway_request_model_id
+            )
+            or (
+                trace.gateway_model_id is not None
+                and trace.gateway_model_id != route.resolved_model_id
+            )
+        ):
+            trace.ambiguous = True
+            scope.ambiguous_turns.add(turn_id)
+            return False
+        trace.gateway_source_id = route.source_id
+        trace.gateway_request_model_id = route.gateway_request_model_id
+        trace.gateway_model_id = route.resolved_model_id
+        return True
+
     def prepare_gateway_turn(
         self,
         *,
         backend: str,
         token: str,
+        turn_id: Optional[str] = None,
         requested_model_id: str,
         resolved_model_id: str,
         source_id: str,
         via_mapping: bool,
-    ) -> None:
-        """Retain the caller-facing model before the CLI rewrites its request."""
+        gateway_request_model_id: str | None = None,
+    ) -> str:
+        """Register a route and return its legacy credential or explicit handle."""
 
         with self._lock:
-            exact = self._exact_turn(backend, token)
-            if exact is None:
-                return
-            turn_id, key = exact
-            trace = self._traces.setdefault(
-                turn_id,
-                TurnTrace(
-                    turn_id=turn_id,
-                    agent=key[0],
-                    requested_model_id=requested_model_id,
-                    scope_key=key,
-                ),
+            credential = self._credential(backend, token)
+            if credential is None:
+                return token
+            key = credential.scope_key
+            scope = self._scopes.get(key)
+            if scope is None:
+                return token
+            normalized_turn_id = str(turn_id or "").strip()
+            request_model_id = gateway_request_model_id or resolved_model_id
+            prepared = PreparedGatewayRoute(
+                requested_model_id=requested_model_id,
+                resolved_model_id=resolved_model_id,
+                source_id=source_id,
+                gateway_request_model_id=request_model_id,
             )
-            if (
-                trace.requested_model_id != requested_model_id
-                or (
-                    trace.gateway_source_id is not None
-                    and trace.gateway_source_id != source_id
-                )
-                or (
-                    trace.gateway_model_id is not None
-                    and trace.gateway_model_id != resolved_model_id
-                )
-            ):
-                trace.ambiguous = True
-                self._scopes[key].ambiguous_turns.add(turn_id)
-                return
-            trace.gateway_source_id = source_id
-            trace.gateway_model_id = resolved_model_id
-            trace.gateway_via_mapping = via_mapping
 
-    def gateway_requested_model(self, turn_id: str) -> Optional[str]:
+            if scope.request_scoped:
+                launch_token = self._route_credential(key, scope, prepared)
+                if (
+                    normalized_turn_id
+                    and normalized_turn_id in scope.active_turns
+                ):
+                    self._register_prepared_gateway_route(
+                        scope=scope,
+                        turn_id=normalized_turn_id,
+                        route=prepared,
+                    )
+                    self._record_prepared_gateway_trace(
+                        key=key,
+                        scope=scope,
+                        turn_id=normalized_turn_id,
+                        route=prepared,
+                    )
+                return launch_token
+
+            if normalized_turn_id:
+                if normalized_turn_id not in scope.active_turns:
+                    return token
+                route_turn_id = normalized_turn_id
+            else:
+                exact = self._exact_turn(backend, token)
+                if exact is None:
+                    return token
+                route_turn_id = exact[0]
+            launch_token = self._route_credential(key, scope, prepared)
+            self._register_prepared_gateway_route(
+                scope=scope,
+                turn_id=route_turn_id,
+                route=prepared,
+            )
+            exact = self._exact_turn(backend, token)
+            if exact is None or exact[0] != route_turn_id:
+                return launch_token
+            self._record_prepared_gateway_trace(
+                key=key,
+                scope=scope,
+                turn_id=route_turn_id,
+                route=prepared,
+            )
+            return launch_token
+
+    def gateway_request_metadata(
+        self,
+        *,
+        backend: str,
+        token: str,
+        turn_id: Optional[str],
+        route: PreparedGatewayRoute | None = None,
+    ) -> dict[str, str]:
+        """Return a registered route, with an empty turn for untracked callers."""
+
+        normalized_turn_id = str(turn_id or "").strip()
         with self._lock:
-            trace = self._traces.get(turn_id)
-            if trace is None or trace.ambiguous:
-                return None
-            return trace.requested_model_id
+            credential = self._credential(backend, token)
+            if credential is None:
+                return {}
+            scope = self._scopes.get(credential.scope_key)
+            if (
+                scope is None
+                or not scope.request_scoped
+            ):
+                return {}
+            if normalized_turn_id:
+                if (
+                    normalized_turn_id not in scope.active_turns
+                    or normalized_turn_id in scope.routing_conflicts
+                ):
+                    return {}
+                prepared = scope.prepared_routes.get(normalized_turn_id)
+                if route is not None and route != prepared:
+                    return {}
+                route = prepared
+            if route is None:
+                return {}
+            route_id = scope.route_tokens.get(route)
+            if route_id is None:
+                return {}
+            return {
+                "avibe_route_id": route_id,
+                "avibe_turn_id": normalized_turn_id,
+            }
+
+    def claim_gateway_request(
+        self,
+        *,
+        backend: str,
+        token: str,
+        prepared_turn_id: Optional[str],
+        request_id: str = TURN_REQUEST,
+        gateway_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
+    ) -> GatewayRouting:
+        """Route one gateway request and settle its attribution atomically.
+
+        Where the request goes, whether a live turn owns it, and whether the
+        attempt already opened for that turn still stands are one decision
+        about one request, so they are made in one critical section. Split
+        across two, a turn rotation lands in between: the turn that becomes
+        the sole live one is then told a model it never asked for arrived on
+        its token, which marks it ambiguous and drops the provenance of the
+        request it goes on to make itself.
+
+        The nested calls below re-enter `_lock`, which is an `RLock` for
+        exactly this reason — reusing the two public mutators keeps one
+        implementation of each rather than a `_locked` twin to keep in sync.
+        """
+
+        with self._lock:
+            caller_model_id, claimed = self._route_gateway_model(
+                backend=backend,
+                token=token,
+                gateway_model_id=gateway_model_id,
+                request_metadata=request_metadata,
+            )
+            if prepared_turn_id is None:
+                return GatewayRouting(caller_model_id, None)
+            credential = self._credential(backend, token)
+            scope = (
+                self._scopes.get(credential.scope_key)
+                if credential is not None
+                else None
+            )
+            if scope is not None and scope.request_scoped:
+                trace = self._traces.get(prepared_turn_id)
+                if (
+                    claimed
+                    and trace is not None
+                    and not trace.ambiguous
+                    and request_id in trace.pending_attempts
+                    and gateway_model_id
+                    in {trace.gateway_request_model_id, trace.gateway_model_id}
+                ):
+                    # Admission may close after this request opened. Its
+                    # ownership remains valid through the bounded drain.
+                    return GatewayRouting(caller_model_id, prepared_turn_id)
+                self.clear_prepared_attempt(
+                    prepared_turn_id,
+                    request_id=request_id,
+                )
+                return GatewayRouting(caller_model_id, None)
+            if claimed:
+                trace = self._traces.get(prepared_turn_id)
+                if (
+                    trace is not None
+                    and trace.admission_closed
+                    and not trace.ambiguous
+                    and request_id in trace.pending_attempts
+                    and gateway_model_id in {trace.gateway_request_model_id, trace.gateway_model_id}
+                ):
+                    # This request acquired its identity before the FSM closed
+                    # admission; completing its body parse is not a new claim.
+                    return GatewayRouting(caller_model_id, prepared_turn_id)
+                owner = self.begin_gateway_request(
+                    backend=backend,
+                    token=token,
+                    requested_model_id=gateway_model_id,
+                )
+                if owner != prepared_turn_id:
+                    owner = None
+                return GatewayRouting(caller_model_id, owner)
+            # Routing was answered from this request's own credential, so no
+            # live turn owns it and its own turn has already settled — there
+            # is nothing left to attribute it to. The attempt armed for the
+            # live turn on the way in therefore has to be given back: left
+            # behind, it settles that turn as having canceled or interrupted a
+            # Hub attempt it never made. It cannot be armed later instead,
+            # because `fail` runs before this call and needs a turn to fail.
+            self.clear_prepared_attempt(prepared_turn_id, request_id=request_id)
+            return GatewayRouting(caller_model_id, None)
+
+    def _route_gateway_model(
+        self,
+        *,
+        backend: str,
+        token: str,
+        gateway_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
+    ) -> tuple[Optional[str], bool]:
+        """Resolve where this gateway request goes; call under `_lock`.
+
+        Routing is a property of the credential, not of the turn windows that
+        happen to be open. The credential was minted for one route when the
+        process was launched, so it answers for that route for as long as the
+        process lives — through CLI tool loops, agent-initiated turns, and
+        transport retries, none of which arrive inside a dispatched-turn
+        window.
+
+        Returns the caller model to route by, and whether a live turn claims
+        it and may therefore be credited with the request.
+        """
+
+        credential = self._credential(backend, token)
+        if credential is None:
+            return None, False
+        scope = self._scopes.get(credential.scope_key)
+        if scope is None:
+            return None, False
+        if scope.request_scoped:
+            explicit = self._explicit_route(
+                backend=backend,
+                token=token,
+                request_metadata=request_metadata,
+            )
+            if explicit is None:
+                return None, False
+            _key, _scope, route, _route_id = explicit
+            if gateway_model_id not in {
+                route.gateway_request_model_id,
+                route.resolved_model_id,
+            }:
+                return None, False
+            identity = self._request_identity(request_metadata)
+            assert identity is not None
+            _route_id, turn_id = identity
+            if turn_id in scope.active_turns:
+                if not self._explicit_turn_owns_route(
+                    scope,
+                    turn_id=turn_id,
+                    route=route,
+                ):
+                    return None, False
+                return route.requested_model_id, True
+            # Completed turn IDs are intentionally not retained. A valid
+            # process-owned route handle can route a late continuation, but it
+            # cannot claim a newer active turn.
+            return route.requested_model_id, False
+        route = credential.route
+        if route is None:
+            # No route was known when this credential was minted: the shared
+            # OpenCode server, and any launch Avibe did not map. There the
+            # wire model id really is the route key, because one credential
+            # serves every model the process may name.
+            return (gateway_model_id if scope.untracked_use else None), False
+        if gateway_model_id not in {
+            route.gateway_request_model_id,
+            route.resolved_model_id,
+        }:
+            # This credential was minted for one route, and the route knows
+            # both model ids a request on it may legitimately name: the id the
+            # launch was told to send, and the resolved upstream id a backend
+            # started before that became explicit still sends. A request for
+            # anything else belongs to no route the process was launched on —
+            # a CLI naming its own model, most often — and answering it from
+            # some other route would be exactly the aliasing this credential
+            # exists to prevent. Accepting both ids cannot alias here: the
+            # credential already named the route, so there is no second route
+            # for the legacy id to be confused with.
+            return None, False
+        # A live turn claims this request when it prepared this same route.
+        # The whole route must match, not just the upstream model: two routes
+        # can resolve to one upstream model id, and crediting a turn for a
+        # request that belongs to the other one is how a turn ends up
+        # ambiguous over a model it never asked for.
+        claimed = any(
+            prepared == route and turn_id in scope.active_turns
+            for turn_id, prepared in scope.prepared_routes.items()
+        )
+        return route.requested_model_id, claimed
 
     def gateway_terminalizer(
         self,
         *,
         backend: str,
         token: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> GatewayTurnTerminalizer:
         return GatewayTurnTerminalizer(
             self,
             backend=backend,
             token=token,
+            request_metadata=request_metadata,
         )
 
     def _open_prepared_gateway_turn(
@@ -466,8 +1621,59 @@ class TurnCorrelationRegistry:
         *,
         backend: str,
         token: str,
+        request_id: str = TURN_REQUEST,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> Optional[str]:
+        """Arm the launch identity for one gateway request.
+
+        The identity is filed under this request, so arming it can neither
+        displace nor be displaced by a concurrent request on the same turn.
+        Arming has to happen here, before any model id is read, because a
+        request can fail on its parameters before it ever names a model and
+        that failure still needs a turn to land on.
+        """
+
         with self._lock:
+            credential = self._credential(backend, token)
+            scope = (
+                self._scopes.get(credential.scope_key)
+                if credential is not None
+                else None
+            )
+            if scope is not None and scope.request_scoped:
+                explicit = self._explicit_route(
+                    backend=backend,
+                    token=token,
+                    request_metadata=request_metadata,
+                )
+                if explicit is None:
+                    return None
+                _key, scope, route, _route_id = explicit
+                identity = self._request_identity(request_metadata)
+                assert identity is not None
+                _route_id, turn_id = identity
+                if not self._explicit_turn_owns_route(
+                    scope,
+                    turn_id=turn_id,
+                    route=route,
+                ):
+                    return None
+                trace = self._traces.get(turn_id)
+                if (
+                    trace is None
+                    or trace.ambiguous
+                    or trace.admission_closed
+                    or trace.gateway_source_id is None
+                    or trace.gateway_model_id is None
+                ):
+                    return None
+                trace.pending_attempts[request_id] = AttemptIdentity(
+                    source_id=trace.gateway_source_id,
+                    resolved_model_id=trace.gateway_model_id,
+                    channel="hub",
+                )
+                return turn_id
+
             exact = self._exact_turn(backend, token)
             if exact is None:
                 return None
@@ -479,19 +1685,47 @@ class TurnCorrelationRegistry:
                 or trace.gateway_model_id is None
             ):
                 return None
-            trace.pending_attempt = AttemptIdentity(
+            trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=trace.gateway_source_id,
                 resolved_model_id=trace.gateway_model_id,
                 channel="hub",
-                via_mapping=trace.gateway_via_mapping,
             )
             return turn_id
+
+    def clear_prepared_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        request_id: str = TURN_REQUEST,
+    ) -> None:
+        """Remove one request's launch identity when it never invokes.
+
+        Only this request's own entry is removed. A peer awaiting an upstream
+        result keeps its identity, which is the whole point of filing attempts
+        per request: `finish_attempt` reconstructs nothing from an empty
+        entry, so taking a peer's would lose its provenance for good.
+        """
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.outcome_frozen:
+                return
+            identity = trace.pending_attempts.get(request_id)
+            if identity is not None and identity.channel == "hub":
+                trace.pending_attempts.pop(request_id, None)
 
     def _terminalize_gateway_exit(
         self,
         turn_id: Optional[str],
         *,
-        reason: Literal["invalid_parameter", "protocol_error"] = "protocol_error",
+        request_id: str = TURN_REQUEST,
+        reason: Literal[
+            "invalid_parameter",
+            "protocol_error",
+            "engine_down",
+        ] = "protocol_error",
         stream_started: bool,
         force: bool = False,
     ) -> None:
@@ -499,19 +1733,33 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None or trace.ambiguous:
+            if trace is None or trace.ambiguous or trace.outcome_frozen:
                 return
             if not force and (
                 trace.served is not None
                 or trace.terminal_error is not None
                 or trace.model_supply_state is not None
                 or (
-                    trace.pending_attempt is None
+                    trace.pending_attempts.get(request_id) is None
                     and bool(trace.failed_attempts)
                 )
             ):
                 return
-            identity = trace.pending_attempt
+            if reason == "engine_down":
+                # The engine, not one request, is what went down.
+                trace.pending_attempts.clear()
+                trace.served = None
+                trace.model_supply_state = None
+                trace.blockers = []
+                trace.terminal_error = {
+                    "source_id": None,
+                    "configured_model_id": None,
+                    "channel": None,
+                    "reason": reason,
+                    "stream_started": stream_started,
+                }
+                return
+            identity = trace.pending_attempts.get(request_id)
             if identity is None and (
                 trace.gateway_source_id is not None
                 and trace.gateway_model_id is not None
@@ -520,11 +1768,10 @@ class TurnCorrelationRegistry:
                     source_id=trace.gateway_source_id,
                     resolved_model_id=trace.gateway_model_id,
                     channel="hub",
-                    via_mapping=trace.gateway_via_mapping,
                 )
             if identity is None or identity.channel != "hub":
                 return
-            trace.pending_attempt = None
+            trace.pending_attempts.pop(request_id, None)
             trace.served = None
             trace.terminal_error = {
                 **identity.payload(),
@@ -548,7 +1795,11 @@ class TurnCorrelationRegistry:
         if not normalized_turn_id:
             return
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._trusted_turn(
+                backend=backend,
+                token=token,
+                turn_id=normalized_turn_id,
+            )
             if exact is None or exact[0] != normalized_turn_id:
                 return
             trace = self._traces.setdefault(
@@ -560,11 +1811,11 @@ class TurnCorrelationRegistry:
                     scope_key=exact[1],
                 ),
             )
-            trace.pending_attempt = AttemptIdentity(
+            # A native turn is one request by construction.
+            trace.pending_attempts[TURN_REQUEST] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel="native_cli",
-                via_mapping=via_mapping,
             )
 
     def mark_no_candidate(
@@ -575,13 +1826,18 @@ class TurnCorrelationRegistry:
         turn_id: Optional[str],
         requested_model_id: str,
         supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
         token = self.credentials(backend, process_scope, turn_id)
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._trusted_turn(
+                backend=backend,
+                token=token,
+                turn_id=normalized_turn_id,
+            )
             if exact is None or exact[0] != normalized_turn_id:
                 return
             trace = self._traces.setdefault(
@@ -594,21 +1850,40 @@ class TurnCorrelationRegistry:
                 ),
             )
             trace.model_supply_state = supply_state
+            trace.blockers = [blocker.payload() for blocker in blockers]
 
     def mark_gateway_no_candidate(
         self,
         turn_id: Optional[str],
         supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
+        *,
+        request_id: str = TURN_REQUEST,
     ) -> None:
         if turn_id is None:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is not None:
-                trace.pending_attempt = None
+            if trace is not None and not trace.outcome_frozen:
+                # Only this request found nothing to call; a peer still
+                # awaiting an upstream result keeps its identity.
+                trace.pending_attempts.pop(request_id, None)
                 trace.served = None
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state
+                trace.blockers = [blocker.payload() for blocker in blockers]
+
+    def record_turn_outcome(
+        self,
+        turn_id: Optional[str],
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None and not trace.outcome_frozen:
+                trace.terminal_outcome = turn_outcome
 
     def begin_attempt(
         self,
@@ -618,22 +1893,27 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         channel: SupplyChannel,
         via_mapping: bool,
+        stripped_reasoning_efforts: tuple[str, ...] = (),
+        declared_reasoning_efforts: tuple[str, ...] = (),
+        request_id: str = TURN_REQUEST,
     ) -> None:
         if turn_id is None:
             return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None:
+            if trace is None or trace.outcome_frozen:
                 return
-            observed_via_mapping = via_mapping or (
-                trace.gateway_via_mapping
-                and trace.gateway_model_id == resolved_model_id
-            )
-            trace.pending_attempt = AttemptIdentity(
+            # Admission supersedes earlier supply failures, not their attempt history.
+            trace.model_supply_state = None
+            trace.blockers = []
+            if trace.terminal_outcome is not None and trace.terminal_outcome.outcome in {"no_candidate", "exhausted"}:
+                trace.terminal_outcome = None
+            trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
                 channel=channel,
-                via_mapping=observed_via_mapping,
+                stripped_reasoning_efforts=stripped_reasoning_efforts,
+                declared_reasoning_efforts=declared_reasoning_efforts,
             )
 
     def fail_native_attempt(
@@ -649,14 +1929,14 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(normalized)
-            if (
-                trace is None
-                or trace.pending_attempt is None
-                or trace.pending_attempt.channel != "native_cli"
-            ):
+            identity = (
+                trace.pending_attempts.get(TURN_REQUEST)
+                if trace is not None
+                else None
+            )
+            if trace is None or trace.outcome_frozen or identity is None or identity.channel != "native_cli":
                 return
-            identity = trace.pending_attempt
-            trace.pending_attempt = None
+            trace.pending_attempts.pop(TURN_REQUEST, None)
             trace.served = None
             trace.terminal_error = None
             trace.failed_attempts.append(
@@ -671,8 +1951,13 @@ class TurnCorrelationRegistry:
             return
         with self._lock:
             trace = self._traces.get(normalized)
-            if trace is None:
+            if trace is None or trace.outcome_frozen:
                 return
+            if self.terminal_projection(normalized, backend=trace.agent) is not None:
+                # The native failure is reporting the gateway's completed
+                # failure, not rejecting content that the gateway served.
+                return
+            trace.outcome_frozen = True
             identity = trace.pending_attempt
             payload = (
                 identity.payload()
@@ -681,7 +1966,8 @@ class TurnCorrelationRegistry:
             )
             if payload is None or payload.get("channel") != "hub":
                 return
-            trace.pending_attempt = None
+            # The backend rejected the turn's result, not one request's.
+            trace.pending_attempts.clear()
             trace.served = None
             trace.terminal_error = {
                 **payload,
@@ -695,35 +1981,80 @@ class TurnCorrelationRegistry:
         *,
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
+        request_id: str = TURN_REQUEST,
     ) -> None:
         if turn_id is None:
             return
+        if decision.error_code == "engine_down":
+            self._terminalize_gateway_exit(
+                turn_id,
+                request_id=request_id,
+                reason="engine_down",
+                stream_started=outcome.stream_started,
+                force=True,
+            )
+            return
         with self._lock:
             trace = self._traces.get(turn_id)
-            if trace is None or trace.pending_attempt is None:
+            identity = (
+                trace.pending_attempts.get(request_id) if trace is not None else None
+            )
+            if trace is None or trace.outcome_frozen or identity is None:
                 return
-            identity = trace.pending_attempt
-            trace.pending_attempt = None
+            trace.pending_attempts.pop(request_id, None)
             if decision.action == "return":
                 trace.served = identity.payload()
                 trace.terminal_error = None
                 return
             if decision.action == "fallback" and decision.reason is not None:
                 trace.failed_attempts.append(
-                    {**identity.payload(), "reason": decision.reason}
+                    {
+                        **identity.payload(), "reason": decision.reason,
+                        **({"http_status": outcome.http_status} if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599 else {}),
+                    }
                 )
                 return
             if decision.action == "surface":
+                observed_codes = machine_error_codes(outcome)
+                diagnostic_code = (
+                    "model_not_found"
+                    if decision.error_code == "upstream_request_invalid" and "model_not_found" in observed_codes
+                    else next((code for code in observed_codes if code in UPSTREAM_MACHINE_ERROR_CODES), None)
+                )
                 trace.terminal_error = {
                     **identity.payload(),
                     "reason": _terminal_reason(decision),
                     "stream_started": outcome.stream_started,
+                    "http_status": (
+                        outcome.http_status
+                        if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599
+                        else None
+                    ),
+                    "upstream_error_code": diagnostic_code,
                 }
+
+    def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
+        """Latch the FSM boundary without discarding already-owned requests."""
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            if trace is None or trace.admission_closed:
+                return
+            trace.admission_closed = True
+            had_recovery = bool(trace.recovery_requests)
+            trace.recovery_requests.clear()
+            if settled_by == SETTLED_BY_STOPPED:
+                # Preserve the exact facts present at Stop. Teardown may expose
+                # a later producer success, but cannot change who ended the turn.
+                trace.outcome_frozen = True
+        if had_recovery:
+            self._notify_recovery_changed(turn_id)
 
     def settle(self, turn_id: str, *, settled_by: Optional[str], ts: Optional[str] = None) -> None:
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
             return
+        self.close_turn_admission(normalized_turn_id, settled_by=settled_by)
         with self._lock:
             trace = self._traces.pop(normalized_turn_id, None)
             scope_keys = self._turn_scopes.pop(normalized_turn_id, set())
@@ -735,6 +2066,8 @@ class TurnCorrelationRegistry:
                 poisoned = poisoned or scope.untracked_use
                 scope.active_turns.discard(normalized_turn_id)
                 scope.ambiguous_turns.discard(normalized_turn_id)
+                scope.prepared_routes.pop(normalized_turn_id, None)
+                scope.routing_conflicts.discard(normalized_turn_id)
             if trace is None or trace.ambiguous or poisoned:
                 return
 
@@ -742,7 +2075,15 @@ class TurnCorrelationRegistry:
             terminal_error = trace.terminal_error
             canceled_attempt = None
             supply_state = None
-            if settled_by == SETTLED_BY_STOPPED:
+            terminal_history_committed = (
+                (
+                    trace.terminal_outcome is not None
+                    and trace.terminal_outcome.outcome != "canceled"
+                )
+                or trace.terminal_error is not None
+                or trace.served is not None
+            )
+            if settled_by == SETTLED_BY_STOPPED and not terminal_history_committed:
                 outcome = "canceled"
                 canceled_attempt = (
                     trace.pending_attempt.payload()
@@ -751,6 +2092,25 @@ class TurnCorrelationRegistry:
                 )
                 served = None
                 terminal_error = None
+            elif settled_by == SETTLED_BY_STOPPED:
+                logger.info(
+                    "Ignored stopped settlement after terminal Model Hub history was committed",
+                    extra={"turn_id": normalized_turn_id},
+                )
+                if trace.model_supply_state is not None:
+                    outcome = "no_candidate"
+                    served = None
+                    terminal_error = None
+                    supply_state = trace.model_supply_state
+                elif terminal_error is not None:
+                    outcome = "failed_terminal"
+                    served = None
+                elif served is not None:
+                    outcome = "served"
+                elif trace.failed_attempts:
+                    outcome = "exhausted"
+                else:
+                    return
             elif trace.model_supply_state is not None:
                 outcome = "no_candidate"
                 served = None
@@ -797,7 +2157,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 5,
+                    "contract_version": 10,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,
@@ -808,6 +2168,10 @@ class TurnCorrelationRegistry:
                     "terminal_error": terminal_error,
                     "canceled_attempt": canceled_attempt,
                     "model_supply_state": supply_state,
-                    "blockers": [],
+                    "blockers": (
+                        list(trace.blockers)
+                        if outcome == "no_candidate"
+                        else []
+                    ),
                 }
             )

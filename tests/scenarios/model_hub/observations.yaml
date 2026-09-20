@@ -1,29 +1,60 @@
-version: 1
+version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-009
+    source: codex-0.154.0-hermetic-native-wire-2026-09-19
+    summary: Route-bound bearer tokens caused model changes to replace shared Codex processes. Per-turn responsesapiClientMetadata survives concurrent threads, tool continuations, retries and local automatic compaction in both the native metadata header and body. The header provides identity before body parsing; a legacy remote compact wire-only probe carries metadata only in its header.
+    affects:
+      - MH-CODEX-ROUTING-001
+      - MH-CODEX-ROUTING-002
+      - MH-CODEX-METADATA-001
+  - id: MH-OBS-008
+    source: local-codex-gateway-investigation-2026-09-08
+    summary: A shared transport budget also limited response headers, first bytes, first model output, and buffered inference completion. Prior tests explicitly required these premature timeouts. Delayed loopback HTTP fixtures now assert completion and cancellation across all supported protocols independently of the connection budget.
+    affects:
+      - MH-RUNTIME-009
+  - id: MH-OBS-007
+    source: opencode-1.18.18-codex-0.153.2-local-http-regression-2026-09-06
+    summary: OpenCode inline config deep-merges provider and model headers, allowing native Authorization headers to replace the Hub token even when baseURL and apiKey are pinned. The managed runtime config hook must replace complete Hub provider definitions. Codex native and same-name provider fixtures retained the configured Source credential and upstream model on the wire.
+    affects:
+      - MH-CODEX-LAUNCH-001
+      - MH-OPENCODE-LAUNCH-001
+  - id: MH-OBS-006
+    source: claude-sdk-0.2.93-local-http-regression-2026-09-06
+    summary: Native project and local settings override subprocess environment; when cwd is HOME the user settings file is also a project source. Hub connection settings require a higher-priority launch override, and SDK sandbox merging must not expand credentials into argv.
+    affects:
+      - MH-CLAUDE-LAUNCH-001
   - id: MH-OBS-001
     source: engine-survey-s1
-    summary: Engine fallback is broader than the signed taxonomy, so the adapter owns the per-source candidate loop.
+    summary: The adapter owns one Source call while the configured route executor owns cross-Source fallback.
     affects:
-      - MH-RES-001
+      - MH-S1-001
+      - MH-TAKEOVER-001
+      - MH-CREDENTIAL-001
+      - MH-RES-LIVE-004
   - id: MH-OBS-002
     source: engine-survey-s1
-    summary: Engine usage events contain inbound credential material and remain disabled; Model Hub emits its own redacted events.
+    summary: Engine usage events can contain credential material, so Model Hub emits only its own redacted records.
     affects:
-      - MH-RES-001
+      - MH-PROTOCOL-001
+      - MH-TURN-RESULT-001
+      - MH-TURN-COPY-001
   - id: MH-OBS-003
     source: engine-survey-s1
-    summary: OAuth presentation is runtime-declared rather than inferred from a vendor table.
+    summary: OAuth presentation is runtime-declared rather than inferred from vendor metadata.
     affects:
-      - MH-OAUTH-A-001
-      - MH-OAUTH-B-001
-      - MH-OAUTH-C-001
       - MH-OAUTH-NATIVE-001
       - MH-OAUTH-NATIVE-002
+      - MH-OAUTH-NATIVE-003
   - id: MH-OBS-004
     source: model-hub-completeness-audit
-    summary: A successful OAuth status response must atomically materialize the bound Source; no second create request exists in the live UI path.
+    summary: Persisted Sources from every writer must survive the same canonical serialization and reload boundary.
     affects:
-      - MH-OAUTH-NATIVE-001
-      - MH-OAUTH-NATIVE-002
-      - MH-OAUTH-CONSENT-001
+      - MH-AC29-001
+      - MH-MIG-001
+  - id: MH-OBS-005
+    source: local-incus-cold-start-2026-08-23
+    summary: A first CLIProxyAPI process remained alive when Avibe ended the fixed 10-second readiness window; the next start reached both health surfaces in 7.4 seconds.
+    affects:
+      - MH-RUNTIME-005
+      - MH-RUNTIME-006

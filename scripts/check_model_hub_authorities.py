@@ -8,7 +8,9 @@ import ast
 import fnmatch
 import hashlib
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,20 +22,59 @@ REGISTRY = CONTRACTS / "mirror-registry.json"
 
 class AuthorityInput:
     def __init__(self, root: Path) -> None:
-        self.root = root
+        self.root = root.resolve()
         self.files: dict[Path, bytes] = {}
+        self._trees: dict[str, ast.Module] = {}
+        self._globs: dict[str, tuple[Path, ...]] = {}
+        self._checkout_verified = False
+
+    def _path(self, relative: str) -> Path:
+        path = self.root / relative
+        if not path.resolve().is_relative_to(self.root):
+            raise ValueError(f"authority input escapes checkout: {relative}")
+        return path
 
     def bytes(self, relative: str) -> bytes:
-        path = self.root / relative
-        payload = path.read_bytes()
-        self.files[path] = payload
-        return payload
+        path = self._path(relative)
+        if path not in self.files:
+            self.files[path] = path.read_bytes()
+        return self.files[path]
 
     def text(self, relative: str) -> str:
         return self.bytes(relative).decode("utf-8")
 
     def json(self, relative: str) -> Any:
         return json.loads(self.text(relative))
+
+    def python_tree(self, relative: str, *, retain: bool = True) -> ast.Module:
+        if relative not in self._trees:
+            tree = ast.parse(self.bytes(relative), filename=relative)
+            if not retain:
+                return tree
+            self._trees[relative] = tree
+        return self._trees[relative]
+
+    def _git(self, *args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+
+    def glob(self, pattern: str) -> tuple[Path, ...]:
+        if not self._checkout_verified:
+            checkout = Path(os.fsdecode(self._git("rev-parse", "--show-toplevel")).rstrip("\n"))
+            if checkout.resolve() != self.root:
+                raise ValueError("authority source root must be the Git checkout root")
+            self._checkout_verified = True
+        if pattern not in self._globs:
+            # Git owns ignore/pathspec semantics; include unstaged new consumers.
+            names = self._git(
+                "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+                "--", f":(glob){pattern}",
+            ).split(b"\0")
+            paths = (self._path(os.fsdecode(name)) for name in sorted(set(names)) if name)
+            self._globs[pattern] = tuple(path for path in paths if path.is_file())
+        return self._globs[pattern]
 
     def fingerprint(self) -> str:
         digest = hashlib.sha256()
@@ -233,7 +274,7 @@ def _literal_strings(node: ast.AST) -> set[str]:
 
 
 def _python_test_literals(source: AuthorityInput, relative: str, name: str) -> set[str]:
-    tree = ast.parse(source.text(relative), filename=relative)
+    tree = source.python_tree(relative)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return _literal_strings(node)
@@ -241,7 +282,7 @@ def _python_test_literals(source: AuthorityInput, relative: str, name: str) -> s
 
 
 def _python_literal_annotation(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
-    tree = ast.parse(source.text(spec["file"]), filename=spec["file"])
+    tree = source.python_tree(spec["file"])
     for node in tree.body:
         if not isinstance(node, ast.ClassDef) or node.name != spec["class"]:
             continue
@@ -256,7 +297,7 @@ def _python_literal_annotation(source: AuthorityInput, spec: dict[str, Any]) -> 
 
 
 def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
-    tree = ast.parse(source.text(spec["file"]), filename=spec["file"])
+    tree = source.python_tree(spec["file"])
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -268,6 +309,63 @@ def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> s
             break
         return _literal_strings(value)
     raise ValueError(f"assignment not found: {spec['name']}")
+
+
+def _typescript_string_union(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
+    declaration = re.search(
+        rf"^export\s+type\s+{re.escape(spec['name'])}\s*=\s*([^;]+);",
+        source.text(spec["file"]),
+        flags=re.MULTILINE,
+    )
+    if declaration is None:
+        raise ValueError(f"exported type not found: {spec['name']}")
+    body = declaration.group(1).strip()
+    literal = re.compile(r'''\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|null)\s*(\||$)''')
+    values: set[str] = set()
+    offset = 1 if body.startswith("|") else 0
+    while offset < len(body):
+        token = literal.match(body, offset)
+        if token is None:
+            raise ValueError(f"not a string/null union: {spec['name']}")
+        if token.group(1) != "null":
+            values.add(ast.literal_eval(token.group(1)))
+        offset = token.end()
+        if token.group(2) and offset == len(body):
+            raise ValueError(f"incomplete union: {spec['name']}")
+    if not values:
+        raise ValueError(f"empty string union: {spec['name']}")
+    return values
+
+
+def _versioned_schema_nodes(node: Any):
+    """Yield every contract_version subschema from an arbitrary schema tree."""
+
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict) and isinstance(
+            properties.get("contract_version"),
+            dict,
+        ):
+            yield properties["contract_version"]
+        for value in node.values():
+            yield from _versioned_schema_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _versioned_schema_nodes(value)
+
+
+def _literal_contract_versions(text: str) -> list[int]:
+    patterns = (
+        r"\b[A-Z_]*CONTRACT_VERSION\s*=\s*(\d+)",
+        r"[\"']contract_version[\"']\s*:\s*(\d+)",
+        r"\bcontract_version\s*:\s*(\d+)",
+        r"[\"']contract_version[\"'][^\n\d]{0,40}==\s*(\d+)",
+    )
+    return [
+        int(value)
+        for pattern in patterns
+        for value in re.findall(pattern, text)
+    ]
 
 
 def _json_object_keys(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
@@ -294,6 +392,8 @@ def _extract(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
         return _python_literal_annotation(source, spec)
     if kind == "python_string_assignment":
         return _python_string_assignment(source, spec)
+    if kind == "typescript_string_union":
+        return _typescript_string_union(source, spec)
     if kind == "json_object_keys":
         return _json_object_keys(source, spec)
     raise ValueError(f"unknown extractor: {kind}")
@@ -426,12 +526,12 @@ def _binding_lane_rows(source: AuthorityInput, check: dict[str, Any]) -> list[st
 
 def _python_importers(source: AuthorityInput, check: dict[str, Any]) -> set[str]:
     importers: set[str] = set()
-    for path in sorted(source.root.rglob("*.py")):
+    for path in source.glob("**/*.py"):
         relative = path.relative_to(source.root).as_posix()
         if any(fnmatch.fnmatch(relative, pattern) for pattern in check.get("exclude_globs", ())):
             continue
         try:
-            tree = ast.parse(source.bytes(relative), filename=relative)
+            tree = source.python_tree(relative, retain=False)
         except (SyntaxError, UnicodeDecodeError):
             continue
         if any(
@@ -444,8 +544,150 @@ def _python_importers(source: AuthorityInput, check: dict[str, Any]) -> set[str]
 
 def check(root: Path = ROOT) -> dict[str, Any]:
     source = AuthorityInput(root)
+    root = source.root
     registry = source.json("docs/plans/model-hub-contracts/mirror-registry.json")
     findings: list[dict[str, Any]] = []
+
+    version_closure = registry.get("contract_version_closure", {})
+    terminal_version = registry.get("contract_version")
+    if not isinstance(terminal_version, int):
+        findings.append({"kind": "invalid_contract_version", "domain": "V1"})
+    else:
+        raw_persisted_schema_floors = version_closure.get(
+            "persisted_schema_version_floors", {}
+        )
+        if not isinstance(raw_persisted_schema_floors, dict) or any(
+            not isinstance(name, str)
+            or not name
+            or isinstance(floor, bool)
+            or not isinstance(floor, int)
+            or floor < 1
+            or floor > terminal_version
+            for name, floor in (
+                raw_persisted_schema_floors.items()
+                if isinstance(raw_persisted_schema_floors, dict)
+                else ()
+            )
+        ):
+            findings.append(
+                {
+                    "kind": "invalid_persisted_schema_version_floors",
+                    "domain": "V1",
+                }
+            )
+            persisted_schema_floors: dict[str, int] = {}
+        else:
+            persisted_schema_floors = raw_persisted_schema_floors
+        persisted_schemas = set(persisted_schema_floors)
+        checked_schemas: set[str] = set()
+        contracts_dir = root / "docs/plans/model-hub-contracts"
+        for path in sorted(contracts_dir.glob("*.schema.json")):
+            relative = path.relative_to(root).as_posix()
+            for node in _versioned_schema_nodes(source.json(relative)):
+                checked_schemas.add(path.name)
+                accepted = [node["const"]] if "const" in node else list(node.get("enum", ()))
+                if accepted != sorted(set(accepted)) or not accepted:
+                    findings.append(
+                        {
+                            "kind": "invalid_contract_version_set",
+                            "domain": "V1",
+                            "file": relative,
+                            "values": accepted,
+                        }
+                    )
+                    continue
+                expected = (
+                    list(
+                        range(
+                            persisted_schema_floors[path.name],
+                            terminal_version + 1,
+                        )
+                    )
+                    if path.name in persisted_schemas
+                    else [terminal_version]
+                )
+                if accepted != expected:
+                    findings.append(
+                        {
+                            "kind": "contract_version_schema_drift",
+                            "domain": "V1",
+                            "file": relative,
+                            "values": accepted,
+                            "expected": expected,
+                        }
+                    )
+        for missing in sorted(persisted_schemas - checked_schemas):
+            findings.append(
+                {
+                    "kind": "missing_persisted_version_schema",
+                    "domain": "V1",
+                    "file": missing,
+                }
+            )
+
+        for path in sorted(contracts_dir.iterdir()):
+            if not path.is_file() or path.name.endswith(".schema.json"):
+                continue
+            relative = path.relative_to(root).as_posix()
+            for value in re.findall(
+                r"contract_version[^0-9]{0,12}(\d+)",
+                source.text(relative),
+            ):
+                if int(value) != terminal_version:
+                    findings.append(
+                        {
+                            "kind": "contract_version_text_drift",
+                            "domain": "V1",
+                            "file": relative,
+                            "value": int(value),
+                        }
+                    )
+
+        required_literal_files = set(
+            version_closure.get("required_literal_files", ())
+        )
+        matched_literal_files: set[str] = set()
+        for pattern in version_closure.get("literal_globs", ()):
+            for path in source.glob(pattern):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root).as_posix()
+                values = _literal_contract_versions(source.text(relative))
+                if values:
+                    matched_literal_files.add(relative)
+                for value in values:
+                    if value != terminal_version:
+                        findings.append(
+                            {
+                                "kind": "contract_version_literal_drift",
+                                "domain": "V1",
+                                "file": relative,
+                                "value": value,
+                            }
+                        )
+        for missing in sorted(required_literal_files - matched_literal_files):
+            findings.append(
+                {
+                    "kind": "missing_contract_version_literal",
+                    "domain": "V1",
+                    "file": missing,
+                }
+            )
+
+        for relative in version_closure.get("contract_headers", ()):
+            match = re.search(
+                r"FINAL CONTRACT v(\d+)",
+                source.text(relative),
+            )
+            if match is None or int(match.group(1)) != terminal_version:
+                findings.append(
+                    {
+                        "kind": "contract_version_header_drift",
+                        "domain": "V1",
+                        "file": relative,
+                        "value": int(match.group(1)) if match else None,
+                    }
+                )
 
     # Absence assertions are discovered from the live normative text. The checker
     # never embeds a retired member; it derives each term from the assertion and
@@ -462,7 +704,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     for absence in registry.get("schema_absence_checks", ()):
         terms = _normative_absence_terms(source, absence)
         for pattern in absence["scope_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 relative = path.relative_to(root).as_posix()
                 tokens = _schema_decision_tokens(source, relative)
                 for term in sorted(terms & tokens):
@@ -511,7 +753,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
                     }
                 )
         for pattern in boundary["forbidden_ui_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 relative = path.relative_to(root).as_posix()
                 if value in source.text(relative):
                     findings.append(
@@ -521,7 +763,7 @@ def check(root: Path = ROOT) -> dict[str, Any]:
     for absence in registry.get("repo_absence_checks", ()):
         term = "-".join(absence["term_parts"])
         for pattern in absence["scope_globs"]:
-            for path in sorted(root.glob(pattern)):
+            for path in source.glob(pattern):
                 if not path.is_file():
                     continue
                 relative = path.relative_to(root).as_posix()

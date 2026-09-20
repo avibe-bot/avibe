@@ -3,11 +3,10 @@ import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
-import type { ShowPageLinkInfo } from '../lib/showPageLinks';
 import {
+  commitShowPagesInventoryStore,
   getShowPagesInventoryStore,
   type ShowPage,
-  type Visibility,
 } from '../lib/showPagesStore';
 
 export { replaceShowPageTitleIfCurrent } from '../lib/showPagesStore';
@@ -25,6 +24,14 @@ export function useShowPageInventory(enabled = true) {
     store.getSnapshot,
   );
 
+  // The tree has now committed to this identity's store, which is what makes the
+  // one a previous identity handed out unreachable and its retained
+  // subscription a leak. Runs whether or not this consumer activates: holding
+  // the store is what supersedes, reading it is a separate question.
+  useEffect(() => {
+    commitShowPagesInventoryStore(api);
+  }, [api]);
+
   useEffect(() => {
     if (enabled) return store.activate();
   }, [enabled, store]);
@@ -38,13 +45,14 @@ export function useShowPageInventory(enabled = true) {
     loading,
     loaded,
     mergePage: store.mergePage,
+    removePage: store.removePage,
     replaceTitleIfCurrent: store.replaceTitleIfCurrent,
     reload,
   };
 }
 
-// The Show Pages inventory: fetch + the visibility / share-id / rotate mutations,
-// with their toasts. Lifted out of the view so the App Library owns one copy of
+// The Show Pages inventory and availability mutations, with their toasts.
+// Lifted out of the view so the App Library owns one copy of
 // the pages state and projects it into both the Apps and Show Pages views (kept
 // in a hook module so the view file exports only components — fast-refresh safe).
 export function useShowPages() {
@@ -55,39 +63,19 @@ export function useShowPages() {
     useShowPageInventory();
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const setVisibility = async (page: ShowPage, visibility: Visibility) => {
-    if (page.visibility === visibility || busyId) return;
+  const setOffline = async (page: ShowPage, offline: boolean) => {
+    if (page.offline === offline || busyId) return;
     setBusyId(page.session_id);
     try {
-      const res = await api.setShowPageVisibility(page.session_id, visibility);
-      mergePage(res);
+      const res = await api.setShowPageAvailability(page.session_id, offline);
+      if (res?.session_id === page.session_id) mergePage(res as ShowPage);
+      else reload();
       showToast(t('showPages.toast.updated'));
     } catch {
       // ApiContext surfaces a toast on failure.
     } finally {
       setBusyId(null);
     }
-  };
-
-  const rotate = async (page: ShowPage) => {
-    if (busyId) return;
-    setBusyId(page.session_id);
-    try {
-      const res = await api.rotateShowPageShare(page.session_id);
-      mergePage(res);
-      showToast(t('showPages.toast.rotated'));
-    } catch {
-      // handled by ApiContext
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  // The custom-link field owns its own request/validation; we only merge the
-  // returned payload (new share_id, updated_at) and confirm.
-  const onShareIdSaved = (next: ShowPageLinkInfo) => {
-    mergePage(next as ShowPage);
-    showToast(t('showPages.shareId.toast.saved'));
   };
 
   const rename = async (page: ShowPage, title: string | null) => {
@@ -121,7 +109,7 @@ export function useShowPages() {
     }
   };
 
-  return { pages, loading, loaded, busyId, setVisibility, rotate, rename, uploadIcon, onShareIdSaved, reload };
+  return { pages, loading, loaded, busyId, setOffline, rename, uploadIcon, reload };
 }
 
 export type ShowPagesController = ReturnType<typeof useShowPages>;

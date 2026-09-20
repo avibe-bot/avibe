@@ -57,7 +57,7 @@ export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<stri
           type="button"
           size="icon"
           variant="ghost"
-          className="size-7 text-mint"
+          className="size-7 text-mint-ink"
           aria-label={t('apps.fileBrowser.download')}
           onClick={() => downloadFile(path)}
         >

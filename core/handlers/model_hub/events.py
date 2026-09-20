@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, Optional, TypeAlias, get_args
 
 from vibe.i18n import t as i18n_t
+
+from .state_file import write_state_document
 
 EventAgent = Literal["claude", "codex", "opencode", "system"]
 EventKind = Literal[
@@ -21,51 +21,80 @@ EventKind = Literal[
     "cooldown",
     "recover",
     "skip",
-    "mapping_applied",
     "channel_switch",
     "needs_action",
     "supply_interrupted",
+    "reasoning_efforts_override",
 ]
-EventReason = Literal[
-    "quota_exhausted",
-    "rate_limited",
-    "server_error",
-    "network",
-    "recovery",
-    "manual",
-    "mapping",
-    "credential_expired",
-    "credential_revoked",
-    "balance_exhausted",
-    "account_banned",
-    "permission_denied",
-    "unclassified_error",
-    "no_enabled_source",
-    "no_eligible_source",
-    "model_unsupported",
-]
+EventReason: TypeAlias = str
 BillingNote = Literal["entered_metered", "left_metered"]
 EventSeverity = Literal["info", "action_required"]
 
-_SELF_HEALING_REASONS = {
-    "quota_exhausted",
-    "rate_limited",
-    "server_error",
-    "network",
+ReasonClass = Literal[
+    "self_healing",
+    "non_self_healing",
+    "structural",
+    "transition",
+]
+
+# The reason vocabulary, validation classes, event rendering, and locale parity
+# all consume this table. The JSON schema and locale bundles are checked mirrors.
+EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
+    "quota_exhausted": "self_healing",
+    "rate_limited": "self_healing",
+    "server_error": "self_healing",
+    "network": "self_healing",
+    "recovery": "transition",
+    "manual": "transition",
+    "upstream_tiers": "transition",
+    "catalog_tiers": "transition",
+    "credential_expired": "non_self_healing",
+    "credential_revoked": "non_self_healing",
+    "balance_exhausted": "non_self_healing",
+    "account_banned": "non_self_healing",
+    "unclassified_error": "non_self_healing",
+    "no_enabled_source": "structural",
+    "no_eligible_source": "structural",
+    "route_unconfigured": "structural",
+    "source_missing": "structural",
+    "model_unsupported": "structural",
+    "native_cli_unavailable": "structural",
 }
-_NON_SELF_HEALING_REASONS = {
-    "credential_expired",
-    "credential_revoked",
-    "balance_exhausted",
-    "account_banned",
-    "unclassified_error",
+
+SOURCE_DETAIL_EVENT_REASONS = {
+    "models.source.cooldown.quota_exhausted": "quota_exhausted",
+    "models.source.cooldown.rate_limited": "rate_limited",
+    "models.source.cooldown.server_error": "server_error",
+    "models.source.cooldown.network": "network",
+    "models.source.cooldown.timeout": "network",
+    "models.source.needs_action.oauth_expired": "credential_expired",
+    "models.source.needs_action.credential_revoked": "credential_revoked",
+    "models.source.needs_action.balance_exhausted": "balance_exhausted",
+    "models.source.needs_action.account_banned": "account_banned",
+    "models.source.error.unclassified": "unclassified_error",
 }
-_REQUEST_SCOPED_REASONS = {"permission_denied"}
-_STRUCTURAL_REASONS = {
-    "no_enabled_source",
-    "no_eligible_source",
-    "model_unsupported",
+
+# Released v5 records are normalized only at their persistence read boundary.
+RETIRED_PERSISTED_REASON_DEGRADATIONS = {
+    "permission_denied": "unclassified_error",
 }
+
+
+def degrade_persisted_event(event: dict) -> dict:
+    degraded = dict(event)
+    reason = degraded.get("reason")
+    if isinstance(reason, str):
+        degraded["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
+            reason,
+            reason,
+        )
+    return degraded
+
+
+def event_reason_label(reason: str, language: str) -> str:
+    if reason not in EVENT_REASON_AUTHORITY:
+        raise ValueError("Invalid resolution event reason")
+    return i18n_t(f"modelHub.events.reason.{reason}", language)
 
 _CREDENTIAL_PATTERNS = (
     re.compile(r"(?i)\b(?:sk|rk|pk|sess|token)[-_][a-z0-9_-]{8,}\b"),
@@ -135,6 +164,17 @@ def build_resolution_event(
     severity: Optional[EventSeverity] = None,
     now: Optional[datetime] = None,
 ) -> ResolutionEvent:
+    if agent not in get_args(EventAgent):
+        raise ValueError("Invalid resolution event agent")
+    if kind not in get_args(EventKind):
+        raise ValueError("Invalid resolution event kind")
+    reason_class = EVENT_REASON_AUTHORITY.get(reason)
+    if reason_class is None:
+        raise ValueError("Invalid resolution event reason")
+    if billing_note is not None and billing_note not in get_args(BillingNote):
+        raise ValueError("Invalid resolution event billing note")
+    if severity is not None and severity not in get_args(EventSeverity):
+        raise ValueError("Invalid resolution event severity")
     action_required = kind in {"needs_action", "supply_interrupted"}
     expected_severity: EventSeverity = (
         "action_required" if action_required else "info"
@@ -148,22 +188,20 @@ def build_resolution_event(
             or model_id is None
             or from_source is not None
             or to_source is not None
-            or reason not in _STRUCTURAL_REASONS
+            or reason_class != "structural"
         ):
             raise ValueError("Invalid supply_interrupted event")
-    elif reason in _STRUCTURAL_REASONS:
+    elif reason_class == "structural":
         raise ValueError("Structural reasons require supply_interrupted")
-    if reason in _REQUEST_SCOPED_REASONS and kind != "switch":
-        raise ValueError("Request-scoped reasons require a switch event")
     if kind == "needs_action" and (
         from_source is None
         or to_source is not None
-        or reason not in _NON_SELF_HEALING_REASONS
+        or reason_class != "non_self_healing"
     ):
         raise ValueError("Invalid needs_action event")
-    if reason in _NON_SELF_HEALING_REASONS and kind in {"cooldown", "recover"}:
+    if reason_class == "non_self_healing" and kind in {"cooldown", "recover"}:
         raise ValueError("Non-self-healing reasons cannot cool down or recover")
-    if kind == "cooldown" and reason not in _SELF_HEALING_REASONS:
+    if kind == "cooldown" and reason_class != "self_healing":
         raise ValueError("Invalid cooldown reason")
     if kind == "channel_switch" and (
         from_source is None
@@ -175,6 +213,18 @@ def build_resolution_event(
         model_id is None or from_source is None or to_source is None
     ):
         raise ValueError("Invalid switch event")
+    if kind == "reasoning_efforts_override" and (
+        agent != "system"
+        or model_id is None
+        or from_source is None
+        or to_source is not None
+        or reason not in {"upstream_tiers", "catalog_tiers"}
+    ):
+        raise ValueError("Invalid reasoning_efforts_override event")
+    if reason in {"upstream_tiers", "catalog_tiers"} and (
+        kind != "reasoning_efforts_override"
+    ):
+        raise ValueError("Managed-tier reasons require reasoning_efforts_override")
     if kind in {"cooldown", "skip"} and (
         from_source is None or to_source is not None
     ):
@@ -187,6 +237,7 @@ def build_resolution_event(
         "skip",
         "needs_action",
         "channel_switch",
+        "reasoning_efforts_override",
     }:
         raise ValueError("Invalid system event kind")
     if model_id is None and (
@@ -206,7 +257,7 @@ def build_resolution_event(
             lang,
             from_source=safe_from or i18n_t("modelHub.events.sourceFallback", lang),
             to_source=safe_to or i18n_t("modelHub.events.sourceFallback", lang),
-            reason=i18n_t(f"modelHub.events.reason.{reason}", lang),
+            reason=event_reason_label(reason, lang),
             model=model_id or "",
         )
 
@@ -246,18 +297,14 @@ class BoundedEventLog:
             return []
         if not isinstance(payload, list):
             return []
-        return [item for item in payload if isinstance(item, dict) and not contains_credential_material(item)]
+        return [
+            degrade_persisted_event(item)
+            for item in payload
+            if isinstance(item, dict) and not contains_credential_material(item)
+        ]
 
     def _write(self, payload: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        content = json.dumps(payload[-self.max_entries :], ensure_ascii=False, separators=(",", ":"))
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
+        write_state_document(self.path, payload[-self.max_entries :])
 
     def append(self, event: ResolutionEvent) -> None:
         payload = event.to_payload()

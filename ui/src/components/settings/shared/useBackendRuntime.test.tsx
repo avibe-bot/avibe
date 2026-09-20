@@ -54,9 +54,6 @@ describe('persisted backend install paths', () => {
   it('does not mark a lifecycle install as an unsaved path edit', async () => {
     const hook = await mountRuntime();
 
-    act(() => hook.result.current.setCliPath('/user/edit'));
-    expect(hook.result.current.runtimeDirty).toBe(true);
-
     await act(async () => {
       await hook.result.current.handleLifecycleChanged({
         installedPath: '/private/backends/claude',
@@ -65,6 +62,16 @@ describe('persisted backend install paths', () => {
 
     expect(hook.result.current.cliPath).toBe('/private/backends/claude');
     expect(hook.result.current.runtimeDirty).toBe(false);
+  });
+
+  it('preserves a newer draft while adopting the installed saved path', async () => {
+    const hook = await mountRuntime();
+    act(() => hook.result.current.setCliPath('/user/edit'));
+    await act(async () => {
+      await hook.result.current.handleLifecycleChanged({ installedPath: '/private/backends/claude' });
+    });
+    expect(hook.result.current.cliPath).toBe('/user/edit');
+    expect(hook.result.current.runtimeDirty).toBe(true);
   });
 
   it('does not mark the direct install action as an unsaved path edit', async () => {

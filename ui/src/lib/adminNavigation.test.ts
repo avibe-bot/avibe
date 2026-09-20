@@ -1,40 +1,66 @@
-import { describe, expect, it } from 'vitest';
+/* @vitest-environment jsdom */
 
-import { isAdvancedSettingsPath, isMemorySettingsPath } from './adminNavigation';
+import { beforeEach, describe, expect, it } from 'vitest';
 
-describe('isAdvancedSettingsPath', () => {
-  it('defers to the standalone Memory item when that item is visible', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/memory', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/memory/', true)).toBe(false);
+import {
+  isLocalOnlyMessagingField,
+  isMemorySettingsPath,
+  isOwnerOnlyPath,
+  SETTINGS_LANDING_PATH,
+} from './adminNavigation';
+
+beforeEach(() => {
+  window.localStorage.clear();
+});
+
+describe('isOwnerOnlyPath', () => {
+  it('covers canonical machine-management destinations and their details', () => {
+    const ownerOnly = [
+      '/settings/service',
+      '/settings/platforms/slack',
+      '/settings/remote-access',
+      '/settings/backends/claude',
+      '/settings/models',
+      '/settings/dependencies',
+      '/settings/memory',
+      '/settings/diagnostics/logs',
+    ];
+    expect(ownerOnly.every(isOwnerOnlyPath)).toBe(true);
   });
 
-  it('keeps Memory setup under Advanced Settings when the standalone item is hidden', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/memory', false)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/memory/', false)).toBe(true);
+  it('keeps personal preferences, replies, and access readable', () => {
+    expect(isOwnerOnlyPath('/settings/replies')).toBe(false);
+    expect(isOwnerOnlyPath('/settings/access')).toBe(false);
   });
 
-  it('keeps the remaining settings pages grouped under Advanced Settings', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/messaging', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/service', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/dependencies', true)).toBe(true);
-    expect(isAdvancedSettingsPath('/admin/settings/diagnostics', true)).toBe(true);
+  it('keeps retired owner routes gated before their redirect runs', () => {
+    expect(isOwnerOnlyPath('/admin/dashboard')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/backends/codex')).toBe(true);
+    expect(isOwnerOnlyPath('/admin/settings/messaging')).toBe(false);
+    expect(isOwnerOnlyPath('/admin/permissions')).toBe(false);
+  });
+});
+
+describe('settings landing', () => {
+  it('opens General, which every role can read', () => {
+    expect(SETTINGS_LANDING_PATH).toBe('/settings/general');
+    expect(isOwnerOnlyPath(SETTINGS_LANDING_PATH)).toBe(false);
   });
 
-  it('leaves other standalone settings destinations inactive', () => {
-    expect(isAdvancedSettingsPath('/admin/settings/platforms', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/backends', true)).toBe(false);
-    expect(isAdvancedSettingsPath('/admin/settings/models', true)).toBe(false);
+});
+
+describe('isLocalOnlyMessagingField', () => {
+  it('keeps machine-global controls owner-only without gating Replies', () => {
+    expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
+    expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
+    expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });
 
 describe('isMemorySettingsPath', () => {
-  it('matches the Memory route and nested path boundaries', () => {
-    expect(isMemorySettingsPath('/admin/settings/memory')).toBe(true);
-    expect(isMemorySettingsPath('/admin/settings/memory/')).toBe(true);
-    expect(isMemorySettingsPath('/admin/settings/memory/details')).toBe(true);
-  });
-
-  it('does not match a route that only shares the Memory prefix', () => {
-    expect(isMemorySettingsPath('/admin/settings/memory-tools')).toBe(false);
+  it('matches the canonical Memory route at a path boundary', () => {
+    expect(isMemorySettingsPath('/settings/memory')).toBe(true);
+    expect(isMemorySettingsPath('/settings/memory/details')).toBe(true);
+    expect(isMemorySettingsPath('/settings/memory-tools')).toBe(false);
   });
 });

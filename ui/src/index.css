@@ -25,6 +25,26 @@
   }
 }
 
+/* How much bottom room the fixed mobile tab bar needs: its own height, the
+   home-indicator inset, and a small gap. The shell's scroll area pads by it so
+   the last row can always be scrolled clear, and a control pinned to the bottom
+   of that scroll area offsets by it so it rests just above the bar. Two
+   consumers, one number — the pair drifting apart is what leaves a button under
+   the bar. */
+:root {
+  --mobile-nav-clearance: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+/* Width of the desktop shell sidebar. The sidebar itself, every md+ content
+   offset and the Settings overlay's left edge read this one value, so dragging
+   the divider moves all of them together — including the overlay, which lives in
+   a portal outside the shell's subtree. SidebarResizer overrides it on the
+   document element while the shell is mounted; this default is its drag minimum
+   (MIN_SIDEBAR_WIDTH), so the shell renders unchanged with no JS at all. */
+:root {
+  --app-sidebar-w: 248px;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -37,36 +57,57 @@
   --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
+  --color-primary-ink: var(--primary-ink);
+  --color-primary-hover: var(--primary-hover);
   --color-secondary: var(--secondary);
   --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-soft: var(--muted-soft);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-hover: var(--accent-hover);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-ink: var(--destructive-ink);
+  --color-destructive-hover: var(--destructive-hover);
   --color-border: var(--border);
   --color-border-strong: var(--border-strong);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  /* Each accent is four tokens: --X is the brand fill and the base every wash
+     mixes from, --X-foreground is the label printed on that fill, --X-soft is
+     the wash, and --X-ink is the accent used as text on a neutral surface.
+     Fill and ink pull in opposite directions on a light surface — the fill has
+     to stay vivid to read as the brand, the ink has to go deep to stay legible
+     — so they cannot be the same value. Use bg-X / border-X for the fill and
+     text-X-ink for text. */
   --color-mint: var(--mint);
   --color-mint-soft: var(--mint-soft);
+  --color-mint-ink: var(--mint-ink);
+  --color-mint-hover: var(--mint-hover);
   --color-cyan: var(--cyan);
   --color-cyan-soft: var(--cyan-soft);
+  --color-cyan-ink: var(--cyan-ink);
+  --color-cyan-hover: var(--cyan-hover);
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
+  --color-violet-foreground: var(--violet-foreground);
+  --color-violet-ink: var(--violet-ink);
+  --color-violet-hover: var(--violet-hover);
   --color-gold: var(--gold);
+  --color-gold-soft: var(--gold-soft);
   --color-gold-foreground: var(--gold-foreground);
+  --color-gold-ink: var(--gold-ink);
+  --color-gold-hover: var(--gold-hover);
   --color-pink: var(--pink);
   --color-pink-soft: var(--pink-soft);
+  --color-pink-ink: var(--pink-ink);
 
   /* Compatibility aliases for current UI during migration. */
   --color-bg: var(--background);
   --color-panel: var(--surface);
   --color-text: var(--foreground);
-  --color-success: var(--mint);
-  --color-warning: var(--gold);
-  --color-danger: var(--destructive);
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
@@ -83,9 +124,124 @@
   --radius-2xl: 20px;
   --radius-3xl: 24px;
 
-  /* Card glow shadows (matches design.pen). */
-  --shadow-mint-card: 0 24px 48px -12px rgba(91, 255, 160, 0.078);
-  --shadow-mint-card-lg: 0 32px 64px -12px rgba(91, 255, 160, 0.078);
+  /* Card wash shadows (matches design.pen). The colour is `--card-wash` rather
+     than a literal because this block is `@theme inline`: Tailwind substitutes
+     each entry's value into the generated utility, so a light-theme override of
+     the token itself would compile to nothing and the wash would keep the dark
+     neon on a white page. Every other entry here is the same shape for the same
+     reason -- `--color-mint: var(--mint)` and friends -- so theming happens in
+     the runtime variable, never in the token. */
+  --shadow-mint-card-sm: 0 8px 32px -8px var(--card-wash);
+  --shadow-mint-card: 0 24px 48px -12px var(--card-wash);
+  --shadow-mint-card-lg: 0 32px 64px -12px var(--card-wash);
+
+  /* The accent glow scale, read off design.pen: `dot` is the Landing Page's
+     status dot, `xs` a control track, `sm` its icon tile and the Doctor pulse,
+     `md` its nav CTA, eyebrow badge and the Dashboard hero pulse, `lg` its hero
+     button, `xl` the Welcome logo. Geometry and alpha come from those frames,
+     with one departure: the dot glows at full alpha over near-black, and ours
+     also sit on lit panels, so `dot` is clamped to 0.9 -- the brightest value
+     the call sites were already using.
+
+     `cta` is the exception that is not from design.pen. Its blur is themed
+     because a neon that reads on black barely registers over a white card
+     (owner decision 2026-08-14); its 0.6 is likewise owner-set.
+
+     The colour, unlike the blur, does NOT vary by theme. design.pen's Light
+     frame recolours the card washes above to the light brand mint and keeps
+     every glow on the dark neon, so these stay literal instead of routing
+     through a runtime variable the way `--card-wash` does. */
+  --shadow-glow-dot-mint: 0 0 8px rgba(91, 255, 160, 0.9);
+  --shadow-glow-dot-gold: 0 0 8px rgba(255, 200, 87, 0.9);
+  --shadow-glow-dot-destructive: 0 0 8px rgba(255, 107, 107, 0.9);
+
+  /* `wire` is the drop-shadow role: the Model Hub connection wires glow through
+     `filter: drop-shadow(…)`, which takes no spread, so none of the sized roles
+     above can be spelled into one. Like `dot` it is named for its use rather
+     than its size, which is what the no-spread roles have in common.
+
+     These three are a verbatim capture of what already shipped in
+     modelHubSurface.css, down to the `color-mix`, so the wires render exactly as
+     before -- the point of moving them was that a glow written as a filter
+     escaped the guard entirely, not that the light was wrong. That does leave
+     `wire` as the one role whose colour follows the theme, through `--mint` and
+     friends, while every role above stays on the dark neon by design. Aligning
+     them would repaint the wires in Light, so it is a design.pen decision and
+     not this file's to take. */
+  --shadow-glow-wire-mint: 0 0 4px color-mix(in srgb, var(--mint) 40%, transparent);
+  --shadow-glow-wire-cyan: 0 0 4px color-mix(in srgb, var(--cyan) 40%, transparent);
+  --shadow-glow-wire-violet: 0 0 4px color-mix(in srgb, var(--violet) 40%, transparent);
+
+  /* The sized rungs are derived from one rule design.pen follows, not chosen
+     one triple at a time: a glow is centred, its spread is a quarter of its
+     blur, and its colour is the accent at #5BFFA070. Five annotated frames
+     agree -- diagPulse 16/-4, heroPulse 24/-6, diagHero 32/-8, StepCard 48/-12
+     -- and welCard, at blur 64, still holds -12, so that is the cap.
+
+     Reading the rule off the design rather than off the call sites is what
+     makes the rungs land on their frames. The first cut of this scale did the
+     opposite: it took each rung from the middle of the literals it had to
+     absorb, which produced `sm` at -2px -- a spread written nowhere in
+     design.pen and nowhere in this tree -- and every 16px glow moved off its
+     frame to reach it. glowScale.test.mjs asserts the rule so a rung cannot be
+     nudged back off it.
+
+     The rungs stop at the blurs design.pen actually draws. `xs` and `xl` exist
+     because 12px and 48px glows are in the tree; without them a hero logo gets
+     snapped to 32px, which is not a token conversion but a redesign. */
+  --shadow-glow-xs-mint: 0 0 12px -3px rgba(91, 255, 160, 0.44);
+  --shadow-glow-xs-cyan: 0 0 12px -3px rgba(63, 224, 229, 0.44);
+
+  --shadow-glow-sm-mint: 0 0 16px -4px rgba(91, 255, 160, 0.44);
+  --shadow-glow-sm-cyan: 0 0 16px -4px rgba(63, 224, 229, 0.44);
+  --shadow-glow-sm-violet: 0 0 16px -4px rgba(124, 91, 255, 0.44);
+  --shadow-glow-sm-gold: 0 0 16px -4px rgba(255, 200, 87, 0.44);
+
+  --shadow-glow-md-mint: 0 0 24px -6px rgba(91, 255, 160, 0.44);
+  --shadow-glow-md-cyan: 0 0 24px -6px rgba(63, 224, 229, 0.44);
+  --shadow-glow-md-violet: 0 0 24px -6px rgba(124, 91, 255, 0.44);
+  --shadow-glow-md-gold: 0 0 24px -6px rgba(255, 200, 87, 0.44);
+
+  --shadow-glow-lg-mint: 0 0 32px -8px rgba(91, 255, 160, 0.44);
+  --shadow-glow-lg-cyan: 0 0 32px -8px rgba(63, 224, 229, 0.44);
+  --shadow-glow-lg-violet: 0 0 32px -8px rgba(124, 91, 255, 0.44);
+
+  --shadow-glow-xl-mint: 0 0 48px -12px rgba(91, 255, 160, 0.44);
+
+  /* `onboarding` is the active-card halo of the approved onboarding reference, the
+     one the owner pointed at: a centred 28px mint at #5BFFA060, with no spread and
+     brighter than the sized rungs carry. It is a role rather than a rung because
+     both of those departures are the reference's, not the scale's -- reaching it by
+     stacking `xl` and `lg` was an approximation of an explicit value.
+     `37.6%` is that hex's own alpha: 0x60 is 96/255.
+
+     It is the one role the design draws at two sizes, because the two frames drew
+     it separately: Light's active card (node waUhu) is 16/-4 at #10B98170, which is
+     the sized scale's own `sm` geometry and alpha. The hue needs nothing for that
+     -- `var(--mint)` already follows whichever mint the theme declares, the way
+     `wire` does -- but blur, spread and alpha are numbers, and a number cannot
+     follow a palette. They are named here and re-anchored beside the rest of the
+     light palette, which is the shape `--brand-glow-blur` already uses and the only
+     one that renders: this block is `@theme inline`, so Tailwind substitutes the
+     value below into the utilities at build time and a later override of THIS name
+     would compile to nothing while looking correct in the file. */
+  --shadow-glow-onboarding-mint:
+    0 0 var(--onboarding-glow-blur) var(--onboarding-glow-spread)
+    color-mix(in srgb, var(--mint) var(--onboarding-glow-alpha), transparent);
+
+  --shadow-glow-cta-mint: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
+  --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);
+  --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
+  --shadow-glow-cta-gold: 0 0 var(--brand-glow-blur) -4px rgba(255, 200, 87, 0.6);
+
+  /* The approved Workbench sidebar draws its selected nav row with a halo at the
+     sized scale's own `sm` geometry and alpha -- 16/-4 at 0.44 -- but the design
+     table gives it #10B98170 in Light beside #5BFFA070 in Dark, so the hue has to
+     follow the palette. A written-out RGB cannot: the sized rungs stay on the dark
+     neon precisely because their channels are spelled out. Mixing the live accent
+     is what `wire` already does for the same reason, which is why this is a role
+     named for its use rather than a fifth rung on the scale. */
+  --shadow-glow-nav-mint: 0 0 16px -4px color-mix(in srgb, var(--mint) 44%, transparent);
 }
 
 :root,
@@ -102,32 +258,108 @@
   --popover: #11111c;
   --popover-foreground: #f5f1e8;
 
+  /* On a dark surface a vivid accent is already legible, so ink tracks fill
+     here; light is where the two diverge. --violet is the one exception. */
   --primary: #5bffa0;
   --primary-foreground: #080812;
+  --primary-ink: #5bffa0;
+  /* Every interactive brand fill declares the value it hovers to, instead of deriving
+     one with a filter. A filter scales the label along with the background, so it
+     cannot move a pairing in a chosen direction: light's labels are white, already
+     clamped at the top, and brightness(1.1) there dropped --primary from 2.54:1 to
+     2.09:1 while brightness(0.95) bought nothing back (2.50:1). A declared fill leaves
+     the label at full luminance and lifts that same hover to 3.23:1.
+     Which way a fill moves follows its LABEL, not its theme — the distinction a single
+     shared mix token could not express. These accents carry a dark label, so they
+     lighten; --violet's label is white in both themes, so it darkens in both. Each
+     value is the fill mixed 88% toward its label's opposite, and validate-theme.mjs
+     asserts hovering never costs contrast, so no brand fill can ship without one. */
+  --primary-hover: #6fffab;
   --secondary: #11111c;
   --secondary-foreground: #f5f1e8;
   --muted: #9ba3b8;
   --muted-soft: #0e0e18;
   --accent: #3fe0e5;
   --accent-foreground: #080812;
+  --accent-ink: #3fe0e5;
+  --accent-hover: #56e4e8;
   --destructive: #ff6b6b;
   --destructive-foreground: #080812;
+  --destructive-ink: #ff6b6b;
+  --destructive-hover: #ff7d7d;
 
   --border: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.14);
   --input: rgba(255, 255, 255, 0.10);
   --ring: rgba(91, 255, 160, 0.6);
 
+  /* Workbench shell surfaces from the approved design table, written as the exact
+     8-digit hex the table states so no alpha is lost to a rounded decimal. The
+     sidebar fill and the nav row states are their own tokens rather than reuses
+     because two of them are not the value the nearest existing token holds: in
+     Light the sidebar is #FCFCFE against a #ffffff --surface, and --nav-selected-bg
+     is #10B98114 against --mint-soft's #10B98124. They happen to coincide in Dark,
+     which is exactly why collapsing them there would look correct and render wrong
+     in the other theme. */
+  --sidebar-background: #0e0e18;
+  --nav-selected-bg: #5bffa029;
+  --nav-selected-border: #5bffa059;
+  --nav-hover-bg: #1a1a26;
+  /* The well behind the brand mark, and the hairline around the decorative theme
+     preview artwork in General Settings. --desktop-overlay-shadow is the shared
+     shadow colour for surfaces that float above the shell (the settings/connection
+     dialogs); it is a colour token, not a geometry one. */
+  --logo-well-background: #ffffff04;
+  --illustration-card-border: #ffffff1c;
+  --desktop-overlay-shadow: #00000088;
+
   --mint: #5bffa0;
+  --route-manual: #8bb4ff;
   --mint-soft: rgba(91, 255, 160, 0.16);
+  --mint-ink: #5bffa0;
+  --mint-hover: #6fffab;
   --cyan: #3fe0e5;
   --cyan-soft: rgba(63, 224, 229, 0.16);
+  --cyan-ink: #3fe0e5;
+  --cyan-hover: #56e4e8;
+  /* Fill and ink both carry design.pen's #7c5bff. An accent is never moved off
+     its design value to buy contrast — see the light block for the decision.
+     Violet is the only accent whose label is white in BOTH themes, which is why
+     it needs its own --violet-foreground rather than borrowing a theme rule: the
+     Button used a hard-coded text-white, so nothing declared the pair and the
+     guard could not see it. Naming it also fixes the hover direction — violet
+     darkens on hover in dark too, where every other accent lightens. */
   --violet: #7c5bff;
   --violet-soft: rgba(124, 91, 255, 0.16);
+  --violet-foreground: #ffffff;
+  --violet-ink: #7c5bff;
+  --violet-hover: #6d50e0;
   --gold: #ffc857;
+  --gold-soft: rgba(255, 200, 87, 0.16);
   --gold-foreground: #080812;
+  --gold-ink: #ffc857;
+  --gold-hover: #ffcf6b;
   --pink: #ff5b8a;
   --pink-soft: rgba(255, 91, 138, 0.10);
+  --pink-ink: #ff5b8a;
+
+  /* Blur radius of the brand CTA glow, shared by all four `brand*` Button variants
+     (see button-variants.ts). One radius, four accents — a per-accent value would be
+     the drift that variant exists to remove. It lives here rather than in the class
+     because it is the one part of that glow that differs per theme. */
+  --brand-glow-blur: 16px;
+
+  /* Geometry and alpha of the onboarding active-card halo, for the same reason the
+     CTA blur is here: they are the parts of that glow that differ per theme, and
+     the token itself is inlined into its utilities and so cannot be re-declared. */
+  --onboarding-glow-blur: 28px;
+  --onboarding-glow-spread: 0px;
+  --onboarding-glow-alpha: 37.6%;
+
+  /* Colour of the card wash shadows (`--shadow-mint-card*`). design.pen writes it
+     as the frame's own brand mint at 0.078, which is why it is the one part of
+     those shadows that moves between themes. */
+  --card-wash: rgba(91, 255, 160, 0.078);
 
   /* Page-family gradients (mirror design.pen 1:1). Layers ordered top-most first. */
   --gradient-console:
@@ -176,32 +408,83 @@
     --popover: #ffffff;
     --popover-foreground: #0a0a14;
 
+    /* Fills keep design.pen's vivid light accents *and* its white label — the
+       pairing the product shipped before it was briefly deepened. The brand
+       pair is a product decision, not an oversight: an AI-colleague product
+       should read as alive rather than muted, so the accent stays at full
+       saturation and the label stays white the way the design drew it. That
+       costs AA on the label (white on #10b981 is 2.54:1), so
+       validate-theme.mjs exempts these pairs by *pinning* the ratio each was
+       accepted at rather than skipping them — drift in either token changes
+       the measured ratio and fails the guard until someone re-decides.
+       --destructive needs no exemption: #e11d48 under white is 4.70:1.
+       Accent-as-text uses --X-ink, which carries the same brand value; see the
+       --mint-ink group. Owner decision 2026-08-14. */
     --primary: #10b981;
     --primary-foreground: #ffffff;
+    --primary-ink: #10b981;
+    /* Every brand fill darkens on hover here, because this theme's labels are white —
+       see the dark block for why hover is a declared fill rather than a filter. */
+    --primary-hover: #0ea372;
     --secondary: #eef1f7;
     --secondary-foreground: #0a0a14;
     --muted: #5c6079;
     --muted-soft: #eef1f7;
     --accent: #0891b2;
     --accent-foreground: #ffffff;
+    --accent-ink: #0891b2;
+    --accent-hover: #07809d;
     --destructive: #e11d48;
     --destructive-foreground: #ffffff;
+    --destructive-ink: #e11d48;
+    --destructive-hover: #c61a3f;
 
     --border: rgba(8, 8, 18, 0.08);
     --border-strong: rgba(8, 8, 18, 0.14);
     --input: rgba(8, 8, 18, 0.12);
+    /* design.pen's mint at 50%. It composites to ~1.5:1 on every light surface,
+       under the 3:1 non-text floor, and stays there by the same owner decision
+       as the fills above: the ring is a hint drawn beside a focused control,
+       and the brand value is not traded away to raise its ratio. */
     --ring: rgba(16, 185, 129, 0.5);
 
+    /* Each --X-ink carries the same brand value as its fill: an accent is never
+       moved off its design value to buy contrast. As small text on a light
+       surface those values read 2.2-4.2:1, under WCAG AA (4.5:1), and stay
+       there by the owner decision of 2026-08-14 above. The washes below mix
+       from the fill, which is why they carry the fill's hex. */
+    /* Mirrors the dark block's note: the sidebar fill and the selected nav wash
+       are the two that genuinely differ from --surface and --mint-soft here. */
+    --sidebar-background: #fcfcfe;
+    --nav-selected-bg: #10b98114;
+    --nav-selected-border: #10b98160;
+    --nav-hover-bg: #f5f5f6;
+    --logo-well-background: #eef1f780;
+    --illustration-card-border: #08081212;
+    --desktop-overlay-shadow: #0a0a1424;
+
     --mint: #10b981;
+    --route-manual: #245bcd;
     --mint-soft: rgba(16, 185, 129, 0.14);
+    --mint-ink: #10b981;
+    --mint-hover: #0ea372;
     --cyan: #0891b2;
     --cyan-soft: rgba(8, 145, 178, 0.14);
+    --cyan-ink: #0891b2;
+    --cyan-hover: #07809d;
     --violet: #7c3aed;
     --violet-soft: rgba(124, 58, 237, 0.14);
+    --violet-foreground: #ffffff;
+    --violet-ink: #7c3aed;
+    --violet-hover: #6d33d1;
     --gold: #d97706;
+    --gold-soft: rgba(217, 119, 6, 0.14);
     --gold-foreground: #ffffff;
+    --gold-ink: #d97706;
+    --gold-hover: #bf6905;
     --pink: #dc2659;
     --pink-soft: rgba(220, 38, 89, 0.10);
+    --pink-ink: #dc2659;
 
     /* Light-theme page gradients (softer alphas over light base). */
     --gradient-console:
@@ -234,9 +517,21 @@
 
     --bg-page: var(--gradient-console);
 
-    /* Light card glow — much softer than dark. */
-    --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
-    --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+    /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+       swaps only the hue to the light brand mint. */
+    --card-wash: rgba(16, 185, 129, 0.078);
+
+    /* Wider CTA glow than dark: the same neon spreads far less over a white card,
+       so 16px read as almost nothing here (owner decision 2026-08-14). */
+    --brand-glow-blur: 20px;
+
+    /* The Light frame's own active card (waUhu) draws 16px at -4px spread and
+       #10B98170 -- the sized scale's `sm` geometry and its 0.44 alpha, not dark's
+       spreadless 28. Only these numbers are re-anchored; the hue stays `var(--mint)`,
+       which this block has already swapped to the light brand. */
+    --onboarding-glow-blur: 16px;
+    --onboarding-glow-spread: -4px;
+    --onboarding-glow-alpha: 44%;
   }
 }
 
@@ -253,32 +548,65 @@
   --popover: #ffffff;
   --popover-foreground: #0a0a14;
 
+  /* Vivid fill + white label, ink equal to the fill - see the
+     prefers-color-scheme block above. Both light blocks must stay
+     value-identical. */
   --primary: #10b981;
   --primary-foreground: #ffffff;
+  --primary-ink: #10b981;
+  /* Every brand fill darkens on hover here, because this theme's labels are white —
+     see the dark block for why hover is a declared fill rather than a filter. */
+  --primary-hover: #0ea372;
   --secondary: #eef1f7;
   --secondary-foreground: #0a0a14;
   --muted: #5c6079;
   --muted-soft: #eef1f7;
   --accent: #0891b2;
   --accent-foreground: #ffffff;
+  --accent-ink: #0891b2;
+  --accent-hover: #07809d;
   --destructive: #e11d48;
   --destructive-foreground: #ffffff;
+  --destructive-ink: #e11d48;
+  --destructive-hover: #c61a3f;
 
   --border: rgba(8, 8, 18, 0.08);
   --border-strong: rgba(8, 8, 18, 0.14);
   --input: rgba(8, 8, 18, 0.12);
+  /* Mirrors the @media light block above; see the note there. */
   --ring: rgba(16, 185, 129, 0.5);
 
+  /* Mirrors the @media light block above; see the note in the dark block. */
+  --sidebar-background: #fcfcfe;
+  --nav-selected-bg: #10b98114;
+  --nav-selected-border: #10b98160;
+  --nav-hover-bg: #f5f5f6;
+  --logo-well-background: #eef1f780;
+  --illustration-card-border: #08081212;
+  --desktop-overlay-shadow: #0a0a1424;
+
   --mint: #10b981;
+  --route-manual: #245bcd;
   --mint-soft: rgba(16, 185, 129, 0.14);
+  --mint-ink: #10b981;
+  --mint-hover: #0ea372;
   --cyan: #0891b2;
   --cyan-soft: rgba(8, 145, 178, 0.14);
+  --cyan-ink: #0891b2;
+  --cyan-hover: #07809d;
   --violet: #7c3aed;
   --violet-soft: rgba(124, 58, 237, 0.14);
+  --violet-foreground: #ffffff;
+  --violet-ink: #7c3aed;
+  --violet-hover: #6d33d1;
   --gold: #d97706;
+  --gold-soft: rgba(217, 119, 6, 0.14);
   --gold-foreground: #ffffff;
+  --gold-ink: #d97706;
+  --gold-hover: #bf6905;
   --pink: #dc2659;
   --pink-soft: rgba(220, 38, 89, 0.10);
+  --pink-ink: #dc2659;
 
   /* Light-theme page gradients (softer alphas over light base). */
   --gradient-console:
@@ -311,9 +639,19 @@
 
   --bg-page: var(--gradient-console);
 
-  /* Light card glow — much softer than dark. */
-  --shadow-mint-card: 0 12px 24px -16px rgba(16, 185, 129, 0.20);
-  --shadow-mint-card-lg: 0 16px 32px -16px rgba(16, 185, 129, 0.22);
+  /* design.pen's Light frame keeps the dark frame's geometry and 0.078 and
+     swaps only the hue to the light brand mint. */
+  --card-wash: rgba(16, 185, 129, 0.078);
+
+  /* Wider CTA glow than dark: the same neon spreads far less over a white card,
+     so 16px read as almost nothing here (owner decision 2026-08-14). */
+  --brand-glow-blur: 20px;
+
+  /* Light's own active-card geometry - see the prefers-color-scheme block above.
+     Both light blocks must stay value-identical. */
+  --onboarding-glow-blur: 16px;
+  --onboarding-glow-spread: -4px;
+  --onboarding-glow-alpha: 44%;
 }
 
 html,
@@ -431,9 +769,11 @@ pre,
   animation: slide-in 0.2s ease-out;
 }
 
-/* App windows (Apps layer): a subtle scale+fade on open/restore, and a
-   scale-down toward the Dock on minimize/close. Short enough to read as
-   responsiveness, not a transition you wait on. */
+/* App windows (Apps layer): a subtle scale+fade on open, and a scale-down
+   toward the Dock on close. Short enough to read as responsiveness, not a
+   transition you wait on. A window that mounts already minimized must NOT
+   take animate-appwindow-in — this keyframe writes opacity/transform and
+   would flash the window at full size before the minimized hide sticks. */
 @keyframes appwindow-in {
   from { opacity: 0; transform: scale(0.97) translateY(6px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
@@ -511,7 +851,7 @@ pre,
 .vr-markdown li.task-list-item { list-style: none; }
 .vr-markdown li.task-list-item input { margin-right: 0.4em; }
 .vr-markdown a {
-  color: var(--cyan);
+  color: var(--cyan-ink);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -562,7 +902,7 @@ pre,
 .vr-code-block:hover .vr-code-copy,
 .vr-code-copy:focus-visible { opacity: 1; }
 .vr-code-copy:hover { color: var(--foreground); background: var(--surface-3); }
-.vr-code-copy.is-copied { opacity: 1; color: var(--mint); border-color: rgba(91, 255, 160, 0.4); }
+.vr-code-copy.is-copied { opacity: 1; color: var(--mint-ink); border-color: rgba(91, 255, 160, 0.4); }
 /* Touch devices have no hover — keep the button gently visible so it's tappable. */
 @media (hover: none) {
   .vr-code-copy { opacity: 0.6; }
@@ -650,3 +990,32 @@ pre,
 .vr-fileview-table th { background: var(--surface-2); font-weight: 600; }
 .vr-fileview-table tbody tr:nth-child(even) { background: var(--surface-3); }
 .vr-fileview-note { padding: 8px 14px; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--border); }
+
+/* Text previews share the Editor's persisted font-size preference. The custom
+   property is owned by FilePreview so every shell (Editor preview, Files,
+   chat) updates live without coupling its surrounding chrome to that setting. */
+.vr-fileview-text { font-size: var(--vr-fileview-font-size, 13px); }
+.vr-fileview-text :is(.vr-fileview-md, .vr-fileview-pre, .vr-fileview-code pre, .vr-fileview-json, .vr-fileview-table) {
+  font-size: inherit;
+}
+.vr-fileview-text .vr-fileview-md pre code { font-size: 0.92em; }
+
+/* The project header remains a scroll/tap target until a touch hold activates. */
+.project-drag-header {
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.project-drag-header[aria-describedby] .project-drag-icon { cursor: grab; }
+.project-drag-header[aria-pressed="true"],
+.project-drag-header[aria-pressed="true"] .project-drag-icon { cursor: grabbing; }
+.project-drag-preview { animation: project-pickup 140ms ease-out; }
+@keyframes project-pickup {
+  from { opacity: 0.75; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .project-drag-preview { animation: none; }
+  .project-sortable { transition: none !important; }
+}

@@ -1,21 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, update
 
+from avibe_memory.capture_adapter import EnabledMemoryAdapter
+from core.handlers.message_handler import memory_turn_event
+from core.memory_adapter import SessionArchived, SessionReset
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
+    prewrite_user_stop_requested,
     set_dispatch_phase,
 )
 from core.run_settlement import (
@@ -25,6 +32,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -33,12 +41,16 @@ from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
     DeliveryRequest,
+    DeliveryResult,
     SessionTurnManager,
     Turn,
+    _collect_delivery_segment,
     _scheduled_merge_key,
+    _segment_dispatch_text,
 )
-from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+from core.agent_input import AgentInputMetadata
 from core.handlers.message_handler import MessageHandler
+from core.message_context import resolve_turn_sink_key
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from storage import message_deliveries as delivery_store
@@ -101,6 +113,28 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
     )
 
 
+def _memory_facts_controller():
+    from core.controller import Controller
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller.memory_runtime = SimpleNamespace(
+        principal_for_user_key=lambda user_key: f"principal:{user_key}",
+    )
+    controller.platform_settings_managers = {}
+    controller.get_cwd = lambda _context: None
+    return controller
+
+
+def _complete_capture_admission(context: MessageContext) -> None:
+    """Guard that durable dispatch carries no lifecycle state in its JSON bag."""
+
+    payload = context.platform_specific or {}
+    assert "_turn_lifecycle_admission" not in payload
+    assert "_turn_lifecycle_snapshot" not in payload
+    json.dumps(payload)
+
+
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
     return MessageContext(
         user_id="user",
@@ -149,12 +183,24 @@ def _seed_session(engine, session_id: str = "ses_fsm") -> None:
         )
 
 
+@pytest.fixture(scope="module")
+def _fsm_schema_template(tmp_path_factory):
+    path = tmp_path_factory.mktemp("fsm-schema") / "empty.sqlite"
+    engine = create_sqlite_engine(path)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return path
+
+
 @pytest.fixture
-def managers(tmp_path: Path):
-    db_path = tmp_path / "fsm.sqlite"
+def managers(tmp_path: Path, sqlite_db_factory, _fsm_schema_template):
+    db_path = sqlite_db_factory(tmp_path / "fsm.sqlite", template=_fsm_schema_template)
     engine_a = create_sqlite_engine(db_path)
     engine_b = create_sqlite_engine(db_path)
-    metadata.create_all(engine_a)
     _seed_session(engine_a)
 
     controller_a = _Controller()
@@ -169,6 +215,7 @@ def managers(tmp_path: Path):
     async def fake_run(_session_id, _context_value, text, **kwargs):
         with starts_lock:
             starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     manager_a._run = fake_run
     manager_b._run = fake_run
@@ -177,6 +224,219 @@ def managers(tmp_path: Path):
     engine_b.dispose()
 
 
+def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template, sqlite_db_factory):
+    reference = tmp_path / "reference.sqlite"
+    engine = create_sqlite_engine(reference)
+    try:
+        metadata.create_all(engine)
+        with engine.connect() as connection:
+            assert all(connection.execute(select(table)).first() is None for table in metadata.tables.values())
+    finally:
+        engine.dispose()
+    copied = sqlite_db_factory(tmp_path / "copied.sqlite", template=_fsm_schema_template)
+    with closing(sqlite3.connect(reference)) as fresh, closing(sqlite3.connect(copied)) as clone:
+        assert list(fresh.iterdump()) == list(clone.iterdump())
+        for pragma in ("journal_mode", "user_version", "application_id"):
+            assert fresh.execute(f"PRAGMA {pragma}").fetchall() == clone.execute(f"PRAGMA {pragma}").fetchall()
+        assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
+@pytest.mark.anyio
+async def test_completed_memory_lifecycle_state_does_not_accumulate(managers) -> None:
+    """Scenario: MEMORY-INDEP-005.
+
+    Settled optional Memory fences must not retain every historical session.
+    """
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    for index in range(256):
+        session_id = f"settled-memory-session-{index}"
+        snapshot = manager.snapshot_session_lifecycle(session_id)
+        admission = await manager.acquire_lifecycle_admission(session_id)
+        admission.release()
+
+        async def reset_session() -> str:
+            return "reset"
+
+        assert await manager.run_session_lifecycle(
+            session_id,
+            reset_session,
+        ) == "reset"
+        assert not manager.session_lifecycle_snapshot_matches(
+            session_id,
+            snapshot,
+        )
+
+    del admission, snapshot
+    gc.collect()
+    assert len(manager._session_lifecycle_states) == 0
+
+
+@pytest.mark.anyio
+async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    snapshot = manager.snapshot_session_lifecycle("ses_fsm")
+
+    async def lifecycle_operation() -> str:
+        assert manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
+        return "reset"
+
+    assert await manager.run_session_lifecycle(
+        "ses_fsm",
+        lifecycle_operation,
+    ) == "reset"
+    assert not manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
+
+
+@pytest.mark.anyio
+async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
+    """MEMORY-IM-ATTACH-001: failed reset preserves an in-flight turn epoch."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
+
+    async def lifecycle_operation() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle("ses_fsm", lifecycle_operation)
+
+    admission = await manager.acquire_lifecycle_admission("ses_fsm")
+    try:
+        assert manager.session_lifecycle_snapshot_matches(
+            "ses_fsm",
+            sampled_snapshot,
+        )
+    finally:
+        admission.release()
+
+
+@pytest.mark.anyio
+async def test_hung_memory_capture_does_not_fence_next_turn_or_destructive_ops(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-001."""
+
+    manager, _other, _engine, _engine_b, starts = managers
+    capture_started = asyncio.Event()
+
+    class Module:
+        def __init__(self) -> None:
+            self.capacities: list[SimpleNamespace] = []
+            self.reservations: list[SimpleNamespace] = []
+            self.barriers: list[str] = []
+
+        def reserve_capture_capacity(self) -> object:
+            capacity = SimpleNamespace(active=True)
+            self.capacities.append(capacity)
+            return capacity
+
+        def release_capture_capacity(self, capacity: object) -> None:
+            capacity.active = False
+
+        def reserve_capture_admission(self, **_scope: object) -> object:
+            reservation = SimpleNamespace(active=True)
+            self.reservations.append(reservation)
+            return reservation
+
+        def cancel_capture_reservation(self, reservation: object) -> None:
+            reservation.active = False
+
+        @asynccontextmanager
+        async def capture_admission(self, **_options: object):
+            yield object()
+
+        async def capture(self, _request: object, **_options: object) -> object:
+            capture_started.set()
+            await asyncio.Event().wait()
+
+        def offer_barrier(self, session_id: str) -> object:
+            self.barriers.append(session_id)
+            return "queued"
+
+        async def wait_writer_idle_for_tests(self, **_options: object) -> None:
+            return None
+
+    class Principals:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            return "u-11111111111111111111111111111111"
+
+    module = Module()
+    adapter = EnabledMemoryAdapter(
+        module=module,
+        principals=Principals(),
+        is_enabled_user=lambda _platform, _user_id: True,
+        lifecycle_snapshot_matches=manager.session_lifecycle_snapshot_matches,
+        acquire_lifecycle_admission=manager.acquire_lifecycle_admission,
+        attachment_capture_status=lambda: asyncio.sleep(0, result="unavailable"),
+        attachment_config_generation=lambda: None,
+    )
+    manager.controller.memory_adapter = adapter
+    assert adapter.start(task_factory=asyncio.create_task)
+    context = _context()
+    context.message_id = "native-memory-turn"
+    context.is_original_human_text = True
+    context.platform_specific["author_id"] = "authenticated-author"
+    adapter.offer(
+        memory_turn_event(
+            context,
+            "记住这一轮",
+            "ses_fsm",
+            manager.snapshot_session_lifecycle("ses_fsm"),
+        )
+    )
+    await asyncio.wait_for(capture_started.wait(), timeout=1.0)
+
+    delivered = await asyncio.wait_for(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="next turn",
+            ),
+            context=_context(),
+        ),
+        timeout=1.0,
+    )
+    assert delivered.turn_id
+    assert starts[-1] == (delivered.turn_id, "next turn")
+
+    async def reset_session() -> str:
+        return "reset"
+
+    async def archive_session() -> str:
+        return "archived"
+
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            reset_session,
+            deadline_seconds=0.05,
+        ),
+        timeout=1.0,
+    ) == "reset"
+    adapter.offer(SessionReset("ses_fsm"))
+    assert await asyncio.wait_for(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            archive_session,
+            deadline_seconds=0.05,
+        ),
+        timeout=1.0,
+    ) == "archived"
+    adapter.offer(SessionArchived("ses_fsm"))
+
+    await adapter.wait_idle_for_tests(timeout_seconds=1.0)
+    assert module.barriers == ["ses_fsm", "ses_fsm"]
+    assert module.capacities and all(not item.active for item in module.capacities)
+    assert module.reservations and all(
+        not item.active for item in module.reservations
+    )
+    assert adapter.capture_tasks == set()
+    await adapter.cancel_memory_capture_tasks()
+
+
+@pytest.mark.anyio
 async def _activate(
     manager: SessionTurnManager,
     *,
@@ -540,6 +800,42 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
+def test_fifo_segment_merges_only_one_authenticated_author(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    author_id=user_id,
+                    message_kind="original",
+                ),
+                context=_context(),
+            )
+        )
+        for text, user_id in (
+            ("alice one", "remote:alice"),
+            ("alice two", "remote:alice"),
+            ("bob one", "remote:bob"),
+        )
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    alice_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "alice one\nalice two"
+
+    first, second, third = [_row(engine, str(item.delivery_id)) for item in queued]
+    assert first["turn_id"] == alice_turn_id
+    assert second["turn_id"] == alice_turn_id
+    assert third["turn_id"] is None
+    assert third["state"] == "queued"
+
+
 def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
@@ -576,9 +872,144 @@ def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None
     assert bob["state"] == "queued"
 
 
+def test_memory_indep_016_new_queue_uses_core_identity_without_memory_metadata(
+    managers,
+) -> None:
+    """Scenario: MEMORY-INDEP-016."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="Continue",
+                author_id="remote:alice",
+                message_kind="quick_reply",
+                metadata={
+                    "quick_reply_for": "msg-agent",
+                    "_memory_user_id": "forged-principal",
+                    "_memory_ordinary_text": True,
+                    "_memory_cli_admitted": True,
+                },
+            ),
+            context=_context(),
+        )
+    )
+
+    row = _row(engine, str(result.delivery_id))
+    snapshot = json.loads(row["snapshot_json"])
+    metadata = json.loads(snapshot["metadata_json"])
+    assert snapshot["author_id"] == "remote:alice"
+    assert snapshot["message_kind"] == "quick_reply"
+    assert not any(key.startswith("_memory_") for key in metadata)
+
+
+def test_core_message_kind_separates_original_and_quick_reply_segments() -> None:
+    common = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "remote:alice",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+        "metadata": {},
+    }
+    original = {**common, "message_kind": "original"}
+    quick_reply = {**common, "message_kind": "quick_reply"}
+
+    assert _collect_delivery_segment([original, quick_reply]) == [original]
+
+
+def test_legacy_and_new_original_rows_do_not_merge_admission_schemas() -> None:
+    legacy = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "remote:alice",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+        "metadata": {"_memory_ordinary_text": True},
+    }
+    current = {
+        **legacy,
+        "message_kind": "original",
+        "metadata": {},
+    }
+
+    assert delivery_store.message_merge_identity(legacy) != (
+        delivery_store.message_merge_identity(current)
+    )
+
+
+def test_raw_legacy_and_new_original_snapshots_do_not_merge_admission_schemas() -> None:
+    common = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "remote:alice",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+    }
+    legacy = {
+        **common,
+        "metadata_json": json.dumps({"_memory_ordinary_text": True}),
+    }
+    current = {
+        **common,
+        "message_kind": "original",
+        "metadata_json": "{}",
+    }
+
+    assert delivery_store.message_merge_identity(legacy) != (
+        delivery_store.message_merge_identity(current)
+    )
+
+
+@pytest.mark.parametrize("metadata_field", delivery_store.LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS)
+def test_every_released_memory_admission_fact_fences_delivery_segments(
+    metadata_field: str,
+) -> None:
+    metadata = {
+        delivery_store.LEGACY_MEMORY_USER_ID_METADATA: "principal-a",
+        delivery_store.LEGACY_MEMORY_ORDINARY_TEXT_METADATA: True,
+        delivery_store.LEGACY_MEMORY_CLI_ADMITTED_METADATA: True,
+    }
+    common = {
+        "scope_id": "scope",
+        "platform": "avibe",
+        "author": "user",
+        "type": "user",
+        "source": "user",
+        "author_id": "same-core-author",
+        "author_name": "Alice",
+        "parent_native_message_id": None,
+    }
+    first = {**common, "metadata": metadata}
+    changed_metadata = dict(metadata)
+    value = changed_metadata[metadata_field]
+    changed_metadata[metadata_field] = not value if isinstance(value, bool) else f"{value}-other"
+    second = {**common, "metadata": changed_metadata}
+
+    first_identity = delivery_store.message_merge_identity(first)
+    second_identity = delivery_store.message_merge_identity(second)
+
+    assert first_identity[-1] == delivery_store.legacy_memory_merge_identity(metadata)
+    assert second_identity[-1] == delivery_store.legacy_memory_merge_identity(changed_metadata)
+    assert first_identity != second_identity
+    assert _collect_delivery_segment([first, second]) == [first]
+
+
 def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
     def row(source_session_id: str) -> dict:
         return {
+            "source": "harness",
             "metadata": {
                 SCHEDULED_PROVENANCE_KEY: {
                     "platform_specific": {
@@ -601,6 +1032,26 @@ def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
         {"source_kind": "agent", "source_actor": "source-agent-b"}
     )
     assert _scheduled_merge_key(agent_row) != _scheduled_merge_key(other_agent_row)
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_segment_dispatch_format_is_independent_of_delivery_projection(managers, scheduled):
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    deliveries = []
+    for text in ("first", "second"):
+        request = DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content=text,
+            source="harness" if scheduled else "user",
+            metadata={SCHEDULED_PROVENANCE_KEY: {"platform_specific": {
+                "task_trigger_kind": "agent_run", "source_session_id": "source-session",
+            }}} if scheduled else {},
+        )
+        result = asyncio.run(manager.deliver(request, context=_context()))
+        deliveries.append(_row(engine, result.delivery_id))
+    expected = "first\n\n---\n\nsecond" if scheduled else "first\nsecond"
+    assert _segment_dispatch_text(deliveries) == expected
+    assert _segment_dispatch_text([delivery_store.delivery_payload(row) for row in deliveries]) == expected
 
 
 def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(managers) -> None:
@@ -640,11 +1091,12 @@ def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(manager
 
 
 @pytest.mark.anyio
-async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
+async def test_scheduled_submit_passes_metadata_separately_to_native_steering(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
-    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    metadata = AgentInputMetadata(source_session_id="source-session")
+    prepare = AsyncMock(return_value=metadata)
     manager.controller.message_handler = SimpleNamespace(
-        _prepend_message_metadata=decorator,
+        prepare_input_metadata=prepare,
     )
     await _activate(manager, text="active")
     manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
@@ -677,9 +1129,158 @@ async def test_scheduled_submit_decorates_before_native_steering(managers) -> No
     )
 
     assert result.state == "accepted"
-    decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
+    prepare.assert_awaited_once()
+    assert prepare.await_args.kwargs == {"human": False}
+    assert prepare.await_args.args[0].platform_specific["source_session_id"] == "source-session"
     manager._steer.assert_awaited_once()
-    assert manager._steer.await_args.args[1].text == "decorated: callback result"
+    assert manager._steer.await_args.args[1].text == "callback result"
+    assert manager._steer.await_args.args[1].input_metadata == metadata
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("platform", ["avibe", "slack"])
+@pytest.mark.parametrize("mode", ["immediate", "promote", "pending"])
+async def test_steering_restores_incoming_sender_and_preserves_message_content(managers, platform, mode):
+    """Scenario: MESSAGE-DELIVERY-317."""
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = await _activate(manager, text="active")
+    prepare = AsyncMock(side_effect=lambda context, **kwargs: AgentInputMetadata(
+        user_id=context.user_id,
+        user_name=context.platform_specific["author_name"],
+    ))
+    manager.controller.message_handler = SimpleNamespace(prepare_input_metadata=prepare)
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = "incoming user text\n[Now: literal example]"
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p1" if mode == "immediate" else "p3",
+            content=original, display_text=original, platform=platform,
+            author_id="incoming", author_name="Incoming Sender", message_kind="original",
+        ), context=_context(),
+    )
+    if mode == "promote":
+        assert _row(engine, result.delivery_id)["dispatch_text"] == original
+        await manager.send_now("ses_fsm")
+    elif mode == "pending":
+        with engine.begin() as conn:
+            pending = delivery_store.open_pending_steer_batch(
+                conn, deliveries=[delivery_store.get_delivery(conn, result.delivery_id)],
+                turn_id=turn_id, attempt_id=delivery_store.new_attempt_id(),
+            )
+            assert pending[0]["state"] == "pending_steer"
+        await manager._run_pending_steers("ses_fsm", turn_id, _context())
+    manager._steer.assert_awaited_once()
+    request = manager._steer.await_args.args[1]
+    assert request.text == original
+    assert request.input_metadata == AgentInputMetadata(user_id="incoming", user_name="Incoming Sender")
+    assert prepare.await_args.kwargs == {"human": True}
+    with engine.connect() as conn:
+        delivery = delivery_store.get_delivery(conn, result.delivery_id)
+        message = delivery_store.message_for_delivery(conn, delivery)
+    assert message["content_text"] == original
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+@pytest.mark.parametrize("mode", ["start", "promote", "pending"])
+@pytest.mark.parametrize("legacy_identity", [False, True])
+def test_legacy_queued_metadata_is_removed_only_from_dispatch_copy(managers, subagent, mode, legacy_identity):
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = "[Alex<U1>]\nhello\n[Now: literal user example]"
+    display_text = "reviewer: " + original if subagent else original
+    identity = "[Alex<U1>]\n" if legacy_identity else ""
+    old_text = "[Current Time: 2026-08-02 11:00:00 UTC+08:00]\n" + identity + original
+    result = asyncio.run(manager.deliver(DeliveryRequest(
+        session_id="ses_fsm", priority="p3",
+        platform="slack", content=old_text,
+        display_text=display_text, author_id="U1",
+        admission_context={"message_handler_route": {"subagent_key": "reviewer" if subagent else None}},
+    ), context=_context()))
+    stored = _row(engine, result.delivery_id)
+    assert stored["dispatch_text"] == old_text
+    assert delivery_store.delivery_payload(stored)["text"] == display_text
+    if mode == "start":
+        asyncio.run(manager.terminalize_turn(active_turn_id))
+        assert starts[-1][1] == original
+        assert delivery_store.delivery_payload(_row(engine, result.delivery_id))["text"] == display_text
+    else:
+        if mode == "promote":
+            asyncio.run(manager.send_now("ses_fsm"))
+        else:
+            with engine.begin() as conn:
+                pending = delivery_store.open_pending_steer_batch(
+                    conn, deliveries=[delivery_store.get_delivery(conn, result.delivery_id)],
+                    turn_id=active_turn_id, attempt_id=delivery_store.new_attempt_id(),
+                )
+                assert pending[0]["state"] == "pending_steer"
+            asyncio.run(manager._run_pending_steers("ses_fsm", active_turn_id, _context()))
+        manager._steer.assert_awaited_once()
+        assert manager._steer.await_args.args[1].text == original
+        with engine.connect() as conn:
+            message = delivery_store.message_for_delivery(conn, _row(engine, result.delivery_id))
+        assert message["content_text"] == display_text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["immediate", "promote", "pending"])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_steering_preparation_failure_preserves_a_definitively_unwritten_batch(managers, mode, cancelled):
+    """Scenario: MESSAGE-DELIVERY-319."""
+    manager, _other, engine, _engine_b, _starts = managers
+    turn_id, _ = await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    deliveries = []
+    if mode != "immediate":
+        for text in ("first incoming", "second incoming"):
+            result = await manager.deliver(DeliveryRequest(
+                session_id="ses_fsm", priority="p3", content=text,
+            ), context=_context())
+            deliveries.append(_row(engine, result.delivery_id))
+        if mode == "pending":
+            with engine.begin() as conn:
+                pending = delivery_store.open_pending_steer_batch(
+                    conn, deliveries=deliveries, turn_id=turn_id,
+                    attempt_id=delivery_store.new_attempt_id(),
+                )
+                assert all(row["state"] == "pending_steer" for row in pending)
+    error = asyncio.CancelledError() if cancelled else RuntimeError("context preparation unavailable")
+    manager._steer_input_metadata = AsyncMock(side_effect=error)
+
+    async def dispatch():
+        if mode == "immediate":
+            return await manager.deliver(DeliveryRequest(
+                session_id="ses_fsm", priority="p1", content="first incoming",
+            ), context=_context())
+        if mode == "promote":
+            return await manager.send_now("ses_fsm")
+        return await manager._run_pending_steers("ses_fsm", turn_id, _context())
+
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch()
+    else:
+        await dispatch()
+    manager._steer.assert_not_awaited()
+    queued = [row for row in _rows(engine) if row["state"] == "queued"]
+    assert len(queued) == (1 if mode == "immediate" else 2)
+    for row in queued:
+        assert row["priority"] == "p3"
+        assert row["current_attempt_id"] is None
+        assert row["message_id"] is None
+        events = json.loads(row["delivery_history_json"])["events"]
+        receipts = [event for event in events if event["kind"] == "steer"]
+        assert receipts[-1]["outcome"] == "refused"
+        assert receipts[-1]["receipt"]["reason"] == (
+            "preparation_cancelled" if cancelled else "preparation_failed"
+        )
+
+    manager._steer_input_metadata = AsyncMock(return_value=AgentInputMetadata(user_id="sender"))
+    retry = await manager.send_now("ses_fsm")
+    assert retry["status"] == "accepted"
+    manager._steer.assert_awaited_once()
+    assert manager._steer.await_args.args[1].text == "\n".join(row["dispatch_text"] for row in queued)
+    assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
@@ -688,6 +1289,7 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -746,9 +1348,6 @@ async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(
     assert admitted.state == "claimed"
     assert captured["text"] == "callback result"
     assert captured["context"].platform_specific["source_actor"] == "source-session"
-    assert not captured["context"].platform_specific.get(
-        SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
-    )
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
@@ -1261,16 +1860,18 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
 @pytest.mark.anyio
 async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
-    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    prepare = AsyncMock(side_effect=lambda context, **_kwargs: AgentInputMetadata(
+        source_session_id=context.platform_specific["source_session_id"]
+    ))
     manager.controller.message_handler = SimpleNamespace(
-        _prepend_message_metadata=decorator,
+        prepare_input_metadata=prepare,
     )
-    context = _context()
     deliveries = []
     for index, text in enumerate(("first callback", "second callback")):
         deliveries.append(
             {
                 "id": f"delivery-{index}",
+                "session_id": "ses_fsm",
                 "dispatch_text": text,
                 "snapshot_json": json.dumps(
                     delivery_store.message_snapshot(
@@ -1294,17 +1895,11 @@ async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) ->
             }
         )
 
-    assert await manager.prepare_scheduled_dispatch(
-        context, "first callback", delivery=deliveries[0]
-    ) == "decorated: first callback"
-    assert await manager.prepare_scheduled_dispatch(
-        context, "second callback", delivery=deliveries[1]
-    ) == "decorated: second callback"
-    assert decorator.await_count == 2
-    assert [call.args[1] for call in decorator.await_args_list] == [
-        "first callback",
-        "second callback",
-    ]
+    first = await manager._steer_input_metadata([deliveries[0]])
+    second = await manager._steer_input_metadata([deliveries[1]])
+    assert first.source_session_id == "source-0"
+    assert second.source_session_id == "source-1"
+    assert prepare.await_count == 2
 
 
 def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:
@@ -1596,6 +2191,7 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     payload = manager._hydrate_delivery_context(context, delivery)
 
     assert payload["metadata"] == {"visible": "record metadata"}
+    assert context.user_id == "user"
     assert context.platform_specific["delivery_admission_context"] == {
         "message_handler_route": {
             "base_session_id": "slack_C1:reviewer",
@@ -1603,6 +2199,460 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
             "routing_subagent": True,
         }
     }
+
+
+def test_hydrate_delivery_context_preserves_im_author_as_routing_identity(
+    managers,
+) -> None:
+    """Hydrating an IM delivery keeps the outbound recipient on author_id.
+
+    This is the guardrail that would have caught avibe-bot/avibe#1584: Memory
+    identity must not replace MessageContext.user_id.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                author_name="Ada",
+                native_message_id="wc-msg-1",
+                metadata={"_memory_user_id": "local"},
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=author_id,
+        platform="wechat",
+    )
+
+    manager._hydrate_delivery_context(context, delivery)
+
+    assert context.user_id == author_id
+    assert context.platform_specific["message_metadata"] == {}
+
+
+def test_wechat_outbound_send_uses_hydrated_author_id(managers) -> None:
+    """Scenario: MESSAGE-DELIVERY-316.
+
+    WeChat reply addresses the real platform user, never a Memory principal.
+    """
+
+    from modules.im.wechat import WeChatBot, WeChatConfig
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                native_message_id="wc-msg-2",
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id=None,
+        channel_id=author_id,
+        platform="wechat",
+        platform_specific={"context_token": "ctx-1"},
+    )
+    manager._hydrate_delivery_context(context, delivery)
+    bot = WeChatBot(
+        WeChatConfig(bot_token="token", base_url="https://ilinkai.weixin.qq.com")
+    )
+
+    with patch(
+        "modules.im.wechat.wechat_api.send_message",
+        new=AsyncMock(return_value={}),
+    ) as mock_send:
+        message_id = asyncio.run(bot.send_message(context, "reply"))
+
+    to_user_id = mock_send.await_args.args[2]
+    assert to_user_id == author_id
+    assert to_user_id
+    assert message_id
+
+
+def test_workbench_memory_principal_uses_authenticated_author_id(managers) -> None:
+    """Workbench Memory never trusts released `_memory_user_id` metadata."""
+
+    manager, _other, engine, _engine_b, starts = managers
+    controller = _memory_facts_controller()
+    workbench = _context()
+    workbench.user_id = "workbench"
+    skipped = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="no memory identity",
+            ),
+            context=workbench,
+        )
+    )
+    skipped_delivery = _row(engine, str(skipped.delivery_id))
+    skipped_context = _context()
+    skipped_context.user_id = "workbench"
+    manager._hydrate_delivery_context(skipped_context, skipped_delivery)
+    skipped_facts = controller._memory_turn_facts(skipped_context)
+
+    assert skipped_context.user_id == "workbench"
+    assert skipped_facts.user_id is None
+    assert controller.memory_capture_admitted(skipped_context) is False
+    assert controller.memory_principal_for_context(skipped_context) is None
+    assert starts
+
+    remembered_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=remembered_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="remember this",
+                author_id="push-user",
+                message_kind="original",
+                metadata={
+                    "_memory_user_id": "local",
+                    "_memory_ordinary_text": True,
+                },
+            ),
+            dispatch_text="remember this",
+        )
+    context = _context()
+    context.user_id = "workbench"
+    manager._hydrate_delivery_context(context, _row(engine, remembered_id))
+    facts = controller._memory_turn_facts(context)
+
+    assert context.user_id == "push-user"
+    assert facts.user_id == "push-user"
+    assert controller.memory_principal_for_context(context) == "principal:avibe:push-user"
+
+
+def test_legacy_workbench_lan_author_does_not_gain_memory_admission(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None,
+        session_id="ses_fsm",
+        platform="avibe",
+        author="user",
+        source="user",
+        text="legacy LAN input",
+        author_id="local",
+        metadata={
+            "_memory_cli_admitted": False,
+            "_memory_ordinary_text": True,
+        },
+    )
+    snapshot.pop("message_kind")
+    snapshot["metadata_json"] = json.dumps(
+        {
+            "_memory_cli_admitted": False,
+            "_memory_ordinary_text": True,
+        }
+    )
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=snapshot,
+            dispatch_text="legacy LAN input",
+        )
+
+    context = _context()
+    manager._hydrate_delivery_context(context, _row(engine, delivery_id))
+    controller = _memory_facts_controller()
+
+    assert context.user_id == "user"
+    assert (context.platform_specific or {}).get("memory_cli_admitted") is None
+    assert controller.memory_capture_admitted(context) is False
+    assert controller.memory_principal_for_context(context) is None
+
+
+def test_legacy_workbench_strict_author_keeps_memory_admission(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None,
+        session_id="ses_fsm",
+        platform="avibe",
+        author="user",
+        source="user",
+        text="legacy loopback input",
+        author_id="local",
+        metadata={
+            "_memory_user_id": "local",
+            "_memory_cli_admitted": True,
+            "_memory_ordinary_text": True,
+        },
+    )
+    snapshot.pop("message_kind")
+    snapshot["metadata_json"] = json.dumps(
+        {
+            "_memory_user_id": "local",
+            "_memory_cli_admitted": True,
+            "_memory_ordinary_text": True,
+        }
+    )
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=snapshot,
+            dispatch_text="legacy loopback input",
+        )
+
+    context = _context()
+    manager._hydrate_delivery_context(context, _row(engine, delivery_id))
+    controller = _memory_facts_controller()
+
+    assert context.user_id == "local"
+    assert (context.platform_specific or {}).get("memory_cli_admitted") is True
+    assert controller.memory_capture_admitted(context) is True
+    assert controller.memory_principal_for_context(context) == "principal:avibe:local"
+
+
+@pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
+def test_durable_workbench_turn_restores_memory_admission_facts(
+    managers,
+    launch_path: str,
+) -> None:
+    from core.controller import Controller
+    from core.memory_cli_access import configure_memory_cli_access
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    classifications: list[bool | None] = []
+    routing_users: list[str | None] = []
+    memory_users: list[str | None] = []
+    memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
+    principal_id = "u-" + ("1" * 32)
+    project_id = "p-" + ("2" * 32)
+    admission = SimpleNamespace(
+        principal_for=lambda _facts: principal_id,
+        project_for=lambda _facts: project_id,
+        admits=lambda _facts: True,
+    )
+    facts_controller = _memory_facts_controller()
+    prompt_controller = SimpleNamespace(
+        config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
+        _memory_scopes_by_session={},
+        _memory_cli_facts_by_session={},
+        _memory_turn_facts=lambda _context: object(),
+        _memory_admission=lambda: admission,
+    )
+    prompt_controller.configure_memory_cli_session = (
+        Controller.configure_memory_cli_session.__get__(prompt_controller)
+    )
+    prompt_controller.memory_read_scope_for_cli_session = Controller.memory_read_scope_for_cli_session.__get__(prompt_controller)
+    prompt_controller.memory_scope_for_cli_session = (
+        Controller.memory_scope_for_cli_session.__get__(prompt_controller)
+    )
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        classifications.append(context.is_original_human_text)
+        routing_users.append(context.user_id)
+        memory_users.append(
+            facts_controller._memory_turn_facts(context).user_id
+        )
+        cli_admitted = configure_memory_cli_access(prompt_controller, context)
+        payload = context.platform_specific or {}
+        memory_cli_observations.append(
+            (
+                payload.get("memory_cli_admitted") is True,
+                cli_admitted,
+                prompt_controller.memory_scope_for_cli_session("ses_fsm"),
+            )
+        )
+        _complete_capture_admission(context)
+
+    manager._run = capture_start
+    if launch_path == "immediate":
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content="remember this",
+                    author_id="local",
+                    message_kind="original",
+                    metadata={
+                        "_memory_user_id": "forged",
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                context=_context(),
+            )
+        )
+    else:
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p3",
+                state="queued",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="avibe",
+                    author="user",
+                        source="user",
+                        text="remember this",
+                        author_id="local",
+                        message_kind="original",
+                        metadata={
+                            "_memory_user_id": "forged",
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                dispatch_text="remember this",
+            )
+        if launch_path == "fifo":
+            asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+        else:
+            asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+    assert classifications == [True]
+    assert routing_users == ["local"]
+    assert memory_users == ["local"]
+    assert memory_cli_observations == [
+        (True, True, (principal_id, project_id)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"_memory_cli_admitted": False},
+        {"_memory_cli_admitted": "true"},
+        {"_memory_cli_admitted": 1},
+    ],
+)
+def test_durable_memory_cli_admission_fails_closed(
+    managers,
+    metadata: dict[str, object],
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    admissions: list[object] = []
+
+    def stale_context(_session_id: str) -> MessageContext:
+        context = _context()
+        context.platform_specific["memory_cli_admitted"] = True
+        return context
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        admissions.append((context.platform_specific or {}).get("memory_cli_admitted"))
+        _complete_capture_admission(context)
+
+    manager.bind_context(stale_context)
+    manager._run = capture_start
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not admit",
+                metadata=metadata,
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admissions == [None]
+
+
+@pytest.mark.parametrize(
+    "message_kind",
+    [
+        "quick_reply",
+        "forwarded",
+        "edited",
+        "system",
+        "unknown",
+    ],
+)
+def test_non_original_message_kinds_do_not_merge_or_expand_admission(
+    managers,
+    message_kind: str,
+) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    common = {
+        "platform": "avibe",
+        "source": "user",
+        "author": "user",
+        "author_id": "remote:alice",
+    }
+    rows = [
+        {**common, "message_kind": "original"},
+        {**common, "message_kind": message_kind},
+    ]
+    assert _collect_delivery_segment(rows) == [rows[0]]
+
+    delivery_id = delivery_store.new_delivery_id()
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                text="not original",
+                author_id="remote:alice",
+                message_kind=message_kind,
+            ),
+            dispatch_text="not original",
+        )
+    context = _context()
+    manager._hydrate_delivery_context(context, _row(engine, delivery_id))
+    assert context.message_kind == message_kind
+    assert context.is_original_human_text is False
 
 
 def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
@@ -1627,6 +2677,7 @@ def test_dispatch_uses_current_session_route_without_mutating_delivery_provenanc
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -1635,6 +2686,7 @@ def test_dispatch_uses_current_session_route_without_mutating_delivery_provenanc
                 session_id="ses_fsm",
                 priority="p3",
                 content="scheduled",
+                source="harness",
                 metadata={
                     SCHEDULED_PROVENANCE_KEY: {
                         "message_id": "scheduled:old",
@@ -1841,6 +2893,112 @@ def test_terminal_output_persistence_failure_does_not_emit_empty_fallback(
         ).scalar_one()
     assert turn is not None and turn["state"] == "active"
     assert status == "running"
+
+
+def test_model_hub_finalization_fences_native_start_after_durable_terminal(managers, monkeypatch, tmp_path):
+    from core.handlers.model_hub.adapter import RawOutcomeKind
+    from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from modules.agents.model_hub import ModelHubRuntimeRouter, bind_turn_mode
+    from tests.test_model_hub_l3 import (
+        FakeStreamResponse, LiveInvokeHandle, _canonicalize_fixed_test_routes,
+        _outcome, _prepared_gateway_request, _service, _source,
+    )
+    from tests.test_model_hub_retention import HeldTerminalHandle, TERMINAL
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    _seed_session(engine, "ses_independent")
+    source = _source("src_fencedturn", "Fenced finalization")
+    held = HeldTerminalHandle(source.id)
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    gateway = ModelHubTurnGateway(service)
+    runtime = ModelHubRuntimeRouter(service=service, turn_gateway=gateway, overlay_path=tmp_path / "overlay.json")
+    manager.controller.model_hub_runtime = runtime
+    monkeypatch.setattr("core.handlers.model_hub.service.get_cached_sqlite_engine", lambda: engine)
+    dispatched = []
+    requests = []
+    runners = []
+    finalization_started = asyncio.Event()
+    independent_done = asyncio.Event()
+    original_settle = runtime.settle_turn
+
+    def settle(*args, **kwargs):
+        result = original_settle(*args, **kwargs)
+        if result is not None:
+            finalization_started.set()
+        return result
+
+    runtime.settle_turn = settle
+
+    async def dispatch(_controller, context, text, **_kwargs):
+        session_id = context.platform_specific["workbench_session_id"]
+        turn_id = context.platform_specific["turn_token"]
+        dispatched.append((text, turn_id))
+        set_dispatch_phase(context, DISPATCH_PHASE_ATTEMPTING)
+        context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager.on_native_start(context, backend="codex", runtime_key=f"key-{session_id}", runtime_turn_id=f"runtime-{turn_id}")
+        if text == "first":
+            bind_turn_mode(context, "hub")
+            service.adapter.live_handles.append(held)
+            request = _prepared_gateway_request(gateway, turn_id=turn_id, requested_model=model, source_id=source.id, stream=True)
+            requests.append(asyncio.create_task(gateway._handle_request(request)))
+            await held.at_end.wait()
+        elif text == "second":
+            assert service.provenance.latest_for_model("codex", model)["turn_id"] == dispatched[0][1]
+            bind_turn_mode(context, "hub")
+            service.adapter.live_handles.append(LiveInvokeHandle(
+                _outcome(RawOutcomeKind.SUCCESS, status=200, source_id=source.id), (TERMINAL,)
+            ))
+            request = _prepared_gateway_request(gateway, turn_id=turn_id, requested_model=model, source_id=source.id, stream=True)
+            await gateway._handle_request(request)
+        manager.on_terminal_result(context, is_error=False)
+        manager.on_terminal_delivery_complete(context)
+        if text == "independent":
+            independent_done.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT, backend_dispatch_attempted=True)
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", dispatch)
+
+    async def exercise():
+        try:
+            with patch("core.handlers.model_hub.turn_gateway.web.StreamResponse", side_effect=lambda **_kwargs: FakeStreamResponse()):
+                first = await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="first"), context=_context())
+                old_runner = manager.in_flight["ses_fsm"].task
+                runners.append(old_runner)
+                await asyncio.wait_for(finalization_started.wait(), 5)
+                with engine.connect() as conn:
+                    assert delivery_store.get_turn(conn, first.turn_id)["state"] == "terminal"
+                second = await manager.deliver(DeliveryRequest(session_id="ses_fsm", priority="p3", content="second"), context=_context())
+                assert second.turn_id != first.turn_id
+                assert manager.in_flight["ses_fsm"].task is old_runner
+                assert [text for text, _ in dispatched] == ["first"]
+                # A durable successor can be claimed, but cannot launch while
+                # the departing Session runner still owns its Hub finalizer.
+                assert not await manager._start_persisted_turn(second.turn_id)
+                await manager.deliver(DeliveryRequest(session_id="ses_independent", priority="p3", content="independent"), context=_context("ses_independent"))
+                independent = manager.in_flight["ses_independent"].task
+                runners.append(independent)
+                await asyncio.wait_for(independent_done.wait(), 5)
+                await independent
+                assert not old_runner.done()
+                held.release.set()
+                await asyncio.wait_for(old_runner, 5)
+                successor = manager.in_flight.get("ses_fsm")
+                if successor is not None:
+                    runners.append(successor.task)
+                    await asyncio.wait_for(successor.task, 5)
+            assert [text for text, _ in dispatched] == ["first", "independent", "second"]
+            assert service.provenance.latest_for_model("codex", model)["turn_id"] == second.turn_id
+        finally:
+            held.release.set()
+            for runner in runners:
+                if not runner.done():
+                    runner.cancel()
+            await asyncio.gather(*requests, *runners, return_exceptions=True)
+            await gateway.close()
+
+    asyncio.run(exercise())
 
 
 def test_turn_state_repairs_only_an_exact_ownerless_running_projection(managers) -> None:
@@ -2427,7 +3585,7 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     managers,
     monkeypatch,
 ) -> None:
-    """MESSAGE-DELIVERY-011: adapter acceptance is may-have-written after DB loss."""
+    """MESSAGE-DELIVERY-011: accepted evidence recovers without adapter reconciliation."""
 
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2453,22 +3611,18 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
         )
     )
     monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    persisted = _row(engine, str(outcome.delivery_id))
+    assert persisted["state"] == "reconciling_steer"
+    assert persisted["current_receipt_outcome"] == "accepted"
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
-
-    async def reconcile(_backend, request):
-        assert request.attempt_id
-        assert request.expected_logical_turn_id == turn_id
-        return steer_result(
-            SteerOutcome.ACCEPTED,
-            reason="native_attempt_found",
-            native_message_id=request.attempt_id,
-        )
-
-    restarted._reconcile_steer_attempt = reconcile
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
     asyncio.run(restarted.recover_durable_delivery_state())
 
     row = _row(engine, str(outcome.delivery_id))
     assert calls == 1
+    restarted._reconcile_steer_attempt.assert_not_awaited()
     assert row["state"] == "accepted"
     assert row["turn_id"] == turn_id
     assert row["current_attempt_id"] is None
@@ -2479,9 +3633,146 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     assert message["content_text"] == "accepted once"
 
 
-def test_missing_restart_evidence_keeps_unknown_without_resteer(
+def test_observation_recovery_materializes_persisted_accepted_receipt_without_reconcile(
     managers,
     monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-311: observation recovery consumes accepted evidence directly."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(first))
+    first._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
+    first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = delivery_store.materialize_steer_acceptance
+
+    def lose_receipt(*_args, **_kwargs):
+        raise OSError("simulated receipt fsync loss")
+
+    monkeypatch.setattr(
+        delivery_store,
+        "materialize_steer_acceptance",
+        lose_receipt,
+    )
+    outcome = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="observed"),
+            context=_context(),
+        )
+    )
+    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    observations, _ = restarted.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    observation = next(
+        item for item in observations if item.delivery_id == str(outcome.delivery_id)
+    )
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
+
+    assert asyncio.run(restarted.recover_runtime_delivery_observation(observation))
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    row = _row(engine, str(outcome.delivery_id))
+    assert row["state"] == "accepted"
+    assert row["turn_id"] == turn_id
+
+
+def test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment(
+    managers,
+    monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-313: accepted batch recovery retains Turn participants."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    original = delivery_store.materialize_steer_acceptance
+    run_id = "run-accepted-receipt-batch"
+
+    async def run() -> tuple[str, list[str], MessageContext]:
+        turn_id, active_context = await _activate(first)
+        queued = [
+            await first.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    source="harness",
+                    author="harness",
+                    message_type="harness",
+                ),
+                context=_context(),
+            )
+            for text in ("batch one", "batch two")
+        ]
+        now = "2026-08-11T00:00:00Z"
+        with engine.begin() as conn:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    delivery_id=queued[1].delivery_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+        first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+        def lose_receipt(*_args, **_kwargs):
+            raise OSError("simulated receipt fsync loss")
+
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            lose_receipt,
+        )
+        await first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content=None),
+            context=_context(),
+        )
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            original,
+        )
+        delivery_ids = [str(item.delivery_id) for item in queued]
+        persisted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+        assert {row["state"] for row in persisted} == {"reconciling_steer"}
+        assert {row["current_receipt_outcome"] for row in persisted} == {
+            "accepted"
+        }
+        assert len({row["current_attempt_id"] for row in persisted}) == 1
+
+        holder = asyncio.create_task(asyncio.Event().wait())
+        restarted.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=active_context,
+            logical_turn_id=turn_id,
+        )
+        restarted._reconcile_steer_attempt = AsyncMock(
+            side_effect=AssertionError("accepted evidence must not reconcile")
+        )
+        await restarted.recover_durable_delivery_state()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return turn_id, delivery_ids, active_context
+
+    turn_id, delivery_ids, active_context = asyncio.run(run())
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    accepted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+    assert {row["state"] for row in accepted} == {"accepted"}
+    assert {row["turn_id"] for row in accepted} == {turn_id}
+    assert len({row["message_id"] for row in accepted}) == 1
+    assert [row["turn_position"] for row in accepted] == [1, 2]
+    assert active_context.platform_specific["accepted_agent_run_ids"] == [run_id]
+
+
+def test_missing_restart_evidence_keeps_unknown_without_resteer(
+    managers,
 ) -> None:
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2489,25 +3780,18 @@ def test_missing_restart_evidence_keeps_unknown_without_resteer(
     steer_calls = 0
     reconciliation_calls = 0
 
-    async def accepted(_backend, _request):
+    async def unknown(_backend, _request):
         nonlocal steer_calls
         steer_calls += 1
-        return steer_result(SteerOutcome.ACCEPTED)
+        return steer_result(SteerOutcome.UNKNOWN, reason="evidence_unavailable")
 
-    first._steer = accepted
-    original = delivery_store.materialize_steer_acceptance
-
-    def lose_receipt(*args, **kwargs):
-        raise OSError("simulated receipt fsync loss")
-
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", lose_receipt)
+    first._steer = unknown
     outcome = asyncio.run(
         first.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p1", content="still unknown"),
             context=_context(),
         )
     )
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
 
     async def reconcile(_backend, request):
@@ -2680,6 +3964,50 @@ def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -
     assert _row(engine, queued_id)["state"] == "queued"
 
 
+def test_refused_replacement_releases_its_control_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def refused(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "refused"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=refused)
+        try:
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="replacement",
+                ),
+                context=_context(),
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+        assert result.state == "queued"
+        return turn_id, str(result.delivery_id)
+
+    turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        active = delivery_store.get_turn(conn, turn_id)
+    assert active is not None
+    assert active["state"] == "active"
+    assert active["control_state"] == "refused"
+    assert active["control_mode"] is None
+    assert active["control_successor_turn_id"] is None
+    assert active["control_successor_delivery_id"] is None
+    assert _row(engine, replacement_delivery_id)["state"] == "queued"
+
+
 def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
@@ -2708,6 +4036,152 @@ def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(mana
             await asyncio.gather(holder, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def test_stop_cancels_a_starting_turn_before_native_write(managers, monkeypatch) -> None:
+    """MESSAGE-DELIVERY-022: Stop retires a definitively unwritten input."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    manager.controller.emit_agent_message = AsyncMock()
+    settle_calls: list[tuple[list[str], str]] = []
+
+    def settle_runs(run_ids, *, settled_by):
+        settle_calls.append((run_ids, settled_by))
+
+    manager.controller.scheduled_task_service = SimpleNamespace(
+        settle_agent_runs_without_result=settle_runs,
+    )
+    dispatch_entered = asyncio.Event()
+    stop_intent_seen: list[bool] = []
+
+    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
+        dispatch_evidence = set_dispatch_phase(
+            dispatch_context,
+            DISPATCH_PHASE_PREWRITE,
+        )
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stop_intent_seen.append(
+                prewrite_user_stop_requested(dispatch_context)
+            )
+            # OpenCode absorbs cancellation after cleaning up its inner request
+            # task, so lock that adapter behavior into the shared Stop contract.
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        blocked_prewrite_dispatch,
+    )
+
+    async def run() -> tuple[dict, str, str]:
+        context = _context()
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="stop before native write",
+            ),
+            context=context,
+        )
+        assert admitted.turn_id and admitted.delivery_id
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
+        manager.in_flight["ses_fsm"].context.platform_specific[
+            "task_execution_id"
+        ] = "run-stop-prewrite"
+        stopped = await manager.cancel("ses_fsm")
+        return stopped, str(admitted.turn_id), str(admitted.delivery_id)
+
+    stopped, turn_id, delivery_id = asyncio.run(run())
+
+    assert stopped == {
+        "ok": True,
+        "session_id": "ses_fsm",
+        "status": "stale_released",
+        "reason": "prewrite_canceled",
+    }
+    assert "ses_fsm" not in manager.in_flight
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+    manager.controller.emit_agent_message.assert_not_awaited()
+    assert stop_intent_seen == [True]
+    assert settle_calls == [(["run-stop-prewrite"], SETTLED_BY_STOPPED)]
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "terminal"
+    assert turn["terminal_outcome"] == "not_written"
+    assert turn["settled_by"] == SETTLED_BY_STOPPED
+    retired = _row(engine, delivery_id)
+    assert retired["state"] == "retired"
+    history = json.loads(retired["delivery_history_json"])["events"]
+    assert history[-1]["outcome"] == "canceled"
+
+
+def test_prewrite_replacement_returns_the_successor_delivery_state(
+    managers,
+    monkeypatch,
+) -> None:
+    """A prewrite P0 replacement reports the state of its own successor."""
+
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    manager.controller.emit_agent_message = AsyncMock()
+    dispatch_entered = asyncio.Event()
+
+    async def blocked_prewrite_dispatch(_controller, dispatch_context, *_args, **_kwargs):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        blocked_prewrite_dispatch,
+    )
+
+    async def run() -> DeliveryResult:
+        admitted = await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="replace before native write",
+            ),
+            context=_context(),
+        )
+        assert admitted.turn_id
+        await asyncio.wait_for(dispatch_entered.wait(), timeout=1.0)
+        manager._start_persisted_turn = AsyncMock(return_value=True)
+        return await manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p0",
+                content="replacement",
+            ),
+            context=_context(),
+        )
+
+    replacement = asyncio.run(run())
+
+    assert replacement.delivery_id is not None
+    assert replacement.state == "claimed"
+    assert replacement.admission == "started"
+    with engine.connect() as conn:
+        row = delivery_store.get_delivery(conn, replacement.delivery_id)
+    assert row is not None
+    assert row["state"] == replacement.state
+    assert row["turn_id"] == replacement.turn_id
 
 
 def test_empty_p0_terminal_race_still_resumes_the_queued_head(
@@ -2891,7 +4365,7 @@ def test_stopped_agent_initiated_holder_starts_already_activated_successor(
 
         monkeypatch.setattr(manager, "_start_persisted_turn", record_start)
         holder = manager.in_flight["ses_fsm"].task
-        sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+        sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
         assert sink is not None
         if cancel_holder:
             holder.cancel()
@@ -3077,6 +4551,7 @@ def test_adapter_not_active_runner_cleanup_starts_linked_successor_once(
                 context=start_context,
                 logical_turn_id=logical_turn_id,
             )
+            _complete_capture_admission(start_context)
 
         manager._run = record_successor_start
         admitted = await manager.deliver(
@@ -3387,6 +4862,334 @@ def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers
     assert [text for _started_turn, text in starts] == ["continue after restart"]
 
 
+def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
+    """Record what a lost turn reports outward, without a real IM client."""
+
+    emitted: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str]] = []
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        # The dispatcher answers with the delivered message id; a falsy answer
+        # means the send failed, which the report path must not read as success.
+        return f"msg-{len(emitted)}"
+
+    async def _stamp(_context, message_id, emoji):
+        stamped.append((message_id, emoji))
+        return True
+
+    manager.controller.emit_agent_message = _emit
+    manager.controller.processing_indicator = SimpleNamespace(
+        stamp_orphaned_terminal_reaction=_stamp
+    )
+    return emitted, stamped
+
+
+def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
+    # An IM turn owns no agent_runs row, so the Harness interruption lane cannot
+    # reach it: without this report the thread just stops, which is
+    # indistinguishable from an agent choosing to stay quiet.
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert "interrupted" in emitted[0][1].lower()
+    # The dead process could not clear its own 👀; recovery retires it in place.
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_quick_reply_turn_stamps_the_echo_it_reacted_on(managers) -> None:
+    """A quick-reply turn wears its 👀 on the bot echo, not on a user message.
+
+    The callback is admitted with ``native_message_id=None`` on purpose (it would
+    collide with platform event dedup) and the echo id survives only in the
+    durable admission context. Reading the native id alone yields ``""`` here, so
+    the ⚠️ is skipped and the echo keeps claiming the turn is still running —
+    exactly the stuck indicator the report exists to retire.
+    """
+
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="quick reply killed by restart",
+                admission_context={"processing_indicator_message_id": "echo-9"},
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("echo-9", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
+    # Recovery runs at startup, BEFORE the IM transports finish connecting.
+    # Emitting then would drop the notice into a client that cannot send, so the
+    # report is held and flushed from the transport-ready hook instead.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed before the transport came up",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    ready: set[str] = set()
+    restarted._transport_can_deliver = lambda platform: platform in ready
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert emitted == [] and stamped == []
+
+    ready.add("avibe")
+    reported = asyncio.run(restarted.notify_transport_ready("avibe"))
+
+    assert reported == 1
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    # The queue is drained, not replayed: a second hook fires nothing.
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 0
+    assert len(emitted) == 1
+
+
+def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
+    # "Transport ready" is the transport's claim, not a delivered message. The
+    # dispatcher swallows a send failure and answers None, and the turn is
+    # already terminal, so treating that as done would discard the only account
+    # of the interruption the user will ever get.
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    delivers = False
+    outputs = []
+
+    async def _emit(_context, kind, text, **kwargs):
+        emitted.append((kind, text))
+        outputs.append(kwargs["output"])
+        return "msg-1" if delivers else None
+
+    restarted.controller.emit_agent_message = _emit
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    # It was attempted and it failed: no ⚠️ next to a notice nobody received.
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == []
+
+    # The old notice may arrive after another task starts. Retain the original
+    # failed Turn identity instead of borrowing the current live context.
+    newer_turn, newer_context = asyncio.run(_activate(restarted, text="new work"))
+    restarted._delivery_context = lambda _session_id: newer_context
+    with engine.connect() as conn:
+        before = delivery_store.get_turn(conn, newer_turn)
+    delivers = True
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
+    assert len(emitted) == 2
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    assert outputs[0] == outputs[1]
+    assert outputs[1].provenance(newer_context)["turn_id"] == turn_id
+    assert outputs[1].metadata["failure_id"] == f"turn:{turn_id}"
+    assert outputs[1].metadata["replayed"] is True
+    assert outputs[1].completes_turn is False
+    assert outputs[1].settles_run is False
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, newer_turn) == before
+
+
+def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None:
+    # notify_transport_ready has exactly one caller (_on_im_ready) and the IM
+    # client suppresses repeat ready callbacks until the platform goes unready,
+    # so a connected transport that merely hit one API error would hold the
+    # notice forever. The retry has to come from the manager itself.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin", "trn-origin", "codex")]
+    failures = 1
+
+    async def _emit(_context, kind, text, **_kwargs):
+        nonlocal failures
+        emitted.append((kind, text))
+        if failures:
+            failures -= 1
+            return None
+        return "msg-late"
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_then_settle():
+        assert await restarted.notify_transport_ready("slack") == 0
+        assert restarted._pending_lost_turn_reports["slack"]
+        # Nothing else will call in; the scheduled retry is the only hope.
+        task = restarted._lost_turn_retry_tasks["slack"]
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_flush_then_settle())
+
+    assert len(emitted) == 2
+    assert not restarted._pending_lost_turn_reports.get("slack")
+    assert not restarted._lost_turn_retry_tasks
+
+
+def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
+    # A hard outage must not turn into an unbounded resend loop; the next real
+    # reconnect flushes whatever is still owed.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin", "trn-origin", "codex")]
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return None
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_and_exhaust():
+        await restarted.notify_transport_ready("slack")
+        await asyncio.wait_for(restarted._lost_turn_retry_tasks["slack"], timeout=5)
+
+    asyncio.run(_flush_and_exhaust())
+
+    # One initial attempt plus one per configured delay, then it stops.
+    assert len(emitted) == 3
+    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin", "trn-origin", "codex")]
+
+
+def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
+    # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
+    # Reporting again here would double-notify the same interruption.
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="harness turn"))
+    with engine.begin() as conn:
+        accepted = delivery_store.delivery_for_turn(conn, turn_id)
+        assert accepted is not None
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-lost-turn",
+                definition_id=None,
+                run_type="scheduled",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                delivery_id=str(accepted["id"]),
+                created_at="2026-08-01T00:00:00Z",
+                updated_at="2026-08-01T00:00:00Z",
+                metadata_json="{}",
+            )
+        )
+    assert first.accepted_agent_run_ids_for_turn(turn_id) == ["run-lost-turn"]
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert emitted == []
+    assert stamped == []
+
+
 def test_accepted_opencode_turn_without_restored_identity_stays_live(managers) -> None:
     first, restarted, engine, _engine_b, starts = managers
     turn_id, _context_value = asyncio.run(_activate(first, text="restorable runtime"))
@@ -3479,6 +5282,7 @@ def test_second_unknown_start_retires_delivery_and_unblocks_fifo(managers) -> No
 
     async def succeeds(_session_id, _context_value, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     first._run = succeeds
     first._active_identity = lambda *_args: None
@@ -3598,6 +5402,37 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
 
     assert [text for _turn_id, text in starts] == ["retry safely"]
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
+
+
+def test_persisted_start_does_not_acquire_lifecycle_admission(
+    managers,
+    monkeypatch,
+) -> None:
+    """Scenario: MEMORY-INDEP-001. Dispatch must not wait on Memory."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    acquired = False
+    original_acquire = manager.acquire_lifecycle_admission
+
+    async def track_acquire(raw_session_id):
+        nonlocal acquired
+        acquired = True
+        return await original_acquire(raw_session_id)
+
+    monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not fence dispatch",
+            ),
+            context=_context(),
+        )
+    )
+
+    assert acquired is False
+    assert "ses_fsm" not in manager._session_lifecycle_states
 
 
 @pytest.mark.parametrize(
@@ -3884,6 +5719,275 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
     assert turn is not None
     assert turn["terminal_outcome"] == "not_written"
     assert turn["settled_by"] == "no_terminal_result"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("retry", ["failure_notice", "send_now"])
+async def test_prewrite_retry_budget_survives_restart_and_preserves_original_input(managers, retry, monkeypatch):
+    """MESSAGE-DELIVERY-031: bounded failures retain FIFO input until explicit retry."""
+    from tests.backend_failure_retry_helpers import reserve_failure_retry
+
+    manager, restarted, engine, engine_b, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content="请继续检查附件 🧪",
+            content_json={"attachments": [{"name": "报告.pdf", "url": "fixture://report"}]},
+        ),
+        context=_context(),
+    )
+    original = _row(engine, admitted.delivery_id)["snapshot_json"]
+    queue_events = []
+
+    def observe_committed_queue(event, payload):
+        if event == "queue.updated":
+            assert payload == {"session_id": "ses_fsm"}
+            # A second connection proves the notification follows commit.
+            with engine_b.connect() as conn:
+                row = delivery_store.get_delivery(conn, admitted.delivery_id)
+            queue_events.append(delivery_store.public_delivery_payload(row))
+
+    monkeypatch.setattr("core.inbox_events.bus.publish", observe_committed_queue)
+    for attempt in range(1, 4):
+        assert len(starts) == attempt
+        queue_events.clear()
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+        retained = _row(engine, admitted.delivery_id)
+        assert retained["state"] == "queued"
+        assert retained["snapshot_json"] == original
+        assert delivery_store.requires_explicit_start_retry(retained) is (attempt == 3)
+        public = delivery_store.public_delivery_payload(retained)
+        assert public["requires_explicit_retry"] is (attempt == 3)
+        assert public["retry_reason"] == (SETTLED_BY_NO_TERMINAL_RESULT if attempt == 3 else None)
+        assert queue_events[-1]["state"] == "queued"
+        assert queue_events[-1]["requires_explicit_retry"] is (attempt == 3)
+        before_duplicate_settle = len(queue_events)
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+        assert len(queue_events) == before_duplicate_settle
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    for _ in range(3):
+        assert not await manager.drain_delivery_queue("ses_fsm")
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == 3
+    assert _row(engine, admitted.delivery_id) == retained
+
+    if retry == "failure_notice":
+        with engine.begin() as conn:
+            notice = messages_service.append(
+                conn, session_id="ses_fsm", scope_id=None, platform="avibe",
+                author="agent", source="agent", message_type="notify", text="Startup failed",
+                metadata={
+                    "event": "backend_failure", "backend": "codex",
+                    "turn_id": starts[-1][0], "failure_id": f"turn:{starts[-1][0]}",
+                },
+            )
+            reserved = reserve_failure_retry(conn, notice)
+        assert reserved["id"] == admitted.delivery_id
+        result = await restarted.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm", priority="p3", content="must not replace original",
+                delivery_id=admitted.delivery_id,
+            ),
+            context=_context(),
+        )
+        assert result.state == "claimed"
+    else:
+        result = await restarted.send_now("ses_fsm", expected_delivery_id=admitted.delivery_id)
+        assert result["status"] == "claimed"
+    assert len(starts) == 4
+    assert starts[-1][1] == starts[0][1]
+    assert _row(engine, admitted.delivery_id)["snapshot_json"] == original
+    assert not delivery_store.public_delivery_payload(_row(engine, admitted.delivery_id))["requires_explicit_retry"]
+
+    # Retry replenishes the budget; Send now grants only one extra attempt.
+    for attempt in range(3 if retry == "failure_notice" else 1):
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == (6 if retry == "failure_notice" else 4)
+    assert delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id))
+    successor = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="后续输入"),
+        context=_context(),
+    )
+    assert successor.state == "queued"
+    assert not await restarted.drain_delivery_queue("ses_fsm")
+    assert _row(engine, admitted.delivery_id)["snapshot_json"] == original
+
+
+@pytest.mark.anyio
+async def test_concurrent_start_refusal_does_not_spend_or_reset_prewrite_budget(managers):
+    manager, restarted, engine, _other, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="keep waiting"),
+        context=_context(),
+    )
+    for outcome in (
+        SETTLED_BY_NO_TERMINAL_RESULT,
+        *["refused_concurrent_turn"] * 4,
+        SETTLED_BY_NO_TERMINAL_RESULT,
+        SETTLED_BY_NO_TERMINAL_RESULT,
+    ):
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=outcome)
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == 7
+    retained = _row(engine, admitted.delivery_id)
+    assert delivery_store.consecutive_prewrite_start_failures(retained) == 3
+    assert delivery_store.requires_explicit_start_retry(retained)
+
+
+@pytest.mark.anyio
+async def test_prewrite_batched_retry_budget_is_per_input(managers):
+    manager, restarted, engine, _other, starts = managers
+    older = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="older"),
+        context=_context(),
+    )
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    await restarted.recover_durable_delivery_state("ses_fsm")
+    newer = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="新输入"),
+        context=_context(),
+    )
+    snapshot = _row(engine, newer.delivery_id)["snapshot_json"]
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == 3
+    assert _row(engine, older.delivery_id)["turn_id"] == _row(engine, newer.delivery_id)["turn_id"]
+    manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+    assert delivery_store.requires_explicit_start_retry(_row(engine, older.delivery_id))
+    assert not delivery_store.requires_explicit_start_retry(_row(engine, newer.delivery_id))
+    assert delivery_store.consecutive_prewrite_start_failures(_row(engine, newer.delivery_id)) == 1
+    assert not await restarted.drain_delivery_queue("ses_fsm")
+    with engine.begin() as conn:
+        assert delivery_store.retire_queued(conn, "ses_fsm", older.delivery_id)
+    assert await restarted.drain_delivery_queue("ses_fsm")
+    assert len(starts) == 4
+    assert starts[-1][1] == "新输入"
+    assert _row(engine, newer.delivery_id)["snapshot_json"] == snapshot
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("permanent", [False, True])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "refused_concurrent_turn",
+        SETTLED_BY_NO_TERMINAL_RESULT,
+        "transient_start_failure",
+        "native_start_attempt_absent",
+    ],
+)
+async def test_send_now_no_write_preserves_existing_retry_hold(managers, permanent, outcome):
+    """MESSAGE-DELIVERY-031: changing failure classes never resets a one-shot hold."""
+    from tests.backend_failure_retry_helpers import reserve_failure_retry
+
+    manager, restarted, engine, _other, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content="仍然保留",
+            content_json={"attachments": [{"name": "报告.pdf", "url": "fixture://report"}]},
+        ),
+        context=_context(),
+    )
+    original = _row(engine, admitted.delivery_id)["snapshot_json"]
+    reason = "codex_resume_unavailable" if permanent else SETTLED_BY_NO_TERMINAL_RESULT
+    for _ in range(1 if permanent else 3):
+        manager._settle_durable_prewrite_failure(
+            starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+            failure_evidence={"reason": reason, "requires_explicit_retry": True} if permanent else None,
+        )
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    for _ in range(2):
+        assert delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id))
+        result = await manager.send_now("ses_fsm", expected_delivery_id=admitted.delivery_id)
+        assert result["status"] == "claimed"
+        assert not delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id))
+        if outcome == "native_start_attempt_absent":
+            with engine.connect() as conn:
+                turn = delivery_store.get_turn(conn, starts[-1][0])
+            assert manager.reconcile_start_attempt_not_written(
+                turn["id"], turn["start_attempt_id"], backend="codex",
+            )
+        else:
+            manager._settle_durable_prewrite_failure(starts[-1][0], outcome=outcome)
+        retained = _row(engine, admitted.delivery_id)
+        assert retained["state"] == "queued"
+        assert retained["snapshot_json"] == original
+        held = delivery_store.public_delivery_payload(retained)
+        assert held["requires_explicit_retry"] is True
+        assert held["retry_reason"] == reason
+        count = len(starts)
+        assert not await manager.drain_delivery_queue("ses_fsm")
+        await restarted.recover_durable_delivery_state("ses_fsm")
+        assert len(starts) == count
+        assert _row(engine, admitted.delivery_id) == retained
+
+    # Only the validated failure-notice action releases the retained hold.
+    with engine.begin() as conn:
+        notice = messages_service.append(
+            conn, session_id="ses_fsm", scope_id=None, platform="avibe",
+            author="agent", source="agent", message_type="notify", text="Startup failed",
+            metadata={
+                "event": "backend_failure", "backend": "codex",
+                "turn_id": starts[-1][0], "failure_id": f"turn:{starts[-1][0]}",
+            },
+        )
+        reserved = reserve_failure_retry(conn, notice)
+    assert reserved["id"] == admitted.delivery_id
+    assert not delivery_store.requires_explicit_start_retry(reserved)
+    assert delivery_store.consecutive_prewrite_start_failures(reserved) == 0
+    count = len(starts)
+    assert await restarted.drain_delivery_queue("ses_fsm")
+    for attempt in range(1, 4):
+        assert len(starts) == count + attempt
+        manager._settle_durable_prewrite_failure(starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT)
+        assert delivery_store.requires_explicit_start_retry(_row(engine, admitted.delivery_id)) is (attempt == 3)
+        await restarted.recover_durable_delivery_state("ses_fsm")
+    assert len(starts) == count + 3
+    assert _row(engine, admitted.delivery_id)["snapshot_json"] == original
+    assert all(text == starts[0][1] for _, text in starts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["accepted", "unknown"])
+async def test_send_now_written_or_ambiguous_attempt_does_not_restore_prewrite_hold(managers, outcome):
+    manager, _restarted, engine, _other, starts = managers
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="只执行一次"),
+        context=_context(),
+    )
+    manager._settle_durable_prewrite_failure(
+        admitted.turn_id, outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+        failure_evidence={"reason": "codex_resume_unavailable", "requires_explicit_retry": True},
+    )
+    result = await manager.send_now("ses_fsm", expected_delivery_id=admitted.delivery_id)
+    assert result["status"] == "claimed"
+    turn_id = starts[-1][0]
+    if outcome == "accepted":
+        context = _context()
+        context.platform_specific["turn_token"] = turn_id
+        context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager.on_native_start(
+            context, backend="codex", runtime_key=f"runtime-key-{turn_id}",
+            runtime_turn_id=f"runtime-{turn_id}",
+        )
+        assert not manager._settle_durable_prewrite_failure(
+            turn_id, outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+        )["changed"]
+    else:
+        released = manager._reconcile_durable_runner_release(
+            turn_id, cancelled=False, failed=True, prewrite_refused=False,
+            definitive_prewrite_exit=False, settled_by=None, terminal_is_error=True,
+        )
+        assert released["defer_queue_resume"] is True
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn["start_receipt_outcome"] == outcome
+    row = _row(engine, admitted.delivery_id)
+    assert row["state"] == ("accepted" if outcome == "accepted" else "claimed")
+    assert not delivery_store.requires_explicit_start_retry(row)
+    assert not delivery_store.public_delivery_payload(row)["requires_explicit_retry"]
+    assert not await manager.drain_delivery_queue("ses_fsm")
+    assert len(starts) == 2
 
 
 def test_definite_handler_prewrite_exception_requeues_through_terminal_boundary(
@@ -4306,23 +6410,28 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
                 source="user",
                 text="",
                 content={"attachments": [{"token": token}]},
+                message_kind="original",
             ),
             dispatch_text="",
         )
-    dispatched: list[tuple[str, list[str]]] = []
+    dispatched: list[tuple[str, list[str], str, bool, bool]] = []
 
     async def capture(_session_id, context, text, **_kwargs):
         dispatched.append(
             (
                 text,
                 [str(item.local_path) for item in (context.files or [])],
+                context.message_kind,
+                context.is_original_human_text is True,
+                context.is_original_human_attachment is True,
             )
         )
+        _complete_capture_admission(context)
 
     manager._run = capture
     asyncio.run(manager.recover_durable_delivery_state())
 
-    assert dispatched == [("", [str(attachment)])]
+    assert dispatched == [("", [str(attachment)], "original", True, True)]
     assert _row(engine, delivery_id)["state"] == "claimed"
 
 
@@ -5214,6 +7323,7 @@ def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:
     async def capture_start(_session_id, context, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
         started_contexts.append(dict(context.platform_specific or {}))
+        _complete_capture_admission(context)
 
     manager._run = capture_start
     with engine.begin() as conn:
@@ -5643,12 +7753,201 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "running"
 
+    assert run_id not in manager.snapshot_owned_agent_run_ids({run_id})
+    assert settlement.calls == 1
     assert run_id not in manager.owned_agent_run_ids()
     assert settlement.calls == 2
     with engine.connect() as conn:
         assert conn.execute(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "succeeded"
+
+
+def test_snapshot_retains_pre_turn_delivery_ownership(managers) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    run_id = "run-queued-delivery-owner"
+    delivery_id = delivery_store.new_delivery_id()
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="queued owner",
+            ),
+            dispatch_text="queued owner",
+            now=now,
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                delivery_id=delivery_id,
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    assert manager.snapshot_owned_agent_run_ids({run_id}) == {run_id}
+
+
+@pytest.mark.parametrize("sent_before_recovery", [False, True])
+def test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn(
+    managers,
+    tmp_path: Path,
+    sent_before_recovery: bool,
+) -> None:
+    """Upgrade recovery uses exact Delivery ownership before notices can drain."""
+
+    from core import failure_notices
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    run_ids = [f"run-legacy-restart-{index}" for index in range(3)]
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        assert initial["state"] == "accepted"
+        initial_row = delivery_store.get_delivery(conn, str(initial["id"]))
+        assert initial_row is not None
+        delivery_ids = [str(initial["id"])]
+        for index in range(1, len(run_ids)):
+            delivery_id = delivery_store.new_delivery_id()
+            values = dict(initial_row)
+            values.update(
+                id=delivery_id,
+                priority="p1",
+                dedupe_key=None,
+                turn_role="steer",
+                turn_position=index,
+                submitted_at=now,
+                updated_at=now,
+                version=1,
+            )
+            conn.execute(message_deliveries.insert().values(**values))
+            delivery_ids.append(delivery_id)
+        for run_id, delivery_id in zip(run_ids, delivery_ids, strict=True):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    callback_status="pending",
+                    delivery_id=delivery_id,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=tmp_path / "legacy-restart-requests")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    manager.controller.scheduled_task_service = scheduled
+    try:
+        # Reproduce the old release: each failed Run independently receives a
+        # restart notice although all rows retain the same exact durable Turn.
+        for run_id in run_ids:
+            assert run_store.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error="service restarted",
+                metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+                updated_at=now,
+            ) == "failed"
+        sent_id = run_ids[0]
+        if sent_before_recovery:
+            run_store.update_owed_failure_notice(
+                sent_id,
+                state="sent",
+                ack_evidence="receipt",
+            )
+
+        # Match an upgrade: the old process wrote the terminal Turn and per-Run
+        # notices; the new process owns startup reconciliation.
+        with engine.begin() as conn:
+            terminal = manager._write_terminal_snapshot(
+                conn,
+                turn_id,
+                outcome="failed",
+                settled_by=SETTLED_BY_RESTARTED,
+                evidence_kind="service_shutdown",
+                evidence={"reason": "scheduled_service_shutdown"},
+            )
+        assert terminal["changed"] is True
+
+        asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+        notices = {
+            run_id: run_store.owed_failure_notice(run_id) for run_id in run_ids
+        }
+        assert all(notice is not None for notice in notices.values())
+        assert {
+            notice["turn_id"] for notice in notices.values() if notice is not None
+        } == {turn_id}
+        assert {
+            notice["turn_fallback_run_id"]
+            for notice in notices.values()
+            if notice is not None
+        } == {sent_id}
+        assert {
+            tuple(notice["turn_participant_run_ids"])
+            for notice in notices.values()
+            if notice is not None
+        } == {tuple(run_ids)}
+
+        deliverable = [
+            run_id
+            for run_id, notice in notices.items()
+            if notice is not None
+            and notice["state"] == "pending"
+            and failure_notices.decide(
+                run_id=run_id,
+                definition_id=None,
+                notice=notice,
+                streak_facts=None,
+                earlier_unsettled=None,
+            ).action
+            == failure_notices.ACTION_DELIVER
+        ]
+        assert deliverable == ([] if sent_before_recovery else [sent_id])
+        if sent_before_recovery:
+            assert notices[sent_id]["state"] == "sent"
+            assert all(
+                notice["turn_notification_delivered"] is True
+                for notice in notices.values()
+                if notice is not None
+            )
+    finally:
+        run_store.close()
 
 
 def test_restored_opencode_generation_rebinds_turn_control_and_steer(
@@ -6160,7 +8459,7 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     assert row["text"] == "Agent 主动发起的续接"
     assert transcript["messages"] == []
 
-    sink = manager.get_turn_sink(manager.controller._get_session_key(context))
+    sink = manager.get_turn_sink(resolve_turn_sink_key(manager.controller, context))
     assert sink is not None
     manager.on_terminal_result(
         context,

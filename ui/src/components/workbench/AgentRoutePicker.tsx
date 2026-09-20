@@ -32,7 +32,11 @@ export interface AgentRoutePatch extends AgentRouteValue {
 interface AgentRoutePickerProps {
   value: AgentRouteValue;
   agents: VibeAgentBrief[];
-  onChange: (patch: AgentRoutePatch) => void | Promise<void>;
+  /** Applied by the OWNER, synchronously. An owner whose write is async applies
+   *  the pick to its own state first and persists behind it (see `saving`) —
+   *  the picker holds no selection of its own, so anything it waits for is a
+   *  highlight the user watches lag behind their click. */
+  onChange: (patch: AgentRoutePatch) => void;
   /** Optional backend allow-list for existing sessions whose backend is pinned. */
   allowedBackends?: string[];
   /** Trigger label when no agent is selected — the create flow shows "默认 · …". */
@@ -41,6 +45,10 @@ interface AgentRoutePickerProps {
   defaultRoute?: AgentRouteValue;
   /** True when the displayed route is inherited, not persisted on this session/project yet. */
   isDefaultRoute?: boolean;
+  /** An owner-side write is in flight — shown as a spinner on the trigger. The
+   *  menu stays live: the local state already moved, so further picks queue
+   *  behind it instead of being locked out until the request lands. */
+  saving?: boolean;
   disabled?: boolean;
   align?: 'start' | 'end';
   /** Override the trigger width (chat caps at 62%; the create surfaces go full width). */
@@ -74,6 +82,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   defaultLabel,
   defaultRoute,
   isDefaultRoute,
+  saving,
   disabled,
   align = 'end',
   triggerClassName,
@@ -92,7 +101,6 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   >({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
   const [loadingModels, setLoadingModels] = useState(false);
-  const [patching, setPatching] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
   const [modelQuery, setModelQuery] = useState('');
 
@@ -103,39 +111,38 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     ? agents.find((agent) => agent.name === displayValue.agent_name) || null
     : null;
 
-  // Serialize patches: an agent pick carries its default model/effort, so if it
-  // resolves AFTER a later model/effort pick the later choice would be rolled
-  // back. One patch at a time, items disabled while it's in flight.
+  // Emit the pick straight to the owner: an owner with an async write applies it
+  // locally and queues the request, so ordering is settled where the state lives
+  // (an Agent pick carries that Agent's default model/effort, and an earlier
+  // request landing last would undo a newer model pick). Blocking here would
+  // only delay the highlight — and lock out the very next click.
   const applyPatch = useCallback(
-    async (changes: AgentRoutePatch) => {
-      if (patching) return;
-      setPatching(true);
-      try {
-        const patchPinsDisplayedDefault =
-          routeIsDefault &&
-          Boolean(displayValue.agent_name || displayValue.agent_backend) &&
-          !('agent_name' in changes) &&
-          !('agent_backend' in changes) &&
-          !('agent_id' in changes) &&
-          !('agent_variant' in changes);
-        await onChange(
-          patchPinsDisplayedDefault
-            ? {
-                agent_name: displayValue.agent_name ?? null,
-                agent_id: displayValue.agent_id ?? null,
-                agent_backend: displayedAgent?.backend ?? displayValue.agent_backend ?? null,
-                agent_variant: displayValue.agent_variant ?? displayedAgent?.backend ?? displayValue.agent_backend ?? null,
-                model: displayValue.model ?? null,
-                reasoning_effort: displayValue.reasoning_effort ?? null,
-                ...changes,
-              }
-            : changes,
-        );
-      } finally {
-        setPatching(false);
-      }
+    (changes: AgentRoutePatch) => {
+      // Picking a model/effort on an INHERITED route must persist the whole
+      // displayed route, not just the changed field: otherwise the owner stores
+      // a bare model against no Agent at all.
+      const patchPinsDisplayedDefault =
+        routeIsDefault &&
+        Boolean(displayValue.agent_name || displayValue.agent_backend) &&
+        !('agent_name' in changes) &&
+        !('agent_backend' in changes) &&
+        !('agent_id' in changes) &&
+        !('agent_variant' in changes);
+      onChange(
+        patchPinsDisplayedDefault
+          ? {
+              agent_name: displayValue.agent_name ?? null,
+              agent_id: displayValue.agent_id ?? null,
+              agent_backend: displayedAgent?.backend ?? displayValue.agent_backend ?? null,
+              agent_variant: displayValue.agent_variant ?? displayedAgent?.backend ?? displayValue.agent_backend ?? null,
+              model: displayValue.model ?? null,
+              reasoning_effort: displayValue.reasoning_effort ?? null,
+              ...changes,
+            }
+          : changes,
+      );
     },
-    [displayValue, displayedAgent, patching, onChange, routeIsDefault],
+    [displayValue, displayedAgent, onChange, routeIsDefault],
   );
 
   const backend = displayValue.agent_backend || displayedAgent?.backend || '';
@@ -256,7 +263,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           {backend && (
             <span
               className={clsx(
-                'shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan',
+                'shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan-ink',
                 compactMobile ? 'hidden md:inline-flex' : 'inline-flex',
               )}
             >
@@ -290,14 +297,28 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               </span>
             </>
           )}
-          <ChevronDown className="ml-auto size-3 shrink-0 text-muted" />
+          {/* In-flight feedback replaces the chevron rather than greying the menu:
+              the pick is already applied, so the user is watching a save, not
+              waiting for their click to take effect. */}
+          {saving ? (
+            <Loader2 className="ml-auto size-3 shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
+          ) : (
+            <ChevronDown className="ml-auto size-3 shrink-0 text-muted" />
+          )}
         </Button>
       </PopoverTrigger>
       <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
-        {/* On phones the three columns stack into one scrollable list; sm+ keeps
-            the side-by-side cascading menu. Model gets the widest track (long ids)
-            and Effort the narrowest (short labels). */}
-        <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-[1fr_1.35fr_0.7fr] sm:divide-x sm:divide-y-0">
+        {/* On phones the columns stack into one scrollable list; sm+ keeps the
+            side-by-side cascading menu. Model gets the widest track (long ids)
+            and Effort the narrowest (short labels). When the picked model states
+            no efforts the menu is a two-column cascade: an Effort column with a
+            heading and nothing under it would look like a list that failed. */}
+        <div
+          className={clsx(
+            'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
+            effortOptions.length > 0 ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
+          )}
+        >
           {/* Column 1 — Agent */}
           <RouteColumn title={t('chat.picker.agent')}>
             {/* Default option: clears the route back to inherited defaults after
@@ -305,9 +326,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             {defaultLabel && (
               <RouteItem
                 active={routeIsDefault}
-                disabled={patching}
                 onClick={() =>
-                  void applyPatch({
+                  applyPatch({
                     agent_name: null,
                     agent_id: null,
                     agent_backend: null,
@@ -317,7 +337,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   })
                 }
               >
-                <Sparkles className="size-3.5 shrink-0 text-cyan" />
+                <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
                 <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
               </RouteItem>
             )}
@@ -331,9 +351,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   <RouteItem
                     key={agent.id}
                     active={!routeIsDefault && agent.name === currentAgent}
-                    disabled={patching}
                     onClick={() =>
-                      void applyPatch({
+                      applyPatch({
                         agent_name: agent.name,
                         agent_id: agent.id,
                         agent_backend: agent.backend,
@@ -362,7 +381,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 // that tab explicitly instead of resuming the remembered one.
                 navigate('/agents?tab=definitions');
               }}
-              className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan hover:bg-cyan/[0.08] hover:text-cyan"
+              className="mt-1 h-auto w-full justify-start gap-1.5 rounded px-2 py-1.5 text-[11px] font-medium text-cyan-ink hover:bg-cyan/[0.08] hover:text-cyan-ink"
             >
               <Plus className="size-3.5" />
               {t('chat.picker.newAgent')}
@@ -400,7 +419,6 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 <RouteItem
                   key={model}
                   active={model === currentModel}
-                  disabled={patching}
                   onClick={() => {
                     const patch: AgentRoutePatch = { model };
                     // Switching to a model whose effort set no longer includes
@@ -409,7 +427,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     if (!isEffortSupported(backend, model, currentEffort, backendReasoning)) {
                       patch.reasoning_effort = null;
                     }
-                    void applyPatch(patch);
+                    applyPatch(patch);
                   }}
                 >
                   {/* Full id always visible (wraps instead of truncating); the
@@ -424,20 +442,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
-          <RouteColumn title={t('chat.picker.effort')}>
-            {effortOptions.map((opt) => (
-              <RouteItem
-                key={opt}
-                active={opt === currentEffort}
-                disabled={patching}
-                onClick={() => void applyPatch({ reasoning_effort: opt })}
-              >
-                <span className="flex-1 capitalize">
-                  {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
-                </span>
-              </RouteItem>
-            ))}
-          </RouteColumn>
+          {effortOptions.length > 0 && (
+            <RouteColumn title={t('chat.picker.effort')}>
+              {effortOptions.map((opt) => (
+                <RouteItem
+                  key={opt}
+                  active={opt === currentEffort}
+                  onClick={() => applyPatch({ reasoning_effort: opt })}
+                >
+                  <span className="flex-1 capitalize">
+                    {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
+                  </span>
+                </RouteItem>
+              ))}
+            </RouteColumn>
+          )}
         </div>
       </PopoverContent>
     </Popover>
@@ -456,18 +475,16 @@ const RouteColumn: React.FC<{ title: string; children: React.ReactNode }> = ({ t
 const RouteItem: React.FC<{
   active: boolean;
   onClick: () => void;
-  disabled?: boolean;
   children: React.ReactNode;
-}> = ({ active, onClick, disabled, children }) => (
+}> = ({ active, onClick, children }) => (
   <Button
     type="button"
     variant="ghost"
     size="sm"
     onClick={onClick}
-    disabled={disabled}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-1.5 text-left text-[12px] font-normal',
-      active ? 'bg-cyan/[0.10] text-cyan hover:bg-cyan/[0.10] hover:text-cyan' : 'text-foreground hover:bg-foreground/[0.04]',
+      active ? 'bg-cyan/[0.10] text-cyan-ink hover:bg-cyan/[0.10] hover:text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
     )}
   >
     {children}

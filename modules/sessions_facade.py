@@ -122,6 +122,46 @@ class SessionsFacade:
             expected_route=expected_route,
         )
 
+    def get_agent_session_runtime_marker(
+        self,
+        agent_session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+    ) -> Any:
+        getter = getattr(self.sessions_store, "get_agent_session_runtime_marker", None)
+        if not callable(getter):
+            return None
+        return getter(
+            agent_session_id,
+            backend=backend,
+            native_session_id=native_session_id,
+            key=key,
+        )
+
+    def set_agent_session_runtime_marker(
+        self,
+        agent_session_id: str,
+        *,
+        backend: str,
+        native_session_id: Any,
+        key: str,
+        value: Any,
+    ) -> bool:
+        setter = getattr(self.sessions_store, "set_agent_session_runtime_marker", None)
+        if not callable(setter):
+            return False
+        return bool(
+            setter(
+                agent_session_id,
+                backend=backend,
+                native_session_id=native_session_id,
+                key=key,
+                value=value,
+            )
+        )
+
     def bind_agent_session(
         self,
         user_id: Union[int, str],
@@ -164,6 +204,22 @@ class SessionsFacade:
             vibe_agent_id=vibe_agent_id,
             vibe_agent_name=vibe_agent_name,
             vibe_agent_backend=vibe_agent_backend,
+        )
+
+    def replace_agent_session_native(
+        self,
+        agent_session_id: str,
+        *,
+        expected_native_session_id: Any,
+        replacement_native_session_id: Any,
+    ) -> Optional[str]:
+        replacer = getattr(self.sessions_store, "replace_agent_session_native", None)
+        if not callable(replacer):
+            return None
+        return replacer(
+            agent_session_id,
+            expected_native_session_id=expected_native_session_id,
+            replacement_native_session_id=replacement_native_session_id,
         )
 
     def clear_agent_session_mapping(

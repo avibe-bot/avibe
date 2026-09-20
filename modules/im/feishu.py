@@ -20,7 +20,12 @@ from .base import (
     MessageContext,
 )
 from .formatters import FeishuFormatter
-from .message_facts import is_ordinary_feishu_text
+from .message_facts import (
+    feishu_message_kind,
+    is_original_human_feishu_attachment,
+    is_original_human_feishu_text,
+)
+from .download_target import open_download_target
 from config.v2_config import LarkConfig
 from vibe.i18n import get_supported_languages, t as i18n_t
 from modules.agents.opencode.utils import (
@@ -56,6 +61,16 @@ _EMOJI_MAP: Dict[str, str] = {
     "✍": "Typing",
     "shrug": "Shrug",
     "🤷": "Shrug",
+    # Terminal receipts: ⏹️ stopped, ⚠️ interrupted. Lark has neither glyph, so
+    # each maps to the published key whose meaning matches — ``SILENT`` for a
+    # turn told to go quiet (the stop result is deliberately silent, so the
+    # reaction is its only trace) and ``ERROR`` for a runtime that died mid-turn.
+    "stop_button": "SILENT",
+    "⏹️": "SILENT",
+    "⏹": "SILENT",
+    "warning": "ERROR",
+    "⚠️": "ERROR",
+    "⚠": "ERROR",
     "thumbsup": "THUMBSUP",
     "👍": "THUMBSUP",
     "+1": "THUMBSUP",
@@ -995,26 +1010,57 @@ class FeishuBot(BaseIMClient):
             logger.debug("Failed to add Feishu reaction: %s", exc)
             return False
 
+    def _reaction_is_owned_by_bot(self, item: object) -> bool:
+        """Whether a listed reaction was created by this application."""
+
+        if not isinstance(item, dict):
+            return False
+        operator = item.get("operator")
+        if not isinstance(operator, dict) or operator.get("operator_type") != "app":
+            return False
+        operator_id = str(operator.get("operator_id") or "").strip()
+        bot_ids = {
+            str(value).strip()
+            for value in (self._bot_open_id, getattr(self.config, "app_id", None))
+            if value
+        }
+        return bool(operator_id and operator_id in bot_ids)
+
     async def remove_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
         self._ensure_client()
-        # Feishu remove reaction requires reaction_id; we'd need to list reactions first.
-        # For simplicity, attempt to delete by listing and finding matching reaction.
+        # Feishu deletes by reaction_id, so resolve only this app's matching
+        # reaction. Multiple people may use the same emoji.
         try:
             token = await self._get_tenant_token()
             if not token:
                 return False
             emoji_type = _normalize_emoji(emoji)
-            # List reactions
             url = f"{self.config.api_base_url}/open-apis/im/v1/messages/{message_id}/reactions"
+            params = {
+                "reaction_type": emoji_type,
+                "user_id_type": "open_id",
+                "page_size": 50,
+            }
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers={"Authorization": f"Bearer {token}"}) as resp:
-                    if resp.status != 200:
+                while True:
+                    async with session.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        params=params,
+                    ) as resp:
+                        if resp.status != 200:
+                            return False
+                        data = await resp.json()
+                    if data.get("code") not in (None, 0):
                         return False
-                    data = await resp.json()
-                    items = data.get("data", {}).get("items", [])
+                    page = data.get("data", {})
+                    items = page.get("items", []) if isinstance(page, dict) else []
                     for item in items:
-                        rt = item.get("reaction_type", {})
-                        if rt.get("emoji_type") == emoji_type:
+                        rt = item.get("reaction_type", {}) if isinstance(item, dict) else {}
+                        if (
+                            rt.get("emoji_type") == emoji_type
+                            and self._reaction_is_owned_by_bot(item)
+                        ):
                             reaction_id = item.get("reaction_id")
                             if reaction_id:
                                 del_url = f"{url}/{reaction_id}"
@@ -1023,7 +1069,10 @@ class FeishuBot(BaseIMClient):
                                     headers={"Authorization": f"Bearer {token}"},
                                 ) as del_resp:
                                     return del_resp.status == 200
-            return False
+                    page_token = page.get("page_token") if isinstance(page, dict) else None
+                    if not (isinstance(page, dict) and page.get("has_more") and page_token):
+                        return False
+                    params["page_token"] = page_token
         except Exception as exc:
             logger.debug("Failed to remove Feishu reaction: %s", exc)
             return False
@@ -1347,6 +1396,7 @@ class FeishuBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         message_id = file_info.get("message_id")
         file_key = file_info.get("file_key")
@@ -1364,12 +1414,14 @@ class FeishuBot(BaseIMClient):
                         if resp.status != 200:
                             return FileDownloadResult(False, f"Download failed with HTTP {resp.status}")
                         total = 0
-                        with open(target_path, "wb") as file_obj:
+                        with open_download_target(target_path, target_fd=target_fd) as file_obj:
                             async for chunk in resp.content.iter_chunked(64 * 1024):
                                 total += len(chunk)
                                 if max_bytes is not None and total > max_bytes:
                                     return FileDownloadResult(
-                                        False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                        False,
+                                        f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                        "file_too_large",
                                     )
                                 file_obj.write(chunk)
                         return FileDownloadResult(True)
@@ -1389,13 +1441,15 @@ class FeishuBot(BaseIMClient):
                         logger.error("Failed to download Feishu file: HTTP %s", resp.status)
                         return FileDownloadResult(False, f"Download failed with HTTP {resp.status}")
                     total = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in resp.content.iter_chunked(64 * 1024):
                             total += len(chunk)
                             if max_bytes is not None and total > max_bytes:
                                 logger.warning("Feishu file exceeds max size, aborting")
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)
@@ -1709,8 +1763,20 @@ class FeishuBot(BaseIMClient):
                     "is_dm": is_p2p,
                 },
                 files=file_attachments,
-                is_ordinary_text=is_ordinary_feishu_text(
+                is_original_human_text=is_original_human_feishu_text(
                     event_data,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
+                is_original_human_attachment=is_original_human_feishu_attachment(
+                    event_data,
+                    msg_content,
+                    file_attachments,
+                    shared_text=shared_text,
+                ),
+                message_kind=feishu_message_kind(
+                    event_data,
+                    msg_content,
                     file_attachments,
                     shared_text=shared_text,
                 ),

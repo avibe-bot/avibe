@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import re
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import stat as stat_module
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -13,27 +14,80 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
-from sqlalchemy import insert, or_, select, update
+from sqlalchemy import delete, insert, or_, select, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
-from config.v2_config import V2Config
+from config.v2_config import V2Config, config_file_lock
 from core.avibe_cloud import avibe_cloud_connect_guidance, base_public_url
-from core.show_git import format_agent_contract
+from core.show_router import default_show_router
+from core.show_runtime_failures import (
+    ShowRuntimeFailureClass,
+    ShowRuntimeRecoveryAction,
+)
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.models import agent_sessions, show_pages
-from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.models import agent_sessions, show_page_access_entries, show_pages
+from storage.pagination import PageRequest, PageResult, page_sequence
+from vibe.i18n import t
 
 VISIBILITY_PRIVATE = "private"
+VISIBILITY_LIMITED = "limited"
 VISIBILITY_PUBLIC = "public"
 VISIBILITY_OFFLINE = "offline"
-VISIBILITIES = {VISIBILITY_PRIVATE, VISIBILITY_PUBLIC, VISIBILITY_OFFLINE}
+VISIBILITIES = {
+    VISIBILITY_PRIVATE,
+    VISIBILITY_LIMITED,
+    VISIBILITY_PUBLIC,
+    VISIBILITY_OFFLINE,
+}
+ACCESS_MODE_PRIVATE = "private"
+ACCESS_MODE_LIMITED = "limited"
+ACCESS_MODE_PUBLIC = "public"
+ACCESS_MODES = {ACCESS_MODE_PRIVATE, ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}
+# The Limited audience is one heterogeneous set of read-only grants, OR-ed at
+# admission: an email, an organization group, or "everyone in this
+# organization". They are peers -- no kind outranks or implies another.
+ACCESS_ENTRY_KIND_EMAIL = "email"
+ACCESS_ENTRY_KIND_GROUP = "group"
+ACCESS_ENTRY_KIND_ORGANIZATION = "organization"
+ACCESS_ENTRY_KINDS = (
+    ACCESS_ENTRY_KIND_EMAIL,
+    ACCESS_ENTRY_KIND_GROUP,
+    ACCESS_ENTRY_KIND_ORGANIZATION,
+)
+# Kinds whose meaning is relative to the organization that owns the page. A
+# Personal instance has no organization, so it can hold none of them.
+ORGANIZATION_ACCESS_ENTRY_KINDS = (
+    ACCESS_ENTRY_KIND_GROUP,
+    ACCESS_ENTRY_KIND_ORGANIZATION,
+)
+# Active-member roles the show-identity organization block may assert. A
+# missing or unknown role is fail-closed for group and organization entries.
+SHOW_ACCESS_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+# Bound the group list one assertion may claim, so matching a visitor stays a
+# bounded amount of work. It is independent of SHOW_ACCESS_GROUP_MAX_COUNT (how
+# many groups a page may grant), and the list is never persisted: what outlives
+# the match is the single matched entry.
+SHOW_ACCESS_VISITOR_GROUP_MAX_COUNT = 256
+SHOW_ACCESS_EMAIL_MAX_COUNT = 64
+SHOW_ACCESS_GROUP_MAX_COUNT = 64
+# Per-kind write caps. "This organization may read" is one switch, so it caps at
+# one; the list kinds get the same bound the email audience already had.
+SHOW_ACCESS_ENTRY_MAX_COUNTS = {
+    ACCESS_ENTRY_KIND_EMAIL: SHOW_ACCESS_EMAIL_MAX_COUNT,
+    ACCESS_ENTRY_KIND_GROUP: SHOW_ACCESS_GROUP_MAX_COUNT,
+    ACCESS_ENTRY_KIND_ORGANIZATION: 1,
+}
+SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH = 320
 SHARE_ID_BYTES = 8
 SHOW_EVENT_WRITE_TOKEN_COOKIE = "vibe_show_event_token"
 SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
 SHOW_CLI_EVENT_TOKEN_HEADER = "X-Vibe-Show-Cli-Token"
-SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
+SHOW_PAGE_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
+
+
 # Only the head of index.html is scanned for the icon <link> (it lives in <head>,
 # at the top). Bounds the per-page read so a huge inline page can't stall
 # /api/show-pages or allocate a large string (§7.1f review).
@@ -59,6 +113,16 @@ SHOW_PAGE_ICON_CONTENT_TYPES: dict[str, str] = {
     "gif": "image/gif",
 }
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_EMAIL_ATOM = r"[a-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+_NORMALIZED_EMAIL_PATTERN = re.compile(
+    rf"^{_EMAIL_ATOM}(?:\.{_EMAIL_ATOM})*@{_DNS_LABEL}(?:\.{_DNS_LABEL})*$"
+)
+_ASCII_SURROUNDING_WHITESPACE = " \t\r\n\f\v"
+_ASCII_LOWER_TRANSLATION = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
 # A custom public share suffix lands directly in the ``/p/<share_id>/`` URL, so
 # keep it to URL-safe slug characters: start and end alphanumeric, with dash and
 # underscore allowed in between. 3–64 chars balances "memorable" against trivial
@@ -78,7 +142,8 @@ class ShowPageError(ValueError):
 @dataclass(frozen=True)
 class ShowPage:
     session_id: str
-    visibility: str
+    access_mode: str
+    access_revision: int
     share_id: str | None
     offline_at: str | None
     created_at: str
@@ -86,7 +151,163 @@ class ShowPage:
 
     @property
     def offline(self) -> bool:
-        return self.visibility == VISIBILITY_OFFLINE
+        return self.offline_at is not None
+
+    @property
+    def visibility(self) -> str:
+        """Compatibility projection for callers not yet migrated to ShowAccess."""
+
+        return VISIBILITY_OFFLINE if self.offline else self.access_mode
+
+
+@dataclass(frozen=True)
+class ShowAccessEntry:
+    """One read-only grant in a Limited audience.
+
+    ``organization_id`` is set for ``group`` and ``organization`` entries and is
+    always the organization that owns the page -- never one the caller names.
+    """
+
+    kind: str
+    value: str
+    organization_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ShowAccess:
+    page_id: str
+    access_mode: str
+    share_id: str | None
+    revision: int
+    entries: tuple[ShowAccessEntry, ...] = ()
+    # Kept as a stored field so existing constructors that pass
+    # ``normalized_emails=`` still construct, and so equality for those
+    # callers stays email-shaped. It is always the email slice of ``entries``.
+    normalized_emails: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.normalized_emails and not self.entries:
+            object.__setattr__(
+                self,
+                "entries",
+                tuple(
+                    ShowAccessEntry(kind=ACCESS_ENTRY_KIND_EMAIL, value=email)
+                    for email in self.normalized_emails
+                ),
+            )
+        object.__setattr__(
+            self,
+            "normalized_emails",
+            tuple(
+                entry.value
+                for entry in self.entries
+                if entry.kind == ACCESS_ENTRY_KIND_EMAIL
+            ),
+        )
+
+    def entries_of_kind(self, kind: str) -> tuple[ShowAccessEntry, ...]:
+        return tuple(entry for entry in self.entries if entry.kind == kind)
+
+
+@dataclass(frozen=True)
+class ShowAccessVisitor:
+    """Identity used to match a Limited ``/p`` audience.
+
+    ``organization_id`` / ``organization_member_id`` / ``organization_role`` /
+    ``group_ids`` are the optional show-identity organization block. Absence is
+    fail-closed for group and organization entries and never grants them.
+    """
+
+    normalized_email: str
+    organization_id: str | None = None
+    organization_member_id: str | None = None
+    organization_role: str | None = None
+    group_ids: frozenset[str] = frozenset()
+
+    @property
+    def has_organization_block(self) -> bool:
+        return bool(
+            self.organization_id
+            and self.organization_member_id
+            and self.organization_role in SHOW_ACCESS_ORGANIZATION_ROLES
+        )
+
+
+def limited_show_access_grant(
+    access: ShowAccess,
+    visitor: ShowAccessVisitor,
+) -> ShowAccessEntry | None:
+    """Return the audience entry that admits a Limited visitor, if any.
+
+    The three kinds are peers and OR-ed: an email hit, a group intersection,
+    or active membership of the page's organization. Every hit is read-only;
+    this function does not grant HMR, annotations, or Agent. Group and
+    organization entries fail closed when the visitor has no organization
+    block, including a block for a different organization.
+
+    The matched entry -- not the visitor's membership list -- is what a caller
+    persists to re-check a later request: one entry is bounded by the same
+    per-entry write caps the audience already enforces, while a membership
+    list is bounded only by the identity provider.
+    """
+
+    if access.access_mode != ACCESS_MODE_LIMITED:
+        return None
+    for entry in access.entries:
+        if entry.kind == ACCESS_ENTRY_KIND_EMAIL:
+            if visitor.normalized_email and visitor.normalized_email == entry.value:
+                return entry
+            continue
+        if not visitor.has_organization_block:
+            continue
+        if entry.kind == ACCESS_ENTRY_KIND_GROUP:
+            if (
+                entry.organization_id == visitor.organization_id
+                and entry.value in visitor.group_ids
+            ):
+                return entry
+        elif entry.kind == ACCESS_ENTRY_KIND_ORGANIZATION:
+            if (
+                entry.value == visitor.organization_id
+                and entry.organization_id == visitor.organization_id
+                and visitor.organization_role in SHOW_ACCESS_ORGANIZATION_ROLES
+            ):
+                return entry
+    return None
+
+
+def limited_show_access_admits(access: ShowAccess, visitor: ShowAccessVisitor) -> bool:
+    """Whether any Limited audience entry admits this visitor."""
+
+    return limited_show_access_grant(access, visitor) is not None
+
+
+def limited_show_access_grant_is_current(
+    access: ShowAccess,
+    grant: ShowAccessEntry | None,
+) -> bool:
+    """Whether a previously matched entry is still in the Limited audience.
+
+    Re-checking the grant instead of re-running the match keeps a resumed
+    visitor's proof bounded. It is fail-closed and self-healing: withdrawing
+    the entry ends the grant immediately, and a visitor who still matches some
+    other entry is re-admitted through a fresh identity round trip.
+    """
+
+    if grant is None or access.access_mode != ACCESS_MODE_LIMITED:
+        return False
+    return any(
+        entry.kind == grant.kind
+        and entry.value == grant.value
+        and entry.organization_id == grant.organization_id
+        for entry in access.entries
+    )
+
+
+@dataclass(frozen=True)
+class ShowAccessApplyResult:
+    status: str
+    show_access: ShowAccess
 
 
 def validate_session_id(session_id: str) -> str:
@@ -113,6 +334,237 @@ def validate_share_id(share_id: str) -> str:
             code="invalid_share_id",
         )
     return value
+
+
+def normalize_show_access_email(raw: str) -> str:
+    if not isinstance(raw, str):
+        raise ShowPageError("Invalid Show Page email.", code="invalid_email")
+    value = raw.strip(_ASCII_SURROUNDING_WHITESPACE).translate(
+        _ASCII_LOWER_TRANSLATION
+    )
+    if (
+        len(value) > 320
+        or not value
+        or _NORMALIZED_EMAIL_PATTERN.fullmatch(value) is None
+    ):
+        raise ShowPageError("Invalid Show Page email.", code="invalid_email")
+    return value
+
+
+def normalize_show_access_emails(emails: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(emails, (list, tuple)):
+        raise ShowPageError("Invalid Show Page email list.", code="invalid_email")
+    if len(emails) > SHOW_ACCESS_EMAIL_MAX_COUNT:
+        raise ShowPageError(
+            f"A Show Page may grant access to at most {SHOW_ACCESS_EMAIL_MAX_COUNT} emails.",
+            code="invalid_email",
+        )
+    return tuple(sorted({normalize_show_access_email(email) for email in emails}))
+
+
+def _normalize_opaque_entry_value(raw: Any) -> str:
+    """Normalize a group/organization identifier: an opaque, non-empty string."""
+
+    if not isinstance(raw, str):
+        raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+    value = raw.strip()
+    if not value or len(value) > SHOW_ACCESS_ENTRY_VALUE_MAX_LENGTH:
+        raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+    return value
+
+
+def _entry_fields(raw: Any) -> tuple[Any, Any, Any]:
+    if isinstance(raw, ShowAccessEntry):
+        return raw.kind, raw.value, raw.organization_id
+    if isinstance(raw, Mapping):
+        unexpected = set(raw) - {"kind", "value", "organization_id"}
+        if unexpected:
+            raise ShowPageError(
+                "Invalid Show Page access entry.", code="invalid_access_entry"
+            )
+        return raw.get("kind"), raw.get("value"), raw.get("organization_id")
+    raise ShowPageError("Invalid Show Page access entry.", code="invalid_access_entry")
+
+
+def normalize_show_access_entries(
+    entries: Any,
+    *,
+    page_organization_id: str | None,
+) -> tuple[ShowAccessEntry, ...]:
+    """Validate one complete audience against the page's own organization.
+
+    ``page_organization_id`` is the server's answer to "which organization owns
+    this instance", so a group or organization entry is only ever stored for
+    that organization: a caller-named one that disagrees is rejected rather than
+    quietly rewritten, and a Personal instance (no organization) accepts email
+    entries only.
+    """
+
+    if isinstance(entries, (str, bytes, Mapping)) or not isinstance(entries, Iterable):
+        raise ShowPageError(
+            "Invalid Show Page access entry list.", code="invalid_access_entry"
+        )
+
+    normalized: dict[tuple[str, str], ShowAccessEntry] = {}
+    for raw in entries:
+        kind, value, organization_id = _entry_fields(raw)
+        if kind not in ACCESS_ENTRY_KINDS:
+            raise ShowPageError(
+                "Invalid Show Page access entry.", code="invalid_access_entry"
+            )
+        if kind == ACCESS_ENTRY_KIND_EMAIL:
+            if organization_id is not None:
+                raise ShowPageError(
+                    "An email Show Page access entry has no organization.",
+                    code="invalid_access_entry",
+                )
+
+            normalized_value = normalize_show_access_email(value)
+            entry_organization_id = None
+        else:
+            if page_organization_id is None:
+                raise ShowPageError(
+                    "This instance has no organization, so it has no "
+                    f"{kind} Show Page access entries.",
+                    code="invalid_access_entry",
+                )
+            # An organization entry names the page's organization in both
+            # fields; a group entry only in ``organization_id``. Whatever the
+            # caller supplied has to agree with the server's answer, which is
+            # what gets stored -- a cross-organization group is rejected, not
+            # rewritten into the local one.
+            claimed = [organization_id]
+            if kind == ACCESS_ENTRY_KIND_ORGANIZATION:
+                claimed.append(value)
+            if any(
+                _normalize_opaque_entry_value(claim) != page_organization_id
+                for claim in claimed
+                if claim is not None
+            ):
+                raise ShowPageError(
+                    "A Show Page access entry cannot name another organization.",
+                    code="invalid_access_entry",
+                )
+            entry_organization_id = page_organization_id
+            normalized_value = (
+                page_organization_id
+                if kind == ACCESS_ENTRY_KIND_ORGANIZATION
+                else _normalize_opaque_entry_value(value)
+            )
+        normalized[(kind, normalized_value)] = ShowAccessEntry(
+            kind=kind,
+            value=normalized_value,
+            organization_id=entry_organization_id,
+        )
+
+    for kind, limit in SHOW_ACCESS_ENTRY_MAX_COUNTS.items():
+        if sum(1 for entry_kind, _ in normalized if entry_kind == kind) > limit:
+            raise ShowPageError(
+                f"A Show Page may grant access to at most {limit} {kind} entries.",
+                code="invalid_access_entry",
+            )
+    return tuple(normalized[key] for key in sorted(normalized))
+
+
+def show_access_entry_payload(entry: ShowAccessEntry) -> dict[str, Any]:
+    return {
+        "kind": entry.kind,
+        "value": entry.value,
+        "organization_id": entry.organization_id,
+    }
+
+
+def show_access_payload(show_access: ShowAccess) -> dict[str, Any]:
+    return {
+        "page_id": show_access.page_id,
+        "access_mode": show_access.access_mode,
+        "share_id": show_access.share_id,
+        "revision": show_access.revision,
+        "normalized_emails": list(show_access.normalized_emails),
+        "entries": [show_access_entry_payload(entry) for entry in show_access.entries],
+    }
+
+
+def _is_show_access_entries_payload(entries: Any) -> bool:
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            return False
+        if set(entry) - {"kind", "value", "organization_id"}:
+            return False
+        kind = entry.get("kind")
+        value = entry.get("value")
+        organization_id = entry.get("organization_id")
+        if "kind" in entry and not isinstance(kind, str):
+            return False
+        if "value" in entry and value is not None and not isinstance(value, str):
+            return False
+        if (
+            "organization_id" in entry
+            and organization_id is not None
+            and not isinstance(organization_id, str)
+        ):
+            return False
+    return True
+
+
+def parse_show_access_apply_request(payload: Any) -> dict[str, Any] | None:
+    """Return store kwargs for a well-formed apply body, else None.
+
+    Exactly one of ``target_emails`` or ``target_entries`` may be present.
+    The email-only form remains the complete-replacement shorthand; the
+    entry form is how group and organization grants are written.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    keys = set(payload)
+    has_emails = "target_emails" in keys
+    has_entries = "target_entries" in keys
+    if has_emails == has_entries:
+        return None
+    expected = {
+        "page_id",
+        "expected_revision",
+        "target_access_mode",
+        "target_share_id",
+    }
+    expected.add("target_emails" if has_emails else "target_entries")
+    if keys != expected:
+        return None
+    page_id = payload.get("page_id")
+    expected_revision = payload.get("expected_revision")
+    target_access_mode = payload.get("target_access_mode")
+    target_share_id = payload.get("target_share_id")
+    if (
+        not isinstance(page_id, str)
+        or isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 0
+        or not isinstance(target_access_mode, str)
+        or not (target_share_id is None or isinstance(target_share_id, str))
+    ):
+        return None
+    parsed: dict[str, Any] = {
+        "page_id": page_id,
+        "expected_revision": expected_revision,
+        "target_access_mode": target_access_mode,
+        "target_share_id": target_share_id,
+    }
+    if has_emails:
+        emails = payload.get("target_emails")
+        if not isinstance(emails, list) or any(
+            not isinstance(email, str) for email in emails
+        ):
+            return None
+        parsed["target_emails"] = emails
+        return parsed
+    entries = payload.get("target_entries")
+    if not _is_show_access_entries_payload(entries):
+        return None
+    parsed["target_entries"] = entries
+    return parsed
 
 
 def show_page_dir(session_id: str) -> Path:
@@ -177,7 +629,10 @@ def _utc_now_iso() -> str:
 
 
 def _new_share_id() -> str:
-    return secrets.token_urlsafe(SHARE_ID_BYTES).rstrip("_-")
+    while True:
+        candidate = secrets.token_urlsafe(SHARE_ID_BYTES).strip("_-")
+        if _SHARE_ID_PATTERN.fullmatch(candidate):
+            return candidate
 
 
 def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -> str:
@@ -191,6 +646,62 @@ def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -
     if prefix:
         return f"{escaped}%"
     return escaped
+
+
+def _resolve_resource_access_context(user_context: Any = None):
+    """Resolve the request context used by Show Page ACL checks."""
+
+    from storage import resource_access_service
+
+    return resource_access_service.resolve_resource_access_context(user_context)
+
+
+def require_show_page_management(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require Instance Editor authority to change the page."""
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not _instance_editor_or_owner(context):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
+def require_show_page_sharing_control(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require Instance Editor authority to widen anonymous sharing."""
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not _instance_editor_or_owner(context):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
+def require_show_page_access_management(
+    connection: Connection,
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Require Instance Editor authority to manage the audience or narrow sharing."""
+
+    session_id = validate_session_id(session_id)
+    context = _resolve_resource_access_context(user_context)
+    if not _instance_editor_or_owner(context):
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+
+def _instance_editor_or_owner(context: Any) -> bool:
+    """The /show Workbench management capability is the Instance Editor role."""
+
+    return bool(context is not None and context.has_role("editor"))
 
 
 def private_url(session_id: str, *, config: V2Config | None = None) -> str | None:
@@ -210,15 +721,18 @@ def public_url(share_id: str | None, *, config: V2Config | None = None) -> str |
 
 
 class ShowPageStore:
-    def __init__(self, db_path: Path | None = None):
+    def __init__(self, db_path: Path | None = None, *, read_only: bool = False):
         self.db_path = db_path or paths.get_sqlite_state_path()
-        if db_path is None:
-            ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-        else:
-            from storage.migrations import run_migrations
+        if not read_only:
+            if db_path is None:
+                ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+            else:
+                from storage.migrations import run_migrations
 
-            run_migrations(self.db_path)
-        self.engine = create_sqlite_engine(self.db_path)
+                run_migrations(self.db_path)
+        self.engine = (
+            create_sqlite_engine(self.db_path, read_only=True) if read_only else create_sqlite_engine(self.db_path)
+        )
 
     def close(self) -> None:
         self.engine.dispose()
@@ -228,6 +742,269 @@ class ShowPageStore:
         with self.engine.connect() as conn:
             row = conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1)).mappings().first()
             return _page_from_row(row) if row else None
+
+    def get_access(self, page_id: str) -> ShowAccess | None:
+        page_id = validate_session_id(page_id)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == page_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            return _show_access_from_row(conn, row) if row else None
+
+    def require_access_settings(
+        self,
+        page_id: str,
+        *,
+        user_context: Any = None,
+    ) -> ShowAccess:
+        page_id = validate_session_id(page_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == page_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            self._require_sharing_control(conn, page_id, context)
+            return _show_access_from_row(conn, row)
+
+    def apply_access(
+        self,
+        page_id: str,
+        *,
+        expected_revision: int,
+        target_access_mode: str,
+        target_share_id: str | None,
+        target_emails: list[str] | tuple[str, ...] | None = None,
+        target_entries: Any = None,
+        user_context: Any = None,
+    ) -> ShowAccessApplyResult:
+        """Replace the whole ShowAccess aggregate under a revision check.
+
+        The audience is a complete entry set, not a delta: whatever is not in
+        ``target_entries`` is revoked. ``target_emails`` is the email-only
+        shorthand for the same replacement, so a caller that passes it revokes
+        every group and organization entry too. Exactly one of the two may be
+        given.
+        """
+
+        page_id = validate_session_id(page_id)
+        context = _resolve_resource_access_context(user_context)
+        current = self.require_access_settings(page_id, user_context=context)
+
+        try:
+            if (
+                isinstance(expected_revision, bool)
+                or not isinstance(expected_revision, int)
+                or expected_revision < 0
+            ):
+                raise ShowPageError("Invalid ShowAccess revision.", code="invalid_revision")
+            if target_access_mode not in ACCESS_MODES:
+                raise ShowPageError("Invalid ShowAccess mode.", code="invalid_access_mode")
+            if target_emails is not None and target_entries is not None:
+                raise ShowPageError(
+                    "Pass either a ShowAccess email list or an entry list, not both.",
+                    code="invalid_show_access",
+                )
+            normalized_share_id = (
+                validate_share_id(target_share_id)
+                if target_share_id is not None
+                else None
+            )
+            if target_access_mode == ACCESS_MODE_PRIVATE and normalized_share_id is None:
+                normalized_share_id = current.share_id
+        except (ShowPageError, TypeError):
+            return ShowAccessApplyResult(status="invalid", show_access=current)
+
+        status = "applied"
+        now = _utc_now_iso()
+        try:
+            # Organization-scoped entries are stamped with the instance's
+            # current organization. Hold the pairing lock that ``ensure`` /
+            # ``get_for_use`` already use across that read AND the database
+            # write, so a re-pair cannot land between them and persist the
+            # former organization's ID.
+            with config_file_lock():
+                try:
+                    normalized_entries = self._normalize_target_entries(
+                        target_emails=target_emails,
+                        target_entries=target_entries,
+                    )
+                    if target_access_mode == ACCESS_MODE_LIMITED:
+                        if normalized_share_id is None or not normalized_entries:
+                            raise ShowPageError(
+                                "Limited ShowAccess requires a share ID and at least one "
+                                "access entry.",
+                                code="invalid_show_access",
+                            )
+                    elif normalized_entries:
+                        raise ShowPageError(
+                            "Only Limited ShowAccess may contain access entries.",
+                            code="invalid_show_access",
+                        )
+                    if target_access_mode == ACCESS_MODE_PUBLIC and normalized_share_id is None:
+                        raise ShowPageError(
+                            "Public ShowAccess requires a share ID.",
+                            code="invalid_show_access",
+                        )
+                except (ShowPageError, TypeError):
+                    return ShowAccessApplyResult(status="invalid", show_access=current)
+                with self.engine.begin() as conn:
+                    row = (
+                        conn.execute(
+                            select(show_pages)
+                            .where(show_pages.c.session_id == page_id)
+                            .limit(1)
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if row is None:
+                        raise ShowPageError(
+                            "This session has no Show Page.",
+                            code="show_page_not_found",
+                        )
+                    self._require_sharing_control(conn, page_id, context)
+                    current = _show_access_from_row(conn, row)
+                    if current.revision != expected_revision:
+                        return ShowAccessApplyResult(
+                            status="conflict",
+                            show_access=current,
+                        )
+                    canonical_target = (
+                        target_access_mode,
+                        normalized_share_id,
+                        normalized_entries,
+                    )
+                    canonical_current = (
+                        current.access_mode,
+                        current.share_id,
+                        current.entries,
+                    )
+                    if canonical_target == canonical_current:
+                        return ShowAccessApplyResult(
+                            status="no_change",
+                            show_access=current,
+                        )
+                    archived = conn.execute(
+                        select(agent_sessions.c.status)
+                        .where(agent_sessions.c.id == page_id)
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if archived == "archived":
+                        return ShowAccessApplyResult(
+                            status="invalid",
+                            show_access=current,
+                        )
+                    result = conn.execute(
+                        update(show_pages)
+                        .where(
+                            show_pages.c.session_id == page_id,
+                            show_pages.c.access_revision == expected_revision,
+                        )
+                        .values(
+                            access_mode=target_access_mode,
+                            share_id=normalized_share_id,
+                            access_revision=expected_revision + 1,
+                            updated_at=now,
+                        )
+                    )
+                    if not result.rowcount:
+                        status = "conflict"
+                    else:
+                        conn.execute(
+                            delete(show_page_access_entries).where(
+                                show_page_access_entries.c.page_id == page_id
+                            )
+                        )
+                        if normalized_entries:
+                            conn.execute(
+                                insert(show_page_access_entries),
+                                [
+                                    {
+                                        "page_id": page_id,
+                                        "kind": entry.kind,
+                                        "value": entry.value,
+                                        "organization_id": entry.organization_id,
+                                        "created_at": now,
+                                    }
+                                    for entry in normalized_entries
+                                ],
+                            )
+        except IntegrityError:
+            status = "share_id_taken"
+
+        latest = self.get_access(page_id)
+        if latest is None:
+            raise ShowPageError(
+                "This session has no Show Page.",
+                code="show_page_not_found",
+            )
+        return ShowAccessApplyResult(status=status, show_access=latest)
+
+    def _normalize_target_entries(
+        self,
+        *,
+        target_emails: list[str] | tuple[str, ...] | None,
+        target_entries: Any,
+    ) -> tuple[ShowAccessEntry, ...]:
+        if target_entries is None:
+            return tuple(
+                ShowAccessEntry(kind=ACCESS_ENTRY_KIND_EMAIL, value=email)
+                for email in normalize_show_access_emails(target_emails or ())
+            )
+        if isinstance(target_entries, (str, bytes, Mapping)) or not isinstance(
+            target_entries, Iterable
+        ):
+            raise ShowPageError(
+                "Invalid Show Page access entry list.", code="invalid_access_entry"
+            )
+        materialized = list(target_entries)
+        # Resolving the instance organization reads configuration, so only an
+        # audience that actually contains an organization-scoped entry pays for
+        # the answer; an email-only audience never needs one.
+        needs_organization = any(
+            _entry_fields(raw)[0] in ORGANIZATION_ACCESS_ENTRY_KINDS
+            for raw in materialized
+        )
+        return normalize_show_access_entries(
+            materialized,
+            page_organization_id=(
+                self._page_organization_id() if needs_organization else None
+            ),
+        )
+
+    @classmethod
+    def _page_organization_id(cls) -> str | None:
+        """The organization that owns this instance, or None when Personal.
+
+        Group and organization entries are stored against this value, never
+        against one a caller supplies, so a Personal instance simply has no
+        organization to grant and rejects both kinds.
+        """
+
+        ownership = cls._resolve_instance_ownership()
+        if not isinstance(ownership, Mapping) or ownership.get("mode") != "organization":
+            return None
+        organization_id = ownership.get("organization_id")
+        if not isinstance(organization_id, str) or not organization_id.strip():
+            return None
+        return organization_id.strip()
 
     def get_by_share_id(self, share_id: str) -> ShowPage | None:
         share_id = (share_id or "").strip()
@@ -239,8 +1016,44 @@ class ShowPageStore:
             )
             return _page_from_row(row) if row else None
 
-    def list(self, *, visibility: str | None = None) -> list[ShowPage]:
-        result = self.list_page(visibility=visibility, page_request=None)
+    def require_access(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Return a Show Page only to an Instance Viewer (owner/editor/viewer).
+
+        ``/show`` admission is the Instance role alone, independent of the
+        sharing list and of Resource ACL (§3.2): any Viewer enters the Workbench.
+        """
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.begin() as conn:
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+            self._require_resource_access(context)
+            return _page_from_row(row)
+
+    def require_management(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Return a Show Page only when the caller may change its resource."""
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        with self.engine.begin() as conn:
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+            self._require_resource_management(conn, session_id, context)
+            return _page_from_row(row)
+
+    def list(self, *, visibility: str | None = None, user_context: Any = None) -> list[ShowPage]:
+        result = self.list_page(visibility=visibility, page_request=None, user_context=user_context)
         return result.items
 
     def list_page(
@@ -252,12 +1065,19 @@ class ShowPageStore:
         updated_before: str | None = None,
         query: str | None = None,
         page_request: PageRequest | None,
+        user_context: Any = None,
     ) -> PageResult[ShowPage]:
         if visibility is not None and visibility not in VISIBILITIES:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
         statement = select(show_pages)
         if visibility is not None:
-            statement = statement.where(show_pages.c.visibility == visibility)
+            if visibility == VISIBILITY_OFFLINE:
+                statement = statement.where(show_pages.c.offline_at.is_not(None))
+            else:
+                statement = statement.where(
+                    show_pages.c.offline_at.is_(None),
+                    show_pages.c.access_mode == visibility,
+                )
         if session_id:
             statement = statement.where(show_pages.c.session_id.like(_like_pattern(session_id, prefix=True), escape=_LIKE_ESCAPE))
         if updated_after:
@@ -266,48 +1086,216 @@ class ShowPageStore:
             statement = statement.where(show_pages.c.updated_at <= updated_before)
         if query:
             pattern = _like_pattern(query, contains=True)
-            statement = statement.where(
-                or_(
-                    show_pages.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
-                    show_pages.c.share_id.like(pattern, escape=_LIKE_ESCAPE),
-                    show_pages.c.visibility.like(pattern, escape=_LIKE_ESCAPE),
-                )
-            )
+            clauses = [
+                show_pages.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
+                show_pages.c.share_id.like(pattern, escape=_LIKE_ESCAPE),
+                show_pages.c.access_mode.like(pattern, escape=_LIKE_ESCAPE),
+            ]
+            if query.lower() in VISIBILITY_OFFLINE:
+                clauses.append(show_pages.c.offline_at.is_not(None))
+            statement = statement.where(or_(*clauses))
         statement = statement.order_by(show_pages.c.updated_at.desc(), show_pages.c.session_id.asc())
-        if page_request is not None:
-            statement = statement.offset(page_request.offset).limit(page_request.limit + 1)
-        with self.engine.connect() as conn:
+        with self.engine.begin() as conn:
             rows = conn.execute(statement).mappings().all()
-        return page_result_from_limit_plus_one((_page_from_row(row) for row in rows), page_request)
+        return page_sequence([_page_from_row(row) for row in rows], page_request)
 
-    def ensure(self, session_id: str) -> ShowPage:
+    @staticmethod
+    def _require_resource_access(user_context: Any) -> None:
+        if not (user_context is not None and user_context.has_role("viewer")):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _require_resource_management(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_management(connection, session_id, user_context=user_context)
+
+    @staticmethod
+    def _require_sharing_control(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_sharing_control(connection, session_id, user_context=user_context)
+
+    @staticmethod
+    def _require_access_management(connection, session_id: str, user_context: Any) -> None:
+        require_show_page_access_management(connection, session_id, user_context=user_context)
+
+    @classmethod
+    def _require_visibility_transition_control(
+        cls,
+        connection,
+        session_id: str,
+        user_context: Any,
+        *,
+        current_visibility: str,
+        target_visibility: str,
+    ) -> None:
+        if target_visibility == VISIBILITY_PUBLIC or (
+            current_visibility == VISIBILITY_OFFLINE
+            and target_visibility != VISIBILITY_OFFLINE
+        ):
+            cls._require_sharing_control(connection, session_id, user_context)
+            return
+        cls._require_access_management(connection, session_id, user_context)
+
+    @staticmethod
+    def _require_create_access(user_context: Any) -> None:
+        if user_context.has_role("editor"):
+            return
+        raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _require_project_edit_access(connection: Connection, session_id: str, user_context: Any) -> None:
+        """Require Editor access to the Project that owns this session."""
+
+        if user_context.is_instance_owner:
+            return
+        from storage import project_access_service
+
+        if not project_access_service.role_allows(
+            project_access_service.get_effective_session_role(connection, user_context, session_id),
+            "editor",
+        ):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+
+    @staticmethod
+    def _resolve_instance_ownership() -> dict[str, Any]:
+        from vibe import permissions
+
+        return permissions.resolve_current_instance_ownership()
+
+    @staticmethod
+    def _reconcile_resource_policy(ownership: dict[str, Any]) -> dict[str, Any]:
+        """Map the instance-ownership fence to a frontend ``ownership_status``.
+
+        §3.2 removed show_page from the Resource ACL, so there is no policy row
+        to reconcile: the status is derived from the ownership fence alone and
+        ``policy`` is always ``None``. The ``conflict`` status is obsolete with
+        the Resource ACL gone — there is no ``policy_organization_id`` to diverge
+        from the instance organization.
+        """
+
+        status = {
+            "unmanaged": "unmanaged",
+            "personal": "unchanged",
+            "organization": "unchanged",
+            "organization_pending": "pending",
+            "configuration_unavailable": "configuration_unavailable",
+        }.get(ownership.get("mode"), "unmanaged")
+        return {"status": status, "ownership": ownership, "policy": None}
+
+    @classmethod
+    def _existing_page_for_use(
+        cls,
+        connection,
+        session_id: str,
+        user_context: Any,
+        ownership: dict[str, Any],
+    ) -> ShowPage | None:
+        """Reconcile and authorize an ALREADY-EXISTING page; None when there is none.
+
+        The single owner of "may this caller use this existing page". ``ensure`` /
+        ``ensure_active`` take this branch before they consider creating anything,
+        and ``get_for_use`` is only this branch — so a read can never drift from
+        what the create path would have enforced for the same page.
+        """
+        existing = (
+            connection.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+            .mappings()
+            .first()
+        )
+        if existing is None:
+            return None
+        cls._require_project_edit_access(connection, session_id, user_context)
+        cls._require_resource_access(user_context)
+        return _page_from_row(existing)
+
+    def get_for_use(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        """Read a page the caller may use, WITHOUT creating one.
+
+        The read-only half of ``ensure_active``: identical reconcile-and-authorize
+        enforcement for a page that exists, and ``show_page_not_found`` where
+        ``ensure_active`` would have created one. Reading no longer requires taking
+        the creation path, which is what keeps the one-shot ``created`` edge — and
+        the "visualize this session" prompt it triggers — owned by the single
+        caller that honors it.
+        """
         session_id = validate_session_id(session_id)
-        existing = self.get(session_id)
-        if existing is not None:
-            return existing
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                page = self._existing_page_for_use(conn, session_id, context, ownership)
+                if page is None:
+                    # Absence is only reported to a caller allowed to work on the
+                    # project, exactly as ``ensure`` checks before it creates. The
+                    # route policy screens the Instance role alone, so skipping this
+                    # would let an Editor without project access tell a session that
+                    # HAS a page (forbidden) from one that does not (not found) —
+                    # turning a read into a page-existence oracle over arbitrary
+                    # session ids.
+                    self._require_project_edit_access(conn, session_id, context)
+                    raise ShowPageError(
+                        "This session has no Show Page.",
+                        code="show_page_not_found",
+                    )
+                return page
+
+    def reconcile_resource_policy(
+        self,
+        session_id: str,
+        *,
+        user_context: Any = None,
+    ) -> dict[str, Any]:
+        """Resolve ownership outside SQLite, then reconcile one existing page."""
+
+        session_id = validate_session_id(session_id)
+        ownership = self._resolve_instance_ownership()
+        with config_file_lock():
+            with self.engine.begin() as connection:
+                exists = connection.execute(
+                    select(show_pages.c.session_id)
+                    .where(show_pages.c.session_id == session_id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if exists is None:
+                    raise ShowPageError(
+                        "This session has no Show Page.",
+                        code="show_page_not_found",
+                    )
+                return self._reconcile_resource_policy(ownership)
+
+    def ensure(self, session_id: str, *, user_context: Any = None) -> ShowPage:
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
         page = ShowPage(
             session_id=session_id,
-            visibility=VISIBILITY_PRIVATE,
-            share_id=None,
+            access_mode=ACCESS_MODE_PRIVATE,
+            access_revision=0,
+            share_id=self._unique_share_id(),
             offline_at=None,
             created_at=now,
             updated_at=now,
         )
-        with self.engine.begin() as conn:
-            conn.execute(
-                insert(show_pages).values(
-                    session_id=page.session_id,
-                    visibility=page.visibility,
-                    share_id=page.share_id,
-                    offline_at=page.offline_at,
-                    created_at=page.created_at,
-                    updated_at=page.updated_at,
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                existing = self._existing_page_for_use(conn, session_id, context, ownership)
+                if existing is not None:
+                    return existing
+                self._require_project_edit_access(conn, session_id, context)
+                self._require_create_access(context)
+                conn.execute(
+                    insert(show_pages).values(
+                        session_id=page.session_id,
+                        access_mode=page.access_mode,
+                        access_revision=page.access_revision,
+                        share_id=page.share_id,
+                        offline_at=page.offline_at,
+                        created_at=page.created_at,
+                        updated_at=page.updated_at,
+                    )
                 )
-            )
         return page
 
-    def ensure_active(self, session_id: str) -> tuple[ShowPage, bool]:
+    def ensure_active(self, session_id: str, *, user_context: Any = None) -> tuple[ShowPage, bool]:
         """Atomically ensure a page for a NON-archived session; return (page, created).
 
         The existing-row check, the archived check and the insert all run in ONE
@@ -318,49 +1306,65 @@ class ShowPageStore:
         is returned untouched (archive already took it offline).
         """
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        ownership = self._resolve_instance_ownership()
         now = _utc_now_iso()
-        with self.engine.begin() as conn:
-            existing = (
-                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                .mappings()
-                .first()
-            )
-            if existing is not None:
-                return _page_from_row(existing), False
-            status = conn.execute(
-                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-            ).scalar_one_or_none()
-            if status is None:
-                # Unknown session — don't create an orphan page row not tied to any
-                # session lifecycle/archive cleanup (other session-scoped APIs also
-                # treat a missing session as absent).
-                raise ShowPageError(
-                    "Cannot create a Show Page for an unknown session.",
-                    code="session_not_found",
-                )
-            if status == "archived":
-                raise ShowPageError(
-                    "Cannot create a Show Page for an archived session.",
-                    code="session_archived",
-                )
-            result = conn.execute(
-                insert(show_pages)
-                .prefix_with("OR IGNORE")
-                .values(
-                    session_id=session_id,
-                    visibility=VISIBILITY_PRIVATE,
-                    share_id=None,
-                    offline_at=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            created = bool(result.rowcount and result.rowcount > 0)
-            row = (
-                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                .mappings()
-                .first()
-            )
+        with config_file_lock():
+            with self.engine.begin() as conn:
+                existing = self._existing_page_for_use(conn, session_id, context, ownership)
+                if existing is not None:
+                    return existing, False
+                self._require_project_edit_access(conn, session_id, context)
+                self._require_create_access(context)
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+                if status is None:
+                    # Unknown session — don't create an orphan page row not tied to any
+                    # session lifecycle/archive cleanup (other session-scoped APIs also
+                    # treat a missing session as absent).
+                    raise ShowPageError(
+                        "Cannot create a Show Page for an unknown session.",
+                        code="session_not_found",
+                    )
+                if status == "archived":
+                    raise ShowPageError(
+                        "Cannot create a Show Page for an archived session.",
+                        code="session_archived",
+                    )
+                created = False
+                row = None
+                for _ in range(20):
+                    result = conn.execute(
+                        insert(show_pages)
+                        .prefix_with("OR IGNORE")
+                        .values(
+                            session_id=session_id,
+                            access_mode=ACCESS_MODE_PRIVATE,
+                            access_revision=0,
+                            share_id=_new_share_id(),
+                            offline_at=None,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    created = bool(result.rowcount and result.rowcount > 0)
+                    row = (
+                        conn.execute(
+                            select(show_pages)
+                            .where(show_pages.c.session_id == session_id)
+                            .limit(1)
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if row is not None:
+                        break
+                if row is None:
+                    raise ShowPageError(
+                        "Could not allocate a unique share ID.",
+                        code="share_id_allocation_failed",
+                    )
         return _page_from_row(row), created
 
     def is_archived(self, session_id: str) -> bool:
@@ -373,146 +1377,232 @@ class ShowPageStore:
             ).scalar_one_or_none()
         return status == "archived"
 
-    def update_visibility(self, session_id: str, visibility: str) -> ShowPage:
+    def set_offline(
+        self,
+        session_id: str,
+        offline: bool,
+        *,
+        user_context: Any = None,
+    ) -> ShowPage:
+        """Change operational availability without changing ShowAccess."""
+
         session_id = validate_session_id(session_id)
-        if visibility not in VISIBILITIES:
+        context = _resolve_resource_access_context(user_context)
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(show_pages)
+                    .where(show_pages.c.session_id == session_id)
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            current_visibility = (
+                VISIBILITY_OFFLINE
+                if row["offline_at"] is not None
+                else str(row["access_mode"])
+            )
+            target_visibility = (
+                VISIBILITY_OFFLINE if offline else str(row["access_mode"])
+            )
+            self._require_visibility_transition_control(
+                conn,
+                session_id,
+                context,
+                current_visibility=current_visibility,
+                target_visibility=target_visibility,
+            )
+            if not offline:
+                status = conn.execute(
+                    select(agent_sessions.c.status)
+                    .where(agent_sessions.c.id == session_id)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if status == "archived":
+                    raise ShowPageError(
+                        "Cannot bring back the Show Page of an archived session.",
+                        code="session_archived",
+                    )
+            target_offline_at = (row["offline_at"] or now) if offline else None
+            if target_offline_at != row["offline_at"]:
+                conn.execute(
+                    update(show_pages)
+                    .where(show_pages.c.session_id == session_id)
+                    .values(offline_at=target_offline_at, updated_at=now)
+                )
+        updated = self.get(session_id)
+        assert updated is not None
+        return updated
+
+    def update_visibility(self, session_id: str, visibility: str, *, user_context: Any = None) -> ShowPage:
+        """Compatibility adapter over orthogonal availability and ShowAccess.
+
+        New audience callers use :meth:`apply_access`. The legacy CLI still uses
+        this adapter, but Web callers have no second audience write path.
+        """
+
+        session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
+        if visibility not in {
+            VISIBILITY_PRIVATE,
+            VISIBILITY_PUBLIC,
+            VISIBILITY_OFFLINE,
+        }:
             raise ShowPageError(f"Unsupported visibility: {visibility}", code="invalid_visibility")
-        # Reject republish BEFORE ``ensure`` so it doesn't first materialize a
-        # default (private) page row for an archived session — that would leave
-        # ``/show/<id>/`` enabled for a terminal session. The in-txn check below
-        # is the atomic authority for the concurrent-archive race.
+        existing = self.get(session_id)
+        if existing is not None:
+            with self.engine.connect() as conn:
+                self._require_visibility_transition_control(
+                    conn,
+                    session_id,
+                    context,
+                    current_visibility=existing.visibility,
+                    target_visibility=visibility,
+                )
+            page = existing
+        else:
+            page = None
         if visibility != VISIBILITY_OFFLINE and self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot republish the Show Page of an archived session.",
                 code="session_archived",
             )
-        page = self.ensure(session_id)
-        now = _utc_now_iso()
-        values: dict[str, Any] = {
-            "visibility": visibility,
-            "updated_at": now,
-            "offline_at": now if visibility == VISIBILITY_OFFLINE else None,
-        }
-        if visibility == VISIBILITY_PUBLIC and not page.share_id:
-            values["share_id"] = self._unique_share_id()
-        with self.engine.begin() as conn:
-            # Archive is terminal and takes the page offline on purpose — never let
-            # an archived session's page be brought back online / re-shared. Checked
-            # in the SAME txn as the write so a concurrent archive can't slip in
-            # between the check and the update (TOCTOU); raising here rolls back.
-            if visibility != VISIBILITY_OFFLINE:
-                status = conn.execute(
-                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-                ).scalar_one_or_none()
-                if status == "archived":
-                    raise ShowPageError(
-                        "Cannot republish the Show Page of an archived session.",
-                        code="session_archived",
-                    )
-            conn.execute(update(show_pages).where(show_pages.c.session_id == session_id).values(**values))
-        updated = self.get(session_id)
-        assert updated is not None
-        return updated
+        if page is None:
+            page = self.ensure(session_id, user_context=context)
 
-    def rotate_share(self, session_id: str) -> tuple[ShowPage, str | None]:
+        if visibility != VISIBILITY_OFFLINE:
+            access = self.require_access_settings(session_id, user_context=context)
+            result = self.apply_access(
+                session_id,
+                expected_revision=access.revision,
+                target_access_mode=visibility,
+                target_share_id=access.share_id,
+                target_emails=[],
+                user_context=context,
+            )
+            if result.status == "conflict":
+                raise ShowPageError(
+                    "ShowAccess changed concurrently.",
+                    code="show_access_conflict",
+                )
+            if result.status not in {"applied", "no_change"}:
+                raise ShowPageError(
+                    "ShowAccess could not be updated.",
+                    code=result.status,
+                )
+            return self.set_offline(session_id, False, user_context=context)
+
+        return self.set_offline(session_id, True, user_context=context)
+
+    def rotate_share(
+        self,
+        session_id: str,
+        *,
+        user_context: Any = None,
+    ) -> tuple[ShowPage, str | None]:
         session_id = validate_session_id(session_id)
-        # Same guard as update_visibility, before ``ensure`` materializes a page:
-        # an archived session is terminal, so its share link can't be rotated /
-        # re-enabled (and a stale/direct call must not create a default page).
+        context = _resolve_resource_access_context(user_context)
         if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot rotate the share link of an archived session.",
                 code="session_archived",
             )
-        page = self.ensure(session_id)
-        if page.visibility != VISIBILITY_PUBLIC:
+        if self.get(session_id) is None:
+            self.ensure(session_id, user_context=context)
+        access = self.require_access_settings(session_id, user_context=context)
+        if access.access_mode not in {ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}:
             raise ShowPageError(
-                "Share links can only be rotated while the Show Page is public.",
-                code="not_public",
+                "Share links can only be rotated while the Show Page is shared.",
+                code="not_shared",
             )
-        previous_share_id = page.share_id
-        new_share_id = self._unique_share_id()
-        now = _utc_now_iso()
-        with self.engine.begin() as conn:
-            conn.execute(
-                update(show_pages)
-                .where(show_pages.c.session_id == session_id)
-                .values(share_id=new_share_id, updated_at=now)
+        previous_share_id = access.share_id
+        for _ in range(20):
+            result = self.apply_access(
+                session_id,
+                expected_revision=access.revision,
+                target_access_mode=access.access_mode,
+                target_share_id=_new_share_id(),
+                # Rotating the link is not an audience edit: carry the whole
+                # entry set over, not just its email slice.
+                target_entries=access.entries,
+                user_context=context,
             )
-        updated = self.get(session_id)
-        assert updated is not None
-        return updated, previous_share_id
+            if result.status == "share_id_taken":
+                continue
+            if result.status == "conflict":
+                raise ShowPageError(
+                    "ShowAccess changed concurrently.",
+                    code="show_access_conflict",
+                )
+            if result.status not in {"applied", "no_change"}:
+                raise ShowPageError(
+                    "The share link could not be rotated.",
+                    code=result.status,
+                )
+            updated = self.get(session_id)
+            assert updated is not None
+            return updated, previous_share_id
+        raise ShowPageError(
+            "Could not allocate a unique share ID.",
+            code="share_id_allocation_failed",
+        )
 
-    def set_share_id(self, session_id: str, share_id: str) -> tuple[ShowPage, str | None]:
-        """Set a custom public share suffix; return (page, previous_share_id).
-
-        A custom suffix is just a chosen value for the same ``share_id`` that
-        ``rotate_share`` would otherwise randomize, so this mirrors that method:
-        archived sessions are terminal (guarded before ``ensure`` materializes a
-        page), and the suffix can only be set while the page is public. Setting a
-        new value revokes the previous public URL, exactly like a rotate.
-        """
+    def set_share_id(
+        self,
+        session_id: str,
+        share_id: str,
+        *,
+        user_context: Any = None,
+    ) -> tuple[ShowPage, str | None]:
+        """Replace a shared page's stable suffix through the ShowAccess writer."""
         session_id = validate_session_id(session_id)
+        context = _resolve_resource_access_context(user_context)
         new_share_id = validate_share_id(share_id)
-        # Pre-guard before ``ensure`` so a stale/direct call never materializes a
-        # default page for an archived (terminal) session. The in-txn re-reads
-        # below are the atomic authority for the concurrent-archive / concurrent
-        # visibility-flip race.
         if self.is_archived(session_id):
             raise ShowPageError(
                 "Cannot change the share link of an archived session.",
                 code="session_archived",
             )
-        self.ensure(session_id)
-        now = _utc_now_iso()
-        previous_share_id: str | None = None
-        try:
-            with self.engine.begin() as conn:
-                # Read visibility, archive status, and the current suffix in the
-                # SAME transaction as the write so a concurrent flip to private/
-                # offline, an archive, or another session claiming the suffix
-                # can't slip between the check and the update; raising rolls back.
-                row = (
-                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
-                    .mappings()
-                    .first()
-                )
-                if row is None or row["visibility"] != VISIBILITY_PUBLIC:
-                    raise ShowPageError(
-                        "A custom link can only be set while the Show Page is public.",
-                        code="not_public",
-                    )
-                status = conn.execute(
-                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-                ).scalar_one_or_none()
-                if status == "archived":
-                    raise ShowPageError(
-                        "Cannot change the share link of an archived session.",
-                        code="session_archived",
-                    )
-                previous_share_id = row["share_id"]
-                if new_share_id != previous_share_id:
-                    # Idempotent when unchanged (skips the write, so no self-
-                    # collision and no updated_at churn). Otherwise reject a
-                    # suffix held by another session; the unique constraint is
-                    # the final authority (IntegrityError below).
-                    taken_by = conn.execute(
-                        select(show_pages.c.session_id).where(show_pages.c.share_id == new_share_id).limit(1)
-                    ).scalar_one_or_none()
-                    if taken_by is not None and taken_by != session_id:
-                        raise ShowPageError(
-                            "That custom link is already taken. Pick another.",
-                            code="share_id_taken",
-                        )
-                    conn.execute(
-                        update(show_pages)
-                        .where(show_pages.c.session_id == session_id)
-                        .values(share_id=new_share_id, updated_at=now)
-                    )
-        except IntegrityError:
+        if self.get(session_id) is None:
+            self.ensure(session_id, user_context=context)
+        access = self.require_access_settings(session_id, user_context=context)
+        if access.access_mode not in {ACCESS_MODE_LIMITED, ACCESS_MODE_PUBLIC}:
+            raise ShowPageError(
+                "A custom link can only be set while the Show Page is shared.",
+                code="not_shared",
+            )
+        previous_share_id = access.share_id
+        result = self.apply_access(
+            session_id,
+            expected_revision=access.revision,
+            target_access_mode=access.access_mode,
+            target_share_id=new_share_id,
+            # Renaming the link is not an audience edit: carry the whole entry
+            # set over, not just its email slice.
+            target_entries=access.entries,
+            user_context=context,
+        )
+        if result.status == "share_id_taken":
             raise ShowPageError(
                 "That custom link is already taken. Pick another.",
                 code="share_id_taken",
+            )
+        if result.status == "conflict":
+            raise ShowPageError(
+                "ShowAccess changed concurrently.",
+                code="show_access_conflict",
+            )
+        if result.status not in {"applied", "no_change"}:
+            raise ShowPageError(
+                "The custom link could not be applied.",
+                code=result.status,
             )
         updated = self.get(session_id)
         assert updated is not None
@@ -529,11 +1619,46 @@ class ShowPageStore:
 def _page_from_row(row: Any) -> ShowPage:
     return ShowPage(
         session_id=str(row["session_id"]),
-        visibility=str(row["visibility"]),
+        access_mode=str(row["access_mode"]),
+        access_revision=int(row["access_revision"]),
         share_id=str(row["share_id"]) if row["share_id"] else None,
         offline_at=str(row["offline_at"]) if row["offline_at"] else None,
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+    )
+
+
+def _show_access_from_row(connection: Connection, row: Any) -> ShowAccess:
+    page_id = str(row["session_id"])
+    entries = tuple(
+        ShowAccessEntry(
+            kind=str(entry_row["kind"]),
+            value=str(entry_row["value"]),
+            organization_id=(
+                str(entry_row["organization_id"])
+                if entry_row["organization_id"]
+                else None
+            ),
+        )
+        for entry_row in connection.execute(
+            select(
+                show_page_access_entries.c.kind,
+                show_page_access_entries.c.value,
+                show_page_access_entries.c.organization_id,
+            )
+            .where(show_page_access_entries.c.page_id == page_id)
+            .order_by(
+                show_page_access_entries.c.kind.asc(),
+                show_page_access_entries.c.value.asc(),
+            )
+        ).mappings()
+    )
+    return ShowAccess(
+        page_id=page_id,
+        access_mode=str(row["access_mode"]),
+        share_id=str(row["share_id"]) if row["share_id"] else None,
+        revision=int(row["access_revision"]),
+        entries=entries,
     )
 
 
@@ -1036,6 +2161,8 @@ def show_page_payload(page: ShowPage, *, config: V2Config | None = None) -> dict
     return {
         "session_id": page.session_id,
         "visibility": page.visibility,
+        "access_mode": page.access_mode,
+        "access_revision": page.access_revision,
         "path": str(path),
         # Opaque cache token (not a path): non-null iff a servable icon exists, and
         # it changes when the icon file changes so the frontend's ?v=<token> busts
@@ -1078,7 +2205,7 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
     if fresh_workspace:
         files.update(
             {
-                "src/router.tsx": _default_router_tsx(),
+                "src/router.tsx": default_show_router(),
                 "src/pages/index.tsx": _default_page_home_tsx(),
                 "src/pages/second.tsx": _default_page_second_tsx(),
                 # App imports the router, so publish it after every generated
@@ -1091,7 +2218,13 @@ def _write_default_runtime_files(page_dir: Path, session_id: str) -> None:
         if target.exists():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(contents, encoding="utf-8")
+        try:
+            # An editor may create a source after the existence check. Seeding
+            # is create-only, never permission to replace authored content.
+            with target.open("x", encoding="utf-8") as handle:
+                handle.write(contents)
+        except FileExistsError:
+            continue
 
 
 def _default_index_html(session_id: str) -> str:
@@ -1137,29 +2270,61 @@ def _default_index_html(session_id: str) -> str:
 """
 
 
-def show_page_runtime_recovery_html(session_id: str) -> str:
+def show_page_runtime_recovery_html(
+    session_id: str,
+    *,
+    reason: str,
+    failure_class: ShowRuntimeFailureClass,
+    recovery_action: ShowRuntimeRecoveryAction,
+    retry_authorized: bool,
+    language: str = "en",
+) -> str:
     session_id = validate_session_id(session_id)
     escaped = _escape_html(session_id)
-    loading_delay = f"{SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS}s"
-    prompt = (
-        "Please repair this avibe Show Page. Open the Show Page workspace for session "
-        f"{session_id}, read the local Show Page/runtime instructions, then replace src/App.tsx "
-        "with a polished React page. Use the shadcn-style components from @/components/ui and "
-        "Tailwind CSS v4. Keep the existing CSS imports and customize standard shadcn variables "
-        "such as --background, --foreground, --primary, --border, and --radius. Do not edit "
-        "index.html unless it is required. If the browser shows "
-        "Ready to visualize, check src/App.tsx, src/main.tsx, src/styles.css, and the Vite/browser "
-        "console for compile or runtime errors. Make the page responsive and verify it renders.\n\n"
-        "Show Page history contract:\n"
-        f"{format_agent_contract(numbered=True, session_id=session_id)}"
+    current_reason = reason
+    escaped_reason = _escape_html(current_reason)
+    loading_delay = "0s"
+    translate = lambda key: _escape_html(t(f"show.runtimeRecovery.{key}", language))
+    message_key = _show_runtime_recovery_message_key(reason, failure_class=failure_class)
+    surface_action = recovery_action if retry_authorized else ShowRuntimeRecoveryAction.NO_LOCAL_ACTION
+    if surface_action is ShowRuntimeRecoveryAction.REPAIR:
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate("repairHeading")}</h2>
+            <p>{translate("repairMessage")}</p>
+            <p><code>vibe doctor repair show-runtime</code></p>
+            <div class="show-recovery-actions">
+              <button class="show-recovery-button" id="show-runtime-retry-now" type="button">{translate("retryNow")}</button>
+            </div>
+          </div>"""
+    elif surface_action is ShowRuntimeRecoveryAction.CHANGE_SETTING:
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate("settingsHeading")}</h2>
+            <p>{translate("settingsMessage")}</p>
+            <p><code>{escaped_reason}</code></p>
+            <div class="show-recovery-actions">
+              <button class="show-recovery-button" id="show-runtime-retry-now" type="button">{translate("retryNow")}</button>
+            </div>
+          </div>"""
+    else:
+        if recovery_action is ShowRuntimeRecoveryAction.NO_LOCAL_ACTION:
+            no_action_heading = "unsupportedHeading"
+            no_action_message = "unsupportedMessage"
+        else:
+            no_action_heading = "ownerActionHeading"
+            no_action_message = "ownerActionMessage"
+        action_card = f"""<div class="show-recovery-card">
+            <h2>{translate(no_action_heading)}</h2>
+            <p>{translate(no_action_message)}</p>
+          </div>"""
+    recovery_script = _show_runtime_recovery_script(
+        retry_authorized=retry_authorized and surface_action is not ShowRuntimeRecoveryAction.NO_LOCAL_ACTION,
     )
-    escaped_prompt = _escape_html(prompt)
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{_escape_html(language)}" data-show-runtime-reason="{escaped_reason}" data-show-runtime-class="{failure_class.value}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Show Page recovery {escaped}</title>
+    <title>{translate("title")}</title>
     <style>
       :root {{
         color-scheme: light;
@@ -1316,43 +2481,93 @@ def show_page_runtime_recovery_html(session_id: str) -> str:
   </head>
   <body>
     <main class="show-recovery-shell">
-      <div class="show-recovery-loading">Loading Show Page</div>
+      <div class="show-recovery-loading">{translate("loading")}</div>
       <section class="show-recovery-panel">
-        <div class="show-recovery-eyebrow">Vibe Show recovery</div>
-        <h1>Ready to visualize</h1>
-        <p>The managed Show runtime did not respond, so avibe is showing this recovery page instead of serving a raw app shell.</p>
+        <div class="show-recovery-eyebrow">{translate("eyebrow")}</div>
+        <h1>{translate("heading")}</h1>
+        <p>{translate(message_key)}</p>
         <div class="show-recovery-grid">
+          {action_card}
           <div class="show-recovery-card">
-            <h2>Ask your agent to fix the Show Page</h2>
-            <textarea id="show-recovery-agent-prompt" readonly>{escaped_prompt}</textarea>
-            <div class="show-recovery-actions">
-              <button class="show-recovery-button" type="button" data-copy-prompt>Copy prompt</button>
-              <button class="show-recovery-button secondary" type="button" onclick="window.location.reload()">Retry</button>
-            </div>
-          </div>
-          <div class="show-recovery-card">
-            <h2>What to check</h2>
-            <ul>
-              <li>Wait a moment and refresh if the runtime is still starting.</li>
-              <li>Ask the agent to inspect Vite and browser console errors.</li>
-              <li>The main file to edit is <code>src/App.tsx</code>.</li>
-              <li>Use shared UI imports like <code>@/components/ui/card</code>.</li>
-            </ul>
+            <h2>{translate("reasonLabel")}</h2>
+            <p><code>{escaped_reason}</code></p>
           </div>
         </div>
-        <p>Session: <code>{escaped}</code></p>
+        <p>{translate("sessionLabel")}: <code>{escaped}</code></p>
       </section>
     </main>
-    <script>
-      document.querySelector("[data-copy-prompt]")?.addEventListener("click", async (event) => {{
-        const prompt = document.getElementById("show-recovery-agent-prompt")?.value || "";
-        await navigator.clipboard.writeText(prompt);
-        event.currentTarget.textContent = "Copied";
-      }});
-    </script>
+    {recovery_script}
   </body>
 </html>
 """
+
+
+def _show_runtime_recovery_script(
+    *,
+    retry_authorized: bool,
+) -> str:
+    if not retry_authorized:
+        return ""
+    return """<script>
+      (() => {
+      const retryNow = async () => {
+        const button = document.getElementById("show-runtime-retry-now");
+        if (button) button.disabled = true;
+        try {
+          const response = await fetch(window.location.href, {
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: {
+              "Accept": "text/html",
+              "X-Avibe-Show-Recovery-Retry": "1",
+            },
+          });
+          const contentType = (response.headers.get("content-type") || "").toLowerCase();
+          if (response.redirected || !response.ok || !contentType.includes("text/html")) {
+            window.location.assign(response.url || window.location.href);
+            return;
+          }
+          const html = await response.text();
+          document.open();
+          document.write(html);
+          document.close();
+        } catch (_error) {
+          if (button) button.disabled = false;
+        }
+      };
+      document.getElementById("show-runtime-retry-now")?.addEventListener("click", retryNow);
+      })();
+    </script>"""
+
+
+def _show_runtime_recovery_message_key(
+    reason: str | None,
+    *,
+    failure_class: ShowRuntimeFailureClass,
+) -> str:
+    if failure_class is ShowRuntimeFailureClass.CONFIGURED and reason and reason.endswith("_unavailable_offline"):
+        return "offlineMessage"
+    if reason in {"runtime_archive_download_failed", "runtime_manifest_download_failed"}:
+        return "downloadMessage"
+    if reason in {"runtime_node_missing", "runtime_node_unsupported"}:
+        return "nodeMessage"
+    if reason == "runtime_platform_unsupported":
+        return "platformMessage"
+    if reason in {
+        "runtime_archive_checksum_mismatch",
+        "runtime_archive_size_mismatch",
+        "runtime_manifest_invalid",
+    }:
+        return "verificationMessage"
+    if reason in {"runtime_source_unsupported", "runtime_archive_url_unsupported"}:
+        return "configurationMessage"
+    if reason in {"VIBE_INSTALL_SKIP_SHOW_RUNTIME", "VIBE_SHOW_RUNTIME_AUTO_INSTALL"}:
+        return "policyMessage"
+    if reason and reason.startswith("runtime_start_"):
+        return "startMessage"
+    if reason and (reason.startswith("runtime_install_") or reason in {"runtime_git_missing", "runtime_npm_missing"}):
+        return "installMessage"
+    return "unavailableMessage"
 
 
 def _escape_html(value: str) -> str:
@@ -1447,210 +2662,6 @@ export default function App() {
       <RouterView />
     </main>
   )
-}
-"""
-
-
-def _default_router_tsx() -> str:
-    # A tiny, dependency-free History router with file-based page discovery.
-    #
-    # The injected basePath is the authority for both private /show/<id>/ and public
-    # /p/<share>/ surfaces. Their servers provide the matching entry-document
-    # fallback, so clean nested URLs remain refreshable and shareable.
-    #
-    # Why file-based discovery: adding a route is just adding a file under src/pages/.
-    # A folder becomes a nested path segment and a [param] file becomes a dynamic
-    # segment, so the scaffold is not locked into a flat page list. Nothing here or in
-    # the app shell needs editing to add a page.
-    return """import type { ComponentType, MouseEvent, ReactNode } from "react"
-import { useSyncExternalStore } from "react"
-
-export type PageProps = {
-  // Values captured from [param] segments, e.g. { id: "42" } for /items/42.
-  params: Record<string, string>
-}
-
-type PageModule = { default: ComponentType<PageProps> }
-
-type Segment = { name: string; dynamic: boolean }
-type Route = {
-  path: string
-  segments: Segment[]
-  Component: ComponentType<PageProps>
-  dynamic: boolean
-}
-
-const PAGES_PREFIX = "./pages/"
-const PAGE_SUFFIX = ".tsx"
-
-// Eagerly import every page module at build time. This is the discovery
-// mechanism: a new file under src/pages/ automatically registers a route.
-const modules = import.meta.glob<PageModule>("./pages/**/*.tsx", { eager: true })
-
-// "./pages/items/[id].tsx" -> "/items/:id"; "./pages/index.tsx" -> "/".
-// Returns null for framework files (any segment starting with "_"), which lets
-// an agent colocate non-page helpers under src/pages/ without creating a route.
-function filePathToRoute(file: string): string | null {
-  const relative = file.slice(PAGES_PREFIX.length, file.length - PAGE_SUFFIX.length)
-  const parts = relative.split("/")
-  if (parts[parts.length - 1] === "index") parts.pop()
-  if (parts.some((part) => part.startsWith("_"))) return null
-  const path = parts
-    .map((part) => (part.startsWith("[") && part.endsWith("]") ? ":" + part.slice(1, -1) : part))
-    .join("/")
-  return path ? "/" + path : "/"
-}
-
-function toSegments(path: string): Segment[] {
-  if (path === "/") return []
-  return path
-    .slice(1)
-    .split("/")
-    .map((part) => (part.startsWith(":") ? { name: part.slice(1), dynamic: true } : { name: part, dynamic: false }))
-}
-
-// Per-segment specificity mask: "0" for a static segment, "1" for a dynamic one.
-// Routes are sorted ascending by this mask (compared left to right), so among
-// routes of the same length a static segment always beats a [param] at the same
-// position — e.g. /items/new wins over /items/:id, and /users/:id/edit wins over
-// /users/:id/:action.
-function routeSpecificity(segments: Segment[]): string {
-  return segments.map((segment) => (segment.dynamic ? "1" : "0")).join("")
-}
-
-// A page's default export is renderable if it is a function component or a React
-// "exotic" component (memo/forwardRef/lazy/…) — an object carrying $$typeof.
-// Rejecting by `typeof === "function"` alone would drop memo()/forwardRef() pages.
-function isRenderablePage(value: unknown): value is ComponentType<PageProps> {
-  return (
-    typeof value === "function" ||
-    (typeof value === "object" && value !== null && "$$typeof" in value)
-  )
-}
-
-export const routes: Route[] = Object.entries(modules)
-  .map(([file, mod]): Route | null => {
-    const path = filePathToRoute(file)
-    if (!path || !isRenderablePage(mod.default)) return null
-    const segments = toSegments(path)
-    return { path, segments, Component: mod.default, dynamic: segments.some((s) => s.dynamic) }
-  })
-  .filter((route): route is Route => route !== null)
-  .sort((a, b) => {
-    const specA = routeSpecificity(a.segments)
-    const specB = routeSpecificity(b.segments)
-    if (specA !== specB) return specA < specB ? -1 : 1
-    return a.path.localeCompare(b.path)
-  })
-
-// decodeURIComponent throws on a malformed escape (e.g. a link built with a raw
-// "%", like /items/50%); fall back to the raw segment so a bad param degrades to
-// that page instead of throwing during render and blanking the whole app.
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value)
-  } catch {
-    return value
-  }
-}
-
-function matchRoute(path: string): { route: Route | null; params: Record<string, string> } {
-  const parts = path === "/" ? [] : path.slice(1).split("/")
-  for (const route of routes) {
-    if (route.segments.length !== parts.length) continue
-    const params: Record<string, string> = {}
-    let matched = true
-    for (let i = 0; i < parts.length; i++) {
-      const segment = route.segments[i]
-      if (segment.dynamic) params[segment.name] = safeDecode(parts[i])
-      else if (segment.name !== safeDecode(parts[i])) {
-        matched = false
-        break
-      }
-    }
-    if (matched) return { route, params }
-  }
-  return { route: null, params: {} }
-}
-
-function basePath(): string {
-  const configured = globalThis.__AVIBE_SHOW__?.basePath
-  const fallback = window.location.pathname.match(/^\\/(?:show|p)\\/[^/]+\\//)?.[0] || "/"
-  const pathname = new URL(configured || fallback, window.location.origin).pathname
-  const parts = pathname.split("/").filter(Boolean)
-  return parts.length ? "/" + parts.join("/") + "/" : "/"
-}
-
-function normalizeRoutePath(path: string): string {
-  const withLeadingSlash = path.startsWith("/") ? path : "/" + path
-  return withLeadingSlash.length > 1 && withLeadingSlash.endsWith("/")
-    ? withLeadingSlash.slice(0, -1)
-    : withLeadingSlash
-}
-
-function readRoutePath(): string {
-  const base = basePath()
-  const pathname = window.location.pathname
-  if (!pathname.startsWith(base)) return "/"
-  const routePath = normalizeRoutePath("/" + pathname.slice(base.length))
-  return routePath === "/index.html" ? "/" : routePath
-}
-
-function subscribe(onChange: () => void): () => void {
-  window.addEventListener("popstate", onChange)
-  return () => window.removeEventListener("popstate", onChange)
-}
-
-export function useRoutePath(): string {
-  return useSyncExternalStore(subscribe, readRoutePath, () => "/")
-}
-
-function routeUrl(to: string): URL {
-  const normalizedTo = to.startsWith("/") ? to : "/" + to
-  const route = new URL(normalizedTo, window.location.origin)
-  const current = new URL(window.location.href)
-  const target = new URL(basePath(), window.location.origin)
-  const embed = current.searchParams.get("vibe-embed")
-  target.pathname = basePath() + route.pathname.replace(/^\\/+/, "")
-  target.search = route.search
-  if (embed && !target.searchParams.has("vibe-embed")) target.searchParams.set("vibe-embed", embed)
-  target.hash = route.hash
-  return target
-}
-
-export function navigate(to: string): void {
-  const target = routeUrl(to)
-  window.history.pushState({}, "", target)
-  window.dispatchEvent(new PopStateEvent("popstate"))
-}
-
-export function Link({ to, className, children }: { to: string; className?: string; children: ReactNode }) {
-  function onClick(event: MouseEvent<HTMLAnchorElement>) {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-    event.preventDefault()
-    navigate(to)
-  }
-  return <a href={routeUrl(to).toString()} className={className} onClick={onClick}>{children}</a>
-}
-
-export function RouterView() {
-  const path = useRoutePath()
-  const { route, params } = matchRoute(path)
-  if (!route) {
-    return (
-      <div className="rounded-lg border border-border bg-card p-6 text-card-foreground">
-        <h1 className="text-lg font-semibold">Page not found</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          No route matches <code className="rounded bg-muted px-1.5 py-0.5">{path}</code>.
-        </p>
-        <p className="mt-4 text-sm">
-          <Link className="font-medium underline underline-offset-4" to="/">Back to Home</Link>
-        </p>
-      </div>
-    )
-  }
-  const Page = route.Component
-  return <Page params={params} />
 }
 """
 

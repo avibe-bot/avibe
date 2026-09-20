@@ -80,6 +80,7 @@ type TerminalCandidate = { author: string; type: string; metadata?: Record<strin
 
 const wasTerminalAgentMessage = (message: TerminalCandidate): boolean =>
   message.author === 'agent' &&
+  message.metadata?.detached !== true &&
   (message.type === 'result' ||
     message.type === 'error' ||
     (message.type === 'notify' && message.metadata?.event === 'backend_failure'));
@@ -134,6 +135,8 @@ describe('catalog-derived predicates match the communication-record boundary', (
       { event: 'backend_failure' },
       { event: 'activity_completed' },
       { event: 42 },
+      { detached: true },
+      { event: 'backend_failure', detached: true },
     ];
     for (const type of PROBE_TYPES) {
       for (const author of ['agent', 'user', 'system', 'harness']) {

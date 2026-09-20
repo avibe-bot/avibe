@@ -1,24 +1,5 @@
 // Pure formatting helpers for the Model Hub UI (no i18n — callers wrap the
 // returned values in translated templates).
-const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€' };
-
-/**
- * Symbol for an ISO 4217 code — the ONLY place a currency symbol is resolved.
- *
- * USD is the fallback because every upstream vendor bills in USD; a CNY default
- * was our own invention. The mapping is kept, so a source that really does report
- * CNY (or EUR) still renders in its own currency. Returns '' for a code we cannot
- * map, so callers can fall back to a currency-free label rather than print a
- * misleading symbol.
- */
-export function currencySymbol(currency?: string | null): string {
-  return CURRENCY_SYMBOL[currency ?? 'USD'] ?? '';
-}
-
-/** Monthly spend as symbol + amount (1 decimal), e.g. "$12.4". */
-export function formatSpend(cents: number, currency?: string | null): string {
-  return `${currencySymbol(currency)}${(cents / 100).toFixed(1)}`;
-}
 
 /**
  * A list of names in the reader's own punctuation — 「A、B、C」 for a Chinese
@@ -32,6 +13,57 @@ export function formatSpend(cents: number, currency?: string | null): string {
  */
 export function formatNameList(names: readonly string[], locale: string): string {
   return new Intl.ListFormat(locale, { style: 'narrow', type: 'conjunction' }).format(names);
+}
+
+/**
+ * A counted quantity in the reader's own grouping — 「2,968,500」.
+ *
+ * Grouped rather than compacted (「3M」) because a usage report is read to be
+ * reconciled against a vendor's own console, and a rounded figure cannot be.
+ * `Intl` is what makes the separator the reader's rather than ours; the value is
+ * floored because a token count is a count, and a fractional one would be a bug
+ * upstream rendered as truth here.
+ */
+export function formatCount(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale).format(Math.max(0, Math.floor(value)));
+}
+
+/**
+ * A context window as the figure a model is published under — 「128K」.
+ *
+ * Compact, and compacted the same way in every locale, because this is not a
+ * quantity being reconciled: it is the number that appears on the vendor's own
+ * model card, in its docs and in every comparison the reader has already seen,
+ * and 「12.8万」 is that number in a unit no provider uses. The exact value is one
+ * field below in the reader's own grouping, so nothing is hidden by rounding
+ * here. `null` renders as nothing rather than as a zero the catalog never
+ * claimed.
+ */
+export function formatTokensCompact(value: number | null): string {
+  if (value === null || value < 1) return '';
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 0 })
+    .format(Math.floor(value));
+}
+
+/** A ratio in [0, 1] as a whole-percent string — 「65%」. */
+export function formatPercent(ratio: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: 0 }).format(ratio);
+}
+
+/**
+ * An instant as a short day-and-time in the reader's own zone — 「8/18 03:14」.
+ *
+ * The host zone is the frame on purpose: what this answers is "when did this last
+ * happen to me", and a UTC stamp is a time the reader cannot reconcile against
+ * their own day. The year is dropped because the report this appears in spans at
+ * most a couple of months, so the year is never the ambiguous part; the month is
+ * kept because the day alone is. An unparseable stamp renders verbatim rather
+ * than as an invented time.
+ */
+export function formatDayTime(instant: string, locale: string): string {
+  const ms = Date.parse(instant);
+  if (Number.isNaN(ms)) return instant;
+  return new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(ms);
 }
 
 /** Whole minutes until a cooldown retry_at (never negative). */

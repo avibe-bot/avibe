@@ -1,76 +1,85 @@
-// Demoted account-management section. Each source keeps its repair journeys and
-// exposes the server-provided model inventory plus the shared manual-model action.
-//
-// Mobile header (design.pen M01 m01SrcHead): the title block and 添加来源 stack
-// instead of competing for one line, with 添加来源 as a full-width primary
-// button — at 360px the side-by-side desktop header squeezed the sub-line to two
-// or three lines and left the button a cramped tap target.
 import * as React from 'react';
+import { LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { AddSourceMenu } from './AddSourceMenu';
+import { Button } from '@/components/ui/button';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
-import type { RaisedRepair } from './SourceRowMenu';
-import type { Source } from './types';
+import type { AgentBackend, Source } from './types';
 
 export const SourcesCard: React.FC<{
-  sources: Source[];
-  onConnectClaude: () => void;
-  onConnectChatGPT: () => void;
-  onAddApiKey: () => void;
-  /** Re-fetch after a per-row action (rename / delete). */
-  onSourceChanged: () => void;
-  onRefreshSource: (source: Source) => void;
-  refreshingSourceId: string | null;
-  /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
-  onRepair?: (source: Source, kind: RaisedRepair) => void;
-  onAddModel: (source: Source) => void;
-}> = ({
-  sources,
-  onConnectClaude,
-  onConnectChatGPT,
-  onAddApiKey,
-  onSourceChanged,
-  onRefreshSource,
-  refreshingSourceId,
-  onRepair,
-  onAddModel,
-}) => {
+  read: RegionRead<Source[]>;
+  onRetry: () => void;
+  readFailureCopy?: string;
+  onOpenSource: (source: Source, opener: HTMLButtonElement) => void;
+  onAddApiKey: (opener: HTMLButtonElement) => void;
+  onAddSubscription: () => void;
+  subscriptionPickerOpen?: boolean;
+  subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
+  activeBackends?: ReadonlySet<AgentBackend>;
+}> = ({ read, onRetry, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends }) => {
   const { t } = useTranslation();
-
+  const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
+    loading: () => undefined,
+    ready: (data) => data,
+    unread: () => undefined,
+    degraded: (staleData) => staleData,
+  });
+  const groups = [
+    { id: 'native' as const, sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
+    { id: 'hub' as const, sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
+  ].filter((group) => group.sources.length > 0);
+  // The settings route pane owns vertical scrolling. This card grows with its
+  // sources so users never have to coordinate a second scroll area here.
   return (
-    // Not overflow-hidden: the row supply tooltip must escape the card bounds.
-    <section className="rounded-xl border border-border bg-background">
-      <div className="flex flex-col gap-2.5 border-b border-border px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:px-5">
-        <div className="flex min-w-0 flex-col gap-1">
-          <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.sources.title')}</h2>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.sources.subtitle')}</p>
-        </div>
-        <AddSourceMenu
-          onConnectClaude={onConnectClaude}
-          onConnectChatGPT={onConnectChatGPT}
-          onAddApiKey={onAddApiKey}
-        />
+    <section className="relative z-20 flex w-full min-w-0 flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
+        <span className="flex items-center gap-[7px]">
+          <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.upstream.heading')}</h2>
+          <ModelHubInfoHint
+            label={t('settings.models.upstream.infoLabel')}
+            content={t('settings.models.upstream.info')}
+            className="model-hub-upstream-info"
+          />
+        </span>
+        {sources !== undefined && <span className="model-hub-pill model-hub-upstream-count border">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
-
-      {sources.length === 0 ? (
-        <div className="px-4 py-12 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.sources.empty')}</div>
-      ) : (
-        <div className="flex flex-col">
-          {sources.map((source) => (
-            <SourceRow
-              key={source.id}
-              source={source}
-              onChanged={onSourceChanged}
-              onRefresh={onRefreshSource}
-              refreshing={refreshingSourceId === source.id}
-              refreshDisabled={refreshingSourceId !== null}
-              onRepair={onRepair}
-              onAddModel={onAddModel}
-            />
-          ))}
-        </div>
-      )}
+      <div className="flex-1 space-y-2.5 p-3">
+        {read.kind === 'loading' && sources === undefined
+          ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
+          : read.kind === 'unread'
+            ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>
+            : <>
+                {read.kind === 'degraded' && read.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
+                {groups.length > 0
+                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} activeBackends={activeBackends} />)}</div>)
+                  : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
+              </>}
+      </div>
+      <div className="flex h-14 shrink-0 items-center gap-2 border-t border-border px-3.5">
+        <Button
+          ref={subscriptionTriggerRef}
+          variant="default"
+          size="xs"
+          aria-haspopup="menu"
+          aria-expanded={subscriptionPickerOpen}
+          className="model-hub-footer-action model-hub-footer-action--filled shadow-none disabled:opacity-100"
+          onClick={onAddSubscription}
+        >
+          <Plus className="size-3" />
+          {t('settings.models.upstream.addSubscription')}
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"
+          onClick={(event) => onAddApiKey(event.currentTarget)}
+        >
+          <Plus className="size-3" />
+          {t('settings.models.upstream.addApiKey')}
+        </Button>
+      </div>
     </section>
   );
 };

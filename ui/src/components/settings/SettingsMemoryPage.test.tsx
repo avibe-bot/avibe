@@ -1,110 +1,159 @@
 /* @vitest-environment jsdom */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { MemorySettingsResult } from '../../context/ApiContext';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { ToastProvider } from '../../context/ToastProvider';
+import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { SettingsMemoryPage } from './SettingsMemoryPage';
-import type { MemoryStatus } from '../../context/ApiContext';
 
 const api = vi.hoisted(() => ({
-  clearMemory: vi.fn(),
-  getMemoryFailures: vi.fn(),
+  deleteMemoryData: vi.fn(),
+  getMemoryMaintenance: vi.fn(),
+  getMemoryProcessingRecord: vi.fn(),
   getMemorySettings: vi.fn(),
   getMemoryStatus: vi.fn(),
   listDependencies: vi.fn(),
-  restartMemoryRuntime: vi.fn(),
+  repairMemory: vi.fn(),
+  wakeMemory: vi.fn(),
 }));
-const logMounts = vi.hoisted(() => ({ count: 0 }));
-const showToast = vi.hoisted(() => vi.fn());
-const translate = vi.hoisted(() => (key: string, options?: { returnObjects?: boolean }) =>
-  options?.returnObjects ? [] : key,
-);
+const savedSettings = vi.hoisted(() => ({ current: null as null | ((next: typeof settings) => void) }));
+const translate = vi.hoisted(() => (key: string) => key);
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: translate }),
+}));
 
 vi.mock('../../context/ApiContext', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('../../context/ApiContext')>();
   return { ...original, useApi: () => api };
 });
 
-vi.mock('../../context/ToastContext', () => ({
-  useToast: () => ({ showToast }),
-}));
-
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: translate }),
-}));
-
-vi.mock('./SettingsPageShell', () => ({
-  SettingsPageShell: ({ children }: { children: React.ReactNode }) => children,
-}));
-
 vi.mock('../ui/confirm-dialog', () => ({
-  ConfirmDialog: ({ open, onConfirm }: { open: boolean; onConfirm: () => void | Promise<void> }) =>
-    open ? <button type="button" onClick={() => void onConfirm()}>confirm-clear</button> : null,
+  ConfirmDialog: ({ open, onConfirm, children }: { open: boolean; onConfirm: () => void; children?: ReactNode }) => (
+    open ? (
+      <div role="dialog">
+        {children}
+        <button type="button" onClick={onConfirm}>confirm-delete</button>
+      </div>
+    ) : null
+  ),
 }));
 
-vi.mock('./memory/MemoryLogPanel', async (loadOriginal) => {
-  const original = await loadOriginal<typeof import('./memory/MemoryLogPanel')>();
-  const React = await import('react');
-  return {
-    ...original,
-    MemoryLogPanel: ({ onClearAll }: { onClearAll: () => void }) => {
-      const [mount] = React.useState(() => ++logMounts.count);
-      return <button type="button" onClick={onClearAll}>open-clear-{mount}</button>;
-    },
-  };
-});
-
+vi.mock('./memory/MemoryProcessingRecordPanel', () => ({
+  MemoryProcessingRecordPanel: () => <div data-testid="processing-record-panel">processing-record</div>,
+}));
 vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
 vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
-vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
+vi.mock('./memory/MemorySettingsPanel', () => ({
+  MemorySettingsPanel: ({ onDeleteData, onSaved }: { onDeleteData: () => void; onSaved?: (next: Extract<MemorySettingsResult, { status: 'ok' }>) => void }) => { savedSettings.current = onSaved ?? null; return (
+    <button type="button" onClick={onDeleteData}>open-delete</button>
+  ); },
+}));
 
-const endpoint = {
-  base_url: 'https://provider.example.test/v1',
-  model: 'model-1',
-  api_key: null,
-  has_api_key: false,
+vi.mock('./memory/MemoryStatusPanel', () => ({
+  MemoryStatusPanel: ({
+    repairSupported,
+    onRepair,
+    failuresError,
+    failuresNotice,
+  }: {
+    repairSupported?: boolean;
+    onRepair?: () => void;
+    failuresError?: string | null;
+    failuresNotice?: string | null;
+  }) => (
+    <div>
+      <span>{repairSupported ? 'repair-supported' : 'repair-hidden'}</span>
+      {repairSupported ? <button type="button" onClick={onRepair}>run-repair</button> : null}
+      <span data-testid="memory-failures-message">{failuresError ?? ''}</span>
+      <span data-testid="memory-failures-notice">{failuresNotice ?? ''}</span>
+    </div>
+  ),
+}));
+
+const settings = {
+  status: 'ok' as const,
+  enabled: true,
+  profile_enabled: true,
+  mode: 'custom' as const,
+  processing: {
+    llm: { base_url: null, model: null, api_key: null, has_api_key: false },
+    embedding: { base_url: null, model: null, api_key: null, has_api_key: false },
+  },
 };
 
-const readyStatus = (processingFaultKind: MemoryStatus['processing_fault_kind'] = null): MemoryStatus => ({
-  status: 'ok',
-  state: 'ready',
-  buckets: { syncing: 0, succeeded: 0, unknown: 0, failed: 0, dead: 0, missed: 0 },
-  pending: 0,
-  processing: 0,
-  awaiting_receipt: 0,
-  succeeded: 0,
-  receipt_unknown: 0,
-  distill_failed: 0,
-  dead: 0,
-  missed: 0,
-  queue_plaintext_bytes: 0,
-  provider_disk_bytes: 0,
-  last_success_at: null,
-  last_flush_observation: null,
-  last_flush_status: null,
-  last_flush_error_code: null,
-  last_flush_request_id: null,
-  last_flush_at: null,
-  processing_fault_kind: processingFaultKind,
-  processing_fault_since: processingFaultKind ? '2026-08-04T00:00:00Z' : null,
-  processing_alert_active: processingFaultKind !== null,
-  error: null,
-  data_exists: false,
+const status = (state: 'starting' | 'running' | 'degraded' | 'needs_repair') => ({
+  status: 'ok' as const,
+  state,
+  reason: state === 'needs_repair' ? 'memory_local_data_unusable' : null,
+  source: { status: 'unavailable' as const, observed_at: null, reason: null },
+  health: null,
 });
 
+const renderPage = () => render(
+  <MemoryRouter>
+    <InstanceAuthorizationContext.Provider value={{
+      remote: false,
+      instanceKind: null,
+      instanceRole: 'owner',
+      capabilities: OWNER_INSTANCE_CAPABILITIES,
+    }}>
+      <ToastProvider>
+        <SettingsMemoryPage />
+      </ToastProvider>
+    </InstanceAuthorizationContext.Provider>
+  </MemoryRouter>,
+);
+
 beforeEach(() => {
-  logMounts.count = 0;
-  api.getMemorySettings.mockResolvedValue({
+  api.getMemorySettings.mockResolvedValue(settings);
+  api.getMemoryStatus.mockResolvedValue(status('needs_repair'));
+  api.getMemoryProcessingRecord.mockResolvedValue({
     status: 'ok',
-    enabled: true,
-    processing: { llm: endpoint, embedding: endpoint },
+    runtime: { source: status('running').source, health: null },
+    sources: {
+      memcells: { status: 'unknown', observed_at: null },
+      runs: { status: 'unknown', observed_at: null },
+      semantic: { status: 'unknown', observed_at: null },
+    },
+    anomalies: { source: { status: 'available', observed_at: null }, items: [] },
+    maintenance: {
+      source: { status: 'available', observed_at: null },
+      data_exists: true,
+      can_delete_data: true,
+    },
   });
-  api.getMemoryStatus.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
-  api.getMemoryFailures.mockResolvedValue({ items: [], retention_days: 90 });
-  api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
-  api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
+  api.getMemoryMaintenance.mockResolvedValue({
+    status: 'ok',
+    data_exists: true,
+    can_delete_data: true,
+  });
+  api.listDependencies.mockResolvedValue({
+    deps: [{ id: 'memory-runtime', installed: true, status: 'ready' }],
+  });
+  api.wakeMemory.mockResolvedValue({ ok: true, operation: 'wake', state: 'running' });
+  api.repairMemory.mockResolvedValue({
+    ok: true,
+    operation: 'repair',
+    result: 'completed',
+    data_deleted: true,
+    data_remaining: false,
+    roots: [],
+  });
+  api.deleteMemoryData.mockResolvedValue({
+    ok: true,
+    operation: 'delete_data',
+    result: 'completed',
+    data_deleted: true,
+    data_remaining: false,
+    roots: [],
+  });
 });
 
 afterEach(() => {
@@ -112,138 +161,238 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('SettingsMemoryPage Clear handling', () => {
-  const openAndConfirmClear = async () => {
+describe('SettingsMemoryPage profile transition', () => {
+  it('falls back to processingRecord when active profile is disabled', async () => {
     const user = userEvent.setup();
-
-    render(<SettingsMemoryPage />);
-    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.log' }));
-    await user.click(await screen.findByRole('button', { name: 'open-clear-1' }));
-    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
-  };
-
-  it('purges mounted log payload state when Clear reports partial failure', async () => {
-    api.clearMemory.mockResolvedValue({ status: 'failed', error: 'memory_clear_failed' });
-
-    await openAndConfirmClear();
-
-    await waitFor(() => expect(api.clearMemory).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('button', { name: 'open-clear-2' })).toBeTruthy();
-    expect(showToast).toHaveBeenCalledWith('errors.memory_clear_failed', 'error');
-  });
-
-  it('purges mounted log payload state when the Clear receipt is lost', async () => {
-    api.clearMemory.mockRejectedValue(new Error('connection closed'));
-
-    await openAndConfirmClear();
-
-    await waitFor(() => expect(api.clearMemory).toHaveBeenCalledTimes(1));
-    expect(await screen.findByRole('button', { name: 'open-clear-2' })).toBeTruthy();
-    expect(showToast).toHaveBeenCalledWith('memory.clear.failed', 'error');
+    renderPage();
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'memory.tabs.settings' })).toBeTruthy());
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    expect(savedSettings.current).toBeTruthy();
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
+    const off = { ...settings, profile_enabled: false };
+    api.getMemorySettings.mockResolvedValue(off);
+    act(() => savedSettings.current?.(off));
+    await waitFor(() => {
+      expect(screen.queryByRole('radio', { name: 'memory.tabs.profile' })).toBeNull();
+      expect(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }).getAttribute('aria-checked')).toBe('true');
+    });
   });
 });
 
-describe('SettingsMemoryPage restart action', () => {
-  it('stays available when status cannot be loaded', async () => {
-    render(<SettingsMemoryPage />);
-
-    expect(await screen.findByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
+describe('SettingsMemoryPage', () => {
+  it('inspects only the Memory dependency owner', async () => {
+    renderPage();
+    await waitFor(() => expect(api.listDependencies).toHaveBeenCalledWith({
+      ids: ['memory-package', 'memory-runtime'],
+    }));
   });
 
-  it('is disabled and shows progress while the request is pending', async () => {
-    let finishRestart: ((value: { ok: true; state: string }) => void) | undefined;
-    api.restartMemoryRuntime.mockReturnValue(
-      new Promise((resolve) => {
-        finishRestart = resolve;
-      }),
-    );
-    const user = userEvent.setup();
-
-    render(<SettingsMemoryPage />);
-    const action = await screen.findByRole('button', { name: 'memory.status.restartEngine' });
-    await user.click(action);
-
-    expect((action as HTMLButtonElement).disabled).toBe(true);
-    expect(action.querySelector('.animate-spin')).toBeTruthy();
-
-    finishRestart?.({ ok: true, state: 'ready' });
-    await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false));
-  });
-
-  it('renders exactly one restart action for an engine fault', async () => {
-    api.getMemoryStatus.mockResolvedValue(readyStatus('engine'));
-
-    render(<SettingsMemoryPage />);
-
-    expect(await screen.findByText('memory.status.fault.engine')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'memory.status.restartEngine' })).toHaveLength(1);
-  });
-});
-
-describe('SettingsMemoryPage disabled recorder health', () => {
-  beforeEach(() => {
-    api.getMemorySettings.mockResolvedValue({
-      status: 'ok',
-      enabled: false,
-      processing: { llm: endpoint, embedding: endpoint },
-    });
-  });
-
-  it('surfaces a retained call-log corruption with the Clear recovery action', async () => {
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'disabled',
-      recorder: { state: 'degraded', reason: 'call_log_corrupt' },
-    });
-    const user = userEvent.setup();
-
-    render(<SettingsMemoryPage />);
-    await user.click(await screen.findByRole('button', { name: 'memory.log.clearAction' }));
-
-    expect(screen.getByRole('button', { name: 'confirm-clear' })).toBeTruthy();
-    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
-  });
-
-  it('does not offer a restart that the disabled runtime must reject', async () => {
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'disabled',
-      recorder: { state: 'degraded', reason: 'writer_failures' },
-    });
-
-    render(<SettingsMemoryPage />);
-
-    await waitFor(() => expect(api.getMemoryStatus).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText('memory.log.recorderDegraded')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
-    expect(api.restartMemoryRuntime).not.toHaveBeenCalled();
-    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
-  });
-
-  it('does not offer recorder recovery when enabled Memory is missing its runtime', async () => {
-    api.getMemorySettings.mockResolvedValue({
-      status: 'ok',
-      enabled: true,
-      processing: { llm: endpoint, embedding: endpoint },
-    });
-    api.getMemoryStatus.mockResolvedValue({
-      status: 'ok',
-      state: 'error',
-      recorder: { state: 'degraded', reason: 'writer_failures' },
-    });
+  it('directs disabled Memory to the explicit package bootstrap when missing', async () => {
+    api.getMemorySettings.mockResolvedValue({ ...settings, enabled: false });
     api.listDependencies.mockResolvedValue({
-      ok: true,
-      deps: [{ id: 'memory-runtime', installed: false, status: 'missing' }],
+      deps: [
+        { id: 'memory-package', installed: false, status: 'missing', action_class: 'repairable' },
+        { id: 'memory-runtime', installed: null, status: 'not_required', action_class: 'none' },
+      ],
     });
 
-    render(
-      <MemoryRouter>
-        <SettingsMemoryPage />
-      </MemoryRouter>,
-    );
+    renderPage();
 
-    expect(await screen.findByText('memory.setup.runtimeRequired')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
-    expect(screen.getByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
+    await screen.findByText('memory.setup.runtimeRequired');
+    expect(screen.getByRole('link', { name: /memory.settings.goToDependencies/ })).toBeTruthy();
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+    expect(screen.queryByText('repair-supported')).toBeNull();
+    expect(screen.queryByText('open-delete')).toBeNull();
+  });
+
+  it.each(['running', 'degraded', 'needs_repair'] as const)(
+    'shows only installation guidance for a missing runtime even with stale %s status',
+    async (state) => {
+      api.getMemoryStatus.mockResolvedValue(status(state));
+      api.listDependencies.mockResolvedValue({
+        deps: [{ id: 'memory-runtime', installed: false, status: 'missing' }],
+      });
+      renderPage();
+
+      await screen.findByText('memory.setup.runtimeRequired');
+      expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+      expect(screen.queryByTestId('memory-failures-message')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'memory.runtimeAction.moreActions' })).toBeNull();
+      expect(api.wakeMemory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps configuration hidden until dependency inspection has finished', async () => {
+    let finish!: (value: unknown) => void;
+    api.listDependencies.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    renderPage();
+
+    await waitFor(() => expect(api.getMemorySettings).toHaveBeenCalled());
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+    await act(async () => finish({ deps: [{ id: 'memory-runtime', installed: true, status: 'ready' }] }));
+    expect(await screen.findByTestId('memory-tabs-scroll')).toBeTruthy();
+  });
+
+  it('shows installation guidance when a missing package also prevents settings from loading', async () => {
+    api.getMemorySettings.mockRejectedValue(new Error('Memory package unavailable'));
+    api.listDependencies.mockResolvedValue({
+      deps: [{ id: 'memory-package', installed: false, status: 'missing', action_class: 'repairable' }],
+    });
+    renderPage();
+
+    await screen.findByText('memory.setup.runtimeRequired');
+    expect(screen.queryByText('memory.settings.loadFailed')).toBeNull();
+    expect(screen.queryByTestId('memory-tabs-scroll')).toBeNull();
+  });
+
+  it.each(['memory-package', 'memory-runtime'])(
+    'keeps administration available when the %s entry has no admitted installation action',
+    async (id) => {
+      for (const evidence of [
+        { installed: false, status: 'unsupported', action_class: 'none' },
+        { installed: false, status: 'error', action_class: 'operator_only' },
+        { installed: null, status: 'unknown', action_class: 'operator_only' },
+        { installed: null, status: 'missing', action_class: 'repairable' },
+        { installed: null, status: 'not_required', action_class: 'none' },
+      ]) {
+        api.listDependencies.mockResolvedValue({ deps: [{ id, ...evidence }] });
+        const view = renderPage();
+
+        await screen.findByTestId('memory-tabs-scroll');
+        expect(screen.queryByText('memory.setup.runtimeRequired')).toBeNull();
+        await userEvent.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+        expect(screen.getByText('open-delete')).toBeTruthy();
+        view.unmount();
+      }
+    },
+  );
+
+  it('offers Retry startup for degraded Memory', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
+    await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it('keeps manual restart in More actions while Memory is running', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('running'));
+    renderPage();
+
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.moreActions' }));
+    expect(await screen.findByText('memory.runtimeAction.restartDescription')).toBeTruthy();
+    await userEvent.click(screen.getByRole('menuitem', { name: /memory.runtimeAction.restartButton/ }));
+
+    await waitFor(() => expect(api.wakeMemory).toHaveBeenCalledOnce());
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed native update even when the old runtime remains available', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
+    api.wakeMemory.mockResolvedValue({
+      ok: true, state: 'running',
+      artifact_update: { ok: false, reason: 'memory_runtime_install_failed' },
+    });
+    renderPage();
+    await userEvent.click(await screen.findByRole('button', { name: 'memory.runtimeAction.retryButton' }));
+    expect(await screen.findByText('memory.runtimeAction.updateFailedStillRunning')).toBeTruthy();
+    expect(screen.queryByText('memory.runtimeAction.completed')).toBeNull();
+    expect(api.repairMemory).not.toHaveBeenCalled();
+    expect(api.deleteMemoryData).not.toHaveBeenCalled();
+  });
+
+  it.each(['starting', 'needs_repair'] as const)('hides runtime restart actions while Memory is %s', async (state) => {
+    api.getMemoryStatus.mockResolvedValue(status(state));
+    renderPage();
+
+    await screen.findByText(state === 'needs_repair' ? 'repair-supported' : 'repair-hidden');
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.retryButton' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.runtimeAction.moreActions' })).toBeNull();
+  });
+
+  it('offers Repair only for needs_repair and passes literal accepted loss', async () => {
+    renderPage();
+    expect(await screen.findByText('repair-supported')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'run-repair' }));
+    await waitFor(() => expect(api.repairMemory).toHaveBeenCalledWith(true));
+  });
+
+  it('does not offer Repair for provider degradation', async () => {
+    api.getMemoryStatus.mockResolvedValue(status('degraded'));
+    renderPage();
+    expect(await screen.findByText('repair-hidden')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'run-repair' })).toBeNull();
+  });
+
+  it.each(['unavailable', 'partial'] as const)('shows the %s failure-history limitation as a notice', async (sourceStatus) => {
+    api.getMemoryProcessingRecord.mockResolvedValue({
+      status: 'ok',
+      runtime: { source: status('running').source, health: null },
+      sources: {
+        memcells: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        runs: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        semantic: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+      },
+      anomalies: {
+        source: {
+          status: sourceStatus,
+          observed_at: null,
+          reason: 'memory_failure_history_unavailable',
+        },
+        items: [],
+      },
+      maintenance: {
+        source: { status: 'available', observed_at: '2026-08-24T00:00:00Z' },
+        data_exists: true,
+        can_delete_data: true,
+      },
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByTestId('memory-failures-message').textContent).toBe(''));
+    expect(screen.getByTestId('memory-failures-notice').textContent).toBe(
+      'memory.processingRecord.reason.memory_failure_history_unavailable',
+    );
+  });
+
+  it('keeps bounded per-root outcomes visible after deletion fails', async () => {
+    api.deleteMemoryData.mockResolvedValueOnce({
+      ok: false,
+      operation: 'delete_data',
+      result: 'partial',
+      error: 'memory_delete_data_failed',
+      data_deleted: false,
+      data_remaining: true,
+      roots: [
+        {
+          path: 'memory',
+          existed: true,
+          deleted: false,
+          error: 'ConfinedFilesystemError',
+        },
+        {
+          path: 'state/memory/clear-intent.json',
+          existed: false,
+          deleted: false,
+        },
+      ],
+    });
+    renderPage();
+
+    await userEvent.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await userEvent.click(screen.getByRole('button', { name: 'open-delete' }));
+    await userEvent.click(screen.getByRole('button', { name: 'confirm-delete' }));
+
+    await waitFor(() => expect(api.deleteMemoryData).toHaveBeenCalledWith(true));
+    expect(await screen.findByText('memory.deleteData.rootResultsTitle')).toBeTruthy();
+    expect(screen.getByText('memory')).toBeTruthy();
+    expect(screen.getByText('ConfinedFilesystemError')).toBeTruthy();
+    expect(screen.getByText('state/memory/clear-intent.json')).toBeTruthy();
+    expect(screen.getByText('memory.deleteData.rootStatus.absent')).toBeTruthy();
   });
 });

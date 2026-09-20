@@ -12,6 +12,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.delivery_evidence import DeliveryEvidence
 from core.message_output import (
     MessageOutput,
+    communication_type_for_output,
     contained_teardown_output_for,
     stop_output_for,
 )
@@ -146,6 +147,38 @@ class _StubController:
 
 
 class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_visible_output_type_follows_turn_authority(self):
+        self.assertEqual(
+            communication_type_for_output(
+                "result",
+                MessageOutput(completes_turn=False),
+            ),
+            "output",
+        )
+        self.assertEqual(
+            communication_type_for_output(
+                "result",
+                MessageOutput(completes_turn=True, detached=True),
+                is_error=True,
+            ),
+            "error",
+        )
+        self.assertEqual(
+            communication_type_for_output(
+                "result",
+                MessageOutput(completes_turn=True, detached=True),
+            ),
+            "result",
+        )
+        self.assertEqual(
+            communication_type_for_output(
+                "result",
+                MessageOutput(completes_turn=True),
+                is_error=True,
+            ),
+            "error",
+        )
+
     def test_terminal_snapshot_elects_fallback_after_excluding_canceled_runs(self):
         controller = _StubController(platform="slack")
         dispatcher = ConsolidatedMessageDispatcher(controller)
@@ -229,6 +262,120 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         store.get_run.assert_not_called()
 
+    async def test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract(self):
+        controller = self._terminal_lifecycle_controller()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-empty-failure",
+                "accepted_agent_run_ids": ["run-b", "run-a"],
+            },
+        )
+        store = mock.Mock()
+        store.get_run.side_effect = lambda run_id: {
+            "run-a": {"id": "run-a", "status": "running"},
+            "run-b": {"id": "run-b", "status": "running"},
+        }.get(run_id)
+
+        with mock.patch(
+            "core.message_dispatcher.SQLiteBackgroundTaskStore",
+            return_value=store,
+        ):
+            await dispatcher.emit_agent_message(
+                context,
+                "result",
+                "",
+                is_error=True,
+                output=MessageOutput(completes_turn=True, completes_run=True),
+            )
+
+        evidence = controller.session_turns.on_terminal_result.call_args.kwargs[
+            "terminal_evidence"
+        ]
+        notification = evidence["output_provenance"]["turn_failure_notification"]
+        self.assertEqual(
+            notification,
+            {
+                "failure_id": "turn:turn-empty-failure",
+                "delivered": False,
+                "fallback_run_id": "run-a",
+            },
+        )
+        store.record_turn_run_outputs.assert_called_once()
+        record_call = store.record_turn_run_outputs.call_args
+        self.assertEqual(record_call.args[0], ["run-b", "run-a"])
+        self.assertEqual(
+            record_call.kwargs["provenance"]["turn_failure_notification"],
+            notification,
+        )
+        self.assertEqual(controller.im_client.sent_messages, [])
+
+    async def test_hfr_472_contract_is_snapshotted_before_the_first_run_arrives(self):
+        controller = self._terminal_lifecycle_controller()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        dispatcher._collapse_status_bubble = mock.AsyncMock()
+        dispatcher._clear_consolidated_state = mock.AsyncMock()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_runtime_turn_token": "runtime-turn-1",
+                "turn_token": "turn-before-run",
+            },
+        )
+
+        await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            output=MessageOutput(completes_turn=True, completes_run=True),
+        )
+
+        evidence = controller.session_turns.on_terminal_result.call_args.kwargs[
+            "terminal_evidence"
+        ]
+        self.assertEqual(
+            evidence["output_provenance"]["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-before-run",
+                "delivered": False,
+            },
+        )
+
+    def test_visible_direct_error_does_not_create_a_turn_fallback_contract(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController(platform="slack"))
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-visible-error",
+                "accepted_agent_run_ids": ["run-a", "run-b"],
+            },
+        )
+        output = MessageOutput(completes_turn=True, completes_run=True)
+
+        unchanged = dispatcher._output_with_implicit_turn_failure_notification(
+            context,
+            output,
+            is_error=True,
+            has_visible_result=True,
+            mutates_turn_lifecycle=True,
+        )
+
+        self.assertIs(unchanged, output)
+        self.assertNotIn("turn_failure_notification", unchanged.metadata)
+
     async def test_detached_stale_result_delivers_without_mutating_newer_turn(self):
         controller = _StubController(platform="slack")
         controller.agent_service = type(
@@ -284,6 +431,7 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_service.release_runtime_turn.assert_not_called()
         turn_chunk.assert_not_awaited()
         persist.assert_called_once()
+        self.assertEqual(persist.call_args.args[1], "result")
         self.assertEqual(persist.call_args.kwargs["metadata"]["activity_id"], "task-1")
         self.assertTrue(persist.call_args.kwargs["metadata"]["detached"])
 
@@ -696,6 +844,49 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(reply_to)
         self.assertEqual([button.text for button in keyboard.buttons[0]], ["Continue", "Stop"])
 
+    async def test_wechat_result_preserves_separator_free_button_like_text(self):
+        im_client = _StubIMClient()
+        controller = _StubController(
+            platform="wechat",
+            im_client=im_client,
+            reply_enhancements=True,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="wx1", channel_id="wx1", platform="wechat")
+
+        message_id = await dispatcher.emit_agent_message(
+            context,
+            "result",
+            "Compare:\n[A] | [B]",
+        )
+
+        self.assertEqual(message_id, "msg-1")
+        self.assertEqual(im_client.sent_messages[0][1], "Compare:\n[A] | [B]")
+
+    async def test_separator_free_parsing_uses_delivery_target_capability(self):
+        im_client = _StubIMClient()
+        controller = _StubController(
+            platform="slack",
+            im_client=im_client,
+            reply_enhancements=True,
+        )
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "delivery_override": {
+                    "platform": "wechat",
+                    "channel_id": "wx1",
+                }
+            },
+        )
+
+        await dispatcher.emit_agent_message(context, "result", "Compare:\n[A] | [B]")
+
+        self.assertEqual(im_client.sent_messages[0][1], "Compare:\n[A] | [B]")
+
     async def test_result_footer_rides_subtext_on_status_bubble_platform(self):
         """On a ``supports_status_bubble`` platform (Slack) the show_duration
         footnote is delivered as the de-emphasized ``subtext`` footer and the body
@@ -851,6 +1042,20 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persist.call_args.args[1], "result")
         self.assertEqual(persist.call_args.kwargs.get("quick_replies"), ["✅ Yes", "🙅 No"])
         # The block is still stripped from the persisted text itself.
+        self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
+        self.assertIn("Pick one", persist.call_args.args[2])
+
+    async def test_avibe_result_persists_unseparated_quick_replies_for_workbench(self):
+        controller = _StubController(platform="avibe", reply_enhancements=True)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="avibe")
+        raw = "Pick one:\n[✅ Yes] | [🙅 No]"
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(context, "result", raw)
+
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.kwargs.get("quick_replies"), ["✅ Yes", "🙅 No"])
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 

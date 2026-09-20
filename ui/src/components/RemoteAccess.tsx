@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   Activity,
@@ -25,6 +26,8 @@ import {
   useApi,
 } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { onPageReactivated } from '../lib/pageActivity';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '../lib/tunnelQuality';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
@@ -56,6 +59,8 @@ const formatEdgeLocation = (location: CloudflareEdgeLocation) => (
 export const RemoteAccess: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
+  const canPair = capabilities.is_instance_owner;
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [pairing, setPairing] = useState(false);
@@ -112,13 +117,11 @@ export const RemoteAccess: React.FC = () => {
       if (document.visibilityState === 'visible') refresh(true).catch(() => undefined);
     };
     const interval = window.setInterval(refreshVisible, 30_000);
-    document.addEventListener('visibilitychange', refreshVisible);
-    window.addEventListener('focus', refreshVisible);
+    const stopReactivation = onPageReactivated(refreshVisible);
     return () => {
       disconnect();
       window.clearInterval(interval);
-      document.removeEventListener('visibilitychange', refreshVisible);
-      window.removeEventListener('focus', refreshVisible);
+      stopReactivation();
     };
   }, [api, refresh]);
 
@@ -129,6 +132,7 @@ export const RemoteAccess: React.FC = () => {
   }, [settingsDirty, status?.settings]);
 
   const pair = async () => {
+    if (!canPair) return;
     setPairing(true);
     setActionMessage(null);
     try {
@@ -275,7 +279,7 @@ export const RemoteAccess: React.FC = () => {
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
-  const showPairingForm = !paired || reconfiguring;
+  const showPairingForm = !paired || (canPair && reconfiguring);
   const connectorState = status?.pid_state === 'unknown'
     ? t('remoteAccess.stateNeedsAttention')
     : running
@@ -295,7 +299,12 @@ export const RemoteAccess: React.FC = () => {
         : qualityGrade === 'critical' || qualityGrade === 'degraded'
           ? 'destructive'
           : 'secondary';
-  const qualityLabel = t(`remoteAccess.quality${qualityGrade.charAt(0).toUpperCase()}${qualityGrade.slice(1)}`);
+  const qualityKeys = {
+    good: 'remoteAccess.qualityGood', fair: 'remoteAccess.qualityFair', poor: 'remoteAccess.qualityPoor',
+    critical: 'remoteAccess.qualityCritical', unknown: 'remoteAccess.qualityUnknown',
+    degraded: 'remoteAccess.qualityDegraded', recovering: 'remoteAccess.qualityRecovering',
+  } as const satisfies Record<typeof qualityGrade, TranslationKey>;
+  const qualityLabel = t(qualityKeys[qualityGrade]);
   const requestPath = quality?.request_path;
   const requestPathDisplayState = getTunnelRequestPathDisplayState(requestPath);
   const requestPathUnavailable = requestPathDisplayState === 'unavailable';
@@ -396,12 +405,12 @@ export const RemoteAccess: React.FC = () => {
   return (
     <section
       id="remote-access"
-      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/45 bg-cyan/[0.06] shadow-[0_0_40px_-10px_rgba(63,224,229,0.45)]"
+      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/45 bg-cyan/[0.06] shadow-glow-lg-cyan"
     >
       <div className="flex items-start justify-between gap-4 border-b border-cyan/20 bg-cyan/[0.07] px-5 py-4">
         <div className="min-w-0 space-y-2">
           <h2 className="inline-flex items-center gap-2 text-[15px] font-semibold text-foreground">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.12] text-cyan">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.12] text-cyan-ink">
               <Cloud className="size-4" strokeWidth={2.25} />
             </span>
             {t('remoteAccess.title')}
@@ -417,7 +426,7 @@ export const RemoteAccess: React.FC = () => {
                       href={VIBE_CLOUD_APP_URL}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-0.5 font-medium text-cyan hover:underline"
+                      className="inline-flex items-center gap-0.5 font-medium text-cyan-ink hover:underline"
                     />
                   ),
                 }}
@@ -456,7 +465,7 @@ export const RemoteAccess: React.FC = () => {
         </div>
         <div className="border-b border-border px-5 py-3.5 sm:border-b-0 sm:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.vibeCloudService')}</div>
-          <a className="mt-1 inline-flex text-[13px] font-medium text-cyan" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
+          <a className="mt-1 inline-flex text-[13px] font-medium text-cyan-ink" href={VIBE_CLOUD_URL} target="_blank" rel="noreferrer">
             avibe.bot
             <ExternalLink className="ml-1 size-3.5" />
           </a>
@@ -482,7 +491,7 @@ export const RemoteAccess: React.FC = () => {
         <div className="border-b border-border px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <Network className="size-4 shrink-0 text-cyan" />
+              <Network className="size-4 shrink-0 text-cyan-ink" />
               <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.networkPath')}</h3>
             </div>
             <Badge variant={routeVariant}>{routeLabel}</Badge>
@@ -548,7 +557,7 @@ export const RemoteAccess: React.FC = () => {
                       {connectorPathLabel}
                     </div>
                     {requestPathUnavailable ? (
-                      <div className="break-words font-medium text-destructive">
+                      <div className="break-words font-medium text-destructive-ink">
                         {t('remoteAccess.requestPathUnavailable', {
                           success: requestPath?.success_count || 0,
                           count: requestPath?.sample_count || 0,
@@ -577,7 +586,7 @@ export const RemoteAccess: React.FC = () => {
         <details className="group border-b border-border">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 transition-colors hover:bg-surface/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
             <div className="flex items-center gap-2">
-              <Settings2 className="size-4 text-cyan" />
+              <Settings2 className="size-4 text-cyan-ink" />
               <h3 className="text-[13px] font-semibold text-foreground">{t('remoteAccess.controls')}</h3>
             </div>
             <ChevronDown className="size-4 shrink-0 text-muted transition-transform group-open:rotate-180" />
@@ -684,7 +693,7 @@ export const RemoteAccess: React.FC = () => {
             <div className="mt-4 border-t border-border/70 pt-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <Activity className="size-4 text-cyan" />
+                  <Activity className="size-4 text-cyan-ink" />
                   <span className="text-[12px] font-medium text-foreground">{t('remoteAccess.diagnostics')}</span>
                   {diagnostics?.cloudflared_version && (
                     <span className="font-mono text-[10px] text-muted">
@@ -727,48 +736,52 @@ export const RemoteAccess: React.FC = () => {
       )}
 
       {showPairingForm ? (
-        <div className="grid gap-3 px-5 py-4 md:grid-cols-[1fr_auto] md:items-end">
-          <label className="space-y-1.5">
-            <span className="text-[12px] font-medium text-foreground">{t('remoteAccess.pairingKey')}</span>
+        <div className="space-y-1.5 px-5 py-4">
+          <label htmlFor="remote-access-pairing-key" className="block text-[12px] font-medium text-foreground">
+            {t('remoteAccess.pairingKey')}
+          </label>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
             <CompactField
-              className="w-full font-mono"
+              id="remote-access-pairing-key"
+              className="min-w-0 flex-1 font-mono"
               value={pairingKey}
               onChange={(event) => setPairingKey(event.target.value)}
               placeholder="vrp_xxxxxxxxxxxxxxxxx"
+              disabled={!canPair}
             />
-            <span className="block text-[10px] text-muted">{t('remoteAccess.pairingKeyHelp')}</span>
-          </label>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="default"
-              size="xs"
-              className="font-semibold"
-              disabled={pairing || !pairingKey.trim()}
-              onClick={pair}
-            >
-              <Link2 className="size-3.5" />
-              {pairing ? t('remoteAccess.pairing') : t('remoteAccess.pair')}
-            </Button>
-            {paired && (
+            <div className="flex shrink-0 flex-wrap gap-2">
               <Button
                 type="button"
-                variant="secondary"
+                variant="default"
                 size="xs"
-                onClick={() => {
-                  setReconfiguring(false);
-                  setPairingKey('');
-                }}
+                className="font-semibold"
+                disabled={!canPair || pairing || !pairingKey.trim()}
+                onClick={pair}
               >
-                {t('common.cancel')}
+                <Link2 className="size-3.5" />
+                {pairing ? t('remoteAccess.pairing') : t('remoteAccess.pair')}
               </Button>
-            )}
+              {paired && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="xs"
+                  onClick={() => {
+                    setReconfiguring(false);
+                    setPairingKey('');
+                  }}
+                >
+                  {t('common.cancel')}
+                </Button>
+              )}
+            </div>
           </div>
+          <span className="block text-[10px] text-muted">{canPair ? t('remoteAccess.pairingKeyHelp') : t('remoteAccess.ownerPairingRequired')}</span>
         </div>
       ) : (
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[13px] font-medium text-mint">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-mint-ink">
               <CheckCircle2 className="size-3.5" />
               {t('remoteAccess.configuredBadge')}
             </div>
@@ -777,7 +790,7 @@ export const RemoteAccess: React.FC = () => {
                 href={publicUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="mt-1 inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-cyan hover:underline"
+                className="mt-1 inline-flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-cyan-ink hover:underline"
                 title={publicUrl}
               >
                 <span className="truncate">{publicUrl}</span>
@@ -803,6 +816,8 @@ export const RemoteAccess: React.FC = () => {
               type="button"
               variant="secondary"
               size="xs"
+              disabled={!canPair}
+              title={!canPair ? t('remoteAccess.ownerPairingRequired') : undefined}
               onClick={() => setReconfiguring(true)}
             >
               {t('remoteAccess.repair')}
@@ -831,7 +846,7 @@ export const RemoteAccess: React.FC = () => {
 
       {actionMessage && (
         <div className={`border-t border-border px-4 py-3 text-[12px] ${
-          actionMessage.type === 'error' ? 'text-gold' : 'text-mint'
+          actionMessage.type === 'error' ? 'text-gold-ink' : 'text-mint-ink'
         }`}>
           {actionMessage.text}
         </div>

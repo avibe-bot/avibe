@@ -38,12 +38,16 @@ from config.v2_config import (
 from core.agent_tool_policy import (
     ALWAYS_SESSION_ONLY_TOOL_NAMES,
     check_tool_call,
-    native_background_tools_allowed,
     session_only_background_tool_names,
 )
-from core.avibe_cloud import avibe_cloud_url_available
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
+from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -51,7 +55,6 @@ from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from vibe import backend_model_catalog
 
@@ -76,7 +79,12 @@ if TYPE_CHECKING:
     from modules.agents.model_hub import ModelHubLaunch
 
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
-CLAUDE_REMOTE_DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
+CLAUDE_REMOTE_DISALLOWED_TOOLS = [
+    "AskUserQuestion",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "Skill",
+]
 CLAUDE_REMOTE_PERMISSION_MODE = "bypassPermissions"
 CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 
@@ -444,6 +452,7 @@ class SessionHandler(BaseHandler):
             # when the current turn resolves to a different channel. Retire the
             # cached generation's process credential before recreating it.
             retire_model_hub_scope=True,
+            reason="cached_process_terminated",
         )
         return True
 
@@ -474,15 +483,17 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="model_hub_channel_changed",
             )
             return None
 
-        next_system_prompt = self._build_claude_system_prompt(
+        next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            working_path=working_path,
         )
         cached_system_prompt = self.claude_system_prompts.get(composite_key)
         if cached_system_prompt != next_system_prompt:
@@ -493,6 +504,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="system_prompt_changed",
             )
             return None
 
@@ -500,6 +512,22 @@ class SessionHandler(BaseHandler):
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="caller_env_changed",
+            )
+            return None
+        managed_skills_env = managed_skill_environment(
+            working_path,
+            project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
+        )
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because managed Skill bindings changed",
                 composite_key,
             )
             await self._cleanup_session_locked(
@@ -516,6 +544,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="git_path_changed",
             )
             return None
 
@@ -571,6 +600,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_model_hub_channel_changed",
             )
             return None
         self.ensure_agent_session_id(
@@ -583,24 +613,45 @@ class SessionHandler(BaseHandler):
         if next_agent_system_prompt is None:
             agent_data = self._load_agent_file(effective_agent, working_path)
             next_agent_system_prompt = agent_data.get("prompt") if agent_data else None
-        next_system_prompt = self._build_claude_system_prompt(
+        next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=next_agent_system_prompt,
+            working_path=working_path,
         )
         if self.claude_system_prompts.get(composite_key) != next_system_prompt:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because avibe system prompt changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_system_prompt_changed",
+            )
             return None
         caller_env = self._caller_env_for_context(context)
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
                 "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_caller_env_changed",
+            )
+            return None
+        managed_skills_env = managed_skill_environment(
+            working_path,
+            project_base=managed_skill_project_base(context),
+            claude_cli_path=managed_skill_claude_cli_path(self.config),
+        )
+        if getattr(client, "_vibe_managed_skills_env", {}) != managed_skills_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because managed Skill bindings changed",
                 composite_key,
             )
             await self._cleanup_session_locked(
@@ -617,6 +668,7 @@ class SessionHandler(BaseHandler):
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
+                reason="subagent_git_path_changed",
             )
             return None
         if desired_model:
@@ -760,11 +812,10 @@ class SessionHandler(BaseHandler):
 
         SESSION-STABLE ONLY, and that is not a shortcut. This env is baked into a Claude
         SDK client at spawn and is also the value compared to decide whether a cached
-        client may be reused, so a field that changes per turn would respawn the Agent on
-        every message, and a field that changes per author would attribute one
-        participant's definition to another. ``CallerContext.session_stable`` documents
-        both, and what a Claude-created definition therefore keeps: the conversation, not
-        the author or the individual message.
+        client may be reused, so ordinary IM author/message fields are dropped. A trusted
+        remote Workbench ACL snapshot is retained: changing remote identity or revision
+        must recreate the client rather than let one user's resource authority leak into
+        another user's turn. ``CallerContext.session_stable`` documents both cases.
         """
 
         return caller_env_for_platform_payload(
@@ -971,8 +1022,6 @@ class SessionHandler(BaseHandler):
         """Hook config enforcing the shared tool policy, or None when unavailable."""
         if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
             return None
-        if native_background_tools_allowed():
-            return None
         matcher = "|".join(session_only_background_tool_names())
         return {
             "PreToolUse": [
@@ -992,7 +1041,7 @@ class SessionHandler(BaseHandler):
         session-only under every input.
         """
         disallowed = list(CLAUDE_REMOTE_DISALLOWED_TOOLS)
-        if hooks is None and not native_background_tools_allowed():
+        if hooks is None:
             disallowed.extend(
                 name for name in ALWAYS_SESSION_ONLY_TOOL_NAMES if name not in disallowed
             )
@@ -1441,6 +1490,7 @@ class SessionHandler(BaseHandler):
         from modules.agents.model_hub import (
             build_claude_hub_env,
             claude_setting_sources_for_launch,
+            claude_settings_for_launch,
             launch_for_context,
         )
 
@@ -1452,22 +1502,35 @@ class SessionHandler(BaseHandler):
         )
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
+        catalog_efforts = (
+            model_hub_launch.reasoning_efforts
+            if model_hub_launch is not None
+            and model_hub_launch.backend == "claude"
+            and model_hub_launch.channel in {"hub", "native_cli"}
+            else backend_model_catalog.catalog_reasoning_efforts_for_model(
+                "claude",
+                effective_model,
+            )
+        )
         effective_effort = normalize_claude_reasoning_effort(
             effective_model,
             explicit_effort,
-            backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
+            catalog_efforts,
         )
 
         # Determine final system prompt: agent prompt takes precedence over config.
         # Always append avibe system prompt injection so transport
         # capabilities remain available; reply_enhancements only controls
         # quick-reply button instructions.
-        final_system_prompt = self._build_claude_system_prompt(
+        skill_catalog_sink: list[dict] = []
+        final_system_prompt = await self._build_claude_system_prompt(
             context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
             agent_system_prompt=agent_system_prompt,
+            skill_catalog_sink=skill_catalog_sink,
+            working_path=working_path,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1500,6 +1563,13 @@ class SessionHandler(BaseHandler):
         if model_hub_launch is not None:
             claude_env = build_claude_hub_env(claude_env, model_hub_launch)
         claude_env.update(self._caller_env_for_context(context))
+        claude_env.update(
+            managed_skill_environment(
+                working_path,
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
+            )
+        )
         prepend_vendored_git_to_path(
             claude_env,
             base_env=os.environ,
@@ -1520,8 +1590,9 @@ class SessionHandler(BaseHandler):
             "resume": stored_claude_session_id if stored_claude_session_id else None,
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
-            "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
+            "settings": claude_settings_for_launch(CLAUDE_MEMORY_DISABLED_SETTINGS, model_hub_launch),
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
+            "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically, plus any session-only background
@@ -1567,8 +1638,18 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_pending_skill_catalog", skill_catalog_sink[0] if skill_catalog_sink else None)
         setattr(client, "_vibe_stderr_lines", claude_stderr_lines)
         setattr(client, "_vibe_caller_env", self._caller_env_for_context(context))
+        setattr(
+            client,
+            "_vibe_managed_skills_env",
+            managed_skill_environment(
+                working_path,
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(self.config),
+            ),
+        )
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(
             client,
@@ -1657,7 +1738,7 @@ class SessionHandler(BaseHandler):
 
         return client
 
-    def _build_claude_system_prompt(
+    async def _build_claude_system_prompt(
         self,
         context: MessageContext,
         *,
@@ -1665,6 +1746,8 @@ class SessionHandler(BaseHandler):
         agent_name: str,
         session_anchor: str,
         agent_system_prompt: Optional[str],
+        working_path: Optional[str] = None,
+        skill_catalog_sink: list[dict] | None = None,
     ) -> str | Dict[str, str]:
         base_prompt = agent_system_prompt or self.config.claude.system_prompt
         quick_replies_on = getattr(self.config, "reply_enhancements", True)
@@ -1680,21 +1763,25 @@ class SessionHandler(BaseHandler):
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
         # that write.
-        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, context)
+        configure_memory_cli_access(self.controller, context)
 
-        system_prompt_injection = build_system_prompt_injection(
+        system_prompt_injection = await asyncio.to_thread(
+            build_system_prompt_injection,
+            agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
-            include_show_pages=getattr(self.config, "show_pages_prompt", True),
-            include_memory_cli=memory_cli_admitted,
-            avibe_cloud_connected=avibe_cloud_url_available(self.config),
+            memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
+            profile_enabled=bool(getattr(getattr(self.config, "memory", None), "profile_enabled", True)),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
-            current_agent_backend="claude",
+            skills_cwd=working_path,
+            skills_project_base=managed_skill_project_base(context),
+            skills_claude_cli_path=managed_skill_claude_cli_path(self.config),
+            skill_catalog_sink=skill_catalog_sink,
         )
 
         if base_prompt:
-            return f"{base_prompt}\n\n{system_prompt_injection}"
+            return system_prompt_injection
         return {
             "type": "preset",
             "preset": "claude_code",
@@ -1942,6 +2029,7 @@ class SessionHandler(BaseHandler):
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
         expected_client=None,
+        reason: str = "unspecified",
     ):
         """Clean up one Claude generation under the same lock used by creation.
 
@@ -1958,6 +2046,7 @@ class SessionHandler(BaseHandler):
                 retire_model_hub_scope=retire_model_hub_scope,
                 activation_retired=activation_retired,
                 expected_client=expected_client,
+                reason=reason,
             )
 
     async def _cleanup_session_locked(
@@ -1968,6 +2057,7 @@ class SessionHandler(BaseHandler):
         retire_model_hub_scope: bool = True,
         activation_retired: bool = False,
         expected_client=None,
+        reason: str = "unspecified",
     ):
         """Clean up a specific session by composite key"""
         client = self.claude_sessions.get(composite_key)
@@ -1976,8 +2066,9 @@ class SessionHandler(BaseHandler):
             # by a client that owns the key now. Containing a stale teardown
             # must not become a second teardown.
             logger.info(
-                "Skipping Claude cleanup for session %s: the named generation no longer owns the key",
+                "Skipping Claude cleanup for session %s: reason=%s named generation no longer owns the key",
                 composite_key,
+                reason,
             )
             return
         activation_retired = activation_retired or bool(
@@ -1990,6 +2081,22 @@ class SessionHandler(BaseHandler):
                 lambda: self.claude_sessions.get(composite_key) is client,
             ):
                 return
+        receiver_task = self.receiver_tasks.get(composite_key)
+        if client is not None or receiver_task is not None:
+            identity = self._claude_runtime_activation_identity(client)
+            logger.info(
+                "Retiring Claude runtime session=%s reason=%s busy=%s "
+                "runtime_generation=%s client_identity=%s receiver_identity=%s "
+                "receiver_done=%s pid=%s",
+                composite_key,
+                reason,
+                composite_key in self.active_sessions,
+                identity.generation if identity is not None else None,
+                id(client) if client is not None else None,
+                id(receiver_task) if receiver_task is not None else None,
+                receiver_task.done() if receiver_task is not None else None,
+                get_claude_client_pid(client),
+            )
         receiver_task = self.receiver_tasks.pop(composite_key, None)
         client = self.claude_sessions.pop(composite_key, None)
         if client is not None and retire_model_hub_scope:
@@ -2012,9 +2119,18 @@ class SessionHandler(BaseHandler):
             # retrying cancellation on every event-loop tick.
             if client is not None:
                 if cleanup_from_receiver:
-                    self._disconnect_client_after_receiver(client, composite_key, receiver_task)
+                    self._disconnect_client_after_receiver(
+                        client,
+                        composite_key,
+                        receiver_task,
+                        reason=reason,
+                    )
                 else:
-                    await self._disconnect_client(client, composite_key)
+                    await self._disconnect_client(
+                        client,
+                        composite_key,
+                        reason=reason,
+                    )
         finally:
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task, composite_key)
@@ -2072,14 +2188,32 @@ class SessionHandler(BaseHandler):
             logger=logger,
         )
 
-    async def _disconnect_client(self, client, composite_key: str) -> None:
+    async def _disconnect_client(
+        self,
+        client,
+        composite_key: str,
+        *,
+        reason: str,
+    ) -> None:
         try:
             await client.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting Claude session {composite_key}: {e}")
-        logger.info(f"Cleaned up Claude session {composite_key}")
+        logger.info(
+            "Cleaned up Claude session %s reason=%s client_identity=%s",
+            composite_key,
+            reason,
+            id(client),
+        )
 
-    def _disconnect_client_after_receiver(self, client, composite_key: str, receiver_task) -> None:
+    def _disconnect_client_after_receiver(
+        self,
+        client,
+        composite_key: str,
+        receiver_task,
+        *,
+        reason: str,
+    ) -> None:
         async def _run() -> None:
             if receiver_task is not None:
                 try:
@@ -2088,7 +2222,7 @@ class SessionHandler(BaseHandler):
                     pass
                 except Exception as e:
                     logger.warning("Claude receiver ended with error before deferred disconnect: %s", e)
-            await self._disconnect_client(client, composite_key)
+            await self._disconnect_client(client, composite_key, reason=reason)
 
         asyncio.create_task(_run())
 
@@ -2299,24 +2433,12 @@ class SessionHandler(BaseHandler):
     ) -> int:
         """Disconnect Claude sessions that have been idle beyond the timeout.
 
-        A session is normally exempt from eviction while it is flagged
-        ``active`` (a turn is in flight). That veto is **not** absolute: if the
-        receiver coroutine never releases the flag (e.g. it stays alive but
-        blocked on ``receive_messages`` with no stream EOF), the session would
-        otherwise be pinned forever and its ``claude`` subprocess would survive
-        until the next service restart. As an independent backstop, a session
-        that is ``active`` but whose ``last_activity`` is older than
-        ``max(idle_timeout * stuck_active_multiplier,
-        stuck_active_floor_seconds)`` is force-evicted regardless of why the
-        flag was not cleared. A genuine in-flight turn keeps touching
-        ``last_activity`` via assistant/tool messages, so it normally stays well
-        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
-        backstop. Caveat: a real turn whose single tool call runs silently for
-        longer than the cap is indistinguishable from a stuck session and would
-        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+        Durable Turn and Activity ownership always vetoes reclamation, even
+        during silent inference or tools. The age backstop repairs an
+        adapter-local active flag only after durable ownership independently
+        allows reclamation. Pass ``stuck_active_multiplier <= 0`` to disable
+        that stale-flag repair.
         """
-        from core.runtime_ownership import SessionRuntimeDisposition
-
         if idle_timeout <= 0:
             return 0
 
@@ -2372,13 +2494,11 @@ class SessionHandler(BaseHandler):
                 continue
             idle_for = now - last_activity
             if composite_key in self.active_sessions:
-                # Stuck-active backstop: only evict once well past the cap.
-                if stuck_threshold is not None and idle_for >= stuck_threshold:
-                    if ownership.disposition in {
-                        SessionRuntimeDisposition.TRANSITIONING,
-                        SessionRuntimeDisposition.UNKNOWN,
-                    }:
-                        continue
+                if (
+                    not ownership.blocks_reclamation
+                    and stuck_threshold is not None
+                    and idle_for >= stuck_threshold
+                ):
                     expired.append((composite_key, idle_for))
                 continue
             if not ownership.blocks_reclamation and idle_for >= idle_timeout:
@@ -2436,11 +2556,7 @@ class SessionHandler(BaseHandler):
                             allowed = bool(
                                 stuck_threshold is not None
                                 and recheck_idle >= stuck_threshold
-                                and ownership.disposition
-                                not in {
-                                    SessionRuntimeDisposition.TRANSITIONING,
-                                    SessionRuntimeDisposition.UNKNOWN,
-                                }
+                                and not ownership.blocks_reclamation
                             )
                         else:
                             allowed = bool(
@@ -2498,6 +2614,7 @@ class SessionHandler(BaseHandler):
                         await self._cleanup_session_locked(
                             composite_key,
                             activation_retired=True,
+                            reason="stuck_active_eviction",
                         )
                 else:
                     logger.info(
@@ -2508,6 +2625,7 @@ class SessionHandler(BaseHandler):
                     await self._cleanup_session_locked(
                         composite_key,
                         activation_retired=True,
+                        reason="idle_eviction",
                     )
                 evicted += 1
 
@@ -2623,6 +2741,7 @@ class SessionHandler(BaseHandler):
                 # This failure may belong to a generation a replacement has
                 # already taken over from; retire that exact client or nothing.
                 expected_client=client,
+                reason="intentional_teardown_signal",
             )
             return True
         if returncode is not None:
@@ -2643,6 +2762,7 @@ class SessionHandler(BaseHandler):
                 composite_key,
                 current_receiver_task=asyncio.current_task(),
                 expected_client=client,
+                reason="process_terminated",
             )
             await self._get_im_client(context).send_message(
                 context,
@@ -2653,7 +2773,11 @@ class SessionHandler(BaseHandler):
             return False
         if "read() called while another coroutine" in error_msg:
             logger.error(f"Session {composite_key} has concurrent read error - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                reason="concurrent_read",
+            )
 
             # Notify user and suggest retry
             await self._get_im_client(context).send_message(
@@ -2669,7 +2793,11 @@ class SessionHandler(BaseHandler):
             or is_claude_sdk_buffer_error(error)
         ):
             logger.error(f"Session {composite_key} is broken - cleaning up")
-            await self.cleanup_session(composite_key, current_receiver_task=asyncio.current_task())
+            await self.cleanup_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                reason="connection_broken",
+            )
 
             # Notify user
             await self._get_im_client(context).send_message(

@@ -5,9 +5,9 @@ import clsx from 'clsx';
 // below — and display mirrors askill's own formatScore (integer as-is, else
 // one decimal), so a 96 shows "AI 96", not "AI 96.0".
 function scoreChip(score: number): string {
-  if (score >= 90) return 'bg-mint-soft border-mint/40 text-mint';
-  if (score >= 85) return 'bg-cyan-soft border-cyan/40 text-cyan';
-  return 'bg-gold/[0.12] border-gold/40 text-gold';
+  if (score >= 90) return 'bg-mint-soft border-mint/40 text-mint-ink';
+  if (score >= 85) return 'bg-cyan-soft border-cyan/40 text-cyan-ink';
+  return 'bg-gold/[0.12] border-gold/40 text-gold-ink';
 }
 
 /** Compact "AI 9.5" pill used on registry result cards. */

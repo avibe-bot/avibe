@@ -17,6 +17,7 @@ class CodexTurnState:
     terminal_error: Optional[str] = None
     terminal_error_notified: bool = False
     visible_to_user: bool = True
+    indicator_cleanup_claimed: bool = False
 
 
 @dataclass
@@ -135,6 +136,15 @@ class CodexTurnRegistry:
             if pending and pending.request is state.request and pending.turn_id == turn_id:
                 pending.completed = True
         return state
+
+    def claim_indicator_cleanup(self, turn_id: str) -> Optional[AgentRequest]:
+        """Return the turn request to the first indicator-cleanup owner only."""
+
+        state = self.get_turn(turn_id)
+        if state is None or state.indicator_cleanup_claimed:
+            return None
+        state.indicator_cleanup_claimed = True
+        return state.request
 
     def hide_turn(self, turn_id: str) -> Optional[CodexTurnState]:
         state = self.get_turn(turn_id)

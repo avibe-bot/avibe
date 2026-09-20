@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import shlex
 import time
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
@@ -16,11 +18,22 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
-from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.memory_cli_access import configure_memory_cli_access
+from core.managed_skills import (
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
+from core.native_dispatch_phase import (
+    backend_dispatch_attempted,
+    mark_backend_dispatch_attempted,
+    mark_prewrite_recovery_required,
+)
+from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -33,7 +46,6 @@ from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -47,16 +59,18 @@ from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
-from modules.agents.codex.transport import CodexTransport
+from modules.agents.codex.transport import CodexResponseTooLargeError, CodexRPCError, CodexTransport
 from modules.agents.codex.turn_state import CodexTurnRegistry
 from vibe.codex_config import LEGACY_MANAGED_PROVIDER_IDS, MANAGED_PROVIDER_ID
 from vibe.desktop_backends import desktop_backend_subprocess_environment
+from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from modules.agents.model_hub import ModelHubLaunch
+    from vibe.backend_model_catalog import CodexHubCatalog
 
 _CODEX_MANAGED_PROVIDER_IDS = frozenset((MANAGED_PROVIDER_ID, *LEGACY_MANAGED_PROVIDER_IDS))
 _CODEX_MODEL_HUB_PROVIDER_ID = "avibe_model_hub"
@@ -66,6 +80,7 @@ _CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
 )
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
+CODEX_PROMPT_STRATEGY_METADATA_KEY = "codex_prompt_strategy"
 
 
 class _CodexConnectionProbeState:
@@ -89,6 +104,14 @@ class _CodexConnectionProbeState:
 
 class CodexConnectionProbeRuntimeMismatchError(RuntimeError):
     """The cached transport does not represent direct Codex credentials."""
+
+
+class CodexModelHubCatalogUnavailableError(RuntimeError):
+    """The configured Codex binary could not provide Hub launch metadata."""
+
+
+class CodexPromptRefreshUnavailableError(RuntimeError):
+    """The current app-server cannot safely refresh a persisted thread prompt."""
 
 
 class CodexResumeUnavailableError(RuntimeError):
@@ -127,6 +150,9 @@ class CodexAgent(BaseAgent):
         super().__init__(controller)
         self.codex_config = codex_config
         self._registered_runtime = registered_runtime
+        self._model_hub_catalog: CodexHubCatalog | None = None
+        self._model_hub_catalog_lock = asyncio.Lock()
+        self._model_hub_catalog_generation = 0
 
         # cwd → CodexTransport (one persistent process per working dir)
         self._transports: Dict[str, CodexTransport] = {}
@@ -149,10 +175,23 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, collaboration | fallback |
+        # fallback_pending_clear | fallback_pending_injection |
+        # fallback_pending_clear_injection | injected_pending_persist | unavailable)
+        self._thread_prompt_strategies: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, developer_instructions, target_strategy)
+        self._thread_unpersisted_prompts: Dict[str, tuple[str, str, str]] = {}
+        # base_session_id → (thread_id, active model, active reasoning effort)
+        self._thread_model_settings: Dict[str, tuple[str, str, Optional[str]]] = {}
         # base_session_id → (thread_id, AVIBE_* caller env)
         self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
         self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
+        # Turn ids the USER stopped. ``turn/interrupt`` and the ``turn/completed``
+        # notification it provokes race each other, and whichever arrives first
+        # clears the 👀 — so the stop intent has to outlive both and be consumed
+        # by the winner. See ``consume_user_stop_intent``.
+        self._user_stopped_turn_ids: set[str] = set()
         self._fork_correction_pending_base_sessions: set[str] = set()
         self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
         self._connection_probe_turns: Dict[str, str] = {}
@@ -223,6 +262,9 @@ class CodexAgent(BaseAgent):
     ) -> str:
         """Run a read-only ephemeral turn on the normal persistent app-server."""
 
+        from core.agent_model_selection import require_agent_model
+
+        model = require_agent_model(model, "codex")
         probe_cwd = paths.get_runtime_dir() / CODEX_CONNECTION_PROBE_DIR
         probe_cwd.mkdir(parents=True, exist_ok=True)
         transport: CodexTransport | None = None
@@ -253,6 +295,7 @@ class CodexAgent(BaseAgent):
                     "approvalPolicy": "never",
                     "sandbox": "read-only",
                     "ephemeral": True,
+                    "model": model,
                     "developerInstructions": (
                         "This is a connection probe. Do not use tools. "
                         "Reply with a short greeting."
@@ -276,9 +319,8 @@ class CodexAgent(BaseAgent):
                 "approvalPolicy": "never",
                 "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                 "effort": "low",
+                "model": model,
             }
-            if isinstance(model, str) and model.strip():
-                turn_params["model"] = model.strip()
             turn_response = await transport.send_request("turn/start", turn_params)
             turn = turn_response.get("turn")
             turn_id = turn_response.get("id") or (
@@ -369,6 +411,12 @@ class CodexAgent(BaseAgent):
         async with self._session_locks[request.base_session_id]:
             launch = None
             try:
+                # Register a complete durable binding before any transport
+                # acquisition or resume can fail and require ownership checks.
+                self.ensure_agent_session_id(request)
+                self._session_mgr.set_session_key(request.base_session_id, request.session_key)
+                self._session_mgr.set_cwd(request.base_session_id, request.working_path)
+                self._bind_runtime_agent_session_id(request)
                 if getattr(self.controller, "model_hub_runtime", None) is not None:
                     from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
@@ -399,31 +447,42 @@ class CodexAgent(BaseAgent):
             except Exception as e:
                 logger.error("Failed to start Codex transport: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
+                if isinstance(e, CodexModelHubCatalogUnavailableError):
+                    language = str(
+                        getattr(getattr(self.controller, "config", None), "language", "en")
+                        or "en"
+                    )
+                    display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
+                else:
+                    display_text = f"❌ Failed to start Codex CLI: {e}"
                 await emit_backend_failure(
                     self.controller,
                     request.context,
                     self.name,
                     str(e),
-                    display_text=f"❌ Failed to start Codex CLI: {e}",
+                    display_text=display_text,
                     request=request,
                 )
                 await self._remove_ack_reaction(request)
                 self._event_handler._release_stream_turn(request.context)
                 return
 
-            # Resolve after queued turns, then bind this session to the runtime.
-            self._session_mgr.set_session_key(request.base_session_id, request.session_key)
-            self._session_mgr.set_cwd(request.base_session_id, request.working_path)
             self._touch_transport_activity(request.working_path)
             await self._delete_ack(request)
 
             self._turn_registry.remember_request(request)
+            developer_instructions: Optional[str] = None
+            prompt_rendered = False
             try:
                 # Get or create thread (with resume support)
                 thread_id = self._session_mgr.get_thread_id(request.base_session_id)
 
                 if not thread_id:
-                    thread_id = await self._start_or_resume_thread(transport, request)
+                    developer_instructions = await self._build_thread_developer_instructions(request)
+                    prompt_rendered = True
+                    thread_id = await self._start_or_resume_thread(
+                        transport, request, developer_instructions=developer_instructions
+                    )
 
                 # If a turn is active, interrupt it first
                 active_turn = self._turn_registry.get_active_turn(request.base_session_id)
@@ -452,33 +511,62 @@ class CodexAgent(BaseAgent):
                     if interrupted_request:
                         await self._remove_ack_reaction(interrupted_request)
 
-                await self._refresh_thread_developer_instructions_if_needed(transport, request, thread_id)
+                # Render once at the actual Turn boundary. Besides keeping the
+                # payload byte-stable, this avoids repeating Memory admission
+                # side effects while the same request refreshes and starts.
+                if not prompt_rendered:
+                    developer_instructions = await self._build_thread_developer_instructions(request)
+                    prompt_rendered = True
+                await self._refresh_thread_developer_instructions_if_needed(
+                    transport,
+                    request,
+                    thread_id,
+                )
                 self._bind_runtime_agent_session_id(request)
-                thread_id = await self._start_turn(transport, request, thread_id)
+                thread_id = await self._start_turn(
+                    transport,
+                    request,
+                    thread_id,
+                    developer_instructions=developer_instructions,
+                )
 
             except Exception as e:
                 # Safety net: if the thread is stale (e.g. Codex server-side
                 # expiry, or the proactive invalidation in _get_or_create_transport
                 # was bypassed by a race), invalidate and retry once.
-                if self._is_recoverable_transport_error(e):
+                if (
+                    self._is_recoverable_transport_error(e)
+                    and backend_dispatch_attempted(request.context) is False
+                ):
                     logger.warning(
                         "Recoverable Codex transport failure for session %s, restarting transport and retrying: %s",
                         request.base_session_id,
                         e,
                     )
-                    await self._drop_transport_after_failure(request.working_path, transport, request)
-                    try:
-                        if launch is None:
-                            transport = await self._get_or_create_transport(request.working_path)
-                        else:
-                            transport = await self._get_or_create_transport(request.working_path, launch)
-                        self._touch_transport_activity(request.working_path)
-                        thread_id = await self._start_or_resume_thread(transport, request)
-                        self._bind_runtime_agent_session_id(request)
-                        await self._start_turn(transport, request, thread_id)
-                        return  # retry succeeded
-                    except Exception as retry_err:
-                        e = retry_err  # fall through to normal error handling
+                    if await self._drop_transport_after_failure(request.working_path, transport, request):
+                        try:
+                            if launch is None:
+                                transport = await self._get_or_create_transport(request.working_path)
+                            else:
+                                transport = await self._get_or_create_transport(request.working_path, launch)
+                            self._touch_transport_activity(request.working_path)
+                            if not prompt_rendered:
+                                self.ensure_agent_session_id(request)
+                                developer_instructions = await self._build_thread_developer_instructions(request)
+                                prompt_rendered = True
+                            thread_id = await self._start_or_resume_thread(
+                                transport, request, developer_instructions=developer_instructions
+                            )
+                            self._bind_runtime_agent_session_id(request)
+                            await self._start_turn(
+                                transport,
+                                request,
+                                thread_id,
+                                developer_instructions=developer_instructions,
+                            )
+                            return  # retry succeeded
+                        except Exception as retry_err:
+                            e = retry_err  # fall through to normal error handling
 
                 # FAIL LOUD on a server-side "thread not found": the conversation is
                 # gone, so surface the error instead of silently clearing the
@@ -486,10 +574,12 @@ class CodexAgent(BaseAgent):
                 # The mapping is kept so the failure is consistent until the user
                 # explicitly starts a new session (product decision: no silent
                 # fallbacks).
+                if isinstance(e, (CodexResumeUnavailableError, CodexResponseTooLargeError)):
+                    mark_prewrite_recovery_required(request.context, "codex_resume_unavailable")
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
-                error_text = f"❌ Codex error: {e}"
+                error_text = self._error_display_text(e)
                 await emit_backend_failure(
                     self.controller,
                     request.context,
@@ -538,7 +628,7 @@ class CodexAgent(BaseAgent):
                 {
                     "threadId": thread_id,
                     "expectedTurnId": request.expected_native_turn_id,
-                    "input": [{"type": "text", "text": request.text}],
+                    "input": [{"type": "text", "text": self.render_input(request.text, request.input_metadata)}],
                 },
             )
         except RuntimeError as exc:
@@ -630,19 +720,36 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "runtime_unavailable"
             return False
 
+        # Recorded BEFORE the RPC. Codex answers an interrupt with a
+        # ``turn/completed`` notification the event worker may process while this
+        # call is still awaiting its response; that handler pops the turn and
+        # clears its reaction, after which ``clear_pending`` here returns None.
+        # Whichever side gets there first consumes the intent and owes the
+        # receipt, so the race can no longer swallow it.
+        self._user_stopped_turn_ids.add(turn_id)
         try:
             await transport.send_request(
                 "turn/interrupt",
                 {"threadId": thread_id, "turnId": turn_id},
             )
             interrupted_request = self._event_handler.clear_pending(turn_id)
-            if interrupted_request:
-                await self._remove_ack_reaction(interrupted_request)
+            stopped_by_user = self.consume_user_stop_intent(turn_id)
+            if interrupted_request and stopped_by_user:
+                await self._remove_ack_reaction(
+                    interrupted_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI,
+                )
+            elif interrupted_request is None and stopped_by_user:
+                # A normal/failed completion won the race and popped the turn
+                # without consuming the stop intent. Its own terminal output is
+                # authoritative, so do not overwrite it with a silent cancel.
+                logger.info("Codex turn %s completed before /stop claimed it", turn_id)
+                return True
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
             # releases the SSE waiter through the outbound chokepoint without a
             # bubble. The user already knows they stopped it (avibe shows the dot go
-            # idle; IM shows the ack reaction removed above). ``level="silent"`` is
+            # idle; IM shows the ⏹️ receipt stamped above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
             # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
             # out of the run's terminal state so the stop settles it ``canceled``
@@ -660,6 +767,24 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "interrupt_failed"
             logger.error("Failed to interrupt Codex turn: %s", e)
             return False
+        finally:
+            # A normal/failed completion does not consume stop intent, and the
+            # caller itself may be cancelled while the RPC is in flight. Never
+            # let either path leave a stale turn id in this long-lived agent.
+            self._user_stopped_turn_ids.discard(turn_id)
+
+    def consume_user_stop_intent(self, turn_id: str) -> bool:
+        """Claim the /stop intent for ``turn_id``; True for the first claimer only.
+
+        Both the interrupt RPC and the ``turn/completed`` notification it causes
+        want to retire the same reaction, and either may run first. Claiming the
+        intent makes the receipt exactly-once instead of dependent on that order.
+        """
+
+        if not turn_id or turn_id not in self._user_stopped_turn_ids:
+            return False
+        self._user_stopped_turn_ids.discard(turn_id)
+        return True
 
     async def clear_sessions(self, session_key: str) -> int:
         """Clear sessions scoped to a specific session_key."""
@@ -745,7 +870,66 @@ class CodexAgent(BaseAgent):
         """Reload persisted runtime config before respawning app-server transports."""
         self.codex_config = codex_config
         self.controller.config.codex = codex_config
+        await self.invalidate_model_hub_runtime()
         await self.refresh_auth_state()
+
+    async def invalidate_model_hub_runtime(self) -> None:
+        """Make the next Hub launch rebuild its catalog without touching Direct transports."""
+        self._model_hub_catalog_generation += 1
+        if self._model_hub_catalog is not None:
+            self._model_hub_catalog.close()
+        self._model_hub_catalog = None
+
+    async def prepare_model_hub_runtime(self) -> CodexHubCatalog:
+        """Bind Hub metadata to this Agent's exact configured Codex binary."""
+        from vibe import backend_model_catalog
+
+        async with self._model_hub_catalog_lock:
+            if self._model_hub_catalog is not None:
+                return self._model_hub_catalog
+            generation = self._model_hub_catalog_generation
+            binary = self.codex_config.binary
+            configured_models = None
+            model_hub_service = getattr(self.controller, "model_hub_service", None)
+            store = getattr(model_hub_service, "store", None)
+            if store is not None:
+                configured_models = [
+                    model.to_payload()
+                    for model in store.load().agents["codex"].models
+                ]
+            preparation = asyncio.create_task(
+                asyncio.to_thread(
+                    backend_model_catalog.prepare_codex_hub_catalog,
+                    binary,
+                    None,
+                    configured_models,
+                )
+            )
+            try:
+                catalog = await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                # The export runs in a thread and cannot be cancelled. Its
+                # result must still release its pin after the caller leaves.
+                preparation.add_done_callback(self._discard_model_hub_catalog)
+                raise
+            except Exception as exc:
+                raise CodexModelHubCatalogUnavailableError(
+                    "Codex Model Hub catalog preparation failed"
+                ) from exc
+            if self._model_hub_catalog_generation != generation:
+                catalog.close()
+                raise CodexModelHubCatalogUnavailableError(
+                    "Codex Model Hub catalog generation changed during preparation"
+                )
+            self._model_hub_catalog = catalog
+            return catalog
+
+    @staticmethod
+    def _discard_model_hub_catalog(preparation: asyncio.Task) -> None:
+        try:
+            preparation.result().close()
+        except Exception:
+            logger.warning("Cancelled Codex catalog preparation failed", exc_info=True)
 
     async def prepare_resume_binding(
         self,
@@ -796,6 +980,7 @@ class CodexAgent(BaseAgent):
 
     async def shutdown_runtime(self) -> None:
         """Stop all app-server transports during vibe-remote shutdown."""
+        await self.invalidate_model_hub_runtime()
         if not hasattr(self, "_transport_last_activity"):
             self._transport_last_activity = {}
         if not hasattr(self, "_transport_locks"):
@@ -842,6 +1027,21 @@ class CodexAgent(BaseAgent):
         payload = getattr(request.context, "platform_specific", None) or {}
         session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
         setter(request.base_session_id, session_id)
+
+    def _error_display_text(self, error: BaseException) -> str:
+        if isinstance(error, CodexResponseTooLargeError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t('error.codexResponseTooLarge', language, limitMiB=error.limit // (1024 * 1024))}"
+        if isinstance(error, CodexPromptRefreshUnavailableError):
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t('error.codexPromptRefreshUnavailable', language)}"
+        return f"❌ Codex error: {error}"
 
     def _runtime_ownership_target_for_cwd(
         self,
@@ -1195,10 +1395,7 @@ class CodexAgent(BaseAgent):
                 and not has_active
                 and idle_for >= idle_timeout
             )
-            stuck_candidate = bool(stuck_sessions) and ownership.disposition not in {
-                SessionRuntimeDisposition.TRANSITIONING,
-                SessionRuntimeDisposition.UNKNOWN,
-            }
+            stuck_candidate = bool(stuck_sessions) and not ownership.blocks_reclamation
             if not ordinary_candidate and not stuck_candidate:
                 continue
 
@@ -1220,12 +1417,10 @@ class CodexAgent(BaseAgent):
                     now=current_now,
                     cap=stuck_active_cap,
                 )
-                if ownership.disposition in {
-                    SessionRuntimeDisposition.TRANSITIONING,
-                    SessionRuntimeDisposition.UNKNOWN,
-                }:
-                    continue
-                if ownership.blocks_reclamation and not stuck_sessions:
+                # Silence cannot revoke a durable Turn or Activity owner.
+                # The age backstop only repairs stale adapter-local flags once
+                # durable ownership independently allows reclamation.
+                if ownership.blocks_reclamation:
                     continue
 
                 settled_stuck_sessions: set[str] = set()
@@ -1364,13 +1559,11 @@ class CodexAgent(BaseAgent):
             release(context)
 
     def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
-        """Idle cap after which an *active* transport is force-evicted.
+        """Age threshold for repairing an unowned adapter-local active flag.
 
         Returns ``None`` when the backstop is disabled (multiplier <= 0), in
-        which case an active turn remains an absolute veto. Otherwise a
-        transport with an active turn is force-evicted once it has been idle for
-        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
-        sane even when ``idle_timeout`` is configured very small.
+        which case an active flag remains an absolute veto. Durable ownership
+        always vetoes reclamation regardless of this threshold.
         """
         multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
         if multiplier <= 0:
@@ -1406,6 +1599,8 @@ class CodexAgent(BaseAgent):
     # ------------------------------------------------------------------
 
     def _is_recoverable_transport_error(self, error: Exception) -> bool:
+        if isinstance(error, CodexResponseTooLargeError):
+            return False
         if isinstance(error, (ConnectionError, TimeoutError)):
             return True
 
@@ -1424,12 +1619,27 @@ class CodexAgent(BaseAgent):
             )
         )
 
+    async def _transport_replacement_is_safe(self, cwd: str, transport: CodexTransport) -> bool:
+        """Recheck durable ownership and live turns inside retirement."""
+        ownership = await self._runtime_ownership_snapshot_for_cwd_async(cwd)
+        dead = self._transport_alive(transport) is False
+        blocked = getattr(
+            ownership,
+            "blocks_dead_transport_replacement" if dead else "blocks_transport_replacement",
+            True,
+        )
+        return bool(
+            ownership is not None
+            and not blocked
+            and (dead or not self._has_active_turns_for_cwd(cwd))
+        )
+
     async def _drop_transport_after_failure(
         self,
         cwd: str,
         transport: CodexTransport,
         request: AgentRequest,
-    ) -> None:
+    ) -> bool:
         """Remove a broken app-server and clear stale in-memory request state."""
         lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
         async with lock:
@@ -1440,6 +1650,7 @@ class CodexAgent(BaseAgent):
                     detached = await self._stop_and_detach_transport_generation(
                         cwd,
                         transport,
+                        final_predicate=lambda: self._transport_replacement_is_safe(cwd, transport),
                     )
                 except Exception as exc:
                     logger.warning(
@@ -1447,9 +1658,10 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
                 if not detached:
-                    return
+                    logger.warning("Codex failure recovery cannot replace an owned transport for cwd=%s", cwd)
+                    return False
             elif current is None:
                 identity = self._transport_activation_identity(transport)
                 registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
@@ -1458,7 +1670,7 @@ class CodexAgent(BaseAgent):
                         "Refusing to stop an untracked current Codex generation for cwd=%s",
                         cwd,
                     )
-                    return
+                    return False
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -1467,7 +1679,7 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
             else:
                 identity = self._transport_activation_identity(transport)
                 registry = getattr(
@@ -1482,7 +1694,7 @@ class CodexAgent(BaseAgent):
                         "Refusing to stop a replaced but still-current Codex generation for cwd=%s",
                         cwd,
                     )
-                    return
+                    return False
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -1491,7 +1703,7 @@ class CodexAgent(BaseAgent):
                         cwd,
                         exc,
                     )
-                    return
+                    return False
 
             if should_invalidate_cwd_sessions:
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
@@ -1504,6 +1716,7 @@ class CodexAgent(BaseAgent):
         self._session_mgr.invalidate_thread(request.base_session_id)
         self._clear_thread_developer_instructions(request.base_session_id)
         self._turn_registry.clear_session(request.base_session_id)
+        return True
 
     async def _get_or_create_transport(
         self,
@@ -1519,7 +1732,7 @@ class CodexAgent(BaseAgent):
 
         while True:
             wait_for_active_turns = False
-            async with self._transport_locks[cwd]:
+            async with self._transport_locks[cwd], AsyncExitStack() as catalog_pins:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
                 desired_fingerprint = launch.fingerprint if launch is not None else "direct"
@@ -1554,26 +1767,33 @@ class CodexAgent(BaseAgent):
                 if wait_for_active_turns:
                     pass
                 else:
+                    runtime_args: list[str] = []
+                    runtime_env = dict(self._codex_runtime_environment())
+                    runtime_fingerprint = "direct"
+                    catalog = None
+                    if launch is not None:
+                        from modules.agents.model_hub import build_codex_hub_launch
+
+                        if launch.channel == "hub":
+                            # Capture the reference before any later await.
+                            # Invalidation may drop the cache while we retire
+                            # an old transport or spawn/initialize its successor.
+                            catalog = (await self.prepare_model_hub_runtime()).retain()
+                            catalog_pins.callback(catalog.close)
+                        runtime_args, runtime_env = build_codex_hub_launch(
+                            [],
+                            runtime_env,
+                            launch,
+                            model_catalog_path=catalog.path if catalog is not None else None,
+                        )
+                        runtime_fingerprint = launch.fingerprint
+
                     # Stop stale transport if any
                     if existing:
-                        async def replacement_is_safe() -> bool:
-                            ownership = (
-                                await self._runtime_ownership_snapshot_for_cwd_async(cwd)
-                            )
-                            return bool(
-                                ownership is not None
-                                and not getattr(
-                                    ownership,
-                                    "blocks_transport_replacement",
-                                    True,
-                                )
-                                and not self._has_active_turns_for_cwd(cwd)
-                            )
-
                         detached = await self._stop_and_detach_transport_generation(
                             cwd,
                             existing,
-                            final_predicate=replacement_is_safe,
+                            final_predicate=lambda: self._transport_replacement_is_safe(cwd, existing),
                         )
                         if not detached:
                             raise RuntimeError(
@@ -1601,16 +1821,6 @@ class CodexAgent(BaseAgent):
                                 cwd,
                             )
 
-                    runtime_args: list[str] = []
-                    runtime_env = dict(self._codex_runtime_environment())
-                    runtime_fingerprint = "direct"
-                    if launch is not None:
-                        from modules.agents.model_hub import build_codex_hub_launch
-
-                        runtime_args, hub_env = build_codex_hub_launch([], runtime_env, launch)
-                        if hub_env is not None:
-                            runtime_env = hub_env
-                        runtime_fingerprint = launch.fingerprint
                     transport = CodexTransport(
                         binary=self.codex_config.binary,
                         cwd=cwd,
@@ -1618,6 +1828,7 @@ class CodexAgent(BaseAgent):
                         runtime_args=runtime_args,
                         runtime_env=runtime_env,
                         runtime_fingerprint=runtime_fingerprint,
+                        model_hub_catalog=catalog,
                     )
 
                     # Wire up callbacks
@@ -1694,7 +1905,7 @@ class CodexAgent(BaseAgent):
         # this turn's shell needs in order to record where it came from. This env is
         # the only hop it can travel: the CLI runs as a subprocess of the Codex shell.
         context = getattr(request, "context", None)
-        return caller_env_for_platform_payload(
+        env = caller_env_for_platform_payload(
             getattr(context, "platform_specific", None),
             message=context,
             # Defensively resolved: this is reached from payload-shaping helpers that
@@ -1704,6 +1915,16 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self, "controller", None), "config", None), "platform", None
             ),
         )
+        env.update(
+            managed_skill_environment(
+                getattr(request, "working_path", None),
+                project_base=managed_skill_project_base(context),
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+            )
+        )
+        return env
 
     def _caller_env_script_path(self, request: AgentRequest) -> Path:
         caller_env = self._caller_env_for_request(request)
@@ -1744,6 +1965,8 @@ class CodexAgent(BaseAgent):
         env = self._caller_env_for_request(request)
         runtime_env = self._codex_runtime_environment()
         config = dict(params.get("config") or {})
+        config["skills.include_instructions"] = False
+        params["config"] = config
         shell_policy = dict(config.get("shell_environment_policy") or {})
         set_env = dict(shell_policy.get("set") or {})
         had_path = "PATH" in set_env
@@ -1792,6 +2015,8 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         request: AgentRequest,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Create a new Codex thread and return its threadId."""
         params: Dict[str, Any] = {
@@ -1800,9 +2025,10 @@ class CodexAgent(BaseAgent):
             "sandbox": "danger-full-access",
         }
         self.ensure_agent_session_id(request)
-        developer_instructions = self._build_thread_developer_instructions(request)
         if developer_instructions:
-            params["developerInstructions"] = developer_instructions
+            params["developerInstructions"] = await self._native_thread_prompt(
+                transport, request, developer_instructions
+            )
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
@@ -1818,7 +2044,39 @@ class CodexAgent(BaseAgent):
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         # Also persist for resume support
         self.bind_agent_session_id(request, thread_id)
-        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        if developer_instructions:
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(
+                self.controller,
+                request.context,
+                getattr(request, "skill_catalog_observation", None),
+                backend="codex",
+            )
+            # Only a genuinely new thread can establish its first model-visible
+            # prompt from native configuration alone. Resume/fork still carry
+            # history, so they must not advance this delivery fingerprint.
+            self._remember_thread_developer_instructions(
+                request.base_session_id, thread_id, developer_instructions
+            )
+            self._remember_thread_prompt_strategy(
+                request.base_session_id, thread_id, "injected_pending_persist"
+            )
+            if not hasattr(self, "_thread_unpersisted_prompts"):
+                self._thread_unpersisted_prompts = {}
+            self._thread_unpersisted_prompts[request.base_session_id] = (
+                thread_id,
+                developer_instructions,
+                "fallback",
+            )
+            self._repair_unpersisted_prompt_strategy(
+                request, thread_id, agent_session_id=self._prompt_state_agent_session_id(request)
+            )
+        self._remember_thread_model_settings_from_response(
+            request.base_session_id,
+            thread_id,
+            resp,
+        )
         self._remember_thread_caller_env_config(
             request.base_session_id,
             thread_id,
@@ -1837,9 +2095,46 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         request: AgentRequest,
         fork: dict[str, Any],
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
-        self.ensure_agent_session_id(request)
+        target_agent_session_id = self.ensure_agent_session_id(request)
+        (
+            source_prompt_strategy,
+            source_prompt_sha256,
+            source_prompt_instructions,
+        ) = self._fork_source_prompt_state(fork)
+        if source_prompt_strategy == "injected_pending_persist":
+            source_session_id = str(fork.get("source_session_id") or "").strip()
+            source_thread_id = str(fork.get("source_native_session_id") or "").strip()
+            pending = getattr(self, "_thread_unpersisted_prompts", {}).get(
+                source_session_id
+            )
+            if (
+                pending
+                and pending[0] == source_thread_id
+                and pending[2] in {"fallback", "fallback_pending_clear"}
+            ):
+                _, source_prompt_instructions, source_prompt_strategy = pending
+                source_prompt_sha256 = self._prompt_fingerprint(
+                    source_prompt_instructions
+                )
+            else:
+                # This process cannot prove which prompt bytes the source
+                # injected, so a fork must not inherit an unrepairable state.
+                source_prompt_strategy = "unavailable"
+                source_prompt_sha256 = None
+                source_prompt_instructions = None
+        elif source_prompt_strategy == "fallback_pending_injection":
+            # The source injection outcome is ambiguous. The fork already
+            # carries whatever native history exists; never append it again.
+            source_prompt_strategy = "unavailable"
+            source_prompt_sha256 = None
+            source_prompt_instructions = None
+        elif source_prompt_strategy == "unavailable":
+            source_prompt_sha256 = None
+            source_prompt_instructions = None
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
@@ -1848,9 +2143,21 @@ class CodexAgent(BaseAgent):
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
         }
-        developer_instructions = self._build_thread_developer_instructions(request)
         if developer_instructions:
-            params["developerInstructions"] = developer_instructions
+            params["developerInstructions"] = await self._native_thread_prompt(
+                transport, request, developer_instructions
+            )
+        elif source_prompt_strategy is None and callable(
+            getattr(
+                getattr(self, "sessions", None),
+                "get_agent_session_runtime_marker",
+                None,
+            )
+        ):
+            # Threads created before Turn-bound prompt delivery stored Avibe's
+            # prompt as native thread configuration. Do not copy that legacy
+            # configuration into a fork alongside the new delivery strategy.
+            params["developerInstructions"] = None
         if effective_model:
             params["model"] = effective_model
         git_path_state, git_path_managed = self._inject_caller_env_config(params, request)
@@ -1873,8 +2180,69 @@ class CodexAgent(BaseAgent):
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
-        self.bind_agent_session_id(request, thread_id)
-        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        target_agent_session_id = (
+            self.bind_agent_session_id(request, thread_id) or target_agent_session_id
+        )
+        cache_source_prompt_strategy = True
+        if source_prompt_instructions is not None:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                source_prompt_instructions,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+            )
+            if persisted_prompt_strategy:
+                self._remember_thread_developer_instructions(
+                    request.base_session_id,
+                    thread_id,
+                    source_prompt_instructions,
+                )
+        elif source_prompt_sha256 is not None and source_prompt_strategy in {
+            "fallback",
+            "fallback_pending_clear",
+            "fallback_pending_clear_injection",
+        }:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+                prompt_sha256=source_prompt_sha256,
+            )
+            # Let the first target Turn read and compare the carried fingerprint.
+            # Caching only the strategy would make unchanged bytes look changed.
+            cache_source_prompt_strategy = False
+        elif source_prompt_strategy in {
+            "collaboration",
+            "fallback_pending_clear",
+            "unavailable",
+        }:
+            persisted_prompt_strategy = self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=source_prompt_strategy,
+                agent_session_id=target_agent_session_id,
+            )
+        else:
+            persisted_prompt_strategy = True
+        if not persisted_prompt_strategy:
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the forked Codex prompt strategy"
+            )
+        if source_prompt_strategy and cache_source_prompt_strategy:
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                source_prompt_strategy,
+            )
+        self._remember_thread_model_settings_from_response(
+            request.base_session_id,
+            thread_id,
+            resp,
+        )
         self._remember_thread_caller_env_config(
             request.base_session_id,
             thread_id,
@@ -1953,11 +2321,31 @@ class CodexAgent(BaseAgent):
         request_effort = getattr(request, "subagent_reasoning_effort", None)
         vibe_model = getattr(request, "vibe_agent_model", None)
         vibe_effort = getattr(request, "vibe_agent_reasoning_effort", None)
+        vibe_model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))
+        vibe_effort_explicit = bool(
+            getattr(request, "vibe_agent_reasoning_effort_explicit", False)
+        )
         vibe_instructions = getattr(request, "vibe_agent_system_prompt", None)
 
         effective_agent = request_subagent or routing_agent
-        explicit_model = request_model or vibe_model or routing_model
-        explicit_effort = request_effort or vibe_effort or routing_effort
+        if request_model is not None:
+            selected_model = request_model
+            selected_model_is_explicit = True
+        elif vibe_model_explicit:
+            selected_model = vibe_model
+            selected_model_is_explicit = True
+        else:
+            selected_model = vibe_model or routing_model
+            selected_model_is_explicit = False
+        if request_effort is not None:
+            selected_effort = request_effort
+            selected_effort_is_explicit = True
+        elif vibe_effort_explicit:
+            selected_effort = vibe_effort
+            selected_effort_is_explicit = True
+        else:
+            selected_effort = vibe_effort or routing_effort
+            selected_effort_is_explicit = False
 
         agent_definition: Optional[SubagentDefinition] = None
         if effective_agent:
@@ -1968,14 +2356,27 @@ class CodexAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Failed to load Codex subagent %s: %s", effective_agent, exc)
 
-        effective_model = explicit_model or (agent_definition.model if agent_definition else None)
+        effective_model = (
+            selected_model
+            if selected_model_is_explicit
+            else selected_model or (agent_definition.model if agent_definition else None)
+        )
+        effective_effort = (
+            selected_effort
+            if selected_effort_is_explicit
+            else selected_effort or (agent_definition.reasoning_effort if agent_definition else None)
+        )
         if getattr(self.controller, "model_hub_runtime", None) is not None:
             from modules.agents.model_hub import launch_for_context
 
             launch = launch_for_context(getattr(request, "context", None))
             if launch is not None and launch.backend == "codex":
                 effective_model = launch.runtime_model or effective_model
-        effective_effort = explicit_effort or (agent_definition.reasoning_effort if agent_definition else None)
+                if (
+                    launch.channel != "direct"
+                    and effective_effort not in launch.reasoning_efforts
+                ):
+                    effective_effort = None
         developer_instructions = vibe_instructions or (agent_definition.developer_instructions if agent_definition else None)
 
         return effective_agent, effective_model, effective_effort, developer_instructions
@@ -2000,6 +2401,8 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         request: AgentRequest,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Try to resume a persisted thread, fall back to creating a new one."""
         # Resume the native thread bound to the RESERVED workbench row (by PK): the
@@ -2023,8 +2426,27 @@ class CodexAgent(BaseAgent):
                 self.bind_agent_session_id(request, persisted)
                 resume_params: Dict[str, Any] = {
                     "threadId": persisted,
-                    "developerInstructions": self._build_thread_developer_instructions(request),
+                    "excludeTurns": True,
                 }
+                if developer_instructions:
+                    resume_params["developerInstructions"] = await self._native_thread_prompt(
+                        transport, request, developer_instructions
+                    )
+                marker_getter = getattr(
+                    getattr(self, "sessions", None),
+                    "get_agent_session_runtime_marker",
+                    None,
+                )
+                if callable(marker_getter):
+                    marker = self._read_persisted_prompt_strategy_marker(
+                        persisted,
+                        agent_session_id=self._prompt_state_agent_session_id(request),
+                    )
+                    if marker is None and not developer_instructions:
+                        # Older Avibe releases persisted their prompt as thread
+                        # configuration. Clear it before the first Turn selects
+                        # one of the new prompt-delivery strategies.
+                        resume_params["developerInstructions"] = None
                 git_path_state, git_path_managed = self._inject_caller_env_config(
                     resume_params,
                     request,
@@ -2048,6 +2470,8 @@ class CodexAgent(BaseAgent):
                     if isinstance(thread_obj, dict):
                         thread_id = thread_obj.get("id", "")
             except Exception as e:
+                if isinstance(e, (CodexPromptRefreshUnavailableError, CodexResponseTooLargeError)):
+                    raise
                 if self._is_recoverable_transport_error(e):
                     # Transient: reconnect the SAME thread (handled by the outer
                     # retry) — not context loss, keep.
@@ -2069,10 +2493,10 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise CodexResumeUnavailableError(persisted, detail="thread/resume returned no thread id")
             self._session_mgr.set_thread_id(request.base_session_id, thread_id)
-            self._remember_thread_developer_instructions(
+            self._remember_thread_model_settings_from_response(
                 request.base_session_id,
                 thread_id,
-                resume_params.get("developerInstructions"),
+                resp,
             )
             self._remember_thread_caller_env_config(
                 request.base_session_id,
@@ -2090,10 +2514,42 @@ class CodexAgent(BaseAgent):
 
         fork = pending_native_fork(request.context, self.name)
         if fork:
-            return await self._fork_thread(transport, request, fork)
+            return await self._fork_thread(
+                transport, request, fork, developer_instructions=developer_instructions
+            )
 
         # No associated thread yet (genuinely first turn) — start fresh.
-        return await self._start_thread(transport, request)
+        return await self._start_thread(
+            transport, request, developer_instructions=developer_instructions
+        )
+
+    async def _native_thread_prompt(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        developer_instructions: str,
+    ) -> str:
+        """Keep user-configured native instructions before Avibe's baseline.
+
+        Native configuration is reconstructed after compaction, whereas injected
+        items are budgeted history. Never claim that an overlay updates this
+        configuration, or advance the history fingerprint on resume/fork.
+        """
+        params: Dict[str, Any] = {"includeLayers": False}
+        if getattr(request, "working_path", None):
+            params["cwd"] = request.working_path
+        response = await transport.send_request("config/read", params)
+        config = response.get("config") if isinstance(response, dict) else None
+        if not isinstance(config, dict):
+            raise CodexPromptRefreshUnavailableError(
+                "Could not read configured Codex instructions before setting the native baseline"
+            )
+        configured = config.get("developer_instructions")
+        if configured is not None and not isinstance(configured, str):
+            raise CodexPromptRefreshUnavailableError(
+                "Configured Codex developer instructions must be text"
+            )
+        return f"{configured}\n\n{developer_instructions}" if configured else developer_instructions
 
     async def _resolve_resume_model_provider_override(
         self,
@@ -2178,13 +2634,8 @@ class CodexAgent(BaseAgent):
         # created under the ephemeral Hub provider can resume in Direct mode.
         return _CODEX_DEFAULT_PROVIDER_ID
 
-    def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
-        """Build Codex thread-level developer instructions for start/resume.
-
-        Codex treats these as session configuration, not appended chat history.
-        Passing the current value on resume refreshes stale Vibe Remote targeting
-        instructions without growing the thread transcript.
-        """
+    async def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
+        """Render the developer instructions applied at the next Turn boundary."""
         _, _, _, agent_instructions = self._resolve_codex_agent_settings(request)
         platform = (
             request.context.platform
@@ -2192,31 +2643,37 @@ class CodexAgent(BaseAgent):
             or self.controller.config.platform
         )
 
-        instruction_parts: list[str] = []
-        if agent_instructions:
-            instruction_parts.append(agent_instructions)
-
         # Resolve admission once: it associates or clears this turn's Memory CLI
         # session scope as a side effect, so a second call per turn would repeat
         # that write.
-        memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
+        configure_memory_cli_access(self.controller, request.context)
 
-        instruction_parts.append(
-            build_system_prompt_injection(
-                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
-                and platform != "wechat",
-                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
-                include_codex_generated_images=True,
-                include_memory_cli=memory_cli_admitted,
-                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
-                context=request.context,
-                fallback_platform=platform,
-                enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                current_agent_backend="codex",
-            )
+        skill_catalog_sink: list[dict] = []
+        instructions = await asyncio.to_thread(
+            build_system_prompt_injection,
+            agent_instructions=agent_instructions or "",
+            include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
+            and platform != "wechat",
+            include_codex_generated_images=True,
+                memory_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
+                ),
+                profile_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
+                ),
+            context=request.context,
+            fallback_platform=platform,
+            enabled_agents=get_enabled_agents_for_prompt(self.controller),
+            skills_cwd=getattr(request, "working_path", None),
+            skills_project_base=managed_skill_project_base(request.context),
+            skills_claude_cli_path=managed_skill_claude_cli_path(
+                getattr(getattr(self, "controller", None), "config", None)
+            ),
+            skill_catalog_sink=skill_catalog_sink,
         )
 
-        return "\n\n".join(part for part in instruction_parts if part) or None
+        request.skill_catalog_observation = skill_catalog_sink[0] if skill_catalog_sink else None
+        return instructions or None
 
     async def _inject_forked_session_correction(
         self,
@@ -2254,46 +2711,34 @@ class CodexAgent(BaseAgent):
         request: AgentRequest,
         thread_id: str,
     ) -> None:
-        """Refresh thread-level instructions for already-cached Codex threads."""
+        """Refresh mutable non-prompt thread config before starting a Turn."""
         self.ensure_agent_session_id(request)
-        developer_instructions = self._build_thread_developer_instructions(request)
-        # Building the instructions also grants/revokes the per-turn Memory CLI
-        # capability, so resolve the caller environment only after that decision.
+        # The caller invokes this after prompt rendering grants or revokes the
+        # per-turn Memory CLI capability, so the environment observes that
+        # decision without rendering the prompt a second time.
         caller_env = self._caller_env_for_request(request)
         git_path_state = self._git_path_state_for_request(request)
 
-        if not hasattr(self, "_thread_developer_instructions"):
-            self._thread_developer_instructions = {}
         if not hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs = {}
         if not hasattr(self, "_thread_git_path_configs"):
             self._thread_git_path_configs = {}
 
-        cached = self._thread_developer_instructions.get(request.base_session_id)
         cached_caller_env = self._thread_caller_env_configs.get(request.base_session_id)
         cached_git_path = self._thread_git_path_configs.get(request.base_session_id)
         git_path_changed = cached_git_path is None or cached_git_path[:2] != (
             thread_id,
             git_path_state,
         )
-        git_path_managed = bool(
-            cached_git_path
-            and cached_git_path[0] == thread_id
-            and cached_git_path[2]
-        )
-        if not developer_instructions and not caller_env and not git_path_changed:
-            return
-        if cached == (thread_id, developer_instructions) and (
-            not caller_env or cached_caller_env == (thread_id, caller_env)
-        ) and not git_path_changed:
+        git_path_managed = bool(cached_git_path and cached_git_path[0] == thread_id and cached_git_path[2])
+        caller_env_changed = bool(caller_env) and cached_caller_env != (thread_id, caller_env)
+        if not caller_env_changed and not git_path_changed:
             return
 
         resume_params: Dict[str, Any] = {
             "threadId": thread_id,
         }
-        if cached != (thread_id, developer_instructions):
-            resume_params["developerInstructions"] = developer_instructions
-        if caller_env or git_path_changed:
+        if caller_env_changed or git_path_changed:
             git_path_state, git_path_managed = self._inject_caller_env_config(
                 resume_params,
                 request,
@@ -2303,14 +2748,13 @@ class CodexAgent(BaseAgent):
         if model_provider:
             resume_params["modelProvider"] = model_provider
 
+        if len(resume_params) == 1:
+            return
+
+        resume_params["excludeTurns"] = True
         await transport.send_request(
             "thread/resume",
             resume_params,
-        )
-        self._remember_thread_developer_instructions(
-            request.base_session_id,
-            thread_id,
-            developer_instructions,
         )
         self._remember_thread_caller_env_config(request.base_session_id, thread_id, caller_env)
         self._remember_thread_git_path_config(
@@ -2331,6 +2775,86 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions = {}
         self._thread_developer_instructions[base_session_id] = (thread_id, developer_instructions)
+
+    def _remember_thread_prompt_strategy(
+        self,
+        base_session_id: str,
+        thread_id: str,
+        strategy: str,
+    ) -> None:
+        if not hasattr(self, "_thread_prompt_strategies"):
+            self._thread_prompt_strategies = {}
+        self._thread_prompt_strategies[base_session_id] = (thread_id, strategy)
+
+    def _fork_source_prompt_state(
+        self,
+        fork: dict[str, Any],
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        source_thread_id = str(fork.get("source_native_session_id") or "").strip()
+        if not source_session_id or not source_thread_id:
+            return None, None, None
+
+        cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(
+            source_session_id
+        )
+        cached_instructions = getattr(
+            self,
+            "_thread_developer_instructions",
+            {},
+        ).get(source_session_id)
+        instructions = (
+            cached_instructions[1]
+            if cached_instructions and cached_instructions[0] == source_thread_id
+            else None
+        )
+        if cached_strategy and cached_strategy[0] == source_thread_id:
+            strategy = cached_strategy[1]
+            prompt_sha256 = (
+                self._prompt_fingerprint(instructions) if instructions else None
+            )
+            if prompt_sha256 is None and strategy in {
+                "fallback",
+                "fallback_pending_clear",
+                "fallback_pending_clear_injection",
+            }:
+                marker = self._read_persisted_prompt_strategy_marker(
+                    source_thread_id,
+                    agent_session_id=source_session_id,
+                )
+                if marker is not None and marker["strategy"] == strategy:
+                    prompt_sha256 = marker.get("sha256")
+            return strategy, prompt_sha256, instructions
+
+        marker = self._read_persisted_prompt_strategy_marker(
+            source_thread_id,
+            agent_session_id=source_session_id,
+        )
+        if marker is None:
+            return None, None, None
+        return marker["strategy"], marker.get("sha256"), instructions
+
+    def _remember_thread_model_settings_from_response(
+        self,
+        base_session_id: str,
+        thread_id: str,
+        response: Any,
+    ) -> None:
+        if not isinstance(response, dict):
+            return
+        model = response.get("model")
+        if not isinstance(model, str) or not model.strip():
+            return
+        effort = response.get("reasoningEffort")
+        if not isinstance(effort, str):
+            effort = None
+        if not hasattr(self, "_thread_model_settings"):
+            self._thread_model_settings = {}
+        self._thread_model_settings[base_session_id] = (
+            thread_id,
+            model.strip(),
+            effort,
+        )
 
     def _remember_thread_caller_env_config(
         self,
@@ -2362,6 +2886,12 @@ class CodexAgent(BaseAgent):
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
+        if hasattr(self, "_thread_prompt_strategies"):
+            self._thread_prompt_strategies.pop(base_session_id, None)
+        if hasattr(self, "_thread_unpersisted_prompts"):
+            self._thread_unpersisted_prompts.pop(base_session_id, None)
+        if hasattr(self, "_thread_model_settings"):
+            self._thread_model_settings.pop(base_session_id, None)
         if hasattr(self, "_thread_caller_env_configs"):
             self._thread_caller_env_configs.pop(base_session_id, None)
         if hasattr(self, "_thread_git_path_configs"):
@@ -2381,27 +2911,575 @@ class CodexAgent(BaseAgent):
     def is_fork_correction_pending(self, base_session_id: str) -> bool:
         return base_session_id in self._fork_correction_pending_sessions()
 
+    @staticmethod
+    def _collaboration_mode_is_unsupported(error: BaseException) -> bool:
+        message = str(error).casefold()
+        names_field = "collaborationmode" in message or "collaboration_mode" in message
+        unsupported = any(
+            marker in message
+            for marker in (
+                "experimental api",
+                "experimentalapi",
+                "unknown field",
+                "unsupported",
+                "unrecognized",
+            )
+        )
+        return names_field and unsupported
+
+    @staticmethod
+    def _render_developer_prompt_snapshot(developer_instructions: str) -> str:
+        return (
+            prompt_text("runtime-snapshot-open")
+            + developer_instructions
+            + prompt_text("runtime-snapshot-close")
+        )
+
+    async def _inject_thread_developer_instructions(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        thread_id: str,
+        developer_instructions: str,
+        *,
+        agent_session_id: Optional[str] = None,
+        strategy: str = "fallback",
+    ) -> None:
+        """Append model-visible instructions, with durable at-most-once recovery."""
+
+        previous_marker = self._read_persisted_prompt_strategy_marker(
+            thread_id,
+            agent_session_id=agent_session_id,
+        )
+        pending_strategy = (
+            "fallback_pending_clear_injection"
+            if strategy == "fallback_pending_clear"
+            else "fallback_pending_injection"
+        )
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            developer_instructions,
+            strategy=pending_strategy,
+            agent_session_id=agent_session_id,
+        ):
+            # No native mutation happened, so volatile strategy selection can
+            # be discarded and resolved again on a later retry.
+            getattr(self, "_thread_prompt_strategies", {}).pop(
+                request.base_session_id,
+                None,
+            )
+            raise CodexPromptRefreshUnavailableError(
+                "Could not prepare the fallback prompt strategy before injection"
+            )
+        # Keep the write-ahead state in memory too. If the RPC outcome is
+        # ambiguous, a same-process retry must follow the same at-most-once
+        # recovery path as a process restart.
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            pending_strategy,
+        )
+        try:
+            await transport.send_request(
+                "thread/inject_items",
+                {
+                    "threadId": thread_id,
+                    "items": [
+                        {
+                            "type": "message",
+                            "role": "developer",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": self._render_developer_prompt_snapshot(developer_instructions),
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        except CodexRPCError as exc:
+            if not exc.request_rejected:
+                raise
+            # The server rejected the request before dispatch, so restore the
+            # pre-injection state instead of recording an unknowable mutation.
+            previous_marker = previous_marker or {}
+            if not self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy=previous_marker.get("strategy"),
+                prompt_sha256=previous_marker.get("sha256"),
+                agent_session_id=agent_session_id,
+            ):
+                raise CodexPromptRefreshUnavailableError(
+                    "Could not restore the prompt strategy after rejected injection"
+                ) from exc
+            self._thread_prompt_strategies.pop(request.base_session_id, None)
+            raise CodexPromptRefreshUnavailableError(
+                "Codex rejected developer prompt injection; check app-server API compatibility"
+            ) from exc
+        from core.skill_observability import accept_catalog
+
+        candidate = getattr(request, "skill_catalog_observation", None)
+        if candidate is not None:
+            accept_catalog(self.controller, request.context, candidate, backend="codex")
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            developer_instructions,
+            strategy=strategy,
+            agent_session_id=agent_session_id,
+        ):
+            self._remember_thread_developer_instructions(
+                request.base_session_id,
+                thread_id,
+                developer_instructions,
+            )
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                "injected_pending_persist",
+            )
+            if not hasattr(self, "_thread_unpersisted_prompts"):
+                self._thread_unpersisted_prompts = {}
+            self._thread_unpersisted_prompts[request.base_session_id] = (
+                thread_id,
+                developer_instructions,
+                strategy,
+            )
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the fallback prompt strategy after injection"
+            )
+        getattr(self, "_thread_unpersisted_prompts", {}).pop(
+            request.base_session_id,
+            None,
+        )
+        self._remember_thread_developer_instructions(
+            request.base_session_id,
+            thread_id,
+            developer_instructions,
+        )
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            strategy,
+        )
+
+    @classmethod
+    def _prompt_fingerprint(cls, developer_instructions: str) -> str:
+        snapshot = cls._render_developer_prompt_snapshot(developer_instructions)
+        return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+
+    def _read_persisted_prompt_strategy_marker(
+        self,
+        thread_id: str,
+        *,
+        agent_session_id: Optional[str],
+    ) -> Optional[dict[str, str]]:
+        if not agent_session_id:
+            return None
+        getter = getattr(
+            getattr(self, "sessions", None),
+            "get_agent_session_runtime_marker",
+            None,
+        )
+        if not callable(getter):
+            return None
+        try:
+            marker = getter(
+                agent_session_id,
+                backend=self.name,
+                native_session_id=thread_id,
+                key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+            )
+        except Exception as exc:
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex prompt strategy"
+            ) from exc
+        if marker is None:
+            return None
+        marker_thread_id = marker.get("thread_id") if isinstance(marker, dict) else None
+        marker_strategy = marker.get("strategy") if isinstance(marker, dict) else None
+        marker_sha256 = marker.get("sha256") if isinstance(marker, dict) else None
+        marker_sha256_valid = bool(
+            isinstance(marker_sha256, str)
+            and len(marker_sha256) == 64
+            and all(character in "0123456789abcdef" for character in marker_sha256)
+        )
+        marker_invalid = (
+            marker_thread_id != thread_id
+            or marker_strategy
+            not in {
+                "collaboration",
+                "fallback",
+                "fallback_pending_clear",
+                "fallback_pending_injection",
+                "fallback_pending_clear_injection",
+                "unavailable",
+            }
+            or (marker_strategy == "fallback" and not marker_sha256_valid)
+            or (
+                marker_strategy
+                in {
+                    "fallback_pending_injection",
+                    "fallback_pending_clear_injection",
+                }
+                and not marker_sha256_valid
+            )
+            or (
+                marker_strategy
+                in {"collaboration", "fallback_pending_clear"}
+                and marker_sha256 is not None
+                and not marker_sha256_valid
+            )
+            or (marker_strategy == "unavailable" and marker_sha256 is not None)
+        )
+        if marker_invalid:
+            logger.warning(
+                "Stored Codex prompt strategy marker is invalid for thread %s; "
+                "continuing without prompt refresh",
+                thread_id,
+            )
+            return {"thread_id": thread_id, "strategy": "unavailable"}
+        if marker_strategy == "fallback_pending_injection":
+            logger.warning(
+                "Codex fallback prompt injection has an unknown outcome for thread %s; "
+                "continuing without further prompt refresh",
+                thread_id,
+            )
+            return {"thread_id": thread_id, "strategy": "unavailable"}
+        resolved = {
+            "thread_id": thread_id,
+            "strategy": marker_strategy,
+        }
+        if marker_sha256_valid:
+            resolved["sha256"] = marker_sha256
+        return resolved
+
+    def _prompt_state_agent_session_id(
+        self,
+        request: AgentRequest,
+    ) -> Optional[str]:
+        """Return the row that owns backend state, not necessarily visible output."""
+
+        visible_session_id = self.ensure_agent_session_id(request)
+        if not self._uses_namespaced_backend_session(
+            request.context,
+            subagent_name=getattr(request, "subagent_name", None),
+        ):
+            return visible_session_id
+
+        getter = getattr(
+            getattr(self, "sessions", None),
+            "get_agent_session_row_id",
+            None,
+        )
+        if not callable(getter):
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            )
+        try:
+            backend_session_id = getter(
+                request.session_key,
+                request.base_session_id,
+                self.name,
+            )
+        except Exception as exc:
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            ) from exc
+        if not backend_session_id:
+            raise CodexPromptRefreshUnavailableError(
+                "Could not resolve the Codex backend session binding"
+            )
+        return str(backend_session_id)
+
+    def _persist_prompt_strategy(
+        self,
+        request: AgentRequest,
+        thread_id: str,
+        developer_instructions: Optional[str],
+        *,
+        strategy: Optional[str],
+        agent_session_id: Optional[str],
+        prompt_sha256: Optional[str] = None,
+    ) -> bool:
+        if strategy not in {
+            None,
+            "collaboration",
+            "fallback",
+            "fallback_pending_clear",
+            "fallback_pending_injection",
+            "fallback_pending_clear_injection",
+            "unavailable",
+        }:
+            raise ValueError(f"Unsupported Codex prompt strategy: {strategy}")
+        if prompt_sha256 is not None and (
+            len(prompt_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in prompt_sha256)
+        ):
+            raise ValueError("Codex prompt fingerprint must be lowercase SHA-256")
+        if strategy in {None, "unavailable"} and (
+            developer_instructions or prompt_sha256 is not None
+        ):
+            raise ValueError("Absent or unavailable prompt strategy cannot carry prompt identity")
+        if strategy == "fallback" and not developer_instructions and not prompt_sha256:
+            raise ValueError("Fallback prompt strategy requires developer instructions")
+        if not agent_session_id:
+            return True
+        setter = getattr(
+            getattr(self, "sessions", None),
+            "set_agent_session_runtime_marker",
+            None,
+        )
+        if not callable(setter):
+            return True
+        marker = {
+            "thread_id": thread_id,
+            "strategy": strategy,
+        }
+        if developer_instructions:
+            computed_sha256 = self._prompt_fingerprint(developer_instructions)
+            if prompt_sha256 is not None and prompt_sha256 != computed_sha256:
+                raise ValueError("Codex prompt fingerprint does not match prompt bytes")
+            marker["sha256"] = computed_sha256
+        elif prompt_sha256 is not None:
+            marker["sha256"] = prompt_sha256
+
+        def _set_marker(target_session_id: str) -> bool:
+            return bool(
+                setter(
+                    target_session_id,
+                    backend=self.name,
+                    native_session_id=thread_id,
+                    key=CODEX_PROMPT_STRATEGY_METADATA_KEY,
+                    value=marker if strategy is not None else None,
+                )
+            )
+
+        try:
+            persisted = _set_marker(agent_session_id)
+        except Exception:
+            logger.warning("Failed to persist Codex prompt strategy", exc_info=True)
+            return False
+        if not persisted:
+            # A native thread is cached before its durable Session bind. The
+            # Workbench binder deliberately preserves the selected row when a
+            # first bind fails, so retry that exact bind before treating the
+            # marker as unavailable on every later Turn.
+            try:
+                rebound_session_id = self.bind_agent_session_id(request, thread_id)
+                persisted = bool(rebound_session_id) and _set_marker(
+                    str(rebound_session_id)
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to rebind the Codex Session before prompt marker persistence",
+                    exc_info=True,
+                )
+                persisted = False
+        if not persisted:
+            logger.warning(
+                "Skipped Codex prompt strategy for stale Session binding %s",
+                agent_session_id,
+            )
+            return False
+        return True
+
+    def _repair_unpersisted_prompt_strategy(
+        self,
+        request: AgentRequest,
+        thread_id: str,
+        *,
+        agent_session_id: Optional[str],
+    ) -> str:
+        pending = getattr(self, "_thread_unpersisted_prompts", {}).get(
+            request.base_session_id
+        )
+        if not pending or pending[0] != thread_id:
+            raise CodexPromptRefreshUnavailableError(
+                "The injected Codex prompt strategy cannot be recovered"
+            )
+        _, injected_instructions, target_strategy = pending
+        if not self._persist_prompt_strategy(
+            request,
+            thread_id,
+            injected_instructions,
+            strategy=target_strategy,
+            agent_session_id=agent_session_id,
+        ):
+            raise CodexPromptRefreshUnavailableError(
+                "Could not persist the injected Codex prompt strategy"
+            )
+        self._remember_thread_prompt_strategy(
+            request.base_session_id,
+            thread_id,
+            target_strategy,
+        )
+        self._thread_unpersisted_prompts.pop(request.base_session_id, None)
+        return target_strategy
+
+    @staticmethod
+    async def _confirm_collaboration_mode_capability(transport: CodexTransport) -> None:
+        if getattr(transport, "supports_turn_collaboration_mode", False):
+            return
+        try:
+            await transport.send_request("collaborationMode/list", {})
+        except Exception as exc:
+            raise CodexPromptRefreshUnavailableError(
+                "Cannot safely resume a collaboration-backed Codex thread because "
+                "the current app-server did not confirm collaboration mode support"
+            ) from exc
+        transport.supports_turn_collaboration_mode = True
+
     async def _start_turn(
         self,
         transport: CodexTransport,
         request: AgentRequest,
         thread_id: str,
+        *,
+        developer_instructions: Optional[str] = None,
     ) -> str:
         """Build input, configure overrides, and send turn/start to Codex."""
-        self.ensure_agent_session_id(request)
-        input_items = self._build_input(request)
+        agent_session_id = self._prompt_state_agent_session_id(request)
         _, effective_model, effective_effort, _ = self._resolve_codex_agent_settings(request)
+        model_explicit = bool(getattr(request, "vibe_agent_model_explicit", False))
+        effort_explicit = bool(
+            getattr(request, "vibe_agent_reasoning_effort_explicit", False)
+        )
+        cached_model_settings = getattr(self, "_thread_model_settings", {}).get(request.base_session_id)
+        if cached_model_settings and cached_model_settings[0] == thread_id:
+            if effective_model is None and not model_explicit:
+                effective_model = cached_model_settings[1]
+                if effective_effort is None and not effort_explicit:
+                    effective_effort = cached_model_settings[2]
 
         turn_params: Dict[str, Any] = {
             "threadId": thread_id,
-            "input": input_items,
             "approvalPolicy": "never",
             "sandboxPolicy": {"type": "dangerFullAccess"},
         }
-        if effective_model:
+        from modules.agents.model_hub import launch_for_context
+
+        launch = launch_for_context(getattr(request, "context", None))
+        if (
+            launch is not None and launch.backend == "codex" and launch.channel == "hub"
+            and launch.gateway_request_metadata
+        ):
+            # Process authentication stays stable; native tool loops and retries
+            # carry this turn's route instead of inheriting a peer's launch.
+            turn_params["responsesapiClientMetadata"] = dict(launch.gateway_request_metadata)
+        if effective_model is not None or model_explicit:
             turn_params["model"] = effective_model
-        if effective_effort:
+        if effective_effort is not None or effort_explicit:
             turn_params["effort"] = effective_effort
+
+        cached_instructions = getattr(self, "_thread_developer_instructions", {}).get(request.base_session_id)
+        prompt_changed = cached_instructions != (thread_id, developer_instructions)
+        cached_strategy = getattr(self, "_thread_prompt_strategies", {}).get(request.base_session_id)
+        prompt_strategy = cached_strategy[1] if cached_strategy and cached_strategy[0] == thread_id else None
+        if prompt_strategy == "injected_pending_persist":
+            prompt_strategy = self._repair_unpersisted_prompt_strategy(
+                request,
+                thread_id,
+                agent_session_id=agent_session_id,
+            )
+        if prompt_strategy == "fallback_pending_injection":
+            # The native injection may already have succeeded. Never append it
+            # again when only its RPC acknowledgement is unknown.
+            prompt_strategy = "unavailable"
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                prompt_strategy,
+            )
+        persisted_prompt_marker = None
+        if developer_instructions and prompt_strategy is None:
+            persisted_prompt_marker = self._read_persisted_prompt_strategy_marker(
+                thread_id,
+                agent_session_id=agent_session_id,
+            )
+            if persisted_prompt_marker is not None:
+                prompt_strategy = persisted_prompt_marker["strategy"]
+            else:
+                # Keep the durable name for existing threads. Collaboration
+                # settings are not a prompt channel: model catalog messages
+                # can override their developer_instructions entirely.
+                prompt_strategy = "fallback"
+            self._remember_thread_prompt_strategy(
+                request.base_session_id,
+                thread_id,
+                prompt_strategy,
+            )
+        fallback_prompt_is_current = bool(
+            developer_instructions
+            and persisted_prompt_marker
+            and persisted_prompt_marker["strategy"]
+            in {"fallback", "fallback_pending_clear"}
+            and persisted_prompt_marker.get("sha256")
+            == self._prompt_fingerprint(developer_instructions)
+        )
+        if fallback_prompt_is_current:
+            self._remember_thread_developer_instructions(
+                request.base_session_id,
+                thread_id,
+                developer_instructions,
+            )
+            prompt_changed = False
+        pending_clear_after_unknown_injection = (
+            prompt_strategy == "fallback_pending_clear_injection"
+        )
+        if prompt_strategy in {
+            "collaboration",
+            "fallback_pending_clear",
+            "fallback_pending_clear_injection",
+        }:
+            await self._confirm_collaboration_mode_capability(transport)
+        collaboration_mode_is_known = bool(
+            getattr(transport, "supports_turn_collaboration_mode", True)
+        )
+        clear_collaboration_mode = collaboration_mode_is_known and bool(
+            prompt_strategy
+            in {"collaboration", "fallback_pending_clear", "fallback_pending_clear_injection"}
+            or (model_explicit and effective_model is None)
+        )
+        if clear_collaboration_mode:
+            was_collaboration = prompt_strategy == "collaboration"
+            turn_params["collaborationMode"] = None
+            if developer_instructions and not pending_clear_after_unknown_injection:
+                prompt_strategy = (
+                    "fallback_pending_clear"
+                    if was_collaboration
+                    or prompt_strategy == "fallback_pending_clear"
+                    else "fallback"
+                )
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+                if was_collaboration and not fallback_prompt_is_current:
+                    prompt_changed = True
+        if (
+            developer_instructions
+            and prompt_changed
+            and prompt_strategy
+            not in {"unavailable", "fallback_pending_clear_injection"}
+        ):
+            await self._inject_thread_developer_instructions(
+                transport,
+                request,
+                thread_id,
+                developer_instructions,
+                agent_session_id=agent_session_id,
+                strategy=(
+                    "fallback_pending_clear"
+                    if prompt_strategy == "fallback_pending_clear"
+                    else "fallback"
+                ),
+            )
 
         self._write_caller_env_script(request)
         self._turn_registry.begin_turn_start(request, thread_id)
@@ -2413,8 +3491,83 @@ class CodexAgent(BaseAgent):
         )
         if callable(snapshot_generated_images):
             snapshot_generated_images(thread_id, request.base_session_id)
+        turn_params["input"] = self._build_input(request)
         mark_backend_dispatch_attempted(request.context)
-        resp = await transport.send_request("turn/start", turn_params)
+        try:
+            resp = await transport.send_request("turn/start", turn_params)
+        except Exception as exc:
+            if prompt_strategy in {
+                "fallback_pending_clear",
+                "fallback_pending_clear_injection",
+            }:
+                raise CodexPromptRefreshUnavailableError(
+                    "Could not confirm that Codex cleared the previous collaboration prompt"
+                ) from exc
+            if (
+                "collaborationMode" not in turn_params
+                or not self._collaboration_mode_is_unsupported(exc)
+            ):
+                raise
+            logger.warning(
+                "Codex turn collaboration mode is unavailable; retrying without the model reset field: %s",
+                exc,
+            )
+            transport.supports_turn_collaboration_mode = False
+            fallback_turn_params = dict(turn_params)
+            fallback_turn_params.pop("collaborationMode", None)
+            resp = await transport.send_request("turn/start", fallback_turn_params)
+
+        if prompt_strategy == "fallback_pending_clear" and developer_instructions:
+            if self._persist_prompt_strategy(
+                request,
+                thread_id,
+                developer_instructions,
+                strategy="fallback",
+                agent_session_id=agent_session_id,
+            ):
+                prompt_strategy = "fallback"
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+            else:
+                logger.warning(
+                    "Codex collaboration clear succeeded but its completed prompt strategy marker remains pending"
+                )
+        elif (
+            prompt_strategy == "fallback_pending_clear_injection"
+            and developer_instructions
+        ):
+            # The clear is confirmed, but the preceding injection outcome is
+            # unknowable. Lock this thread against later prompt reinjection.
+            if self._persist_prompt_strategy(
+                request,
+                thread_id,
+                None,
+                strategy="unavailable",
+                agent_session_id=agent_session_id,
+            ):
+                prompt_strategy = "unavailable"
+                self._remember_thread_prompt_strategy(
+                    request.base_session_id,
+                    thread_id,
+                    prompt_strategy,
+                )
+            else:
+                logger.warning(
+                    "Codex collaboration clear succeeded but the unknown injection marker remains pending"
+                )
+
+        if effective_model:
+            self._thread_model_settings = getattr(self, "_thread_model_settings", {})
+            self._thread_model_settings[request.base_session_id] = (
+                thread_id,
+                effective_model,
+                effective_effort,
+            )
+        elif model_explicit:
+            getattr(self, "_thread_model_settings", {}).pop(request.base_session_id, None)
 
         turn_id = resp.get("id", "")
         if not turn_id:
@@ -2485,6 +3638,7 @@ class CodexAgent(BaseAgent):
             if len(file_lines) > 2:
                 message = f"{message}\n" + "\n".join(file_lines)
 
+        message = self.render_input(message, getattr(request, "input_metadata", None))
         if message:
             items.insert(0, {"type": "text", "text": message})
 
@@ -2583,7 +3737,7 @@ class CodexAgent(BaseAgent):
         method: str,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Handle server requests — auto-approve all."""
+        """Handle server requests that Avibe opts into or auto-approves."""
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -2591,8 +3745,21 @@ class CodexAgent(BaseAgent):
             logger.info("Auto-approving Codex %s (item=%s)", method, params.get("itemId"))
             return {"approved": True}
 
-        logger.warning("Unknown Codex server request: %s", method)
-        return {"approved": True}
+        if method == "item/tool/requestUserInput":
+            # Avibe conversations collect user input through the next normal
+            # message. An empty answer map is the app-server's valid
+            # unsupported/cancelled response for this experimental request.
+            logger.info(
+                "Declining unsupported Codex requestUserInput (item=%s)",
+                params.get("itemId"),
+            )
+            return {"answers": {}}
+
+        if method == "currentTime/read":
+            return {"currentTimeAt": int(time.time())}
+
+        logger.warning("Unsupported Codex server request: %s", method)
+        raise NotImplementedError(f"Unsupported Codex server request: {method}")
 
     # ------------------------------------------------------------------
     # Helpers

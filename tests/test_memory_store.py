@@ -1,632 +1,388 @@
-from __future__ import annotations
+"""Focused identity-only Memory store contract tests."""
 
-import os
-import sqlite3
-import stat
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+import hashlib
+import hmac
 from pathlib import Path
+import sqlite3
 
 import pytest
 
-from config import paths
-from core.memory.everos import FlushRejected, FlushSucceeded, FlushUnknown
-from core.memory.store import (
-    MAX_MESSAGE_ATTEMPTS,
-    MAX_NONTERMINAL_QUEUE_ROWS,
-    Delivered,
+from vibe.memory_project_ids import MAX_NAMED_MEMORY_PROJECTS
+from avibe_memory.store import (
+    MEMORY_STORE_SCHEMA_VERSION,
     MemoryStore,
-    MessageFailure,
-    SettleResult,
-    SystemOutage,
-    TERMINAL_TOMBSTONE_RETENTION,
-    derive_project_id,
-    derive_principal_id,
-    _keyed_digest,
+    _provider_session_ref,
 )
 
 
-PROJECT = "p-22222222222222222222222222222222"
+def _store_path(tmp_path: Path) -> Path:
+    return tmp_path / "state" / "memory" / "memory.sqlite"
 
 
-def _dt(value: str) -> datetime:
-    """Parse the ISO instants these tests pin, for the settle transition."""
-
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
-
-
-def _store_path(scope: Path, filename: str = "memory.sqlite") -> Path:
-    return paths.get_state_dir() / "memory-tests" / scope.name / filename
-
-
-def _enqueue(store: MemoryStore, digest: str, *, occurred_at_ms: int = 1_000):
-    return store.enqueue_request(
-        source_message_id=digest,
-        session_id="session",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="queued payload",
-        occurred_at_ms=occurred_at_ms,
-        max_provider_timestamp_ms=4_102_444_800_000,
-    )
-
-
-def _row_for_source(store: MemoryStore, source_message_id: str):
-    meta = store.ensure_meta()
-    return store.get_queue_row(_keyed_digest(meta.scope_key, source_message_id))
-
-
-def _deliver(store: MemoryStore, digest: str, *, session_ref: str = "shared-session") -> str:
-    result = store.enqueue_request(
-        source_message_id=digest,
-        session_id=session_ref,
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="queued payload",
-        occurred_at_ms=1_000,
-        max_provider_timestamp_ms=4_102_444_800_000,
-    )
-    assert result.row is not None
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id=f"add-{digest}"),
-        lease_owner="boot",
-        now=_dt("2026-01-01T00:00:01.000Z"),
-    ).settled
-    return result.row.session_id
-
-
-def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-
+def test_new_store_is_identity_only_v4(tmp_path: Path) -> None:
+    store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
+    store.ensure_meta()
     with sqlite3.connect(store.path) as conn:
         tables = {
             row[0]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            if not str(row[0]).startswith("sqlite_")
         }
-        indexes = {
-            row[1]
-            for row in conn.execute("PRAGMA index_list('memory_capture_queue')")
-        }
-        assert {"memory_meta", "memory_capture_queue"}.issubset(tables)
-        assert "ix_memory_capture_due" in indexes
-        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
-        meta_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_meta')")}
-        assert {
-            "principal_id",
-            "project_ref",
-            "provenance",
-            "payload_attachments",
-            "add_request_id",
-            "flush_observation",
-            "flush_status",
-            "flush_error_code",
-            "flush_request_id",
-            "flush_observed_at",
-        }.issubset(queue_columns)
-        assert {
-            "processing_fault_kind",
-            "processing_fault_since",
-            "processing_alert_active",
-            "last_error_at",
-        }.issubset(meta_columns)
-        with pytest.raises(sqlite3.IntegrityError):
-            conn.execute(
-                """
-                INSERT INTO memory_capture_queue (
-                    source_message_digest, epoch, session_id, payload_text,
-                    occurred_at_ms, provider_timestamp_ms, state, created_at
-                ) VALUES ('invalid', 0, 'src', 'payload', 1, 1, 'delivered', 'now')
-                """
-            )
+        assert tables == {"memory_meta", "memory_projects"}
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
 
 
-def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
-    scope_key = bytes.fromhex("11" * 32)
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        ("memory_meta", "updated_at"),
+        ("memory_projects", "last_written_at"),
+    ],
+)
+def test_incomplete_v4_store_is_rejected_during_initialization(
+    tmp_path: Path,
+    table: str,
+    column: str,
+) -> None:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(Path("avibe_memory/schema.sql").read_text(encoding="utf-8"))
+        conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
 
-    first = derive_principal_id(scope_key, "slack:U123")
-    assert first == derive_principal_id(scope_key, "slack:U123")
-    assert first != derive_principal_id(scope_key, "slack:U456")
-    assert first != derive_principal_id(bytes.fromhex("22" * 32), "slack:U123")
-    assert first.startswith("u-") and len(first) == 34
-    assert "U123" not in first
-
-
-def test_project_derivation_is_stable_opaque_and_workdir_scoped() -> None:
-    scope_key = bytes.fromhex("11" * 32)
-
-    first = derive_project_id(scope_key, "/workspaces/one")
-    assert first == derive_project_id(scope_key, "/workspaces/one")
-    assert first != derive_project_id(scope_key, "/workspaces/two")
-    assert first != derive_project_id(bytes.fromhex("22" * 32), "/workspaces/one")
-    assert first.startswith("p-") and len(first) == 34
-    assert "workspaces" not in first
-
-    with pytest.raises(ValueError, match="workdir"):
-        derive_project_id(scope_key, "relative/project")
-    with pytest.raises(ValueError, match="workdir"):
-        derive_project_id(scope_key, "/workspaces/../one")
+    with pytest.raises(RuntimeError, match="schema is incomplete"):
+        MemoryStore(path, effective_home=tmp_path)
 
 
-def test_reused_memory_session_anchor_is_namespaced_by_project(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    first = _enqueue(store, "first")
-    second = store.enqueue_request(
-        source_message_id="second",
-        session_id="session",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref="p-33333333333333333333333333333333",
+@pytest.mark.parametrize("table", ["memory_meta", "memory_projects"])
+def test_v4_store_without_required_primary_key_is_rejected_during_initialization(
+    tmp_path: Path,
+    table: str,
+) -> None:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    replacement = f"{table}_without_key"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(Path("avibe_memory/schema.sql").read_text(encoding="utf-8"))
+        conn.execute(f'CREATE TABLE "{replacement}" AS SELECT * FROM "{table}"')
+        conn.execute(f'DROP TABLE "{table}"')
+        conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+
+    with pytest.raises(RuntimeError, match="schema is incomplete"):
+        MemoryStore(path, effective_home=tmp_path)
+
+
+def test_store_rejects_symlinked_database_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    path = home / "state" / "memory" / "memory.sqlite"
+    path.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.sqlite"
+    with sqlite3.connect(outside) as conn:
+        conn.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO evidence VALUES ('keep-me')")
+    before = outside.read_bytes()
+    path.symlink_to(outside)
+
+    with pytest.raises(OSError, match="private regular file"):
+        MemoryStore(path, effective_home=home)
+
+    assert outside.read_bytes() == before
+    with sqlite3.connect(outside) as conn:
+        assert conn.execute("SELECT value FROM evidence").fetchone()[0] == "keep-me"
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_store_rejects_symlinked_sqlite_sidecars_before_initialization(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    home = tmp_path / "home"
+    path = home / "state" / "memory" / "memory.sqlite"
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path):
+        pass
+    outside = tmp_path / "outside-sidecar"
+    outside.write_bytes(b"keep-me")
+    before = outside.read_bytes()
+    path.with_name(f"{path.name}{suffix}").symlink_to(outside)
+
+    with pytest.raises(OSError, match="private regular file"):
+        MemoryStore(path, effective_home=home)
+
+    assert outside.read_bytes() == before
+
+
+def test_volatile_admission_preserves_identity_without_payload_tables(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-013: admission persists identity but no delivery payload."""
+
+    store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
+    principal = store.principal_for_user_key("slack:U123")
+    project = "project-slug"
+    admission = store.admit_volatile_capture(
+        source_message_id="source-1",
+        session_id="session-1",
+        principal_id=principal,
+        project_ref=project,
         provenance="user_input",
-        payload_text="queued payload",
-        occurred_at_ms=1_001,
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert admission.outcome == "accepted"
+    assert admission.provider_session_ref is not None
+    with sqlite3.connect(store.path) as conn:
+        assert not {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        } & {"memory_queue", "memory_delivery", "memory_attachments"}
+    store.mark_capture_success()
+    assert store.has_provider_data_history()
+
+
+def test_data_loss_settlement_preserves_stable_identity_and_rotates_epoch(
+    tmp_path: Path,
+) -> None:
+    """MEMORY-REPAIR-206: destructive reset preserves stable identity."""
+
+    store = MemoryStore(_store_path(tmp_path), effective_home=tmp_path)
+    before = store.ensure_meta()
+    principal = store.principal_for_user_key("slack:U123")
+    store.admit_volatile_capture(
+        source_message_id="source-1",
+        session_id="session-1",
+        principal_id=principal,
+        project_ref="project-slug",
+        provenance="user_input",
+        occurred_at_ms=1_000,
         max_provider_timestamp_ms=4_102_444_800_000,
     )
 
-    assert first.outcome == second.outcome == "accepted"
-    assert first.row is not None and second.row is not None
-    assert first.row.session_id != second.row.session_id
-    assert first.row.project_ref != second.row.project_ref
+    store.settle_after_data_loss()
 
-def test_store_assigns_one_flush_verdict_to_the_in_flight_session_group(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    session_ref = _deliver(store, "one")
-    assert _deliver(store, "two") == session_ref
-
-    assert store.mark_flush_in_flight(session_ref, PROJECT) == 2
-    assert [row.flush_observation for row in store.list_queue_rows()] == ["in_flight", "in_flight"]
-
-    assert store.record_flush_verdict(
-        session_ref,
-        PROJECT,
-        FlushSucceeded(request_id="flush-request", status="extracted"),
-        now="2026-01-01T00:00:03.000Z",
-    ) == 2
-    rows = store.list_queue_rows()
-    assert [row.flush_observation for row in rows] == ["succeeded", "succeeded"]
-    assert [row.flush_status for row in rows] == ["extracted", "extracted"]
-    assert [row.flush_request_id for row in rows] == ["flush-request", "flush-request"]
-    assert store.ensure_meta().last_success_at == "2026-01-01T00:00:03.000Z"
-
-    stats = store.queue_stats()
-    assert stats.awaiting_receipt == 0
-    assert stats.succeeded == 2
-    assert stats.receipt_unknown == 0
-    assert stats.distill_failed == 0
-    assert stats.last_flush_observation == "succeeded"
-    assert stats.last_flush_status == "extracted"
+    after = store.ensure_meta()
+    assert after.epoch == before.epoch + 1
+    assert after.scope_key == before.scope_key
+    assert after.provider_root_id == before.provider_root_id
+    assert after.last_success_at is None
+    assert store.list_memory_projects(principal) == ("default", "project-slug")
 
 
-def test_store_records_rejected_and_unknown_as_terminal_observations(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    rejected_session = _deliver(store, "rejected", session_ref="rejected-session")
-    assert store.mark_flush_in_flight(rejected_session, PROJECT) == 1
-    assert store.record_flush_verdict(
-        rejected_session,
-        PROJECT,
-        FlushRejected(
-            request_id="reject-request",
-            error_code="INTERNAL_ERROR",
-            server_fault=True,
-        ),
-        now="2026-01-01T00:00:03.000Z",
-    ) == 1
+def test_released_v2_migration_discards_delivery_tables_and_derives_projects(tmp_path: Path) -> None:
+    """MEMORY-SEARCH-005: released delivery stores migrate to identity-only v4."""
 
-    unknown_session = _deliver(store, "unknown", session_ref="unknown-session")
-    assert store.mark_flush_in_flight(unknown_session, PROJECT) == 1
-    assert store.record_flush_verdict(
-        unknown_session,
-        PROJECT,
-        FlushUnknown(reason="timeout"),
-        now="2026-01-01T00:00:04.000Z",
-    ) == 1
-
-    stats = store.queue_stats()
-    assert stats.succeeded == 0
-    assert stats.receipt_unknown == 1
-    assert stats.distill_failed == 1
-    assert stats.last_flush_observation == "unknown"
-    assert _row_for_source(store, "rejected").flush_error_code == "INTERNAL_ERROR"
-
-
-def test_settle_releases_a_system_outage_without_spending_an_attempt(tmp_path: Path) -> None:
-    """An outage is not this row's fault: it returns to pending, attempts intact."""
-
-    store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "outage")
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-
-    result = store.settle(
-        row,
-        SystemOutage(error="memory_sidecar_unavailable"),
-        lease_owner="boot",
-        now=_dt("2026-01-01T00:00:01.000Z"),
-    )
-
-    assert result == SettleResult(settled=True, state="pending", attempts=None)
-    released = _row_for_source(store, "outage")
-    assert released is not None
-    assert released.state == "pending"
-    assert released.attempts == 0
-    # The payload survives so the row can be delivered once the outage clears.
-    assert released.payload_text == "queued payload"
-    assert released.last_error == "memory_sidecar_unavailable"
-
-
-def test_settle_spends_attempts_then_scrubs_a_failing_row_terminally(tmp_path: Path) -> None:
-    """A row that keeps failing is retried MAX_MESSAGE_ATTEMPTS times, then dies."""
-
-    store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "poison")
-
-    # Each retry is fenced behind a backoff, so every claim moves past the last
-    # next_retry_at the store wrote: +30s after the first failure, +2min after
-    # the second.
-    attempt_times = ["01:00:00", "01:01:00", "01:05:00"]
-    assert len(attempt_times) == MAX_MESSAGE_ATTEMPTS
-
-    states: list[tuple[str | None, int | None]] = []
-    for attempt, clock in enumerate(attempt_times, start=1):
-        row = store.claim_due(lease_owner="boot", now=f"2026-01-01T{clock}.000Z")
-        assert row is not None, f"row should be claimable on attempt {attempt}"
-        result = store.settle(
-            row,
-            MessageFailure(error="memory_processing_failed"),
-            lease_owner="boot",
-            now=_dt(f"2026-01-01T{clock}.500Z"),
-        )
-        states.append((result.state, result.attempts))
-
-    assert states == [("pending", 1), ("pending", 2), ("dead", 3)]
-    dead = _row_for_source(store, "poison")
-    assert dead is not None
-    assert dead.state == "dead"
-    # A terminal row keeps no captured text.
-    assert dead.payload_text is None
-
-
-def test_settle_refuses_a_row_this_owner_no_longer_holds(tmp_path: Path) -> None:
-    """Every outcome is fenced by the lease, not just the delivered one."""
-
-    store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "fenced")
-    row = store.claim_due(lease_owner="owner", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-
-    stolen = _dt("2026-01-01T00:00:01.000Z")
-    for outcome in (
-        Delivered(),
-        SystemOutage(error="memory_sidecar_unavailable"),
-        MessageFailure(error="memory_processing_failed"),
-    ):
-        result = store.settle(row, outcome, lease_owner="other-boot", now=stolen)
-        assert result.settled is False, f"{outcome} must not settle another owner's claim"
-        assert result.state is None
-
-    still_claimed = _row_for_source(store, "fenced")
-    assert still_claimed is not None
-    assert still_claimed.state == "processing"
-    assert still_claimed.attempts == 0
-
-
-def test_store_activation_recovery_marks_in_flight_unknown_and_lists_unattempted_sessions(
-    tmp_path: Path,
-) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    not_attempted_session = _deliver(store, "not-attempted", session_ref="not-attempted-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
-
-    recovery = store.recover_after_boot(
-        lease_owner="boot",
-        clock=lambda: _dt("2026-01-01T00:00:05.000Z"),
-    )
-
-    assert recovery.interrupted_flushes == 1
-    assert _row_for_source(store, "in-flight").flush_observation == "unknown"
-    # Sessions are listed only after interrupted flushes have been resolved;
-    # recover_after_boot owns that ordering.
-    assert recovery.not_attempted_sessions == ((not_attempted_session, PROJECT),)
-
-
-def test_boot_recovery_samples_its_clock_after_reclaiming_leases(tmp_path: Path) -> None:
-    """Reclamation can block on SQLite contention; the flush stamp must postdate it.
-
-    A backdated `flush_observed_at` reorders the `ORDER BY
-    COALESCE(flush_observed_at, ...)` history, so the sampling point is part of
-    this method's contract rather than a caller's detail.
-    """
-
-    store = MemoryStore(_store_path(tmp_path / "recovery-clock-order"))
-    in_flight_session = _deliver(store, "in-flight", session_ref="in-flight-session")
-    assert store.mark_flush_in_flight(in_flight_session, PROJECT) == 1
-    _enqueue(store, "stale-lease")
-    assert store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z") is not None
-    observed_states: list[str] = []
-
-    def clock_observing_the_queue() -> datetime:
-        observed_states.append(_row_for_source(store, "stale-lease").state)
-        return _dt("2026-01-01T00:00:09.000Z")
-
-    recovery = store.recover_after_boot(
-        lease_owner="new-boot",
-        clock=clock_observing_the_queue,
-    )
-
-    assert recovery.reclaimed == 1
-    assert observed_states == ["pending"], "the clock was sampled before leases were reclaimed"
-    assert _row_for_source(store, "in-flight").flush_observed_at == "2026-01-01T00:00:09.000Z"
-
-
-def test_store_persists_refreshes_and_closes_processing_fault(tmp_path: Path) -> None:
-    database = _store_path(tmp_path)
-    store = MemoryStore(database)
-
-    assert store.open_processing_fault(now="2026-01-01T00:00:00.000Z") is True
-    assert store.classify_processing_fault("credential") is True
-    assert store.mark_processing_alert_active() is True
-    reopened = MemoryStore(database).ensure_meta()
-    assert reopened.processing_fault_since == "2026-01-01T00:00:00.000Z"
-    assert reopened.processing_fault_kind == "credential"
-    assert reopened.processing_alert_active is True
-    assert reopened.last_error == "memory_processing_failed"
-
-    assert store.open_processing_fault(now="2026-01-01T00:05:00.000Z") is False
-    assert store.classify_processing_fault("engine") is False
-    refreshed = store.ensure_meta()
-    assert refreshed.processing_fault_since == "2026-01-01T00:05:00.000Z"
-    assert refreshed.processing_fault_kind == "engine"
-
-    assert store.close_processing_fault(now="2026-01-01T00:05:01.000Z") is True
-    closed = store.ensure_meta()
-    assert closed.processing_fault_since is None
-    assert closed.processing_fault_kind is None
-    assert closed.processing_alert_active is False
-    assert closed.last_error is None
-
-
-def test_duplicate_enqueue_is_atomic_and_does_not_advance_provider_clock(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-
-    first = _enqueue(store, "same", occurred_at_ms=5_000)
-    duplicate = _enqueue(store, "same", occurred_at_ms=99_000)
-    second = _enqueue(store, "other", occurred_at_ms=5_000)
-
-    assert first.outcome == "accepted"
-    assert duplicate.outcome == "duplicate"
-    assert second.outcome == "accepted"
-    assert first.row is not None and second.row is not None
-    assert first.row.provider_timestamp_ms == 5_000
-    assert second.row.provider_timestamp_ms == 5_001
-    assert store.ensure_meta().last_provider_timestamp_ms == 5_001
-
-
-def test_concurrent_duplicate_enqueue_has_one_row(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(lambda _: _enqueue(store, "same").outcome, range(2)))
-
-    assert sorted(outcomes) == ["accepted", "duplicate"]
-    assert len(store.list_queue_rows()) == 1
-
-
-def test_queue_cap_and_claim_fence(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    accepted = store.enqueue_request(
-        source_message_id="one",
-        session_id="one",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="payload",
-        occurred_at_ms=1,
-        max_provider_timestamp_ms=100,
-        nonterminal_limit=1,
-    )
-    full = store.enqueue_request(
-        source_message_id="two",
-        session_id="two",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance="user_input",
-        payload_text="payload",
-        occurred_at_ms=2,
-        max_provider_timestamp_ms=100,
-        nonterminal_limit=1,
-    )
-    assert accepted.outcome == "accepted"
-    assert full.outcome == "queue_full"
-
-    row = store.claim_due(lease_owner="boot-a", now="2026-01-01T00:00:00.000Z")
-    assert row is not None and row.state == "processing"
-    assert store.settle(row, Delivered(), lease_owner="boot-b", now=_dt("2026-01-01T00:00:01.000Z")).settled is False
-    assert store.settle(row, Delivered(), lease_owner="boot-a", now=_dt("2026-01-01T00:00:01.000Z")).settled is True
-    delivered = _row_for_source(store, "one")
-    assert delivered is not None
-    assert delivered.state == "delivered"
-    assert delivered.payload_text is None
-
-
-def test_reclaim_processing_and_clear_deletes_every_queue_row(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "queued")
-    claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
-    assert claimed is not None
-
-    recovery = store.recover_after_boot(
-        lease_owner="new-boot",
-        clock=lambda: _dt("2026-01-01T00:00:02.000Z"),
-    )
-    assert recovery.reclaimed == 1
-    reclaimed = _row_for_source(store, "queued")
-    assert reclaimed is not None
-    assert reclaimed.state == "pending"
-    assert reclaimed.attempts == 0
-
-    before = store.ensure_meta()
-    clearing = store.begin_clear()
-    assert clearing.epoch == before.epoch + 1
-    assert clearing.clear_in_progress is True
-    completed = store.finish_clear()
-    assert completed.clear_in_progress is False
-    assert completed.epoch == clearing.epoch
-    assert store.list_queue_rows() == ()
-
-
-@pytest.mark.parametrize("provenance", ["user_input", "agent"])
-def test_provenance_survives_payload_tombstoning(tmp_path: Path, provenance: str) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    result = store.enqueue_request(
-        source_message_id=f"source-{provenance}",
-        session_id="session",
-        principal_id="u-11111111111111111111111111111111",
-        project_ref=PROJECT,
-        provenance=provenance,
-        payload_text="private payload",
-        occurred_at_ms=1,
-        max_provider_timestamp_ms=100,
-    )
-    assert result.row is not None
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(row, Delivered(), lease_owner="boot", now=_dt("2026-01-01T00:00:01.000Z")).settled
-
-    tombstone = store.get_queue_row(result.row.source_message_digest)
-    assert tombstone is not None
-    assert tombstone.payload_text is None
-    assert tombstone.provenance == provenance
-
-
-def test_terminal_tombstones_compact_by_retention(tmp_path: Path) -> None:
-    store = MemoryStore(_store_path(tmp_path))
-    _enqueue(store, "terminal")
-    row = store.claim_due(lease_owner="boot", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(row, Delivered(), lease_owner="boot", now=_dt("2026-01-01T00:00:01.000Z")).settled
-
-    reference = datetime(2026, 7, 1, tzinfo=UTC)
-    old = reference - TERMINAL_TOMBSTONE_RETENTION - timedelta(seconds=1)
-    with sqlite3.connect(store.path) as conn:
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    schema = Path("avibe_memory/schema_v2.sql").read_text(encoding="utf-8")
+    with sqlite3.connect(path) as conn:
+        conn.executescript(schema)
+        conn.execute("PRAGMA user_version = 2")
         conn.execute(
-            "UPDATE memory_capture_queue SET completed_at = ? WHERE source_message_digest = 'terminal'",
-            (old.isoformat().replace("+00:00", "Z"),),
+            """
+            INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, last_success_at, last_error,
+                last_error_at, processing_fault_generation, processing_fault_kind,
+                processing_fault_since, processing_alert_active, updated_at
+            ) VALUES (1, 0, 0, ?, 'root', 42, 0, ?, NULL, NULL, 0, NULL, NULL, 0, ?)
+            """,
+            (b"k" * 32, "2026-02-03T00:00:00Z", "2026-01-01T00:00:00Z"),
         )
+        meta = conn.execute("SELECT * FROM memory_meta WHERE singleton = 1").fetchone()
+        assert meta is not None
+        principal = "u-" + "a" * 32
+        legacy_projects = tuple(
+            f"p-{index:032x}" for index in range(MAX_NAMED_MEMORY_PROJECTS)
+        )
+        for index, project in enumerate(legacy_projects):
+            conn.execute(
+                """
+                INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, provider_session_ref, generation,
+                    principal_id, project_ref, provenance, payload_text, payload_attachments,
+                    attachment_bundle_id, occurred_at_ms, provider_timestamp_ms, state, attempts,
+                    next_retry_at, lease_owner, lease_at, lease_token, last_error, created_at, completed_at
+                ) VALUES (?, 0, 'session', ?, 1, ?, ?, 'user_input',
+                          'payload', NULL, NULL, 1, 1, 'pending', 0, NULL, NULL, NULL, 0, NULL,
+                          '2026-01-01T00:00:00Z', NULL)
+                """,
+                (f"digest-{index}", f"ref-{index}", principal, project),
+            )
+    store = MemoryStore(path, effective_home=tmp_path)
+    meta = store.ensure_meta()
+    assert meta.scope_key == b"k" * 32
+    assert meta.provider_root_id == "root"
+    assert meta.last_provider_timestamp_ms == 42
+    assert meta.last_success_at == "2026-02-03T00:00:00Z"
+    with sqlite3.connect(store.path) as conn:
+        assert {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT project_id FROM memory_projects WHERE principal_id = ?",
+                (principal,),
+            )
+        } == set(legacy_projects)
+    admission = store.admit_volatile_capture(
+        source_message_id="new-named-project",
+        session_id="session",
+        principal_id=principal,
+        project_ref="notes",
+        provenance="user_input",
+        occurred_at_ms=43,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+    assert admission.outcome == "accepted"
+    with sqlite3.connect(store.path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            if not str(row[0]).startswith("sqlite_")
+        }
+        assert tables == {"memory_meta", "memory_projects"}
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
-    assert store.compact_terminal_tombstones(now=reference) == 1
-    assert _row_for_source(store, "terminal") is None
+
+def test_provider_session_ref_keeps_released_digest_and_epoch_suffix() -> None:
+    scope_key = bytes(range(32))
+    principal = "u-" + "a" * 32
+    project = "default"
+    raw_session = "session:with:colons"
+    epoch = 7
+    expected = hmac.new(
+        scope_key,
+        f"{principal}:{project}:{raw_session}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert _provider_session_ref(
+        scope_key,
+        principal,
+        project,
+        raw_session,
+        epoch,
+    ) == f"src--{expected}--e{epoch}"
 
 
-def test_default_store_path_uses_effective_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    effective_home = tmp_path / "effective-avibe-home"
-    monkeypatch.setenv("AVIBE_HOME", str(effective_home))
-
-    store = MemoryStore()
-
-    assert store.path == (effective_home / "state" / "memory" / "memory.sqlite").resolve()
-    assert store.path.is_file()
-    assert MAX_NONTERMINAL_QUEUE_ROWS == 500
-
-
-def test_store_enforces_owner_only_directory_and_database_modes_under_open_umask(tmp_path: Path) -> None:
-    database = _store_path(tmp_path / "memory-private")
-    original_umask = os.umask(0o022)
-    try:
-        store = MemoryStore(database)
-    finally:
-        os.umask(original_umask)
-
-    assert stat.S_IMODE(store.path.parent.stat().st_mode) == 0o700
-    assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
-
-
-def test_store_rejects_a_symlinked_state_component_before_creating_external_files(
+@pytest.mark.parametrize("version", [0, 1, 2, 3])
+def test_unknown_released_store_shape_is_left_untouched(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    version: int,
 ) -> None:
-    effective_home = tmp_path / "effective-home"
-    external = tmp_path / "external-memory-state"
-    monkeypatch.setenv("AVIBE_HOME", str(effective_home))
-    memory_directory = effective_home / "state" / "memory"
-    memory_directory.parent.mkdir(parents=True)
-    memory_directory.symlink_to(external, target_is_directory=True)
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE memory_meta (singleton INTEGER PRIMARY KEY, scope_key BLOB)"
+        )
+        conn.execute("INSERT INTO memory_meta VALUES (1, ?)", (b"keep-me",))
+        conn.execute(f"PRAGMA user_version = {version}")
+    before = path.read_bytes()
 
-    with pytest.raises(OSError):
-        MemoryStore()
+    with pytest.raises(RuntimeError, match="Unsupported Memory store schema"):
+        MemoryStore(path, effective_home=tmp_path)
 
-    assert not external.exists()
+    assert path.read_bytes() == before
+    assert not path.with_name(f"{path.name}-wal").exists()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+        assert conn.execute(
+            "SELECT scope_key FROM memory_meta WHERE singleton = 1"
+        ).fetchone()[0] == b"keep-me"
 
 
-@pytest.mark.parametrize("loses_race_at", ["chmod", "mode_verification"])
-def test_store_tolerates_a_sidecar_deleted_while_modes_are_enforced(
+@pytest.mark.parametrize(
+    ("version", "schema_path"),
+    [
+        (0, "tests/fixtures/memory_initial_foundation_v0.sql"),
+        (0, "tests/fixtures/memory_foundation_v0.sql"),
+        (1, "tests/fixtures/memory_foundation_v1.sql"),
+        (3, "avibe_memory/schema_v2.sql"),
+    ],
+)
+def test_released_identity_shapes_migrate_without_provider_io(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    loses_race_at: str,
+    version: int,
+    schema_path: str,
 ) -> None:
-    """A peer connection checkpointing away the shm file is not a store failure."""
-
-    store = MemoryStore(_store_path(tmp_path / f"sidecar-race-{loses_race_at}"))
-    sidecar = store.path.with_name(f"{store.path.name}-shm")
-    sidecar.touch()
-    real_chmod = os.chmod
-    races: list[str] = []
-
-    def racing_chmod(path, mode, *args, **kwargs):
-        if Path(path) != sidecar:
-            return real_chmod(path, mode, *args, **kwargs)
-        races.append(loses_race_at)
-        if loses_race_at == "chmod":
-            sidecar.unlink()
-            return real_chmod(path, mode, *args, **kwargs)
-        result = real_chmod(path, mode, *args, **kwargs)
-        sidecar.unlink()
-        return result
-
-    monkeypatch.setattr(os, "chmod", racing_chmod)
-
-    assert store.ensure_meta() is not None
-    assert races, "the sidecar race never fired, so no benign ENOENT was exercised"
-
-
-def test_store_keeps_sidecar_checks_strict_for_files_that_do_exist(tmp_path: Path) -> None:
-    """Tolerating a vanished sidecar must not weaken the checks on a present one."""
-
-    store = MemoryStore(_store_path(tmp_path / "sidecar-strict"))
-    sidecar = store.path.with_name(f"{store.path.name}-wal")
-    sidecar.touch()
-    os.chmod(sidecar, 0o644)
-
-    store._enforce_private_database_modes()
-
-    assert stat.S_IMODE(sidecar.lstat().st_mode) == 0o600
-
-    sidecar.unlink()
-    sidecar.symlink_to(tmp_path / "external-wal")
-
-    with pytest.raises(OSError, match="must be a regular file"):
-        store._enforce_private_database_modes()
-
-
-def test_store_does_not_treat_a_vanished_main_database_as_a_benign_race(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only SQLite's own sidecars may disappear mid-check; the database may not."""
-
-    store = MemoryStore(_store_path(tmp_path / "database-vanishes"))
-    real_chmod = os.chmod
-
-    def vanishing_chmod(path, mode, *args, **kwargs):
-        result = real_chmod(path, mode, *args, **kwargs)
-        if Path(path) == store.path:
-            store.path.unlink()
-        return result
-
-    monkeypatch.setattr(os, "chmod", vanishing_chmod)
-
-    with pytest.raises(FileNotFoundError):
-        store._enforce_private_database_modes()
+    path = _store_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(Path(schema_path).read_text(encoding="utf-8"))
+        if version == 3:
+            conn.execute(
+                """CREATE TABLE memory_projects (
+                    principal_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_written_at TEXT NOT NULL,
+                    PRIMARY KEY (principal_id, project_id)
+                )"""
+            )
+        principal = "u-" + "c" * 32
+        project = "p-" + ("d" * 32)
+        conn.execute(
+            """INSERT INTO memory_meta (
+                singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                last_provider_timestamp_ms, missed_count, last_success_at, updated_at
+            ) VALUES (1, 7, 0, ?, 'legacy-root', 42, 3, ?, ?)""",
+            (b"z" * 32, "2026-02-03T00:00:00Z", "2026-02-03T00:00:00Z"),
+        )
+        queue_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")
+        }
+        if "generation" in queue_columns:
+            conn.execute(
+                """INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, provider_session_ref,
+                    generation, principal_id, project_ref, provenance, payload_text,
+                    occurred_at_ms, provider_timestamp_ms, state, created_at
+                ) VALUES ('digest', 7, 'session', 'provider-session', 1, ?, ?,
+                          'user_input', 'payload', 1, 1, 'pending', ?)""",
+                (principal, project, "2026-02-01T00:00:00Z"),
+            )
+        else:
+            names = [
+                "source_message_digest", "epoch", "session_id", "principal_id",
+                "project_ref", "provenance", "payload_text", "occurred_at_ms",
+                "provider_timestamp_ms", "state", "created_at",
+            ]
+            values: list[object] = [
+                "digest", 7, "session", principal, project, "user_input", "payload",
+                1, 1, "pending", "2026-02-01T00:00:00Z",
+            ]
+            if "provider_session_ref" in queue_columns:
+                names.insert(3, "provider_session_ref")
+                values.insert(3, "provider-session")
+            placeholders = ", ".join("?" for _ in values)
+            conn.execute(
+                f"INSERT INTO memory_capture_queue ({', '.join(names)}) "
+                f"VALUES ({placeholders})",
+                values,
+            )
+        if version == 3:
+            conn.execute(
+                "INSERT INTO memory_projects VALUES (?, ?, ?, ?)",
+                (
+                    principal,
+                    "default",
+                    "2026-02-01T00:00:00Z",
+                    "2026-02-01T00:00:00Z",
+                ),
+            )
+        conn.execute(f"PRAGMA user_version = {version}")
+    store = MemoryStore(path, effective_home=tmp_path)
+    meta = store.ensure_meta()
+    assert (meta.epoch, meta.scope_key, meta.provider_root_id) == (7, b"z" * 32, "legacy-root")
+    assert meta.last_provider_timestamp_ms == 42
+    assert meta.last_success_at == "2026-02-03T00:00:00Z"
+    with sqlite3.connect(path) as conn:
+        assert {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT project_id FROM memory_projects WHERE principal_id = ?",
+                (principal,),
+            )
+        } == ({project, "default"} if version == 3 else {project})
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4

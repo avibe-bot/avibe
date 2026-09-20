@@ -64,6 +64,7 @@ SHOW_EVENT_ERROR_I18N_KEYS = {
     "event_id_conflict": "show.event.idConflict",
     "show_event_dispatch_failed": "show.event.dispatchFailed",
     "show_event_dispatch_pending": "show.event.acceptanceUnknown",
+    "unsupported_event_type": "show.event.unsupportedEventType",
 }
 SHOW_TRIGGER_KIND = {
     "human.annotation.created": "show_annotation",
@@ -120,6 +121,60 @@ def show_event_requests_dispatch(event: dict[str, Any]) -> bool:
     return isinstance(payload, dict) and bool(payload.get("dispatch"))
 
 
+def show_event_request_requests_dispatch(request_payload: dict[str, Any]) -> bool:
+    """Whether a raw Show event request would start an agent turn.
+
+    HTTP routes must decide before handing a request to the event store, while
+    ``show_event_requests_dispatch`` intentionally accepts the store's normalized
+    event shape. Normalize the two closed dispatching request types here so both
+    decisions use the same trigger definition.
+    """
+
+    event_type = str(request_payload.get("type") or "").strip()
+    if event_type not in SHOW_TRIGGER_KIND:
+        return False
+    return show_event_requests_dispatch(
+        {
+            "type": event_type,
+            "actor": "human",
+            "payload": _normalize_event_payload(event_type, request_payload),
+        }
+    )
+
+
+def _require_show_dispatch_authority(conn: Any, session_id: str, context: Any) -> None:
+    """Refuse a dispatching Show event the author could not start a turn with.
+
+    A dispatching event is a turn queued under the authority recorded with it,
+    so it has to clear the same chat-and-Agent check any other producer of
+    deferred work clears — and it has to clear it here, inside the transaction
+    that is about to write the event, the screenshot and the Delivery. Leaving
+    the decision to the controller would let a refused author take the session
+    anyway, and would surface the refusal where nobody is waiting for it.
+
+    Only dispatching events ask this. Annotating a page, reading it, and every
+    assistant/system event stay governed by the page capability that admitted
+    the request; none of them starts work in the session.
+    """
+
+    from core.vibe_agents import VibeAgentAccessError
+    from vibe.authorization import InstanceAuthorizationError
+
+    try:
+        workbench_sessions_service.require_session_turn_authority(
+            conn, session_id, authorization_context=context
+        )
+    except LookupError as exc:
+        # Chat access answers "not found" on purpose: someone who cannot reach
+        # the session should not learn it exists. Keep that answer.
+        raise ShowSessionEventError("Agent session not found.", code="session_not_found") from exc
+    except (InstanceAuthorizationError, VibeAgentAccessError) as exc:
+        raise ShowSessionEventError(
+            "Agent session access is not permitted.",
+            code="session_access_forbidden",
+        ) from exc
+
+
 @dataclass(frozen=True)
 class ShowSessionEventStore:
     db_path: Path | None = None
@@ -143,7 +198,23 @@ class ShowSessionEventStore:
         *,
         author: dict[str, str] | None = None,
         reserve_dispatch: bool = False,
+        authorization_context: Any = None,
     ) -> dict[str, Any]:
+        # A Show event that dispatches is deferred Agent work, and the controller
+        # rebuilds the whole prompt from the reservation it reloads — the IPC body
+        # it was woken with is discarded. So the authority the author was admitted
+        # under has to be recorded here, when the row is written, or it is lost.
+        #
+        # Producers that already validated an identity pass it (the public share
+        # route in particular: its visitor is not whoever the process would
+        # otherwise resolve to). A local CLI invocation passes nothing and the
+        # running invocation's authority answers, exactly as it does elsewhere.
+        from storage.resource_access_service import (
+            metadata_with_resource_user_context,
+            resolve_resource_access_context,
+        )
+
+        access_context = resolve_resource_access_context(authorization_context)
         validate_show_event_payload_session(session_id, payload)
         event_type = _validate_event_type(payload.get("type"))
         actor = _actor_for_event(event_type)
@@ -182,6 +253,9 @@ class ShowSessionEventStore:
                         request_fingerprint=request_fingerprint,
                     )
                     return existing
+
+                if show_event_request_requests_dispatch(payload):
+                    _require_show_dispatch_authority(conn, session_id, access_context)
 
                 stored_payload = payload
                 if event_type == "assistant.mark.resolved":
@@ -291,6 +365,10 @@ class ShowSessionEventStore:
                         if attachments:
                             content["attachments"] = attachments
                         metadata.update(_annotation_metadata(event_payload, anchor))
+                    # Drops any authority the event payload tried to carry, then
+                    # records the trusted one for a remote author. A local author
+                    # leaves the metadata byte-identical to before.
+                    metadata = metadata_with_resource_user_context(metadata, access_context)
                     if requests_dispatch:
                         from core.message_priority import (
                             delivery_intent_for_trigger,
@@ -333,7 +411,7 @@ class ShowSessionEventStore:
                                 "state": "reserved",
                             },
                         )
-                        delivery = message_deliveries.delivery_payload(delivery_row)
+                        delivery = message_deliveries.public_delivery_payload(delivery_row)
                         conn.execute(
                             update(show_session_events)
                             .where(show_session_events.c.id == event_id)
@@ -376,7 +454,7 @@ class ShowSessionEventStore:
             "payload": event_payload,
             "transcript_text": transcript_text,
             "message_id": message_id,
-            "message": message,
+            "message": _public_event_message(message),
             "delivery_id": delivery_id,
             "delivery": delivery,
             "created_at": created_at,
@@ -1132,6 +1210,25 @@ def _format_transcript_text(
     return _json_dumps(payload)
 
 
+def _public_event_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A transcript message as an event audience may see it.
+
+    The stored metadata carries server-owned identity — the authority a remote
+    author was admitted under, among the fields ``public_message_metadata``
+    already hides. Every audience of an event reads this projection: the POST
+    echo, the ``show.event`` and ``message.new`` streams, the CLI's own result
+    and the local bridge. The row itself keeps the full metadata for the
+    deferred consumers that re-check it.
+    """
+
+    if not isinstance(message, dict):
+        return message
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return message
+    return {**message, "metadata": message_deliveries.public_message_metadata(metadata)}
+
+
 def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
     payload = _json_loads(row.get("payload_json"), {})
     if isinstance(payload, dict):
@@ -1181,10 +1278,10 @@ def _existing_event_payload(
             (item for item in window["messages"] if item.get("id") == message_id),
             None,
         )
-    event["message"] = message
+    event["message"] = _public_event_message(message)
     delivery_id = event.get("delivery_id")
     event["delivery"] = (
-        message_deliveries.delivery_payload(delivery)
+        message_deliveries.public_delivery_payload(delivery)
         if isinstance(delivery_id, str)
         and delivery_id
         and (delivery := message_deliveries.get_delivery(conn, delivery_id)) is not None

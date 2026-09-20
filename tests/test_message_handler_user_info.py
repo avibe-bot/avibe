@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from modules.im import MessageContext
+from core.agent_input import AgentInputMetadata
 
 
 def _load_message_handler_class():
@@ -73,17 +74,19 @@ class _StubController:
 
 class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
     def test_build_current_time_line_uses_readable_utc_offset(self):
-        line = MessageHandler._build_current_time_line(
-            datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8)))
+        line = AgentInputMetadata().render(
+            "hello", types.SimpleNamespace(include_time_info=True),
+            now=datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8))),
         )
 
-        self.assertEqual(line, "[Current Time: 2026-05-13 11:42:08 UTC+08:00]")
+        self.assertEqual(line, "[Now: 2026-05-13 11:42:08 UTC+08:00]\nhello")
 
     async def test_prepend_user_info_prefers_real_name_over_name(self):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))
         context = MessageContext(user_id="U0E0FM3QT", channel_id="C1")
 
-        result = await handler._prepend_user_info(context, "hello")
+        metadata = await handler.prepare_input_metadata(context, human=True)
+        result = metadata.render("hello", types.SimpleNamespace(include_time_info=False))
 
         self.assertEqual(result, "[Alex<U0E0FM3QT>]\nhello")
 
@@ -91,7 +94,8 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(_StubController({"display_name": "Alex Chen", "real_name": "Alex", "name": "cyh"}))
         context = MessageContext(user_id="U0E0FM3QT", channel_id="C1")
 
-        result = await handler._prepend_user_info(context, "hello")
+        metadata = await handler.prepare_input_metadata(context, human=True)
+        result = metadata.render("hello", types.SimpleNamespace(include_time_info=False))
 
         self.assertEqual(result, "[Alex Chen<U0E0FM3QT>]\nhello")
 
@@ -99,28 +103,27 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))
         handler.config.include_time_info = True
         handler.config.include_user_info = True
-        handler._build_current_time_line = lambda: "[Current Time: 2026-05-13 11:42:08 UTC+08:00]"  # type: ignore[method-assign]
         context = MessageContext(user_id="U0E0FM3QT", channel_id="C1")
 
-        result = await handler._prepend_message_metadata(context, "hello", include_user_info=True)
+        metadata = await handler.prepare_input_metadata(context, human=True)
+        result = metadata.render("hello", handler.config, now=datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8))))
 
-        self.assertEqual(result, "[Current Time: 2026-05-13 11:42:08 UTC+08:00]\n[Alex<U0E0FM3QT>]\nhello")
+        self.assertEqual(result, "[Now: 2026-05-13 11:42:08 UTC+08:00]\n[Alex<U0E0FM3QT>]\nhello")
 
     async def test_prepend_message_metadata_can_include_time_without_user_info(self):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))
         handler.config.include_time_info = True
         handler.config.include_user_info = True
-        handler._build_current_time_line = lambda: "[Current Time: 2026-05-13 11:42:08 UTC+08:00]"  # type: ignore[method-assign]
         context = MessageContext(user_id="U0E0FM3QT", channel_id="C1")
 
-        result = await handler._prepend_message_metadata(context, "scheduled work", include_user_info=False)
+        metadata = await handler.prepare_input_metadata(context, human=False)
+        result = metadata.render("scheduled work", handler.config, now=datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8))))
 
-        self.assertEqual(result, "[Current Time: 2026-05-13 11:42:08 UTC+08:00]\nscheduled work")
+        self.assertEqual(result, "[Now: 2026-05-13 11:42:08 UTC+08:00]\nscheduled work")
 
     async def test_prepend_message_metadata_places_source_session_after_time(self):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))
         handler.config.include_time_info = True
-        handler._build_current_time_line = lambda: "[Current Time: 2026-05-13 11:42:08 UTC+08:00]"  # type: ignore[method-assign]
         context = MessageContext(
             user_id="caller",
             channel_id="C1",
@@ -130,11 +133,12 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        result = await handler._prepend_message_metadata(context, "callback result", include_user_info=False)
+        metadata = await handler.prepare_input_metadata(context, human=False)
+        result = metadata.render("callback result", handler.config, now=datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8))))
 
         self.assertEqual(
             result,
-            "[Current Time: 2026-05-13 11:42:08 UTC+08:00]\n"
+            "[Now: 2026-05-13 11:42:08 UTC+08:00]\n"
             "From: #ses_sender123\ncallback result",
         )
 
@@ -150,7 +154,8 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        result = await handler._prepend_message_metadata(context, "delegated work", include_user_info=False)
+        metadata = await handler.prepare_input_metadata(context, human=False)
+        result = metadata.render("delegated work", handler.config)
 
         self.assertEqual(result, "From: #ses_sender456\ndelegated work")
 

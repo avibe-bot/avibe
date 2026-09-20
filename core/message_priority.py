@@ -26,13 +26,24 @@ _INTENT_BY_TRIGGER: dict[str, DeliveryIntent] = {
     "callback": "steer",
 }
 
+_LEGACY_INTENT_ALIASES = {
+    # Agent Run once used this as a separate "queue then promote" policy.
+    # A content-bearing send-now is P1 steering; only content-free P1 promotes
+    # an existing queue head.
+    "send_now": "steer",
+}
+
+
+def normalize_delivery_intent(intent: str) -> DeliveryIntent:
+    normalized = str(intent or "").strip().lower()
+    normalized = _LEGACY_INTENT_ALIASES.get(normalized, normalized)
+    if normalized not in _PRIORITY_BY_INTENT:
+        raise ValueError(f"unsupported delivery intent: {intent}")
+    return cast(DeliveryIntent, normalized)
+
 
 def priority_for_delivery_intent(intent: str) -> DeliveryPriority:
-    normalized = cast(DeliveryIntent, str(intent or "").strip())
-    try:
-        return _PRIORITY_BY_INTENT[normalized]
-    except KeyError as exc:
-        raise ValueError(f"unsupported delivery intent: {intent}") from exc
+    return _PRIORITY_BY_INTENT[normalize_delivery_intent(intent)]
 
 
 def delivery_intent_for_priority(priority: str) -> DeliveryIntent:

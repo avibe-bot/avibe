@@ -8,14 +8,91 @@ import logging
 import os
 import signal
 from asyncio.subprocess import Process
-from typing import Any, Awaitable, Callable, Optional
+from contextlib import nullcontext
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from vibe.codex_config import format_toml_basic_string
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from vibe.backend_model_catalog import CodexHubCatalog
+
 STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
+
+
+# Avibe owns the user-facing surface, durable automation, memory, and agent
+# delegation. Keep Codex app-server focused on the execution capabilities that
+# Avibe deliberately exposes instead of inheriting Codex client features from a
+# user's global config. These overrides are appended last so backend extra args
+# cannot re-enable a competing host surface for this process.
+AVIBE_APP_SERVER_CONFIG_OVERRIDES = (
+    "analytics.enabled=false",
+    "check_for_update_on_startup=false",
+    "feedback.enabled=false",
+    "features.apps=false",
+    "features.auth_elicitation=false",
+    "features.browser_use=false",
+    "features.browser_use_external=false",
+    "features.browser_use_full_cdp_access=false",
+    "features.computer_use=false",
+    "features.goals=false",
+    "features.guardian_approval=false",
+    "features.hooks=false",
+    "features.in_app_browser=false",
+    "features.in_app_updates=false",
+    "features.memories=false",
+    "features.mentions_v2=false",
+    "features.multi_agent=false",
+    "features.personality=false",
+    "features.plugin_sharing=false",
+    "features.plugins=false",
+    "features.recommended_plugins=false",
+    "features.remote_plugin=false",
+    # Opt injected updates into budgeted retention, not guaranteed persistence.
+    "features.retain_client_developer_messages=true",
+    "features.skill_mcp_dependency_install=false",
+    "features.terminal_visualization_instructions=false",
+    "features.tool_call_mcp_elicitation=false",
+    "features.tool_suggest=false",
+    "features.workspace_dependencies=false",
+    "skills.include_instructions=false",
+    # Host-owned questions. Codex 0.153.2 gates the synchronous tool only;
+    # asynchronous exposure still needs upstream support (openai/codex#43821).
+    "tools.experimental_request_user_input.enabled=false",
+)
+
+
+def _avibe_app_server_config_args() -> list[str]:
+    return [
+        arg
+        for override in AVIBE_APP_SERVER_CONFIG_OVERRIDES
+        for arg in ("-c", override)
+    ]
+
+
+class CodexRPCError(RuntimeError):
+    """A structured server error, distinct from an ambiguous transport failure."""
+
+    def __init__(self, error: Any) -> None:
+        super().__init__(f"Codex RPC error: {error}")
+        self.code = error.get("code") if isinstance(error, dict) else None
+
+    @property
+    def request_rejected(self) -> bool:
+        # Protocol validation failures precede dispatch. Internal/server errors
+        # do not prove that a mutation was rejected before it took effect.
+        return self.code in {-32600, -32601, -32602}
+
+
+class CodexResponseTooLargeError(RuntimeError):
+    """The shared stdout reader cannot accept a protocol frame of this size."""
+
+    def __init__(self, limit: int = STREAM_BUFFER_LIMIT) -> None:
+        self.limit = limit
+        super().__init__(f"Codex app-server response exceeds the {limit}-byte stdout line limit")
 
 
 class CodexTransport:
@@ -33,6 +110,7 @@ class CodexTransport:
         runtime_args: list[str] | None = None,
         runtime_env: dict[str, str] | None = None,
         runtime_fingerprint: str = "direct",
+        model_hub_catalog: CodexHubCatalog | None = None,
     ) -> None:
         self._binary = binary
         self._cwd = cwd
@@ -40,11 +118,15 @@ class CodexTransport:
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
         self.runtime_fingerprint = runtime_fingerprint
+        self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
+        self._catalog_required = model_hub_catalog is not None
+        self._catalog_exit_task: asyncio.Task[None] | None = None
         self._process: Optional[Process] = None
         self._request_id: int = 0
         self._pending: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
         self._write_lock = asyncio.Lock()
         self._initialized = False
+        self.supports_turn_collaboration_mode = False
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
 
@@ -64,9 +146,19 @@ class CodexTransport:
 
     async def start(self) -> None:
         """Launch the app-server and perform the ``initialize`` handshake."""
+        try:
+            await self._start()
+        except BaseException:
+            if self._process is None or self._process.returncode is not None:
+                self._release_model_hub_catalog()
+            raise
+
+    async def _start(self) -> None:
         if self._process and self._process.returncode is None:
             logger.warning("CodexTransport.start() called but process is already running")
             return
+        if self._catalog_required and self._model_hub_catalog is None:
+            raise RuntimeError("A stopped Codex Hub transport needs a newly prepared catalog")
 
         self._closed_event.clear()
         cmd = (
@@ -74,11 +166,12 @@ class CodexTransport:
             + ["app-server"]
             + self._runtime_args
             + self._extra_args
-            # Keep this process-local policy last so user args cannot re-enable
-            # memory. Older Codex builds ignore unknown config keys, while an
-            # unknown ``--disable`` feature would abort startup.
-            + ["-c", "features.memories=false"]
+            + _avibe_app_server_config_args()
         )
+        if self._model_hub_catalog is not None:
+            # The path actually consumed must be the one we pin, even if a
+            # backend extra argument tries to select a different generation.
+            cmd += ["-c", f"model_catalog_json={format_toml_basic_string(str(self._model_hub_catalog.path))}"]
         logger.info("Launching Codex app-server: %s (cwd=%s)", " ".join(cmd), self._cwd)
 
         if not os.path.exists(self._cwd):
@@ -94,7 +187,24 @@ class CodexTransport:
         }
         if self._runtime_env is not None:
             subprocess_kwargs["env"] = self._runtime_env
-        self._process = await asyncio.create_subprocess_exec(*cmd, **subprocess_kwargs)
+        catalog = self._model_hub_catalog
+        inheritance = catalog.inherited_subprocess_kwargs() if catalog is not None else nullcontext({})
+        with inheritance as catalog_kwargs:
+            spawn = asyncio.create_task(
+                asyncio.create_subprocess_exec(*cmd, **subprocess_kwargs, **catalog_kwargs)
+            )
+            try:
+                self._process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                # Cancellation can race the OS spawn. Settle it before closing
+                # inherited handles or losing the only reference to this child.
+                self._process = await spawn
+                await self.stop()
+                raise
+        if catalog is not None:
+            self._catalog_exit_task = asyncio.create_task(
+                self._release_catalog_on_exit(self._process, catalog)
+            )
         identity = process_identity(self._process.pid)
         logger.info(
             "Codex app-server started (pid=%s pgid=%s sid=%s service_pgid=%s)",
@@ -117,12 +227,28 @@ class CodexTransport:
                 {
                     "clientInfo": {
                         "name": "avibe",
+                        "title": "Avibe",
                         "version": "1.0.0",
                     },
+                    # Developer item injection and legacy collaboration-mode
+                    # cleanup use experimental APIs. Omitted server-request
+                    # capabilities remain disabled.
+                    "capabilities": {"experimentalApi": True},
                 },
             )
             logger.info("Codex app-server initialized: %s", resp)
             await self.send_notification("initialized")
+            try:
+                await self.send_request("collaborationMode/list", {})
+            except Exception as exc:
+                # Only legacy-thread cleanup depends on collaboration support.
+                # A catalog response does not prove custom prompt delivery.
+                logger.info(
+                    "Codex turn collaboration mode is unavailable; using developer item injection: %s",
+                    exc,
+                )
+            else:
+                self.supports_turn_collaboration_mode = True
             self._initialized = True
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
@@ -140,6 +266,7 @@ class CodexTransport:
         self._initialized = False
         proc = self._process
         if not proc or proc.returncode is not None:
+            self._release_model_hub_catalog()
             self._closed_event.set()
             self._cleanup_tasks()
             return
@@ -165,6 +292,7 @@ class CodexTransport:
                     pass
 
         self._cleanup_tasks()
+        self._release_model_hub_catalog()
         self._closed_event.set()
         # Fail all pending futures
         for fut in self._pending.values():
@@ -172,6 +300,18 @@ class CodexTransport:
                 fut.set_exception(ConnectionError("Transport stopped"))
         self._pending.clear()
         logger.info("Codex app-server stopped")
+
+    async def _release_catalog_on_exit(self, proc: Process, catalog: CodexHubCatalog) -> None:
+        """Stdout EOF is not process exit; keep the pin until wait confirms it."""
+        await proc.wait()
+        catalog.close()
+        if self._model_hub_catalog is catalog:
+            self._model_hub_catalog = None
+
+    def _release_model_hub_catalog(self) -> None:
+        if self._model_hub_catalog is not None:
+            self._model_hub_catalog.close()
+            self._model_hub_catalog = None
 
     def _cleanup_tasks(self) -> None:
         for task in (self._reader_task, self._stderr_task, self._notify_task):
@@ -301,12 +441,14 @@ class CodexTransport:
     async def _reader_loop(self) -> None:
         """Read stdout line-by-line and dispatch JSON-RPC messages."""
         assert self._process and self._process.stdout
+        failure: Exception = ConnectionError("Codex app-server stdout closed")
         try:
             while True:
                 try:
                     raw = await self._process.stdout.readline()
                 except (asyncio.LimitOverrunError, ValueError) as err:
                     logger.error("Codex stdout buffer error: %s", err)
+                    failure = CodexResponseTooLargeError()
                     break
                 if not raw:
                     break  # EOF
@@ -329,7 +471,7 @@ class CodexTransport:
             # Process ended — fail pending futures
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(ConnectionError("Codex app-server stdout closed"))
+                    fut.set_exception(failure)
             self._pending.clear()
 
     async def _dispatch(self, msg: dict[str, Any]) -> None:
@@ -340,7 +482,7 @@ class CodexTransport:
             fut = self._pending.pop(req_id, None)
             if fut and not fut.done():
                 if "error" in msg:
-                    fut.set_exception(RuntimeError(f"Codex RPC error: {msg['error']}"))
+                    fut.set_exception(CodexRPCError(msg["error"]))
                 else:
                     fut.set_result(msg.get("result", {}))
             return

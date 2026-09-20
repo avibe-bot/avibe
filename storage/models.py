@@ -103,6 +103,79 @@ scope_settings = Table(
     Index("ix_scope_settings_backend_model", "agent_backend", "model"),
 )
 
+project_access_policies = Table(
+    "project_access_policies",
+    metadata,
+    Column("project_id", String, primary_key=True),
+    Column("scope_id", String, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=False),
+    Column("organization_id", String, nullable=True),
+    Column("mode", String, nullable=False, server_default="inherit"),
+    Column("policy_revision", Integer, nullable=False, server_default="0"),
+    Column("last_applied_control_plane_revision", Integer, nullable=False, server_default="0"),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    UniqueConstraint("scope_id", name="uq_project_access_policies_scope"),
+    CheckConstraint("mode in ('inherit', 'restricted')", name="ck_project_access_policies_mode"),
+    CheckConstraint("policy_revision >= 0", name="ck_project_access_policies_revision"),
+    CheckConstraint(
+        "last_applied_control_plane_revision >= 0",
+        name="ck_project_access_policies_control_revision",
+    ),
+    Index("ix_project_access_policies_organization", "organization_id"),
+)
+
+project_access_bindings = Table(
+    "project_access_bindings",
+    metadata,
+    Column(
+        "project_id",
+        String,
+        ForeignKey("project_access_policies.project_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("principal_kind", String, primary_key=True),
+    Column("principal_value", String, primary_key=True),
+    Column("access_role", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    CheckConstraint(
+        "principal_kind in ('email', 'email_domain', 'organization_group')",
+        name="ck_project_access_bindings_kind",
+    ),
+    CheckConstraint("access_role in ('editor', 'viewer')", name="ck_project_access_bindings_role"),
+    Index(
+        "ix_project_access_bindings_principal",
+        "principal_kind",
+        "principal_value",
+    ),
+)
+
+remote_access_authorizations = Table(
+    "remote_access_authorizations",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("instance_id", String, nullable=False),
+    Column("subject", String, nullable=False),
+    Column("email", String, nullable=True),
+    Column("scope_kind", String, nullable=True),
+    Column("scope_ref", String, nullable=True),
+    Column("authorization_state", String, nullable=True),
+    Column("claims_json", Text, nullable=False),
+    Column("expires_at", Integer, nullable=True),
+    Column("created_at", Integer, nullable=False),
+    Column("last_checked_at", Integer, nullable=True),
+    Column("updated_at", Integer, nullable=True),
+    Index("ix_remote_access_authorizations_expires", "expires_at"),
+    Index(
+        "ux_remote_access_authorizations_scope",
+        "instance_id",
+        "subject",
+        "scope_kind",
+        "scope_ref",
+        unique=True,
+        sqlite_where=text("scope_kind is not null and scope_ref is not null"),
+    ),
+)
+
 auth_codes = Table(
     "auth_codes",
     metadata,
@@ -222,6 +295,7 @@ run_definitions = Table(
     Column("last_started_at", String, nullable=True),
     Column("last_finished_at", String, nullable=True),
     Column("retired_at", String, nullable=True),
+    Column("retirement_reason", String, nullable=True),
     Column("last_event_at", String, nullable=True),
     Column("last_run_at", String, nullable=True),
     Column("last_error", Text, nullable=True),
@@ -266,6 +340,7 @@ agent_runs = Table(
     Column("callback_error", Text, nullable=True),
     Column("callback_run_id", String, nullable=True),
     Column("callback_completed_at", String, nullable=True),
+    Column("callback_terminal_turn_id", String, nullable=True),
     Column("cancel_requested", Integer, nullable=False, default=0),
     Column("cancel_requested_at", String, nullable=True),
     Column("pid", Integer, nullable=True),
@@ -290,6 +365,16 @@ agent_runs = Table(
     ),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
+    Index(
+        "uq_agent_runs_callback_terminal_turn_session",
+        "callback_terminal_turn_id",
+        "session_id",
+        unique=True,
+        sqlite_where=text(
+            "run_type = 'agent_run' and source_kind = 'callback' "
+            "and callback_terminal_turn_id is not null and session_id is not null"
+        ),
+    ),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
     Index("ix_agent_runs_updated", "updated_at"),
@@ -304,14 +389,70 @@ show_pages = Table(
     "show_pages",
     metadata,
     Column("session_id", String, primary_key=True),
-    Column("visibility", String, nullable=False),
+    Column("access_mode", String, nullable=False, server_default="private"),
+    Column("access_revision", Integer, nullable=False, server_default="0"),
     Column("share_id", String, nullable=True),
     Column("offline_at", String, nullable=True),
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     UniqueConstraint("share_id", name="uq_show_pages_share_id"),
+    CheckConstraint(
+        "access_mode in ('private', 'limited', 'public')",
+        name="ck_show_pages_access_mode",
+    ),
+    CheckConstraint("access_revision >= 0", name="ck_show_pages_access_revision"),
     Index("ix_show_pages_share_id", "share_id"),
-    Index("ix_show_pages_visibility", "visibility"),
+    Index("ix_show_pages_access_mode", "access_mode"),
+)
+
+# The Limited audience of a Show Page: one heterogeneous set of read-only
+# grants, OR-ed at admission. ``email`` is instance-independent; ``group`` and
+# ``organization`` only mean something relative to the organization that owns
+# the page, so they carry that organization and cannot exist on a Personal
+# instance. This table replaces the email-only ``show_page_authorized_emails``.
+show_page_access_entries = Table(
+    "show_page_access_entries",
+    metadata,
+    Column(
+        "page_id",
+        String,
+        ForeignKey("show_pages.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("kind", String, primary_key=True),
+    Column("value", String, primary_key=True),
+    Column("organization_id", String, nullable=True),
+    Column("created_at", String, nullable=False),
+    CheckConstraint(
+        "kind in ('email', 'group', 'organization')",
+        name="ck_show_page_access_entries_kind",
+    ),
+    CheckConstraint(
+        "length(value) between 1 and 320",
+        name="ck_show_page_access_entries_value_length",
+    ),
+    CheckConstraint(
+        "(kind = 'email' and organization_id is null) "
+        "or (kind in ('group', 'organization') and organization_id is not null)",
+        name="ck_show_page_access_entries_organization",
+    ),
+    # An organization entry IS the organization, so its value cannot name a
+    # different one than the entry is scoped to.
+    CheckConstraint(
+        "kind <> 'organization' or value = organization_id",
+        name="ck_show_page_access_entries_organization_value",
+    ),
+    # Admission resolves a visitor assertion to entries by (kind, value).
+    Index("ix_show_page_access_entries_lookup", "kind", "value"),
+    # "This organization may read" is one switch, not a list: at most one such
+    # entry per page. The composite primary key cannot say that on its own,
+    # because two organization rows would differ in ``value``.
+    Index(
+        "uq_show_page_access_entries_organization",
+        "page_id",
+        unique=True,
+        sqlite_where=text("kind = 'organization'"),
+    ),
 )
 
 show_session_events = Table(
@@ -359,6 +500,116 @@ agent_events = Table(
     Index("ix_agent_events_session_type_created_id", "session_id", "event_type", "created_at", "id"),
     Index("ix_agent_events_scope_created_id", "scope_id", "created_at", "id"),
     Index("ix_agent_events_turn_sequence_id", "turn_id", "sequence", "id"),
+    Index(
+        "ix_agent_events_skill_created_id",
+        "created_at",
+        "id",
+        sqlite_where=text(
+            "visibility = 'trace' and event_type in ('skill.catalog_result', 'skill.load_result')"
+        ),
+    ),
+    # Tool retention has its own allowlist, independent of Skill retention.
+    # Keep this index aligned with storage/agent_events_retention.py.
+    Index(
+        "ix_agent_events_trace_retention",
+        "created_at",
+        sqlite_where=text(
+            "event_type = 'tool_call' and visibility = 'trace' "
+            "and datetime(created_at) is not null"
+        ),
+    ),
+)
+
+skill_usage_daily = Table(
+    "skill_usage_daily",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("day", Text, nullable=False),
+    Column("scope_id", Text, ForeignKey("scopes.id", ondelete="CASCADE"), nullable=True),
+    Column("session_id", Text, ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=True),
+    Column("skill_key", Text, nullable=False),
+    Column("skill_name", Text, nullable=False),
+    Column("source_kind", Text, nullable=False),
+    Column("skill_revision", Text, nullable=False, server_default=""),
+    Column("backend", Text, nullable=False, server_default=""),
+    Column("model", Text, nullable=False, server_default=""),
+    Column("trigger_kind", Text, nullable=False, server_default="unknown"),
+    Column("platform", Text, nullable=False, server_default="unknown"),
+    Column("avibe_version", Text, nullable=False),
+    Column("catalog_offer_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_success_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_failure_count", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_samples", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_ms_sum", Integer, nullable=False, server_default=text("0")),
+    Column("load_duration_ms_max", Integer, nullable=False, server_default=text("0")),
+    Column("loaded_body_bytes_sum", Integer, nullable=False, server_default=text("0")),
+    Column("first_observed_at", Text, nullable=False),
+    Column("last_observed_at", Text, nullable=False),
+    CheckConstraint(
+        "day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'",
+        name="ck_skill_usage_day",
+    ),
+    CheckConstraint(
+        "(scope_id is null or length(scope_id) > 0) and "
+        "(session_id is null or length(session_id) > 0)",
+        name="ck_skill_usage_ids",
+    ),
+    CheckConstraint(
+        "length(skill_key) = 64 and skill_key not glob '*[^0-9a-f]*'",
+        name="ck_skill_usage_key",
+    ),
+    CheckConstraint("length(skill_name) between 1 and 64", name="ck_skill_usage_name"),
+    CheckConstraint(
+        "source_kind in ('builtin', 'project', 'global', 'unresolved')",
+        name="ck_skill_usage_source",
+    ),
+    CheckConstraint(
+        "skill_revision = '' or (length(skill_revision) = 64 and skill_revision not glob '*[^0-9a-f]*')",
+        name="ck_skill_usage_revision",
+    ),
+    CheckConstraint(
+        "trigger_kind in ('human', 'task', 'watch', 'agent_run', 'callback', 'standalone', 'unknown')",
+        name="ck_skill_usage_trigger",
+    ),
+    CheckConstraint(
+        "typeof(catalog_offer_count) = 'integer' and catalog_offer_count >= 0 "
+        "and typeof(load_success_count) = 'integer' and load_success_count >= 0 "
+        "and typeof(load_failure_count) = 'integer' and load_failure_count >= 0 "
+        "and catalog_offer_count + load_success_count + load_failure_count > 0 "
+        "and (load_success_count = 0 or skill_revision <> '') "
+        "and (catalog_offer_count = 0 or skill_revision = '')",
+        name="ck_skill_usage_counts",
+    ),
+    CheckConstraint(
+        "typeof(load_duration_samples) = 'integer' "
+        "and load_duration_samples between 0 and load_success_count + load_failure_count "
+        "and typeof(load_duration_ms_sum) = 'integer' and load_duration_ms_sum >= 0 "
+        "and typeof(load_duration_ms_max) = 'integer' "
+        "and load_duration_ms_max between 0 and load_duration_ms_sum "
+        "and (load_duration_samples > 0 or load_duration_ms_sum = 0)",
+        name="ck_skill_usage_duration",
+    ),
+    CheckConstraint(
+        "typeof(loaded_body_bytes_sum) = 'integer' and loaded_body_bytes_sum >= 0 "
+        "and (load_success_count > 0 or loaded_body_bytes_sum = 0)",
+        name="ck_skill_usage_bytes",
+    ),
+    CheckConstraint(
+        "length(first_observed_at) = 27 and length(last_observed_at) = 27 "
+        "and substr(first_observed_at, 1, 10) = day "
+        "and substr(last_observed_at, 1, 10) = day "
+        "and first_observed_at <= last_observed_at",
+        name="ck_skill_usage_observed",
+    ),
+    Index(
+        "uq_skill_usage_daily_grain",
+        "day", text("coalesce(scope_id, '')"), text("coalesce(session_id, '')"),
+        "skill_key", "skill_revision", "backend", "model", "trigger_kind", "platform", "avibe_version",
+        unique=True,
+    ),
+    Index("ix_skill_usage_daily_skill_day", "skill_key", "day"),
+    Index("ix_skill_usage_daily_session_day", "session_id", "day"),
+    Index("ix_skill_usage_daily_scope_day", "scope_id", "day"),
 )
 
 # Platform-agnostic chat message store. Every IM adapter (Slack, Discord,
@@ -655,8 +906,8 @@ message_deliveries = Table(
     Column("state", String, nullable=False),
     Column("snapshot_json", Text, nullable=True),
     Column("snapshot_sha256", String, nullable=False),
-    # The exact backend-facing prompt is independent of Message display content
-    # and remains immutable after materialization for audit/recovery.
+    # Durable dispatch content is independent of Message display content.
+    # Execution metadata is rendered on a request copy at the native write.
     Column("dispatch_text", Text, nullable=True),
     Column("dispatch_sha256", String, nullable=False),
     Column("dedupe_key", Text, nullable=True),
@@ -670,7 +921,17 @@ message_deliveries = Table(
     Column("current_receipt_outcome", String, nullable=True),
     Column("current_receipt_json", Text, nullable=False, server_default="{}"),
     Column("current_attempt_opened_at", String, nullable=True),
-    Column("delivery_history_json", Text, nullable=False, server_default='{"version":1,"events":[]}'),
+    Column(
+        "delivery_history_json",
+        Text,
+        nullable=False,
+        # Declared as an expression rather than a JSON literal on purpose: a literal
+        # default containing ``:1`` is re-read as a bind parameter every time a table
+        # rebuild reflects and recompiles it, which is how 20260811_0050 turned this
+        # default into invalid JSON. json_object() has no colon to lose. See
+        # 20260819_0057.
+        server_default=text("(json_object('version', 1, 'events', json_array()))"),
+    ),
     Column("version", Integer, nullable=False, server_default="1"),
     Column("submitted_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
@@ -732,7 +993,7 @@ message_deliveries = Table(
     ),
     CheckConstraint(
         "(state = 'reconciling_steer' "
-        "and current_receipt_outcome = 'unknown') "
+        "and current_receipt_outcome in ('accepted', 'unknown')) "
         "or (state <> 'reconciling_steer' "
         "and current_receipt_outcome is null)",
         name="ck_message_deliveries_current_receipt",
@@ -808,14 +1069,14 @@ show_session_events.append_constraint(
 # file referenced by an agent reply (or uploaded by the user) is registered
 # here and served back over ``/api/media/<token>``. The URL carries only the
 # opaque ``token`` — never a filesystem path, never a session — so it is stable
-# across messages/sessions and the browser can cache it. ``content_type`` /
+# within the referencing session and the browser can cache it. ``content_type`` /
 # ``file_ext`` are stored so the response and the UI file card don't have to
 # re-derive them; ``kind`` (image|file) selects inline-image vs download-card
 # rendering; ``source`` distinguishes agent output from user uploads so one
 # table serves both. ``size_bytes`` + ``mtime_ns`` are the content fingerprint:
 # :func:`storage.media_service.register` reuses an existing token for the same
-# (local_path, size_bytes, mtime_ns) so a re-referenced file keeps one cacheable
-# URL, while a changed file mints a fresh token (busting the browser cache).
+# session and (local_path, size_bytes, mtime_ns), while a different session or
+# changed file mints a fresh token.
 media_objects = Table(
     "media_objects",
     metadata,
@@ -841,8 +1102,26 @@ media_objects = Table(
     Column("revoked_at", String, nullable=True),
     Index("ix_media_objects_session", "session_id"),
     Index("ix_media_objects_scope_created", "scope_id", "created_at"),
-    # Backs register()'s dedup lookup (machine-global content fingerprint).
+    # Backs the fingerprint prefix of register()'s session-scoped dedup lookup.
     Index("ix_media_objects_dedup", "local_path", "size_bytes", "mtime_ns"),
+)
+
+# A legacy media token could be reused across multiple sessions before token
+# dedup became session-scoped. Keep every trusted referencing session so those
+# historical attachments remain readable without treating the opaque token as
+# authorization for an arbitrary session.
+media_object_references = Table(
+    "media_object_references",
+    metadata,
+    Column("token", String, ForeignKey("media_objects.token", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "session_id",
+        String,
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("created_at", String, nullable=False),
+    Index("ix_media_object_references_session", "session_id"),
 )
 
 # Per-install browser Push API subscriptions for PWA Web Push. These are
@@ -868,6 +1147,57 @@ web_push_subscriptions = Table(
     UniqueConstraint("endpoint", name="uq_web_push_subscriptions_endpoint"),
     Index("ix_web_push_subscriptions_user_enabled", "user_key", "enabled"),
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
+)
+
+# Resource ACLs are local enforcement state. The hosted control plane receives
+# only safe metadata and desired revisions; it never stores local resource
+# content or secret values.
+resource_access_policies = Table(
+    "resource_access_policies",
+    metadata,
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("organization_id", String, nullable=True),
+    Column("owner_user_id", String, nullable=True),
+    Column("owner_email", String, nullable=True),
+    Column("access_level", String, nullable=False, server_default=text("'private'")),
+    Column("created_by_user_id", String, nullable=True),
+    Column("updated_by_user_id", String, nullable=True),
+    Column("policy_revision", Integer, nullable=False, server_default=text("0")),
+    Column("last_applied_control_plane_revision", Integer, nullable=True),
+    Column("created_at", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    CheckConstraint(
+        "resource_kind in ('agent', 'vault_secret', 'skill', 'show_page')",
+        name="ck_resource_access_policies_kind",
+    ),
+    CheckConstraint(
+        "access_level in ('public', 'scope', 'private')",
+        name="ck_resource_access_policies_access_level",
+    ),
+    Index(
+        "ix_resource_access_policies_org_level",
+        "organization_id",
+        "access_level",
+        "resource_kind",
+    ),
+    Index("ix_resource_access_policies_owner", "owner_user_id", "resource_kind"),
+)
+
+resource_access_groups = Table(
+    "resource_access_groups",
+    metadata,
+    Column("resource_kind", String, primary_key=True),
+    Column("resource_id", String, primary_key=True),
+    Column("group_id", String, primary_key=True),
+    Column("organization_id", String, nullable=False),
+    Column("created_at", String, nullable=False),
+    ForeignKeyConstraint(
+        ["resource_kind", "resource_id"],
+        ["resource_access_policies.resource_kind", "resource_access_policies.resource_id"],
+        ondelete="CASCADE",
+    ),
+    Index("ix_resource_access_groups_group", "organization_id", "group_id", "resource_kind"),
 )
 
 # Vaults — secret management for agents.

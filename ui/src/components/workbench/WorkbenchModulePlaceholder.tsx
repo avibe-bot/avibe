@@ -1,3 +1,4 @@
+import type { TranslationPrefix } from '@/i18n/types';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -6,7 +7,7 @@ interface WorkbenchModulePlaceholderProps {
   /** i18n key prefix (e.g. `workbench.modules.agents`). The component reads
    *  `${prefix}.title` and `${prefix}.description` plus the shared
    *  `workbench.modules.comingSoon` hint. */
-  i18nPrefix: string;
+  i18nPrefix: Extract<TranslationPrefix<'title'> & TranslationPrefix<'description'>, `workbench.modules.${string}`>;
 }
 
 // Shared placeholder used by all four capability modules and the inbox
@@ -21,10 +22,10 @@ export const WorkbenchModulePlaceholder: React.FC<WorkbenchModulePlaceholderProp
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col items-center gap-5 py-16 text-center">
-      <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint shadow-[0_0_24px_-6px_rgba(91,255,160,0.5)]">
+      <div className="flex size-14 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
         {icon}
       </div>
-      <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint">
+      <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint-ink">
         {t(`${i18nPrefix}.eyebrow`, { defaultValue: t('workbench.modules.comingSoonEyebrow') })}
       </div>
       <h1 className="text-2xl font-bold text-foreground">{t(`${i18nPrefix}.title`)}</h1>

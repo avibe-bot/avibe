@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/source-probe-result.schema.json",
+  "title": "SourceProbeResult",
+  "description": "One explicitly selected API-key Source/model invocation. It does not claim provider-wide health and cannot fall back to another Source.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_id", "model_id", "protocol", "reachable", "latency_ms", "error"],
+  "properties": {
+    "source_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat"]},
+    "reachable": {"type": "boolean"},
+    "latency_ms": {"type": "integer", "minimum": 0},
+    "error": {"type": ["string", "null"]}
+  },
+  "allOf": [{
+    "if": {"properties": {"reachable": {"const": true}}},
+    "then": {"properties": {"error": {"type": "null"}}},
+    "else": {"properties": {"error": {"type": "string", "minLength": 1}}}
+  }]
+}

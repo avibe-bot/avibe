@@ -1,0 +1,5 @@
+{
+  "anthropic": ["low", "medium", "high", "xhigh", "max"],
+  "openai_responses": ["minimal", "low", "medium", "high", "xhigh"],
+  "openai_chat": ["minimal", "low", "medium", "high", "xhigh"]
+}

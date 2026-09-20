@@ -4,6 +4,7 @@
 // deserve unit tests, and this repo's vitest setup has no DOM, so they are plain
 // functions over the contract types and nothing else.
 import { processAvailabilityOf } from './eligibility';
+import { catalogModelIds } from './backendCatalog';
 import type {
   AgentSupply,
   ModelSupply,
@@ -67,6 +68,21 @@ export const needsAttention = (state: SourceState): boolean =>
  */
 export const healthyButUnrunnable = (agent: Pick<AgentSupply, 'sources'>, source: Source): boolean =>
   !isUnhealthy(source.state) && !processAvailabilityOf(agent, source.id).runnable;
+
+export type GatewayRouteStatus = 'empty' | 'unknown' | 'unconfigured' | 'available' | 'partial' | 'unavailable';
+
+/** Gateway coverage is about the catalog, independent of any Agent's selection. */
+export const gatewayRouteStatus = (agent: AgentSupply): GatewayRouteStatus => {
+  const models = catalogModelIds(agent);
+  if (models.length === 0) return 'empty';
+  const byId = new Map((agent.model_supply ?? []).map((row) => [row.model_id, row]));
+  const supply = models.map((id) => byId.get(id));
+  if (supply.some((row) => !row)) return 'unknown';
+  if (supply.every((row) => row?.chain_length === 0)) return 'unconfigured';
+  const available = supply.filter((row) => row && row.chain_length > 0 && row.has_runnable_hop).length;
+  if (available === models.length) return 'available';
+  return available > 0 ? 'partial' : 'unavailable';
+};
 
 // ── AC-9: who a supply problem is about ─────────────────────────────────
 export type SupplyAttribution = {

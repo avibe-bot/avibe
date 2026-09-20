@@ -4,6 +4,7 @@ regress: pagination cursor and the ``mark_session_read`` boundary check.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -13,12 +14,14 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from storage import project_access_service
 from storage import message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, agent_sessions, messages, scopes, vault_requests
 from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
+from vibe.authorization import AuthorizationContext
 from vibe.message_identity import HARNESS_TYPE
 
 
@@ -338,6 +341,107 @@ def test_agent_run_provenance_skips_missing_source_session(isolated_state):
         result = messages_service.list_session_messages(conn, session_id="ses_target")
     by_id = {m["id"]: m for m in result["messages"]}
     assert "source_session_id" not in by_id["msg_ghost"]
+
+
+def test_agent_run_provenance_hides_inaccessible_source_session(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        target_scope = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_visible",
+            now="2026-08-04T00:00:00Z",
+        )
+        hidden_scope = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_hidden",
+            now="2026-08-04T00:00:00Z",
+        )
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_visible",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "editor@example.com",
+                        "access_role": "viewer",
+                    }
+                ],
+            },
+        )
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_hidden",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+        _seed_session(conn, target_scope, "ses_target")
+        _seed_titled_agent_session(
+            conn,
+            hidden_scope,
+            "ses_hidden_source",
+            title="Hidden Source",
+            agent_name="pm",
+        )
+        _insert_agent_run(
+            conn,
+            "execHidden",
+            session_id="ses_target",
+            source_kind="agent",
+            source_actor="ses_hidden_source",
+        )
+        _insert_harness_msg(
+            conn,
+            target_scope,
+            "ses_target",
+            author_name="agent_run",
+            native_message_id="agent_run:execHidden",
+            msg_id="msg_hidden",
+            created_at="2026-08-04T00:00:01Z",
+        )
+
+    remote_editor = AuthorizationContext(
+        instance_role="editor",
+        email="editor@example.com",
+        is_remote=True,
+    )
+    with engine.connect() as conn:
+        remote_result = messages_service.list_session_messages(
+            conn,
+            session_id="ses_target",
+            authorization_context=remote_editor,
+        )
+        local_result = messages_service.list_session_messages(
+            conn,
+            session_id="ses_target",
+        )
+
+    remote_message = next(row for row in remote_result["messages"] if row["id"] == "msg_hidden")
+    assert "source_session_id" not in remote_message
+    assert "source_session_title" not in remote_message
+    assert "source_session_agent_name" not in remote_message
+
+    with engine.connect() as conn:
+        member_result = messages_service.list_session_messages(
+            conn, session_id="ses_target",
+            authorization_context=AuthorizationContext(instance_role="member", is_remote=True),
+        )
+    member_message = next(row for row in member_result["messages"] if row["id"] == "msg_hidden")
+    assert member_message["source_session_id"] == "ses_hidden_source"
+    assert member_message["source_session_title"] == "Hidden Source"
+
+    local_message = next(row for row in local_result["messages"] if row["id"] == "msg_hidden")
+    assert local_message["source_session_id"] == "ses_hidden_source"
+    assert local_message["source_session_title"] == "Hidden Source"
 
 
 def test_vault_callback_message_provenance_enrichment(isolated_state):
@@ -1192,6 +1296,7 @@ def _insert_msg(
     msg_type=None,
     msg_id=None,
     delivered_at=None,
+    metadata=None,
 ):
     """Direct insert so the test controls created_at (second-resolution) + read_at.
 
@@ -1211,7 +1316,7 @@ def _insert_msg(
             type=resolved_type,
             content_text=text,
             content_json="{}",
-            metadata_json="{}",
+            metadata_json=json.dumps(metadata or {}),
             created_at=created_at,
             updated_at=created_at,
             delivered_at=delivered_at,
@@ -1408,6 +1513,32 @@ def test_list_inbox_sessions_awaiting_reply_persists_through_agent_stream(isolat
         row2 = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
     assert row2["replied"] is False
     assert row2["preview_text"] == "R2"
+
+
+def test_detached_completion_does_not_settle_current_inbox_reply(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_detached", "Detached")
+        _insert_msg(conn, scope_id, "ses_detached", "agent", "R1", "2026-05-30T10:01:00Z")
+        _insert_msg(conn, scope_id, "ses_detached", "user", "new turn", "2026-05-30T10:05:00Z")
+        _insert_msg(
+            conn,
+            scope_id,
+            "ses_detached",
+            "agent",
+            "background completed",
+            "2026-05-30T10:06:00Z",
+            read=False,
+            metadata={"detached": True, "activity_id": "background-1"},
+        )
+
+    with engine.connect() as conn:
+        row = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"][0]
+
+    assert row["preview_text"] == "background completed"
+    assert row["unread_count"] == 1
+    assert row["replied"] is True
 
 
 def test_list_inbox_sessions_silent_completion_clears_awaiting(isolated_state):
@@ -1968,6 +2099,9 @@ def test_draft_upsert_get_and_clear(isolated_state):
         assert message_deliveries.set_draft(conn, "ses_d", "   ") is True
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        cleared = message_deliveries.get_draft_state(conn, "ses_d")
+    assert cleared["text"] == ""
+    assert cleared["updated_at"] is not None
 
     # clear_draft is idempotent.
     with engine.begin() as conn:
@@ -1976,6 +2110,7 @@ def test_draft_upsert_get_and_clear(isolated_state):
         message_deliveries.set_draft(conn, "ses_d", None)
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        assert message_deliveries.get_draft_state(conn, "ses_d")["updated_at"] is not None
 
 
 def test_inbox_ignores_draft_and_queued_delivery_activity(isolated_state):

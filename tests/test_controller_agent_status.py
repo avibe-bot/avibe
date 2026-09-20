@@ -62,7 +62,7 @@ def test_inbound_marks_running_for_avibe_turn():
         dispatched.append(req)
 
     service.agents["claude"] = SimpleNamespace(name="claude", handle_message=_handle)
-    request = SimpleNamespace(context=_ctx("ses-abc"))
+    request = SimpleNamespace(context=_ctx("ses-abc"), subagent_model=None, vibe_agent_model="claude-fixture")
 
     asyncio.run(service.handle_message("claude", request))
 
@@ -78,7 +78,7 @@ def test_inbound_skips_non_avibe_turn():
         pass
 
     service.agents["claude"] = SimpleNamespace(name="claude", handle_message=_handle)
-    request = SimpleNamespace(context=_ctx(None, platform="slack"))
+    request = SimpleNamespace(context=_ctx(None, platform="slack"), subagent_model=None, vibe_agent_model="claude-fixture")
 
     asyncio.run(service.handle_message("claude", request))
 

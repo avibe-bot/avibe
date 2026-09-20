@@ -12,9 +12,11 @@ from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY, terminal_turn_outp
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     backend_dispatch_attempted,
+    mark_prewrite_user_stop,
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
+from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
 from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -330,7 +332,38 @@ def _request(message: str, runtime_key: str = "session:/repo"):
         context=SimpleNamespace(platform_specific={}),
         message=message,
         composite_session_id=runtime_key,
+        subagent_model=None,
+        vibe_agent_model="fixture-avibe-model",
     )
+
+
+@pytest.mark.parametrize("backend", sorted(SUPPORTED_AGENT_BACKENDS))
+@pytest.mark.parametrize("model", [None, "", "   ", "default", "fixture-avibe-model", " padded-model "])
+@pytest.mark.parametrize("selection_field", ["vibe_agent_model", "subagent_model"])
+def test_model_selection_is_required_before_any_backend_dispatch(backend, model, selection_field):
+    async def run():
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        agent.name = backend
+        service.register(agent)
+        request = _request("hello")
+        setattr(request, selection_field, model)
+        request.failure_handler = AsyncMock(return_value=True)
+        selected = request.subagent_model if request.subagent_model is not None else request.vibe_agent_model
+        if selected and selected.strip() and not (backend == "claude" and selected == "default"):
+            await service.handle_message(backend, request)
+            assert agent.started == ["hello"]
+            assert (request.subagent_model or request.vibe_agent_model) == selected.strip()
+            service.release_runtime_turn(request.context)
+        else:
+            with pytest.raises(ValueError, match="Select a model"):
+                await service.handle_message(backend, request)
+            assert agent.started == []
+            assert not service.runtime_turn_active(request.composite_session_id)
+
+    asyncio.run(run())
 
 
 def test_agent_service_dispatches_runtime_config_refresh() -> None:
@@ -351,6 +384,18 @@ def test_agent_service_reports_missing_runtime_refresh_contract() -> None:
 
     assert asyncio.run(service.refresh_runtime_config("codex", object())) is False
     assert asyncio.run(service.refresh_runtime_config("claude", object())) is False
+
+
+def test_agent_service_dispatches_model_hub_runtime_invalidation() -> None:
+    service = AgentService(controller=SimpleNamespace())
+    agent = SimpleNamespace(name="codex", invalidate_model_hub_runtime=AsyncMock())
+    service.register(agent)
+
+    handled = asyncio.run(service.invalidate_model_hub_runtime("codex"))
+
+    assert handled is True
+    agent.invalidate_model_hub_runtime.assert_awaited_once_with()
+    assert asyncio.run(service.invalidate_model_hub_runtime("claude")) is False
 
 
 def test_agent_service_notifies_run_owner_when_activity_runtime_disconnects() -> None:
@@ -805,6 +850,8 @@ def _reaction_request(message: str, message_id: str, runtime_key: str = "session
         message=message,
         composite_session_id=runtime_key,
         processing_indicator=handle,
+        subagent_model=None,
+        vibe_agent_model="claude-fixture",
         ack_reaction_message_id=None,
         ack_reaction_emoji=None,
         ack_message_id=None,
@@ -1398,6 +1445,71 @@ def test_agent_service_schedules_terminal_tidy_on_cancellation() -> None:
     asyncio.run(_run())
 
 
+def test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy() -> None:
+    """MESSAGE-DELIVERY-023: a prewrite Stop cannot retain runtime ownership."""
+
+    async def _run() -> None:
+        controller = _Controller()
+        stalled_tidy = asyncio.Event()
+
+        async def _stall_terminal_tidy(*_args, **_kwargs) -> None:
+            await stalled_tidy.wait()
+
+        controller.emit_agent_message = AsyncMock(side_effect=_stall_terminal_tidy)
+        controller.session_turns = Mock()
+        surface_cleanup_release = asyncio.Event()
+
+        async def _stall_surface_cleanup(*_args, **_kwargs) -> None:
+            await surface_cleanup_release.wait()
+
+        controller.message_dispatcher = SimpleNamespace(
+            status_key_for_context=Mock(return_value="status:first"),
+            finish_prewrite_stop_surfaces=AsyncMock(side_effect=_stall_surface_cleanup),
+        )
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        entered = asyncio.Event()
+
+        class _PrewriteAgent(_RuntimeAgent):
+            async def handle_message(self, request):
+                self.started.append(request.message)
+                if request.message == "first":
+                    entered.set()
+                    await asyncio.Event().wait()
+
+        agent = _PrewriteAgent()
+        service.register(agent)
+        first = _request("first")
+        first_task = asyncio.create_task(service.handle_message("claude", first))
+        await asyncio.wait_for(entered.wait(), timeout=0.5)
+
+        mark_prewrite_user_stop(first.context)
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        await asyncio.sleep(0)
+
+        gate = service._turn_gates["session:/repo"]
+        assert not gate.lock.locked()
+        assert gate.token == ""
+        controller.emit_agent_message.assert_not_awaited()
+        controller.session_turns.on_native_terminal.assert_not_called()
+        controller.message_dispatcher.status_key_for_context.assert_called_once_with(first.context)
+        controller.message_dispatcher.finish_prewrite_stop_surfaces.assert_awaited_once_with(
+            first.context,
+            consolidated_key="status:first",
+        )
+
+        second = _request("second")
+        await asyncio.wait_for(service.handle_message("claude", second), timeout=0.5)
+        assert agent.started == ["first", "second"]
+        service.release_runtime_turn(second.context)
+        surface_cleanup_release.set()
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+
+
 def test_agent_service_releases_gate_when_exception_terminal_emit_fails() -> None:
     """HFR-001: pre-accept failure releases ownership even if terminal emit fails."""
 
@@ -1420,6 +1532,68 @@ def test_agent_service_releases_gate_when_exception_terminal_emit_fails() -> Non
         else:
             raise AssertionError("backend exception should escape")
 
+        assert not service._turn_gates["session:/repo"].lock.locked()
+
+    asyncio.run(_run())
+
+
+def test_agent_service_reports_backend_failure_before_releasing_runtime_turn() -> None:
+    """A caller-owned failure receipt must reach settlement before Turn release."""
+
+    async def _run() -> None:
+        from core.backend_failure import emit_backend_failure
+
+        controller = _Controller()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RaisingRuntimeAgent())
+        request = _request("boom")
+        request.context.platform = "slack"
+        request.context.platform_specific = {
+            "turn_token": "turn-backend-failure",
+            "task_execution_id": "run-backend-failure",
+            "task_trigger_kind": "watch",
+        }
+        emitted: list[tuple[str, object, str]] = []
+
+        async def _emit(_context, message_type, _text, **kwargs):
+            gate = service._turn_gates["session:/repo"]
+            emitted.append((message_type, kwargs.get("output"), gate.token))
+            delivery = kwargs.get("delivery")
+            if message_type == "notify" and delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = "slack-message-1"
+                return delivery.delivered_id
+            return None
+
+        async def _report(error: BaseException) -> None:
+            await emit_backend_failure(
+                controller,
+                request.context,
+                "claude",
+                str(error),
+                display_text=f"Error: {error}",
+                request=request,
+            )
+
+        controller.emit_agent_message = _emit
+        request.failure_handler = _report
+
+        with pytest.raises(RuntimeError, match="backend failed"):
+            await service.handle_message("claude", request)
+
+        assert [message_type for message_type, _output, _token in emitted] == [
+            "notify",
+            "result",
+        ]
+        terminal = emitted[-1][1]
+        assert terminal.metadata["turn_failure_notification"] == {
+            "failure_id": "turn:turn-backend-failure",
+            "ack_evidence": "delivery_only",
+            "delivered": True,
+        }
+        assert all(token for _message_type, _output, token in emitted)
+        assert request.failure_handled is True
         assert not service._turn_gates["session:/repo"].lock.locked()
 
     asyncio.run(_run())
@@ -1603,6 +1777,7 @@ def test_hfr_432_opencode_timeout_releases_fifo_and_shared_runtime() -> None:
                 base_session_id=runtime_key,
                 composite_session_id=runtime_key,
                 session_key=f"avibe::{runtime_key}",
+                vibe_agent_model="fixture-provider/fixture-model",
             )
 
         first = asyncio.create_task(

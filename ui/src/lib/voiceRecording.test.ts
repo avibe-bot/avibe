@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  claimVoiceCapture,
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
@@ -645,6 +646,27 @@ describe('deleteMapValueIfCurrent', () => {
     expect(deleteMapValueIfCurrent(sessions, 'session', oldSession)).toBe(false);
     expect(sessions.get('session')).toBe(replacement);
     expect(deleteMapValueIfCurrent(sessions, 'session', replacement)).toBe(true);
+  });
+});
+
+describe('voice capture ownership', () => {
+  it('finishes the previous surface and ignores its stale release', () => {
+    const finishChat = vi.fn();
+    const finishShowPage = vi.fn();
+    const chat = claimVoiceCapture(finishChat);
+    const showPage = claimVoiceCapture(finishShowPage);
+
+    expect(finishChat).toHaveBeenCalledOnce();
+    expect(chat.isCurrent()).toBe(false);
+    expect(showPage.isCurrent()).toBe(true);
+
+    chat.release();
+    expect(showPage.isCurrent()).toBe(true);
+
+    showPage.release();
+    const next = claimVoiceCapture(vi.fn());
+    expect(finishShowPage).not.toHaveBeenCalled();
+    next.release();
   });
 });
 

@@ -1,4 +1,4 @@
-"""Request metadata carried through the frozen EngineAdapter mapping surface."""
+"""Request metadata carried through the frozen EngineAdapter surface."""
 
 from __future__ import annotations
 

@@ -15,7 +15,7 @@ export const SettingsOpencodeProviderPage: React.FC = () => {
       title={t('settings.backends.opencodeTitle')}
       subtitle={t('settings.backends.opencodeSubtitle')}
       breadcrumb={
-        <Link to="/admin/settings/backends" className="inline-flex items-center gap-1.5 hover:text-foreground">
+        <Link to="/settings/backends" className="inline-flex items-center gap-1.5 hover:text-foreground">
           <ArrowLeft className="size-3" />
           {t('settings.backends.codexBackToBackends')}
         </Link>

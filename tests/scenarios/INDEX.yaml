@@ -8,19 +8,179 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_runtime_install
+    name: Memory Runtime artifact installation
+    status: active
+    catalog: tests/scenarios/memory_runtime_install/catalog.yaml
+    observations: tests/scenarios/memory_runtime_install/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_runtime_install/test_memory_runtime_install_scenarios.py
+      - tests/scenarios/memory_runtime_install/test_memory_native_auto_switch.py
+    unit_or_contract_tests:
+      - tests/test_memory_artifact_contract.py
+      - tests/test_managed_runtime.py
+      - tests/test_memory_runtime_release.py
+      - tests/test_ui_server_install.py
+      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
+  - id: memory_delete_data
+    name: Explicit confirmed deletion of confined Memory data
+    status: active
+    catalog: tests/scenarios/memory_delete_data/catalog.yaml
+    observations: tests/scenarios/memory_delete_data/observations.yaml
+    scenario_tests:
+      - tests/test_ui_memory_routes.py
+    unit_or_contract_tests:
+      - tests/test_controller_memory_data_reset.py
+      - tests/test_internal_client.py
+      - tests/test_internal_server.py
+  - id: memory_search
+    name: Default Memory project and explicit named projects
+    status: active
+    catalog: tests/scenarios/memory_search/catalog.yaml
+    scenario_tests:
+      - tests/test_memory_admission.py
+      - tests/test_memory_store.py
+    unit_or_contract_tests:
+      - tests/test_memory_project_ids.py
+      - tests/test_memory_sidecar.py
+      - tests/test_ui_memory_routes.py
+  - id: memory_list
+    name: Scoped processed Memory episode listing
+    status: active
+    catalog: tests/scenarios/memory_list/catalog.yaml
+    observations: tests/scenarios/memory_list/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_list/test_memory_list_scenarios.py
+    unit_or_contract_tests:
+      - tests/test_memory_runtime.py
+      - tests/test_internal_server.py
+      - tests/test_internal_client.py
+      - tests/test_memory_cli.py
+      - ui/src/components/settings/memory/MemorySearchPanel.test.tsx
+      - ui/src/context/ApiContext.memoryList.test.tsx
+  - id: memory_independence
+    name: Memory remains optional across delivery and session lifecycle
+    status: active
+    catalog: tests/scenarios/memory_independence/catalog.yaml
+    observations: tests/scenarios/memory_independence/observations.yaml
+    scenario_tests:
+      - tests/test_session_delivery_fsm.py
+    unit_or_contract_tests:
+      - tests/test_message_handler_typing.py
+      - tests/test_command_handler_user_names.py
+      - tests/test_memory_runtime.py
+      - tests/test_internal_server.py
+      - tests/test_memory_admission.py
+      - tests/test_memory_slice3.py
+      - tests/test_controller_dispatch_loop.py
+      - tests/test_native_session_providers.py
+      - tests/test_core_services_dispatch.py
+      - tests/test_admin_notifications.py
+      - tests/test_memory_loader.py
+      - tests/test_local_deps.py
+      - tests/test_memory_upgrade_packaged.py
+      - tests/test_upgrade_flow.py
+  - id: memory_im_attachment_capture
+    name: Bound-DM attachment capture through EverOS multimodal ingest
+    status: active
+    catalog: tests/scenarios/memory_im_attachment_capture/catalog.yaml
+    observations: tests/scenarios/memory_im_attachment_capture/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_scenarios.py
+    harness:
+      - tests/scenario_harness/memory_im_attachments.py
+    unit_or_contract_tests:
+      - tests/scenarios/memory_im_attachment_capture/test_memory_im_attachment_capture_catalog.py
+      - tests/test_vibe_cli.py
+      - tests/test_memory_admission.py
+      - tests/test_memory_im_attachments.py
+      - tests/test_inbound_attachments.py
+      - tests/test_memory_runtime.py
+      - tests/test_memory_slice3.py
+      - tests/test_message_handler_typing.py
+      - tests/test_slack_dm_mentions.py
+      - tests/test_ui_memory_routes.py
+  - id: memory_repair
+    name: Unified non-destructive Wake and destructive Memory Repair
+    status: active
+    catalog: tests/scenarios/memory_repair/catalog.yaml
+    observations: tests/scenarios/memory_repair/observations.yaml
+    scenario_tests:
+      - tests/test_ui_memory_routes.py
+    unit_or_contract_tests:
+      - tests/test_vibe_cli.py
+      - tests/test_memory_wake.py
+      - tests/test_memory_supervisor.py
+      - tests/test_memory_confined_filesystem.py
+      - tests/test_controller_memory_data_reset.py
+      - tests/test_memory_store.py
+      - tests/test_internal_client.py
+      - tests/test_internal_server.py
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
-    name: Model Hub source resolution and supply configuration
+    name: Model Hub configured routes and turn outcomes
     status: active
     catalog: tests/scenarios/model_hub/catalog.yaml
     observations: tests/scenarios/model_hub/observations.yaml
     scenario_tests:
+      - tests/scenarios/model_hub/test_model_hub_catalog.py
+      - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
+      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
+      - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+      - tests/e2e/test_model_hub_guards.py
+      - tests/e2e/test_model_hub_migration.py
+      - tests/e2e/test_model_hub_mock_upstream.py
+      - tests/e2e/test_model_hub_routing.py
+      - tests/e2e/test_model_hub_backend_settings.py
+      - tests/e2e/test_model_hub_catalog_consumer.py
+      - tests/e2e/test_codex_request_metadata.py
+      - tests/e2e/test_codex_request_gateway.py
+      - tests/e2e/test_model_hub_runtime.py
+      - tests/e2e/test_model_hub_sources.py
+      - tests/e2e/test_model_hub_usage_events.py
+    harness:
+      - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:
       - tests/test_model_hub_api.py
+      - tests/test_model_hub_admission.py
       - tests/test_model_hub_config.py
+      - tests/test_model_hub_legacy_opencode_migration.py
+      - tests/test_member_management_parity.py
+      - tests/test_model_hub_provenance.py
+      - tests/test_model_hub_retention.py
+      - tests/test_codex_request_provenance.py
+      - tests/test_codex_request_routing.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_routing_modes.py
+      - tests/test_model_hub_transport_leases.py
+      - tests/test_model_hub_injection.py
       - tests/test_model_hub_runtime.py
+      - tests/test_model_hub_inference_wait.py
+      - tests/test_model_hub_retry_advice.py
+      - tests/test_model_hub_retry_policy.py
+      - tests/test_model_hub_retry_lifecycle.py
+      - tests/test_model_hub_recovery_evidence.py
+      - tests/test_model_hub_progress.py
+      - tests/test_model_hub_failure_presentation.py
+      - tests/test_opencode_model_hub_retry.py
+      - ui/src/lib/modelHubRecovery.test.ts
+      - tests/test_model_hub_request_body_budget.py
+      - tests/test_model_hub_l3.py
+      - tests/test_model_hub_usage.py
+      - tests/test_local_deps.py
+      - tests/test_opencode_server.py
+      - tests/test_runtime_activation.py
+      - ui/src/components/settings/models/UsageTab.test.tsx
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+      - ui/src/components/settings/models/RouteChainDialog.test.tsx
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
+      - ui/src/components/settings/models/AgentCard.test.tsx
+      - ui/src/components/settings/models/MigrationDialog.test.tsx
+      - ui/src/components/settings/models/migrationScan.test.ts
+      - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+      - ui/scripts/scenarioCatalog.test.mjs
   - id: harness_failure_recovery
     name: Harness per-Session failure recovery
     status: active
@@ -61,6 +221,32 @@ capabilities:
       - tests/test_claude_agent_sessions.py
     unit_or_contract_tests:
       - tests/test_agent_auth_service.py
+  - id: current_instance_permissions
+    name: Current-instance Permissions policy and authority
+    status: active
+    catalog: tests/scenarios/permissions/catalog.yaml
+    observations: tests/scenarios/permissions/observations.yaml
+    scenario_tests:
+      - tests/scenarios/permissions/test_permissions_scenarios.py
+      - tests/scenarios/permissions/test_member_instance_operations.py
+      - tests/scenarios/permissions/test_editor_reservation_and_fork.py
+      - tests/scenarios/permissions/test_cli_invocation_authority.py
+      - tests/scenarios/permissions/test_deferred_authority_provenance.py
+      - tests/scenarios/permissions/test_effective_target_preflight.py
+    harness:
+      - tests/scenario_harness/permissions.py
+    unit_or_contract_tests:
+      - tests/test_permissions.py
+      - tests/test_resource_access_service.py
+      - tests/test_ui_show_pages.py
+      - ui/src/features/permissions/PermissionsPage.test.tsx
+      - ui/src/components/workbench/ShowPageSharingSettings.test.tsx
+      - ui/src/components/workbench/AgentsPage.test.tsx
+      - ui/src/components/workbench/ShowPageShareControl.test.tsx
+      - ui/src/components/workbench/HarnessPage.banner.test.tsx
+      - ui/src/components/workbench/HarnessPage.events.test.tsx
+      - ui/src/components/workbench/VaultsPage.test.tsx
+      - ui/src/lib/useVaultRequestRefresh.test.ts
   - id: message_delivery
     name: scheduled result delivery
     status: active
@@ -70,6 +256,12 @@ capabilities:
       - tests/scenarios/message_delivery/test_message_delivery_scenarios.py
     unit_or_contract_tests:
       - tests/test_message_dispatcher_scheduled.py
+      - tests/test_agent_service.py
+      - tests/test_ui_session_stream.py
+      - ui/src/components/workbench/Composer.attachmentRetry.test.tsx
+      - tests/test_backend_failure_retry.py
+      - ui/src/components/workbench/FailureRetry.test.tsx
+      - ui/src/components/workbench/ChatRowOptimisticWrites.test.tsx
   - id: tunnel_quality
     name: remote-access tunnel quality and smooth route recovery
     status: active

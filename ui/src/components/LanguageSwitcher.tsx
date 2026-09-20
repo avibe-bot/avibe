@@ -1,28 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import { Check } from 'lucide-react';
 import clsx from 'clsx';
-import { useApi } from '../context/ApiContext';
+import { useLanguageSelection } from '../lib/useLanguageSelection';
 
 export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
-  const { i18n, t } = useTranslation();
-  const { getConfig, saveConfig } = useApi();
+  const { languages, current: currentLang, select } = useLanguageSelection();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        const cfg = await getConfig();
-        if (cfg.language && cfg.language !== i18n.language) {
-          i18n.changeLanguage(cfg.language);
-        }
-      } catch {
-        // Ignore errors on config load
-      }
-    };
-    loadConfig();
-  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -36,14 +20,6 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const languageCodes = Object.keys(i18n.options.resources ?? {});
-  const availableLanguages = languageCodes.length ? languageCodes : ['en'];
-  const languages = availableLanguages.map((code) => ({
-    code,
-    label: t(`language.${code}`, { defaultValue: code }),
-  }));
-  const currentLang = languages.find((l) => l.code === i18n.language) || languages[0];
-
   const shortLabel = (code: string) => {
     if (code === 'zh') return '中';
     return code.slice(0, 2).toUpperCase();
@@ -51,13 +27,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
 
   const handleSelect = async (code: string) => {
     setIsOpen(false);
-    if (code === i18n.language) return;
-    i18n.changeLanguage(code);
-    try {
-      await saveConfig({ language: code });
-    } catch {
-      // Ignore save errors - language change already applied locally
-    }
+    await select(code);
   };
 
   return (
@@ -99,7 +69,7 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
                 )}
               >
                 <span>{lang.label}</span>
-                {active && <Check size={14} className="text-mint" />}
+                {active && <Check size={14} className="text-mint-ink" />}
               </button>
             );
           })}

@@ -21,19 +21,84 @@ export const isNotifyMessageType = (type: string): boolean => specFor(type).rend
 export const isTranscriptMessage = (message: { type: string }): boolean => specFor(message.type).transcript;
 
 type TerminalMessageCandidate = {
-  author: string;
   type: string;
   metadata?: Record<string, unknown> | null;
 };
+
+export const isDetachedCompletionMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return message.metadata?.detached === true && spec.detachedCompletion;
+};
+
+// Recovery reports a Turn that already ended, even when transport delivery is
+// immediate. This provenance removes foreground authority, not Retry eligibility.
+const isReplayedFailureNotice = (message: TerminalMessageCandidate): boolean =>
+  message.type === 'notify'
+  && message.metadata?.event === 'backend_failure'
+  && message.metadata.replayed === true;
+
+const activityRoleForMessage = (
+  message: TerminalMessageCandidate,
+): ReturnType<typeof specFor>['activityRole'] => {
+  const spec = specFor(message.type);
+  if (isDetachedCompletionMessage(message) || isReplayedFailureNotice(message)) return 'none';
+  const event = message.metadata?.event;
+  if (typeof event === 'string' && spec.terminalWhenEvents.includes(event)) return 'terminal';
+  return spec.activityRole;
+};
+
+// A phase boundary uses the muted Agent presentation. The detached-result case
+// keeps rows written by older servers on that presentation; notification types
+// remain status pills even when detached.
+export const isBoundaryMessage = (message: TerminalMessageCandidate): boolean => {
+  const spec = specFor(message.type);
+  return spec.render === 'agent' && (
+    activityRoleForMessage(message) === 'boundary' || isDetachedCompletionMessage(message)
+  );
+};
+
+type TerminalAgentMessageCandidate = TerminalMessageCandidate & { author: string };
+
+// This is action eligibility, not transcript visibility. The server additionally
+// rechecks the durable failed-Turn boundary and current Session authority.
+export function isRetryableFailureNotice(
+  message: TerminalAgentMessageCandidate & { source?: string | null },
+): boolean {
+  const metadata = message.metadata;
+  return message.type === 'notify'
+    && message.author === 'agent'
+    && message.source === 'agent'
+    && metadata?.event === 'backend_failure'
+    && typeof metadata.failure_id === 'string'
+    && !!metadata.failure_id
+    && typeof metadata.turn_id === 'string'
+    && !!metadata.turn_id
+    && !metadata.detached;
+}
 
 // A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role
 // intersected with transcript visibility (``silent`` is terminal for activity
 // bookkeeping but never rendered), plus the conditional terminals that only settle
 // a turn for specific metadata events (``notify`` + ``backend_failure``).
-export const isTerminalAgentMessage = (message: TerminalMessageCandidate): boolean => {
+export const isTerminalAgentMessage = (message: TerminalAgentMessageCandidate): boolean => {
   if (message.author !== 'agent') return false;
   const spec = specFor(message.type);
-  if (spec.transcript && spec.activityRole === 'terminal') return true;
-  const event = message.metadata?.event;
-  return typeof event === 'string' && spec.terminalWhenEvents.includes(event);
+  return spec.transcript && activityRoleForMessage(message) === 'terminal';
+};
+
+// A phase boundary advances the Activity group without settling the Turn.
+// Presentation's isBoundaryMessage also includes detached legacy completions,
+// which must not invalidate the foreground group's live rows or hydration.
+export const isAgentActivityBoundaryMessage = (message: TerminalAgentMessageCandidate): boolean =>
+  message.author === 'agent' && activityRoleForMessage(message) === 'boundary';
+
+// Historical failures and detached completions refresh durable Activity without
+// affecting its live generation. Only current terminal replies settle the Turn.
+export const shouldRefreshAgentActivityForMessage = (
+  message: TerminalAgentMessageCandidate,
+): boolean => {
+  if (message.author !== 'agent') return false;
+  const role = activityRoleForMessage(message);
+  return role === 'boundary' || role === 'terminal'
+    || isDetachedCompletionMessage(message) || isReplayedFailureNotice(message);
 };

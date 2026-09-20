@@ -505,7 +505,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
-| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或提交需要记住的长期内容（用户明确要求，或 Agent 从对话与本机工作中主动提炼） |
+| `vibe memory ...` | 通过运行中的控制器读取当前范围内的记忆，或提交内容进行尽力而为的进程内捕获；接受请求不保证投递或持久化 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
@@ -595,7 +595,7 @@ vibe doctor
 - 检查 backend CLI 是否可用
 - 检查 runtime home 迁移状态
 - 检查 runtime 进程、安装来源和重启元数据状态
-- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Show Runtime、tmux 和 Node.js
+- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Model Hub 引擎（CPA）、Show Runtime、tmux 和 Node.js
 - `vibe doctor --deep` 会在不下载正文的情况下探测缺失依赖的地址
 - 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
 
@@ -610,6 +610,7 @@ vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
 vibe doctor repair git-runtime --yes
+vibe doctor repair model-hub-engine --yes
 vibe doctor repair show-runtime --yes
 vibe doctor repair tmux --yes
 ```
@@ -876,12 +877,12 @@ Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `sessi
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
 
-和现有 `--session-id` 一起使用时，`--send-now` 会先持久化 Agent Run，
-然后复用 Workbench 的 Session 级打断并发送操作：通过共享 Stop 路径停止活动
-Turn，再把现有 FIFO 队头作为新 Turn 发送。它不提供同 Turn steering，也不重排
-队列；如果打断被拒绝，Run 会继续保持排队。命令响应包含
-`delivery_intent`，Controller 消费请求后，`vibe runs show <run-id>` 会显示持久化的
-`metadata.delivery_outcome`。
+对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
+Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会
+直接选择 P3。`--send-now` 显式选择相同的带内容 P1 语义，只针对这条新消息，
+不会提升更早的排队工作。`vibe session send-now` 是无内容 P1 操作，只提升现有的
+精确 FIFO 队头，不新增消息。命令响应包含 `delivery_intent`，Controller 消费请求后，
+`vibe runs show <run-id>` 会显示持久化的 `metadata.delivery_outcome`。
 
 `--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { createRef, type ReactElement } from 'react';
+import { createRef, useState, type ReactElement } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -40,7 +40,10 @@ const providers = (ui: ReactElement) => (
   </I18nextProvider>
 );
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 beforeEach(() => uploadWorkbenchAttachment.mockReset());
 
 describe('Composer attachment retry', () => {
@@ -105,5 +108,88 @@ describe('Composer attachment retry', () => {
     expect(screen.getByText('large.bin')).toBeTruthy();
     expect(screen.queryByLabelText(en.chat.compose.retryAttachment)).toBeNull();
     expect(uploadWorkbenchAttachment).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Composer draft retry', () => {
+  it('re-caches optimistically cleared text when a send cannot start', async () => {
+    const onDraftChange = vi.fn();
+    render(providers(
+      <Composer
+        onSend={async () => false}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'keep this' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+
+    await waitFor(() => expect(textbox.value).toBe('keep this'));
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'keep this',
+      '',
+      'keep this',
+    ]);
+  });
+
+  it('persists rejected text after navigation unmounts the old composer', async () => {
+    let rejectSend!: () => void;
+    const onDraftChange = vi.fn();
+    const view = render(providers(
+      <Composer
+        onSend={() => new Promise<boolean>((resolve) => {
+          rejectSend = () => resolve(false);
+        })}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'survive navigation' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(''));
+
+    view.unmount();
+    await act(async () => rejectSend());
+
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'survive navigation',
+      '',
+      'survive navigation',
+    ]);
+  });
+});
+
+describe('Composer Stop activation', () => {
+  it('MESSAGE-DELIVERY-025 blocks a send click burst from the new Stop control', async () => {
+    vi.useFakeTimers();
+    const onStop = vi.fn();
+
+    const Harness = () => {
+      const [busy, setBusy] = useState(false);
+      return (
+        <Composer
+          busy={busy}
+          onSend={() => {
+            setBusy(true);
+          }}
+          onStop={onStop}
+        />
+      );
+    };
+
+    render(providers(<Harness />));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'start' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    const stop = screen.getByLabelText(en.chat.compose.stop) as HTMLButtonElement;
+
+    expect(stop.disabled).toBe(true);
+    fireEvent.click(stop);
+    expect(onStop).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTime(400));
+    expect(stop.disabled).toBe(false);
+    fireEvent.click(stop);
+    expect(onStop).toHaveBeenCalledTimes(1);
   });
 });

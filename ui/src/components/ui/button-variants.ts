@@ -9,26 +9,56 @@ export const buttonVariants = cva(
     variants: {
       variant: {
         // Mint primary — flat, no glow shadow (design.pen Button/Default).
-        default: 'gap-1.5 bg-primary text-primary-foreground hover:brightness-110',
-        // Brand CTA — bright bg + brand-color glow shadow + bold text + brighten on hover.
-        // Foreground tokens flip in light mode (--primary/--accent/--gold-foreground).
+        default: 'gap-1.5 bg-primary text-primary-foreground hover:bg-primary-hover',
+        // Brand CTA — bright bg + brand-color glow shadow + bold text.
+        // The fill is the accent itself and the label its paired *-foreground: a dark
+        // ink on the dark theme's neon accents, white on light's vivid ones (and white
+        // in both for violet, the one accent whose label does not follow the theme).
+        // All are the design's own pairing; see the ACCEPTED_BRAND_PAIRS note in
+        // ui/scripts/validate-theme.mjs for why light's white label is deliberate.
+        //
+        // Hover paints a declared --X-hover fill rather than filtering the button,
+        // because brightness() scales the label along with the background: on light's
+        // white labels that made hover strictly worse than the pairing the owner
+        // accepted. A named fill also lets validate-theme.mjs measure the hovered pair
+        // and assert it never reads worse than the resting one — which is how violet's
+        // inverted direction surfaces at build time rather than in review. The glow
+        // shadow no longer brightens with the fill; the fill swap carries the
+        // affordance. See the --primary-hover note in index.css.
+        //
+        // Glow blur comes from --brand-glow-blur: 16px dark, 20px light (owner decisions
+        // 2026-08-14 — 24px read too heavy, then 16px read as nothing in light, where the
+        // same neon spreads far less over a white card). It is one token, not four: a
+        // per-accent radius would be the same drift this variant exists to remove, and
+        // routing it through a variable is what makes it theme-dependent at all — this
+        // codebase has no `light:`/`dark:` Tailwind variant, so a per-theme value is
+        // always a CSS variable. design.pen has no glow on any Button, so the value is
+        // ours to hold, not the design's; keep the four in lockstep.
+        // Solid mint buttons use the semantic primary pair. This keeps the
+        // foreground contract owned by the theme (`--primary-foreground`) in
+        // both modes instead of coupling the variant to the palette alias.
         brand:
-          'gap-2 bg-mint font-bold text-primary-foreground shadow-[0_0_24px_-4px_rgba(91,255,160,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-primary font-bold text-primary-foreground shadow-glow-cta-mint hover:bg-primary-hover disabled:shadow-none',
         'brand-cyan':
-          'gap-2 bg-cyan font-bold text-accent-foreground shadow-[0_0_24px_-4px_rgba(63,224,229,0.6)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-cyan font-bold text-accent-foreground shadow-glow-cta-cyan hover:bg-cyan-hover disabled:shadow-none',
         'brand-gold':
-          'gap-2 bg-gold font-bold text-gold-foreground shadow-[0_0_24px_-4px_rgba(255,200,87,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-gold font-bold text-gold-foreground shadow-glow-cta-gold hover:bg-gold-hover disabled:shadow-none',
         'brand-violet':
-          'gap-2 bg-violet font-bold text-white shadow-[0_0_24px_-4px_rgba(124,91,255,0.55)] hover:brightness-105 disabled:shadow-none',
+          'gap-2 bg-violet font-bold text-violet-foreground shadow-glow-cta-violet hover:bg-violet-hover disabled:shadow-none',
         secondary: 'gap-1.5 border border-border bg-secondary text-secondary-foreground hover:border-border-strong',
         // Outline — bg matches page surface so it sits cleanly on glow gradients.
         outline:
           'gap-1.5 border border-border bg-background text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.05)] hover:bg-surface-2',
         // Cyan outline — for "Read Vibe Remote" / docs style CTAs.
         'outline-cyan':
-          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan hover:bg-cyan/[0.10]',
+          'gap-1.5 border border-cyan/40 bg-cyan/[0.06] text-cyan-ink hover:bg-cyan/[0.10]',
         ghost: 'gap-1.5 text-foreground hover:bg-surface-2',
-        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:opacity-90',
+        // Hover swaps the fill rather than fading it: opacity blends the fill toward
+        // the page surface, which pulls the white label *down* toward AA (4.70:1 ->
+        // ~4.25:1 in light). A fixed brightness-95 was no better — it only deepened,
+        // which helps light's white label but drags dark's #080812 label the wrong
+        // way. --destructive-hover is declared per theme like every other brand fill.
+        destructive: 'gap-1.5 bg-destructive text-destructive-foreground hover:bg-destructive-hover',
         // Pink-soft destructive — design.pen T09T8Z. Pink fill + pink border
         // + pink text/icon, used for in-panel delete CTAs where a full
         // destructive shouts too loud. Drives the --pink / --pink-soft tokens
@@ -39,9 +69,9 @@ export const buttonVariants = cva(
         // same visual weight as the mint-soft "Run" button it usually sits next
         // to — a balanced soft pair rather than a near-invisible wash.
         'destructive-soft':
-          'gap-1.5 border border-pink/45 bg-pink/15 text-pink hover:border-pink/60 hover:bg-pink/[0.22]',
-        link: 'text-primary underline-offset-4 hover:underline',
-        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan hover:bg-cyan/15',
+          'gap-1.5 border border-pink/45 bg-pink/15 text-pink-ink hover:border-pink/60 hover:bg-pink/[0.22]',
+        link: 'text-primary-ink underline-offset-4 hover:underline',
+        accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15',
       },
       size: {
         // h-8 toolbar buttons (LogsPanel/DoctorPanel/SettingsServicePage/AgentDetection toolbar).

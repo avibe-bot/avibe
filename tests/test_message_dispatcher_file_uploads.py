@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.message_dispatcher import ConsolidatedMessageDispatcher
-from core.reply_enhancer import FileLink
+from core.reply_enhancer import FileLink, process_reply
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -65,6 +65,107 @@ class _SuccessfulWechatIMClient(_FailingWechatIMClient):
 
 
 class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_angle_wrapped_file_link_is_extracted_and_uploaded(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "报告 (最终).md"
+            file_path.write_text("report", encoding="utf-8")
+            enhanced = process_reply(f"[下载报告](<file://{file_path}>)")
+
+            self.assertEqual(enhanced.text, "下载报告")
+            await dispatcher._upload_file_links(im_client, context, enhanced.files)
+
+        self.assertEqual(
+            im_client.file_uploads,
+            [("C1", str(file_path.resolve()), "下载报告.md")],
+        )
+        self.assertEqual(im_client.image_uploads, [])
+
+    async def test_angle_image_link_with_title_is_uploaded_as_image(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview & (final).png"
+            file_path.write_bytes(b"png")
+            escaped_path = (
+                str(file_path)
+                .replace("&", "&amp;")
+                .replace("(", r"\(")
+                .replace(")", r"\)")
+            )
+            enhanced = process_reply(
+                f'![preview](<f&#105;le://{escaped_path}> "download") '
+                "and [draft](<file:relative.png>)"
+            )
+
+            self.assertEqual(enhanced.text, "preview and [draft](<file:relative.png>)")
+            self.assertEqual(len(enhanced.files), 1)
+            await dispatcher._upload_file_links(im_client, context, enhanced.files)
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+
+    async def test_legacy_bare_space_image_ignores_malformed_authority(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview image.png"
+            file_path.write_bytes(b"png")
+            malformed = "[bad](<file://[bad/path>)"
+            enhanced = process_reply(
+                f"![preview](file://{file_path}) and {malformed}"
+            )
+
+            self.assertEqual(enhanced.text, f"preview and {malformed}")
+            self.assertEqual(len(enhanced.files), 1)
+            await dispatcher._upload_file_links(
+                im_client,
+                context,
+                enhanced.files,
+            )
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+        self.assertEqual(im_client.file_uploads, [])
+
+    async def test_legacy_bare_space_image_after_malformed_prefix_is_uploaded(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview image.png"
+            file_path.write_bytes(b"png")
+            prefix = "[bad](file:///tmp/My Report "
+            enhanced = process_reply(
+                f"{prefix}![preview](file://{file_path})"
+            )
+
+            self.assertEqual(enhanced.text, f"{prefix}preview")
+            self.assertEqual(len(enhanced.files), 1)
+            await dispatcher._upload_file_links(
+                im_client,
+                context,
+                enhanced.files,
+            )
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+        self.assertEqual(im_client.file_uploads, [])
+
     async def test_upload_file_link_allows_path_outside_cwd(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController())
         im_client = _StubIMClient()

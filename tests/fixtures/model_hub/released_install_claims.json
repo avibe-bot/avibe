@@ -1,0 +1,30 @@
+{
+  "claims": [
+    {
+      "schema_version": 1,
+      "state": "installing",
+      "generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error_key": null,
+      "target": {
+        "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "runtime_version": "v7.2.95",
+        "platform": "fixture-platform",
+        "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "binary_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    {
+      "schema_version": 2,
+      "state": "installing",
+      "generation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "error_key": null,
+      "target": {
+        "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "runtime_version": "v7.2.95",
+        "platform": "fixture-platform",
+        "archive_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "binary_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ]
+}

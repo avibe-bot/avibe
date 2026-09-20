@@ -135,7 +135,7 @@ class SlackAppMentionEmptyTests(unittest.IsolatedAsyncioTestCase):
             received["thread_id"] = context.thread_id
             received["text"] = text
             received["control_text"] = (context.platform_specific or {}).get("control_text")
-            received["is_ordinary_text"] = context.is_ordinary_text
+            received["is_ordinary_text"] = context.is_original_human_text
 
         slack.register_callbacks(on_message=_on_message)
         slack.settings_manager = object()

@@ -16,6 +16,12 @@ from config.v2_config import (
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
+from core.handlers.model_hub.adapter import (
+    DiscoveredModel,
+    ObservationDiscovery,
+    ObservationOutcome,
+    SourceObservation,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.migration import scan_native_configs
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
@@ -59,10 +65,55 @@ class MigrationAdapter:
     def __init__(self) -> None:
         self.provisioned: list[tuple[str, int, str]] = []
         self.revoked: list[str] = []
+        self.transient_refs: list[str] = []
+        self.transient_revoked: list[str] = []
+        self.observed: list[tuple[str, tuple[str, ...]]] = []
+        self.observed_protocols = {
+            "anthropic": "anthropic",
+            "openai": "openai_responses",
+            "openrouter": "openai_chat",
+            "zhipuai": "openai_chat",
+        }
+        self.unproven_observation_vendor: str | None = None
         self.synced: list[tuple[object, ...]] = []
-        self.fail_discovery_ref: str | None = None
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
+
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        credential_ref = f"cred_observation_{len(self.transient_refs) + 1}"
+        self.transient_refs.append(credential_ref)
+        return credential_ref
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order,
+    ) -> SourceObservation:
+        self.observed.append((vendor, tuple(protocol_order)))
+        if vendor == self.unproven_observation_vendor:
+            return SourceObservation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=True,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                models=(),
+            )
+        return SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol=self.observed_protocols[vendor],
+            discovery=ObservationDiscovery.SUCCEEDED,
+            models=(DiscoveredModel(id=f"{vendor}-model"),),
+        )
 
     async def provision_credential(
         self,
@@ -81,10 +132,8 @@ class MigrationAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
-    ) -> tuple[str, ...]:
-        if credential_ref == self.fail_discovery_ref:
-            raise RuntimeError("redacted upstream failure")
-        return (f"{vendor}-model",)
+    ) -> tuple[DiscoveredModel, ...]:
+        return (DiscoveredModel(id=f"{vendor}-model"),)
 
     async def sync_sources(self, bindings) -> None:
         self.synced.append(tuple(bindings))
@@ -95,6 +144,9 @@ class MigrationAdapter:
     async def revoke_credential(self, credential_ref: str) -> None:
         if credential_ref in self.fail_revoke_refs:
             raise RuntimeError("redacted revoke failure")
+        if credential_ref in self.transient_refs:
+            self.transient_revoked.append(credential_ref)
+            return
         self.revoked.append(credential_ref)
 
 
@@ -125,6 +177,45 @@ def _isolate_native_home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _assert_canonical_round_trip(config: ModelHubConfig) -> ModelHubConfig:
+    serialized = json.dumps(config.to_payload())
+    reloaded = ModelHubConfig.from_payload(json.loads(serialized))
+    assert reloaded.to_payload() == config.to_payload()
+    return reloaded
+
+
+def _assert_sources_validated_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    service: ModelHubService,
+) -> None:
+    original_validator = ModelHubSourceConfig.from_payload.__func__
+    validated_source_ids: set[str] = set()
+
+    # Pass-through on purpose: what this double observes is which sources were
+    # validated, so it must not pin the validator's signature. Spelling out today's
+    # arguments made a policy flag the owner grew into a migration conflict.
+    def tracked_validator(cls, *args, **kwargs):
+        source = original_validator(cls, *args, **kwargs)
+        validated_source_ids.add(source.id)
+        return source
+
+    original_commit = service._commit_synced
+
+    async def checked_commit(previous, updated):
+        new_source_ids = {
+            source.id for source in updated.sources
+        } - {source.id for source in previous.sources}
+        assert new_source_ids <= validated_source_ids
+        await original_commit(previous, updated)
+
+    monkeypatch.setattr(
+        ModelHubSourceConfig,
+        "from_payload",
+        classmethod(tracked_validator),
+    )
+    monkeypatch.setattr(service, "_commit_synced", checked_commit)
 
 
 def _write_claude(home: Path, *, malformed: bool = False) -> None:
@@ -467,7 +558,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     before = _tree_digest(native_home)
 
     service, store, adapter = _service(tmp_path)
-    store.config.agents["codex"].sources.policy = "custom"
+    _assert_sources_validated_before_commit(monkeypatch, service)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -479,8 +570,8 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         base_url=base_url,
     )
     assert scan_response.status_code == 200
-    scan = scan_response.get_json()
-    _validate_scan({"items": scan["items"]})
+    scan = scan_response.get_json()["scan"]
+    _validate_scan(scan)
     assert len(scan["items"]) == 4
 
     apply_response = client.post(
@@ -496,32 +587,41 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert len(store.config.sources) == 4
     assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
+    assert adapter.transient_revoked == adapter.transient_refs
+    assert len(adapter.observed) == len(adapter.transient_refs)
     assert before == _tree_digest(native_home)
+    reloaded = _assert_canonical_round_trip(store.config)
+    assert all(
+        model.reasoning_efforts == []
+        for source in reloaded.sources
+        for model in source.models
+    )
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)
-    assert store.config.agents["claude"].sources.order == []
-    assert store.config.agents["codex"].sources.order == []
-    assert store.config.agents["opencode"].sources.order == []
-    assert set(store.config.effective_source_order("claude")) == imported_ids
-    assert store.config.effective_source_order("codex") == []
-    assert set(store.config.effective_source_order("opencode")) == imported_ids
+    for backend in ("claude", "codex", "opencode"):
+        assert store.config.agents[backend].sources.order == [
+            source.id
+            for source in store.config.sources
+            if ModelHubConfig.source_eligible_for_backend(source, backend)
+        ]
     codex_payload = next(
         agent for agent in service.list_agents() if agent["backend"] == "codex"
     )
-    assert codex_payload["sources"]["order"] == []
+    assert codex_payload["sources"]["order"] == store.config.agents["codex"].sources.order
     assert {
         item["source_id"]
         for item in codex_payload["sources"]["eligibility"]
         if item["eligible"]
     } == imported_ids
     assert all(
-        by_id[source_id].billing == "metered"
-        for source_id in store.config.effective_source_order("opencode")
+        source.billing == "metered"
+        for source in store.config.sources
+        if source.kind == "api_key"
     )
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
-    assert codex_source.protocol == "openai_chat"
+    assert codex_source.protocol == "openai_responses"
     assert codex_source.base_url == "https://codex-relay.example/v1"
     openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
@@ -545,6 +645,50 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
         assert secret not in serialized
 
 
+@pytest.mark.parametrize("discovery", (ObservationDiscovery.SUCCEEDED, ObservationDiscovery.FAILED))
+def test_mh_mig_001_long_manual_inventory_is_copy_only_even_when_discovery_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, discovery: ObservationDiscovery,
+) -> None:
+    """MH-MIG-001: new manual imports share admission without rewriting native files."""
+    native_home = tmp_path / "native-home"
+    _isolate_native_home(monkeypatch, native_home)
+    identity = "模型🧪/e\u0301" * 3000
+    invalid = (" " * 17000, "m" * 17000 + "\ud800", "m" * 17000 + " sk-fabricated-never-persist-this")
+    _write(
+        native_home / ".config" / "opencode" / "opencode.json",
+        json.dumps({"provider": {"openrouter": {
+            "options": {"apiKey": "sk-openrouter-123456", "baseURL": "https://openrouter.example/v1"},
+            "models": {
+                "  " + identity + "  ": {"name": "Long manual"},
+                **{model_id: {} for model_id in invalid},
+            },
+        }}}),
+    )
+    before = _tree_digest(native_home)
+    service, store, adapter = _service(tmp_path)
+    _assert_sources_validated_before_commit(monkeypatch, service)
+
+    async def observe(*_args):
+        return SourceObservation(
+            outcome=ObservationOutcome.OBSERVED, reachable=True, authenticated=True,
+            protocol="openai_chat", discovery=discovery,
+            models=(DiscoveredModel(id=identity + "-discovered"),) if discovery is ObservationDiscovery.SUCCEEDED else (),
+        )
+
+    adapter.observe_source = observe
+    [item] = service.migration_scan()["items"]
+    result = asyncio.run(service.migration_apply([item["id"]]))
+    assert result["applied"] == 1
+    [source] = _assert_canonical_round_trip(store.config).sources
+    manual = [model for model in source.models if model.provenance == "manual"]
+    assert [(model.id, model.display_name) for model in manual] == [(identity, "Long manual")]
+    assert all(model.id not in invalid for model in source.models)
+    assert source.state.status == ("error" if discovery is ObservationDiscovery.FAILED else "standby")
+    assert _tree_digest(native_home) == before
+    assert adapter.transient_revoked == adapter.transient_refs
+    assert "sk-fabricated-never-persist-this" not in json.dumps(result)
+
+
 def test_mh_mig_002_oauth_defaults_to_native_sources(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -556,6 +700,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     _write_codex_oauth(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
+    _assert_sources_validated_before_commit(monkeypatch, service)
 
     scan = service.migration_scan()["items"]
     oauth_items = [item for item in scan if item["kind"] == "oauth_native"]
@@ -564,6 +709,9 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
 
     result = asyncio.run(service.migration_apply([item["id"] for item in oauth_items]))
     assert result["applied"] == 2
+    assert {position["source_id"] for position in result["added_to"]} == {
+        source.id for source in store.config.sources
+    }
     assert {
         (source.vendor, source.kind, source.supply_channel, source.credential_ref) for source in store.config.sources
     } == {
@@ -571,28 +719,25 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
         ("openai", "subscription", "native_cli", None),
     }
     assert adapter.provisioned == []
+    from vibe.backend_model_catalog import (
+        bundled_catalog_reasoning_efforts_for_model,
+    )
 
-
-def test_mh_mig_003_experimental_flag_keeps_oauth_native(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Scenario: MH-MIG-003."""
-
-    native_home = tmp_path / "native-home"
-    _write_codex_oauth(native_home)
-    _isolate_native_home(monkeypatch, native_home)
-    service, store, adapter = _service(tmp_path)
-    store.config.subscription_hub_experimental = True
-    oauth_item = next(item for item in service.migration_scan()["items"] if item["kind"] == "oauth_native")
-    assert oauth_item["proposed_action"] == "keep_native"
-    assert oauth_item["notes_key"] == "settings.models.source.nativeSupply"
-
-    result = asyncio.run(service.migration_apply([oauth_item["id"]]))
-    assert result["applied"] == 1
-    assert adapter.provisioned == []
-    assert len(store.config.sources) == 1
-    assert store.config.sources[0].supply_channel == "native_cli"
+    for source in store.config.sources:
+        assert source.models
+        for model in source.models:
+            assert model.reasoning_efforts_source == "catalog"
+            assert tuple(model.reasoning_efforts) == (
+                bundled_catalog_reasoning_efforts_for_model(model.id)
+            )
+    reloaded = _assert_canonical_round_trip(store.config)
+    assert {
+        (source.vendor, source.kind, source.supply_channel, source.credential_ref)
+        for source in reloaded.sources
+    } == {
+        ("anthropic", "subscription", "native_cli", None),
+        ("openai", "subscription", "native_cli", None),
+    }
 
 
 @pytest.mark.parametrize(
@@ -864,6 +1009,7 @@ def test_scan_skips_invalid_endpoint_without_blocking_valid_items(
     assert {item["backend"] for item in scan} == {"opencode"}
     result = asyncio.run(service.migration_apply([item["id"] for item in scan]))
     assert result["applied"] == 2
+    assert all(source.verification_pending for source in store.config.sources)
     assert {source.vendor for source in store.config.sources} == {
         "openrouter",
         "zhipuai",
@@ -965,11 +1111,43 @@ def test_failed_batch_revokes_every_provisioned_credential(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
-    adapter.fail_discovery_ref = "cred_migration_2"
+    adapter.unproven_observation_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(item_ids))
-    assert error.value.code == "engine_down"
+    assert error.value.code == "migration_item_conflict"
+    assert adapter.revoked == ["cred_migration_1"]
+    assert adapter.transient_revoked == adapter.transient_refs
+    assert store.config.sources == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
+
+
+def test_canonical_source_rejection_aborts_batch_and_revokes_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    item_ids = [item["id"] for item in service.migration_scan()["items"]]
+    original_validator = ModelHubSourceConfig.from_payload.__func__
+
+    def reject_one_source(cls, payload):
+        if payload.get("vendor") == "zhipuai":
+            raise ValueError("injected canonical rejection")
+        return original_validator(cls, payload)
+
+    monkeypatch.setattr(
+        ModelHubSourceConfig,
+        "from_payload",
+        classmethod(reject_one_source),
+    )
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.migration_apply(item_ids))
+
+    assert error.value.code == "migration_item_conflict"
     assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
     assert all(agent.sources.order == [] for agent in store.config.agents.values())
@@ -1003,7 +1181,7 @@ def test_failed_revoke_survives_retry_with_same_source_id(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_id = service.migration_scan()["items"][0]["id"]
-    adapter.fail_discovery_ref = "cred_migration_1"
+    adapter.fail_sync_count = 1
     adapter.fail_revoke_refs.add("cred_migration_1")
 
     with pytest.raises(ModelHubError) as error:
@@ -1013,7 +1191,6 @@ def test_failed_revoke_survives_retry_with_same_source_id(
     assert ":migration:" in pending.source_id
     assert pending.credential_ref == "cred_migration_1"
 
-    adapter.fail_discovery_ref = None
     adapter.fail_revoke_refs.clear()
     result = asyncio.run(service.migration_apply([item_id]))
     assert result["applied"] == 1
@@ -1049,3 +1226,207 @@ def test_apply_rejects_a_credential_changed_after_scan(
     assert error.value.code == "migration_item_conflict"
     assert adapter.provisioned == []
     assert store.config.sources == []
+
+
+# --- Additive provider-presentation metadata (ratified 2026-09-19) -----------
+#
+# `vendor`, `display_name` and `masked_credential` let a client name and draw the
+# provider a credential belongs to. They exist because `backend` cannot: it says
+# which CLI held the key, not whose key it is, and an OpenCode row can come from
+# either of two stores. The tests below hold the three properties that make them
+# safe to add — every source shape carries them, the masked credential is the same
+# masking the composed detail already used, and no pre-existing value or id moves.
+
+_KEY_FROM_OPENCODE_CONFIG = "sk-config-deepseek-123456"
+_KEY_FROM_OPENCODE_AUTH = "sk-auth-zhipu-123456"
+_CLAUDE_KEY = "sk-ant-meta-123456789"
+_CLAUDE_TOKEN = "bearer-meta-123456"
+_CODEX_KEY = "sk-openai-meta-123456"
+
+_ALL_PLAINTEXT = (
+    _KEY_FROM_OPENCODE_CONFIG,
+    _KEY_FROM_OPENCODE_AUTH,
+    _CLAUDE_KEY,
+    _CLAUDE_TOKEN,
+    _CODEX_KEY,
+    "claude-oauth-meta-token",
+    "codex-oauth-meta-token",
+)
+
+
+def _write_key_sources(home: Path) -> None:
+    """Every shape that yields an importable key, in one home."""
+    _write(
+        home / ".claude" / "settings.json",
+        json.dumps({"env": {"ANTHROPIC_API_KEY": _CLAUDE_KEY, "ANTHROPIC_AUTH_TOKEN": _CLAUDE_TOKEN}}),
+    )
+    _write(home / ".codex" / "auth.json", json.dumps({"OPENAI_API_KEY": _CODEX_KEY}))
+    _write(home / ".codex" / "config.toml", 'cli_auth_credentials_store = "file"\n')
+    # deepseek keeps its key in the OpenCode config file, zhipuai in auth.json —
+    # the two stores `backend` + `kind` cannot tell apart.
+    _write(
+        home / ".config" / "opencode" / "opencode.json",
+        json.dumps(
+            {
+                "provider": {
+                    "deepseek": {"options": {"apiKey": _KEY_FROM_OPENCODE_CONFIG}},
+                    "zhipuai": {"options": {"baseURL": "https://zhipu.example/v1"}},
+                }
+            }
+        ),
+    )
+    _write(
+        home / ".local" / "share" / "opencode" / "auth.json",
+        json.dumps({"zhipuai": {"type": "api", "key": _KEY_FROM_OPENCODE_AUTH}}),
+    )
+    _write(
+        home / ".cache" / "opencode" / "models.json",
+        json.dumps(
+            {
+                "deepseek": {
+                    "id": "deepseek",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://api.deepseek.com/v1",
+                },
+                "zhipuai": {
+                    "id": "zhipuai",
+                    "npm": "@ai-sdk/openai-compatible",
+                    "api": "https://zhipu.example/v1",
+                },
+            }
+        ),
+    )
+
+
+def _write_oauth_sources(home: Path) -> None:
+    """The subscription shapes, which carry no credential of their own."""
+    _write(
+        home / ".claude" / ".credentials.json",
+        json.dumps({"claudeAiOauth": {"accessToken": "claude-oauth-meta-token"}}),
+    )
+    _write(
+        home / ".codex" / "auth.json",
+        json.dumps({"auth_mode": "chatgpt", "tokens": {"access_token": "codex-oauth-meta-token"}}),
+    )
+    _write(home / ".codex" / "config.toml", 'cli_auth_credentials_store = "file"\n')
+
+
+def test_mh_mig_003_scan_rows_name_their_provider_without_exposing_plaintext(
+    tmp_path: Path,
+) -> None:
+    """MH-MIG-003: every shape the scan produces carries the provider it belongs
+    to, and no shape carries a plaintext credential."""
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+    items = scan_native_configs(ModelHubConfig(), home=home, mask_credential=_mask_credential)
+    payload = {"items": [item.to_payload() for item in items]}
+    _validate_scan(payload)
+
+    by_shape = {
+        (row["backend"], row["kind"], row["proposed_action"]): row for row in payload["items"]
+    }
+    # Claude's API key and its Auth Token, Codex's API key, and an OpenCode key
+    # from each of the two stores. The Auth Token is `reauth` and still needs a
+    # name to show, so metadata is not conditional on being importable.
+    assert set(by_shape) == {
+        ("claude", "api_key", "import"),
+        ("claude", "api_key", "reauth"),
+        ("codex", "api_key", "import"),
+        ("opencode", "opencode_provider", "import"),
+    }
+    assert len([r for r in payload["items"] if r["backend"] == "opencode"]) == 2
+
+    for row in payload["items"]:
+        assert row["vendor"], row
+        assert row["display_name"], row
+        assert row["masked_credential"], row
+
+    serialized = json.dumps(payload)
+    for secret in _ALL_PLAINTEXT:
+        assert secret not in serialized
+
+
+def test_masked_credential_is_the_same_masking_the_detail_already_showed(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+    rows = [
+        item.to_payload()
+        for item in scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+    ]
+
+    for row in rows:
+        if row["backend"] == "opencode":
+            # The composed detail is provider + masked key; splitting it in the
+            # client would be re-parsing a display string, so the field carries
+            # the same text the composition used.
+            assert row["masked_detail"] == f"{row['vendor']} · {row['masked_credential']}"
+        else:
+            # Claude and Codex show the masked key alone, so the two agree exactly.
+            assert row["masked_detail"] == row["masked_credential"]
+
+    for plaintext in (_KEY_FROM_OPENCODE_CONFIG, _KEY_FROM_OPENCODE_AUTH, _CLAUDE_KEY):
+        masked = _mask_credential(plaintext)
+        assert masked != plaintext
+        assert any(row["masked_credential"] == masked for row in rows), masked
+
+
+def test_subscription_rows_carry_a_name_but_no_credential(tmp_path: Path) -> None:
+    home = tmp_path / "oauth"
+    _write_oauth_sources(home)
+    rows = [
+        item.to_payload()
+        for item in scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+    ]
+    _validate_scan({"items": rows})
+
+    assert {(row["backend"], row["kind"], row["proposed_action"]) for row in rows} == {
+        ("claude", "oauth_native", "keep_native"),
+        ("codex", "oauth_native", "keep_native"),
+    }
+    for row in rows:
+        assert row["vendor"] and row["display_name"]
+        # There is no key here to mask; a client falls back to `masked_detail`.
+        assert row["masked_credential"] is None
+
+
+def test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "keys"
+    _write_key_sources(home)
+
+    def scan() -> list:
+        return scan_native_configs(
+            ModelHubConfig(), home=home, mask_credential=_mask_credential
+        )
+
+    established = (
+        "id",
+        "backend",
+        "kind",
+        "masked_detail",
+        "proposed_action",
+        "selected",
+        "notes_key",
+    )
+    first = [item.to_payload() for item in scan()]
+    second = [item.to_payload() for item in scan()]
+
+    # Ids are content-derived, so a second scan of untouched files must reproduce
+    # them exactly — an id that moved would orphan a selection made before it.
+    assert [{k: row[k] for k in established} for row in first] == [
+        {k: row[k] for k in established} for row in second
+    ]
+    # And the established half still reads off the dataclass it always did.
+    for item, row in zip(scan(), first):
+        assert row["id"] == item.id
+        assert row["masked_detail"] == item.masked_detail
+        assert row["proposed_action"] == item.proposed_action
+        assert row["selected"] == item.selected
+        assert row["notes_key"] == item.notes_key

@@ -1,3 +1,6 @@
+import { platformText } from '@/lib/platforms';
+import type { TFunction } from 'i18next';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bot,
@@ -66,10 +69,10 @@ interface AggregatedUser {
 }
 
 const AVATAR_TONES = [
-  { textCls: 'text-mint', bg: 'rgba(91,255,160,0.12)', border: 'rgba(91,255,160,0.33)' },
-  { textCls: 'text-cyan', bg: 'rgba(63,224,229,0.12)', border: 'rgba(63,224,229,0.33)' },
-  { textCls: 'text-violet', bg: 'rgba(124,91,255,0.12)', border: 'rgba(124,91,255,0.33)' },
-  { textCls: 'text-gold', bg: 'rgba(255,200,87,0.12)', border: 'rgba(255,200,87,0.33)' },
+  { textCls: 'text-mint-ink', bg: 'rgba(91,255,160,0.12)', border: 'rgba(91,255,160,0.33)' },
+  { textCls: 'text-cyan-ink', bg: 'rgba(63,224,229,0.12)', border: 'rgba(63,224,229,0.33)' },
+  { textCls: 'text-violet-ink', bg: 'rgba(124,91,255,0.12)', border: 'rgba(124,91,255,0.33)' },
+  { textCls: 'text-gold-ink', bg: 'rgba(255,200,87,0.12)', border: 'rgba(255,200,87,0.33)' },
 ];
 
 const hashCode = (s: string) => {
@@ -237,7 +240,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                 variant="secondary"
                 size="xs"
                 onClick={() => handleDelete(primary.code)}
-                className="text-muted hover:border-danger/40 hover:text-danger"
+                className="text-muted hover:border-destructive/40 hover:text-destructive-ink"
               >
                 {t('bindCode.revoke')}
               </Button>
@@ -251,7 +254,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
 
         {/* Invite copy — appears below actions on mobile, left on desktop */}
         <div className="flex min-w-0 flex-col gap-2.5 md:flex-1">
-          <span className="inline-flex w-max items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 font-mono text-[10px] font-bold tracking-[0.12em] text-mint">
+          <span className="inline-flex w-max items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-2.5 py-1 font-mono text-[10px] font-bold tracking-[0.12em] text-mint-ink">
             <KeyRound size={11} strokeWidth={2.4} />
             {t('bindCode.badge')}
           </span>
@@ -274,7 +277,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                   type="radio"
                   checked={newType === 'one_time'}
                   onChange={() => setNewType('one_time')}
-                  className="text-mint"
+                  className="text-mint-ink"
                 />
                 {t('bindCode.oneTime')}
               </label>
@@ -283,7 +286,7 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                   type="radio"
                   checked={newType === 'expiring'}
                   onChange={() => setNewType('expiring')}
-                  className="text-mint"
+                  className="text-mint-ink"
                 />
                 {t('bindCode.expiring')}
               </label>
@@ -328,9 +331,9 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                         <span
                           className={clsx(
                             'rounded-full border px-2 py-0.5 text-[10px] font-mono font-bold tracking-[0.12em]',
-                            status === 'active' && 'border-mint/40 bg-mint-soft text-mint',
+                            status === 'active' && 'border-mint/40 bg-mint-soft text-mint-ink',
                             status === 'used' && 'border-border bg-foreground/[0.04] text-muted',
-                            status === 'expired' && 'border-gold/40 bg-gold/10 text-gold',
+                            status === 'expired' && 'border-gold/40 bg-gold/10 text-gold-ink',
                             status === 'inactive' && 'border-border bg-foreground/[0.04] text-muted',
                           )}
                         >
@@ -355,14 +358,14 @@ const BindCodeCard: React.FC<BindCodeCardProps> = ({ refreshTrigger, onCodesChan
                           title={t('bindCode.copy')}
                           className="rounded p-1.5 text-muted transition-colors hover:text-foreground"
                         >
-                          {copiedCode === bc.code ? <Check size={14} className="text-mint" /> : <Copy size={14} />}
+                          {copiedCode === bc.code ? <Check size={14} className="text-mint-ink" /> : <Copy size={14} />}
                         </button>
                         {bc.is_active && (
                           <button
                             type="button"
                             onClick={() => handleDelete(bc.code)}
                             title={t('bindCode.delete')}
-                            className="rounded p-1.5 text-muted transition-colors hover:text-danger"
+                            className="rounded p-1.5 text-muted transition-colors hover:text-destructive-ink"
                           >
                             <Trash2 size={14} />
                           </button>
@@ -384,7 +387,7 @@ const ActiveCodeBox: React.FC<{
   code: BindCodeItem;
   onCopy: () => void;
   copied: boolean;
-  t: (k: string, opts?: any) => string;
+  t: TFunction;
 }> = ({ code, onCopy, copied, t }) => {
   const expiryLabel = code.type === 'expiring' && code.expires_at
     ? t('bindCode.expiresIn', { time: formatExpiry(code.expires_at) })
@@ -392,7 +395,7 @@ const ActiveCodeBox: React.FC<{
 
   return (
     <div className="flex flex-col items-stretch gap-1 md:items-end">
-      <span className="font-mono text-[10px] font-bold tracking-[0.12em] text-gold">
+      <span className="font-mono text-[10px] font-bold tracking-[0.12em] text-gold-ink">
         {t('bindCode.activeCodeLabel')} · {expiryLabel}
       </span>
       <button
@@ -402,9 +405,9 @@ const ActiveCodeBox: React.FC<{
         style={{ borderColor: 'rgba(255,200,87,0.33)' }}
         title={t('bindCode.copy')}
       >
-        <span className="font-mono text-[18px] font-bold tracking-[0.12em] text-gold">bind {code.code}</span>
+        <span className="font-mono text-[18px] font-bold tracking-[0.12em] text-gold-ink">bind {code.code}</span>
         {copied ? (
-          <Check size={14} className="shrink-0 text-mint" />
+          <Check size={14} className="shrink-0 text-mint-ink" />
         ) : (
           <Copy size={14} className="shrink-0 text-muted" />
         )}
@@ -444,19 +447,14 @@ const Modal: React.FC<{ title: string; onClose: () => void; children: React.Reac
 // ─── User List Page ──────────────────────────────────────────────────────
 
 export const UserList: React.FC = () => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [, setLoading] = useState(false);
   const [usersByPlatform, setUsersByPlatform] = useState<Record<string, Record<string, UserConfig>>>({});
   const [config, setConfig] = useState<any>({});
-  const [opencodeOptionsByCwd, setOpencodeOptionsByCwd] = useState<Record<string, any>>({});
-  const [claudeAgentsByCwd, setClaudeAgentsByCwd] = useState<Record<string, any[]>>({});
-  const [codexAgentsByCwd, setCodexAgentsByCwd] = useState<Record<string, any[]>>({});
-  const [claudeModels, setClaudeModels] = useState<string[]>([]);
-  const [claudeModelLabels, setClaudeModelLabels] = useState<Record<string, string>>({});
-  const [claudeReasoningOptions, setClaudeReasoningOptions] = useState<Record<string, { value: string; label: string }[]>>({});
-  const [codexModels, setCodexModels] = useState<string[]>([]);
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [showDisabled, setShowDisabled] = useState(false);
@@ -501,43 +499,6 @@ export const UserList: React.FC = () => {
 
   useEffect(() => { loadAllUsers(); }, [enabledPlatforms.join(','), refreshTrigger]);
 
-  const loadOpenCodeOptions = async (cwd: string) => {
-    try {
-      const result = await api.opencodeOptions(cwd);
-      if (result.ok) setOpencodeOptionsByCwd((prev) => ({ ...prev, [cwd]: result.data }));
-    } catch (e) { console.error('Failed to load OpenCode options:', e); }
-  };
-
-  const loadClaudeAgents = async (cwd: string) => {
-    try {
-      const result = await api.claudeAgents(cwd);
-      if (result.ok) setClaudeAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-    } catch (e) { console.error('Failed to load Claude agents:', e); }
-  };
-
-  const loadCodexAgents = async (cwd: string) => {
-    try {
-      const result = await api.codexAgents(cwd);
-      if (result.ok) setCodexAgentsByCwd((prev) => ({ ...prev, [cwd]: result.agents || [] }));
-    } catch (e) { console.error('Failed to load Codex agents:', e); }
-  };
-
-  useEffect(() => {
-    if (config.agents?.claude?.enabled) {
-      api.claudeModels().then((r) => {
-        if (r.ok) {
-          setClaudeModels(r.models || []);
-          setClaudeModelLabels(r.model_labels || {});
-          setClaudeReasoningOptions(r.reasoning_options || {});
-        }
-      });
-    }
-  }, [config.agents?.claude?.enabled]);
-
-  useEffect(() => {
-    if (config.agents?.codex?.enabled) api.codexModels().then(r => r.ok && setCodexModels(r.models || []));
-  }, [config.agents?.codex?.enabled]);
-
   // Aggregate users
   const aggregated = useMemo<AggregatedUser[]>(() => {
     const flat: AggregatedUser[] = [];
@@ -566,23 +527,7 @@ export const UserList: React.FC = () => {
     });
   }, [aggregated, searchQuery, showDisabled]);
 
-  // Load agent options for visible enabled users
-  useEffect(() => {
-    const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultAgent = agentByName[defaultAgentName || ''] || null;
-    aggregated.forEach((u) => {
-      if (!u.config.enabled) return;
-      const cwd = u.config.custom_cwd || defaultCwd;
-      const routing = u.config.routing || {};
-      const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-      if (backend === 'opencode' && config.agents?.opencode?.enabled && !opencodeOptionsByCwd[cwd]) loadOpenCodeOptions(cwd);
-      if (backend === 'claude' && config.agents?.claude?.enabled && !claudeAgentsByCwd[cwd]) loadClaudeAgents(cwd);
-      if (backend === 'codex' && config.agents?.codex?.enabled && !codexAgentsByCwd[cwd]) loadCodexAgents(cwd);
-    });
-  }, [aggregated, config, agentByName, defaultAgentName]);
-
-  const persistUsers = async (platform: string, next: Record<string, UserConfig>) => {
+  const persistUsers = async (platform: string, next: Record<string, Partial<UserConfig>>) => {
     setLoading(true);
     try {
       await api.saveUsers({ users: next }, platform);
@@ -603,7 +548,10 @@ export const UserList: React.FC = () => {
     }
     const nextPlatformUsers = { ...platformUsers, [userId]: next };
     setUsersByPlatform((prev) => ({ ...prev, [platform]: nextPlatformUsers }));
-    void persistUsers(platform, nextPlatformUsers);
+    void persistUsers(platform, { [userId]: canManageAccessMembers ? next : {
+      display_name: next.display_name, custom_cwd: next.custom_cwd,
+      routing: next.routing, show_message_types: next.show_message_types,
+    } });
   };
 
   const handleToggleAdmin = async (platform: string, userId: string, isAdmin: boolean) => {
@@ -703,7 +651,7 @@ export const UserList: React.FC = () => {
               variant="secondary"
               size="sm"
               onClick={() => setRefreshTrigger((v) => v + 1)}
-              title={t('common.refresh', { defaultValue: 'Refresh' })}
+              title={t('common.refresh')}
               className="px-3"
             >
               <RefreshCw size={14} />
@@ -712,10 +660,10 @@ export const UserList: React.FC = () => {
         </div>
 
         {/* Bind code card */}
-        <BindCodeCard
+        {canManageAccessMembers && <BindCodeCard
           refreshTrigger={refreshTrigger}
           onCodesChanged={() => setRefreshTrigger((v) => v + 1)}
-        />
+        />}
 
         {/* List header */}
         <div className="flex items-center justify-between px-1 py-2">
@@ -747,10 +695,6 @@ export const UserList: React.FC = () => {
               const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const selectedAgent = agentByName[userConfig.routing?.agent_name || ''] || agentByName[defaultAgentName || ''];
               const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
-              const effectiveCwd = userConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
-              const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
-              const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
-              const codexAgents = codexAgentsByCwd[effectiveCwd] || [];
               const isBot = !userConfig.is_admin && (userConfig.display_name || u.userId).toLowerCase().includes('bot');
               const tone = AVATAR_TONES[hashCode(u.userId) % AVATAR_TONES.length];
               const initials = getInitials(userConfig.display_name, u.userId);
@@ -766,11 +710,11 @@ export const UserList: React.FC = () => {
                 ? selectedAgent
                   ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
                   : `${backendLabel(effectiveBackend)}${backendModel ? `/${backendModel}` : ''}`
-                : t('userList.disabled', { defaultValue: 'Disabled' });
+                : t('userList.disabled');
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);
               const toggleEnabled = () => updateRow({ enabled: !userConfig.enabled });
-              const toggleAdmin = () => handleToggleAdmin(u.platform, u.userId, !userConfig.is_admin);
+              const toggleAdmin = () => canManageAccessMembers && handleToggleAdmin(u.platform, u.userId, !userConfig.is_admin);
 
               return (
                 <div
@@ -778,7 +722,7 @@ export const UserList: React.FC = () => {
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded
-                      ? 'border-mint/30 bg-surface-2/70 shadow-[0_0_32px_-8px_rgba(91,255,160,0.45)]'
+                      ? 'border-mint/30 bg-surface-2/70 shadow-glow-lg-mint'
                       : userConfig.enabled
                         ? 'border-border bg-background hover:border-border-strong'
                         : 'border-border bg-background/60 opacity-70'
@@ -801,6 +745,7 @@ export const UserList: React.FC = () => {
                     {/* Enabled toggle */}
                     <span onClick={(e) => e.stopPropagation()}>
                       <ToggleSwitch
+                        disabled={!canManageAccessMembers}
                         enabled={userConfig.enabled}
                         onClick={toggleEnabled}
                       />
@@ -820,7 +765,7 @@ export const UserList: React.FC = () => {
                       </span>
                       <span
                         className="absolute -bottom-1 -right-1 flex size-[20px] items-center justify-center rounded-full border border-border bg-background shadow-[0_0_0_2px_var(--color-background)]"
-                        title={t(`platform.${u.platform}.title`)}
+                        title={platformText(t, u.platform, 'title')}
                       >
                         <PlatformIcon platform={u.platform} size={13} />
                       </span>
@@ -844,7 +789,8 @@ export const UserList: React.FC = () => {
                     ) : (
                       <span
                         role="button"
-                        tabIndex={0}
+                        tabIndex={canManageAccessMembers ? 0 : -1}
+                        aria-disabled={!canManageAccessMembers}
                         aria-pressed={userConfig.is_admin}
                         onClick={(e) => { e.stopPropagation(); toggleAdmin(); }}
                         onKeyDown={(e) => {
@@ -855,12 +801,12 @@ export const UserList: React.FC = () => {
                           }
                         }}
                         title={userConfig.is_admin
-                          ? t('userList.demoteAdminTitle', { defaultValue: 'Demote admin' })
-                          : t('userList.promoteAdminTitle', { defaultValue: 'Promote to admin' })}
+                          ? t('userList.demoteAdminTitle')
+                          : t('userList.promoteAdminTitle')}
                         className={clsx(
                           'inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors',
                           userConfig.is_admin
-                            ? 'border-gold/40 bg-gold/10 font-bold text-gold hover:bg-gold/15'
+                            ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink hover:bg-gold/15'
                             : 'border-border bg-foreground/[0.04] text-muted hover:border-border-strong hover:text-foreground'
                         )}
                       >
@@ -888,21 +834,15 @@ export const UserList: React.FC = () => {
                       defaultAgentName={defaultAgentName}
                       availableMessageTypes={availableMessageTypes(u.platform)}
                       showRequireMention={false}
-                      opencodeOptions={opencodeOptions}
-                      claudeAgents={claudeAgents}
-                      claudeModels={claudeModels}
-                      claudeModelLabels={claudeModelLabels}
-                      claudeReasoningOptions={claudeReasoningOptions}
-                      codexAgents={codexAgents}
-                      codexModels={codexModels}
                       footerActions={
                         <Button
                           type="button"
                           variant="secondary"
                           size="xs"
+                          disabled={!canManageAccessMembers}
                           onClick={() => handleRemoveUser(u.platform, u.userId)}
                           title={t('userList.removeUser')}
-                          className="text-muted hover:border-danger/40 hover:text-danger"
+                          className="text-muted hover:border-destructive/40 hover:text-destructive-ink"
                         >
                           <Trash2 size={12} />
                           {t('userList.removeUser')}

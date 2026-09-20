@@ -123,6 +123,17 @@ describe('bindFrameChord', () => {
     frameWindow.emit('keydown', matching);
     expect(run).toHaveBeenCalledTimes(1);
     expect(matching.preventDefault).toHaveBeenCalledTimes(1);
+
+    const alreadyOwned = {
+      code: 'KeyD',
+      metaKey: true,
+      shiftKey: true,
+      defaultPrevented: true,
+      preventDefault: vi.fn(),
+    };
+    frameWindow.emit('keydown', alreadyOwned);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(alreadyOwned.preventDefault).not.toHaveBeenCalled();
     expect(seen[0]).toBe(active); // the predicate sees the frame's realm, not ours
 
     const other = { code: 'KeyD', metaKey: true, shiftKey: false, preventDefault: vi.fn() };

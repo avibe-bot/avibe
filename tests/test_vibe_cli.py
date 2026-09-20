@@ -1,6 +1,10 @@
+import asyncio
+import builtins
+import hashlib
 import json
 import os
 import pytest
+import re
 import signal
 import shlex
 import sqlite3
@@ -65,6 +69,33 @@ def _write_alembic_revision(db_path: Path, revision: str) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("create table alembic_version (version_num varchar(32) not null)")
         conn.execute("insert into alembic_version values (?)", (revision,))
+
+
+def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"runtime": {"agent_events_trace_retention_days": 90}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+
+    def _load_should_not_run(*_args, **_kwargs):
+        raise AssertionError("help construction must not load or migrate V2Config")
+
+    monkeypatch.setattr(cli.V2Config, "load", _load_should_not_run)
+    assert cli._configured_trace_retention_days("en") == 90
+    cli.build_parser()
+
+
+def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"runtime": {"agent_events_trace_retention_days": 1_000_000}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+
+    assert cli._configured_trace_retention_days("en") == 30
 
 
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
@@ -186,6 +217,29 @@ def test_status_written(tmp_path, monkeypatch):
     assert payload["detail"] == "pid=123"
 
 
+@pytest.mark.parametrize("state", ["running", "starting", "stopped", "error", "degraded"])
+@pytest.mark.parametrize("ok", [False, None, True], ids=["failed", "in-flight", "succeeded"])
+def test_a_restart_record_survives_every_status_write(tmp_path, monkeypatch, state, ok):
+    """Nothing about writing runtime status touches the restart record.
+
+    The record is the restart subsystem's own account of its last job, and doctor
+    reads it against live facts rather than against anything a status write
+    remembered. Seeded across every outcome and every state a caller can write, so
+    a status path added later inherits the assertion instead of needing its own.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    restart_path = runtime.get_restart_status_path()
+    payload = {"ok": ok, "state": "failed" if ok is False else "succeeded", "job_id": "job-1"}
+    runtime.write_json(restart_path, payload)
+
+    runtime.write_status(state, detail="pid=123")
+
+    assert runtime.read_status()["state"] == state
+    assert runtime.read_json(restart_path) == payload
+
+
 def test_render_status_includes_restart_status(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()
@@ -265,6 +319,79 @@ def test_render_status_keeps_a_recorded_error_when_the_service_is_stopped(tmp_pa
     assert "stale" not in payload["internal_server"]
 
 
+def _age_status_record(seconds: float) -> None:
+    """Backdate the persisted status by `seconds`, leaving everything else alone."""
+
+    path = paths.get_runtime_status_path()
+    status = runtime.read_json(path) or {}
+    status["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds))
+    runtime.write_json(path, status)
+
+
+def test_render_status_keeps_a_recent_starting_record_over_a_stopped_service(tmp_path, monkeypatch):
+    """The window `starting` exists to cover, and it must still be covered.
+
+    Between the spawn and the moment the child takes the instance lock nothing
+    resolves as running. Reporting that window as `stopped` would make every
+    healthy start look like a failure, so a resolved `stopped` does not overwrite
+    a fresh `starting`.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "starting"
+
+
+def test_render_status_stops_believing_a_starting_record_that_outlived_its_start(tmp_path, monkeypatch):
+    """`starting` is a claim about a process expected to arrive, so it expires.
+
+    Unlike `setup` and `error`, which describe a machine deliberately not
+    running, `starting` describes one in flight -- and a release that dies inside
+    its own startup leaves that record behind with nothing coming to replace it.
+    Believing it forever is how an instance with no service reports that it is
+    coming up, for eight days. The deadline is `wait_for_service_ready`'s own:
+    past the point where the waiter gives up, the record no longer describes a
+    machine coming up.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    _age_status_record(runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS + 30)
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
+    assert payload["running"] is False
+
+
+def test_render_status_treats_an_undatable_starting_record_as_expired(tmp_path, monkeypatch):
+    """An undatable `starting` that is believed lasts forever.
+
+    Every status write stamps `updated_at`, so a record without a readable one
+    cannot be dated at all -- and the whole point of the deadline is that this
+    state must not be permanent. Defaulting the other way would restore the
+    original bug through the one input the deadline cannot measure.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    runtime.write_status("starting", detail="waiting for service process", service_pid=4242)
+    status_path = paths.get_runtime_status_path()
+    runtime.write_json(status_path, {**(runtime.read_json(status_path) or {}), "updated_at": "not a timestamp"})
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+
+    payload = json.loads(runtime.render_status(detect_extra_processes=False))
+
+    assert payload["state"] == "stopped"
+
+
 def test_render_status_reports_degraded_show_checkpoints_without_git(monkeypatch):
     monkeypatch.setattr("core.git_binary.resolve_git", lambda: None)
 
@@ -283,6 +410,41 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
             "code": "runtime.show_git_unavailable",
         }
     ]
+
+
+def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    doctor_path = tmp_path / "doctor.json"
+    warning = "Recovered invalid config section 'platforms': sk-leaked-platform-token"
+    config = cli.V2Config.default()
+    config.language = "zh"
+    config.load_warnings = (warning,)
+
+    monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
+    monkeypatch.setattr(paths, "get_runtime_doctor_path", lambda: doctor_path)
+    monkeypatch.setattr(cli.V2Config, "load", lambda _path: config)
+    monkeypatch.setattr(cli, "_home_migration_items", lambda: [])
+    monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_restart_state_items", lambda: [])
+    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda: [])
+    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda: [])
+    monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda: [])
+    monkeypatch.setattr(cli.api, "detect_cli", lambda _path: {})
+
+    result = cli._doctor()
+
+    config_group = next(group for group in result["groups"] if group["name"] == "Configuration")
+    recovery_item = next(item for item in config_group["items"] if item.get("code") == "config.recovery")
+    assert recovery_item["status"] == "warn"
+    assert recovery_item["code"] == "config.recovery"
+    assert recovery_item["message"] != warning
+    assert recovery_item["action"] == cli.i18n_t("error.configRecovery.action", "zh")
+    assert "sk-leaked-platform-token" not in json.dumps(result)
+    assert result["summary"]["warn"] >= 1
 
 
 def test_status_and_doctor_use_running_checkpoint_service_state(monkeypatch):
@@ -850,6 +1012,7 @@ def receipt_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: True)
     monkeypatch.setattr(runtime, "_ui_server_compatible", lambda host, port: True)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
     monkeypatch.setattr(runtime, "extra_service_process_pids", lambda **kwargs: [])
     monkeypatch.setattr(runtime, "maybe_systemd_scope_prefix", lambda: [])
@@ -918,7 +1081,7 @@ def test_start_service_receipt_marks_every_existing_return_as_reused(monkeypatch
     monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: branch == "mismatched_command")
     monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, 1234))
     info = runtime.ProcessStartInfo()
-    expected_pid = 9012 if branch == "ready_owner" else 1234
+    expected_pid = 1234 if branch == "starting" else 9012
 
     assert runtime.start_service(wait_for_ready=branch != "starting", start_info=info) == expected_pid
 
@@ -1000,7 +1163,7 @@ def test_cmd_start_ensures_services_without_stopping(monkeypatch):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
 
     assert cli.cmd_start() == 0
@@ -1088,7 +1251,7 @@ def test_cmd_start_can_suppress_configured_browser_open(monkeypatch):
     monkeypatch.setattr(cli.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
     monkeypatch.setattr(cli, "_open_browser", lambda url: opened.append(url) or True)
 
@@ -1115,7 +1278,6 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", host, port, kwargs)) or _fake_start_result(5678, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: False)
     monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: None)
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: pid == 1234)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
@@ -1128,6 +1290,61 @@ def test_cmd_start_keeps_ui_up_while_service_lock_is_slow(monkeypatch):
     assert calls[service_index][1]["memory_ui_secret"] == calls[ui_index][3]["memory_ui_secret"]
     assert ("runtime_status", ("starting", "waiting for service process", 1234, 5678)) in calls
     assert ("runtime_status", ("starting", "service process is still starting", 1234, 5678)) in calls
+
+
+def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_the_wait(monkeypatch):
+    """`vibe start` is idempotent, and has to be observably idempotent.
+
+    `write_status` carries `started_at` forward only across consecutive `running`
+    writes, so announcing a `starting` transition for a service this command did
+    not start resets the recorded uptime to now -- every status consumer, the
+    dashboard included, then reads a service that has been up for weeks as one
+    that just began starting.
+
+    The wait is the other half, and it is the half that was broken the other way:
+    the predicate that used to guard it was the service lock, taken before the
+    database is migrated, so it read true for a process that had not finished
+    starting and skipped the wait in exactly the case the wait exists for. So
+    only the provisional write is conditional; the wait is always asked, and a
+    service that is already up answers it on the first probe.
+    """
+
+    calls = []
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
+    )
+
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_write_status", lambda *args, **kwargs: None)
+    # The live pair: `start_service` hands back the pid that already holds the
+    # lock, which is what makes this a reuse rather than a start.
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: 5678)
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_service",
+        lambda **kwargs: _fake_start_result(1234, kwargs, reused=True),
+    )
+    monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cli.runtime,
+        "start_ui",
+        lambda host, port, **kwargs: _fake_start_result(5678, kwargs, reused=True),
+    )
+    monkeypatch.setattr(
+        cli.runtime,
+        "wait_for_service_ready",
+        lambda pid, timeout=None: calls.append(("wait", pid)) or pid,
+    )
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: calls.append(("runtime_status", args)))
+
+    assert cli.cmd_start() == 0
+
+    assert ("wait", 1234) in calls, "the readiness wait must be asked even for a service already up"
+    announced = [args[0] for kind, args in calls if kind == "runtime_status"]
+    assert "starting" not in announced, f"a reused service was announced as starting: {announced}"
 
 
 def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
@@ -1185,7 +1402,7 @@ def test_cmd_start_restarts_a_surviving_ui_so_it_shares_the_new_service_secret(m
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(9012, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -1231,7 +1448,7 @@ def test_cmd_start_never_signs_with_a_secret_a_reused_service_cannot_verify(
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(9012, kwargs),
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -1264,7 +1481,7 @@ def test_cmd_start_keeps_a_reused_pair_untouched(monkeypatch, capsys):
         "start_ui",
         lambda host, port, **kwargs: calls.append(("start_ui", kwargs)) or _fake_start_result(5678, kwargs, reused=True),
     )
-    monkeypatch.setattr(cli.runtime, "service_pid_recorded", lambda pid: True)
+    monkeypatch.setattr(cli.runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(cli.runtime, "write_status", lambda *args: None)
 
     assert cli.cmd_start() == 0
@@ -1724,6 +1941,252 @@ def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkey
     assert refreshed == [True]
 
 
+def _restart_status_payload(**overrides) -> dict:
+    """Return the status the restart supervisor writes, defaulted to a failure."""
+
+    payload = {
+        "ok": False,
+        "job_id": "0d1f2e3a4b5c",
+        "supervisor_pid": 4242,
+        "supervisor_started_at": 1.0,
+        "state": "failed",
+        "trigger": "auto-update",
+        "delay_seconds": 0.0,
+        "scope": "all",
+        "old_pid": 111,
+        "new_pid": None,
+        "log_path": "/tmp/vibe-restart-0d1f2e3a4b5c.log",
+        "error": "start runtime failed: Config 'model_hub'\n  contains unknown fields",
+        "created_at": "2026-08-11T04:50:31Z",
+        "stage_durations": {"restart_total_seconds": 1.5},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _seed_restart_status(payload: dict, *, age_seconds: float = 0.0) -> Path:
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, payload)
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(restart_path, (stamp, stamp))
+    return restart_path
+
+
+def _stub_service_liveness(
+    monkeypatch,
+    *,
+    owner_pid=None,
+    starting_pid=None,
+    extra_pids=(),
+    lock_held=None,
+    holder_finished_starting=True,
+):
+    """Describe a machine state, and let the real predicates read it.
+
+    Stubbing ``verified_service_running`` itself would only assert which helper
+    doctor calls. These are the sources underneath it and underneath the broader
+    ``service_process_running``, so a test can name a machine state -- a lock
+    owner, a pid that only reserved itself, a stray process -- and assert the
+    verdict the real predicates produce for it.
+
+    ``lock_held`` defaults to whether a lock owner was named, which is the usual
+    case. Pass it True with no ``owner_pid`` for the state where the two come
+    apart: the lock is held but its record answers no pid, either because the
+    service has not written it yet or because it was corrupted.
+
+    ``holder_finished_starting`` is the holder's own report, and it is a separate
+    axis from the lock because the lock is taken before the database is migrated:
+    a holder can occupy the instance for days without ever having finished
+    starting. Describing a lock owner without it would describe only half a
+    machine state.
+    """
+
+    reserved = owner_pid if starting_pid is None else starting_pid
+    holds_lock = owner_pid is not None if lock_held is None else lock_held
+
+    def resolve_owner(*, include_starting=False, **_kwargs):
+        return reserved if include_starting else owner_pid
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", resolve_owner)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda *_a, **_kw: list(extra_pids))
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_available", lambda: (not holds_lock, owner_pid))
+    monkeypatch.setattr(
+        cli.runtime,
+        "service_instance_started",
+        lambda pid: holder_finished_starting and pid == owner_pid,
+    )
+
+
+@pytest.mark.parametrize(
+    "age_seconds",
+    [0.0, cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60],
+    ids=["fresh", "past-retention"],
+)
+def test_recorded_restart_failure_with_no_service_is_a_doctor_failure(monkeypatch, age_seconds):
+    """A restart that failed and left nothing running is a failure at any age.
+
+    Age is what used to decide the verdict, so both sides of the retention
+    boundary are exercised against the same recorded failure: while the instance
+    is down, neither side may call it healthy nor offer to delete the one record
+    of why it is down.
+    """
+
+    _seed_restart_status(_restart_status_payload(), age_seconds=age_seconds)
+    _stub_service_liveness(monkeypatch)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == ["fail"]
+    item = items[0]
+    assert item["code"] == "runtime.restart_failed"
+    assert "model_hub" in item["message"]
+    assert "\n" not in item["message"]
+    assert "vibe-restart-0d1f2e3a4b5c.log" in item["message"]
+    assert not item.get("repairable")
+    assert "stale-restart-state" not in item.get("action", "")
+
+
+def test_the_failure_action_only_tells_the_reader_to_run_real_commands(monkeypatch):
+    """Every command the action names is one the reader can actually run.
+
+    An action is actionable on its own or not at all. An earlier revision of this
+    told the reader to "apply the extra-service-process repair listed in this
+    report", which is a dependency on what else got rendered: that item is behind
+    `--deep`, and the default run is exactly where a reader of this item lands, so
+    the instruction resolved to nothing. Naming the command instead is the fix, and
+    parsing it here is what keeps the name honest -- a renamed or misspelled repair
+    target fails against the real parser rather than against a user who is already
+    down. Extracted rather than asserted literally, so a command added to this text
+    later is checked too.
+    """
+
+    _seed_restart_status(_restart_status_payload())
+    _stub_service_liveness(monkeypatch)
+
+    action = cli._restart_state_items()[0]["action"]
+    commands = [text for text in re.findall(r"`([^`]+)`", action) if text.startswith("vibe ")]
+    assert commands, f"the action names no runnable command: {action}"
+
+    parser = cli.build_parser()
+    for command in commands:
+        parser.parse_args(shlex.split(command)[1:])
+
+    assert "vibe doctor repair duplicate-service-processes" in commands
+
+    # No command twice. `duplicate-service-processes` starts a clean service on
+    # the no-owner path it is prescribed for, so a trailing "then start again"
+    # earns `ServiceAlreadyRunningError` and reads as a recovery that failed --
+    # which is why this asserts the shape rather than that one wording: any
+    # repair that already does what a later step repeats fails here.
+    assert len(commands) == len(set(commands)), f"the action asks for a command twice: {commands}"
+
+
+@pytest.mark.parametrize(
+    ("liveness", "expected"),
+    [
+        ({}, "fail"),
+        ({"starting_pid": 5555}, "fail"),
+        ({"extra_pids": (7777,)}, "fail"),
+        ({"starting_pid": 5555, "extra_pids": (5555,)}, "fail"),
+        ({"owner_pid": 4321, "holder_finished_starting": False}, "fail"),
+        ({"lock_held": True}, "fail"),
+        ({"owner_pid": 4321}, "warn"),
+        ({"owner_pid": 4321, "extra_pids": (7777,)}, "warn"),
+    ],
+    ids=[
+        "nothing-running",
+        "pid-reserved-but-never-locked",
+        "stray-process-holding-no-lock",
+        "half-started-child-both-reserved-and-scanned",
+        "lock-owner-still-starting",
+        "lock-held-but-its-record-answers-no-pid",
+        "lock-owner-that-finished-starting",
+        "that-owner-beside-a-stray-process",
+    ],
+)
+def test_a_restart_failure_is_downtime_until_a_started_service_says_otherwise(monkeypatch, liveness, expected):
+    """One record against every liveness shape: only a service that finished starting ends downtime.
+
+    The shapes that hold no lock are the wreckage a failed restart leaves: a pid
+    that reserved itself and never acquired the lock, a stray process the scan can
+    see, or one child that is both. Reading any of them as a running service would
+    suppress the very failure that produced it.
+
+    The two lock-holding failures are the ones this PR exists for. A holder is not
+    a service by virtue of holding the lock, because the lock is taken before the
+    database is migrated: the fifth shape is a process that took it and hung in a
+    migration, which is #1567's eight-day outage, and the sixth is a holder whose
+    record answers no pid, so nothing it did can be verified at all. Both occupy
+    the instance without serving it, and calling either one recovery is how the
+    outage stayed invisible behind a green health check.
+
+    Only a holder that published its own start ends the failure -- with or without
+    a stray process beside it, which is a separate item's problem.
+    """
+
+    _seed_restart_status(
+        _restart_status_payload(),
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch, **liveness)
+
+    items = cli._restart_state_items()
+
+    assert [item["status"] for item in items] == [expected]
+    if expected == "warn":
+        assert items[0]["repair"]["target"] == "stale-restart-state"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"service_alive": True}, {"service_alive": False}, {"whatever_a_future_writer_adds": True}],
+    ids=["bare", "claims-a-service-survived", "claims-nothing-survived", "an-unknown-field"],
+)
+def test_only_live_facts_decide_downtime_not_what_the_record_claims(monkeypatch, extra):
+    """No field in the record can talk doctor out of a verdict about right now.
+
+    A record is written at failure time and read arbitrarily later, so anything it
+    says about what was alive is a snapshot that may since have been falsified --
+    by a child that took the lock after the supervisor gave up, or by any later
+    start. The rule reads the record for the outcome and the machine for liveness,
+    and nothing else. Seeded with the field a previous revision of this PR wrote,
+    both ways round, so a record produced by any version reaches the same verdict.
+    """
+
+    _seed_restart_status(
+        {**_restart_status_payload(), **extra},
+        age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60,
+    )
+    _stub_service_liveness(monkeypatch)
+
+    assert [item["status"] for item in cli._restart_state_items()] == ["fail"]
+
+
+def test_restart_state_items_classify_non_failures_without_probing_the_service(monkeypatch):
+    """A record the supervisor did not fail keeps the classification it always had.
+
+    The probes raise instead of returning a pid so this also pins the
+    short-circuit: only a recorded failure may cost doctor a process probe.
+    """
+
+    def fail_probe(*args, **kwargs):
+        raise AssertionError("classifying a non-failure must not probe the service")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    succeeded = _restart_status_payload(ok=True, state="succeeded", error=None, new_pid=222)
+
+    _seed_restart_status(succeeded)
+    assert [item["status"] for item in cli._restart_state_items()] == ["pass"]
+
+    _seed_restart_status(succeeded, age_seconds=cli.DOCTOR_RESTART_RESULT_RETENTION_SECONDS + 60)
+    stale = cli._restart_state_items()
+    assert [item["status"] for item in stale] == ["warn"]
+    assert stale[0]["repair"]["target"] == "stale-restart-state"
+
+
 def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     def fail_runtime_probe(*args, **kwargs):
         raise AssertionError("dry-run must not touch runtime probes")
@@ -1734,6 +2197,26 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
 
     assert result["ok"] is True
     assert result["results"][0]["status"] == "planned"
+
+
+def test_memory_runtime_doctor_repair_dry_run_does_not_reach_controller(monkeypatch):
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("dry-run must not reach the controller")
+        ),
+    )
+
+    result = cli._repair_doctor_targets(["memory-runtime"], dry_run=True)
+
+    assert result["ok"] is True
+    assert result["results"] == [
+        {
+            "target": "memory-runtime",
+            "status": "planned",
+            "message": result["results"][0]["message"],
+        }
+    ]
 
 
 def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monkeypatch):
@@ -1749,7 +2232,7 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
             "name": "vibe-show-runtime-node-linux-x64.tgz",
             "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.5/vibe-show-runtime-node-linux-x64.tgz",
         },
-        "installed": False,
+        "install": {"state": "absent", "install_dir": None},
     }
     manager = SimpleNamespace(
         status=lambda: status,
@@ -1763,6 +2246,66 @@ def test_show_runtime_doctor_fast_mode_reports_local_state_without_network(monke
     assert next(item for item in items if item.get("code") == "show_runtime.archive_probe_skipped")["status"] == "pass"
 
 
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(
+    monkeypatch,
+    language,
+):
+    manager = SimpleNamespace(
+        status=lambda: {
+            "provider": "github",
+            "platform": "linux-x64",
+            "explicit_command": None,
+            "node_available": True,
+            "node_supported": True,
+            "install": {"state": "absent", "install_dir": None},
+        },
+        archive_cache_status=lambda: {"candidate_count": 0, "candidate_bytes": 0, "skipped_reason": None},
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    failure = next(item for item in items if item.get("code") == "show_runtime.provider_unsupported")
+    assert failure["status"] == "fail"
+    assert failure["action"] == cli.i18n_t("runtime.doctor.providerUnsupportedAction", language)
+
+
+def test_show_runtime_doctor_reports_skipped_archive_inspection_as_warn(monkeypatch):
+    status = {
+        "provider": "manifest-cache",
+        "platform": "linux-x64",
+        "explicit_command": None,
+        "node_available": True,
+        "node_version": "22.14.0",
+        "node_supported": True,
+        "manifest": {"runtime_version": "runtime-ref"},
+        "archive": {
+            "name": "vibe-show-runtime-node-linux-x64.tgz",
+            "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.5/vibe-show-runtime-node-linux-x64.tgz",
+        },
+        "installed": True,
+    }
+    manager = SimpleNamespace(
+        status=lambda: status,
+        probe_archive_reachability=lambda: (_ for _ in ()).throw(AssertionError("fast Doctor must not probe network")),
+        archive_cache_status=lambda: {
+            "candidate_count": 0,
+            "candidate_bytes": 0,
+            "skipped_reason": "runtime_install_already_running",
+        },
+    )
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
+
+    items = cli._show_runtime_doctor_items(deep=False)
+
+    skipped = next(item for item in items if item.get("code") == "show_runtime.archive_cache_skipped")
+    assert skipped["status"] == "warn"
+    clean = [item for item in items if item.get("code") == "show_runtime.archive_cache_clean"]
+    assert not clean  # an uninspected cache must not be reported as clean
+
+
 def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     offline_calls: list[bool] = []
 
@@ -1772,6 +2315,13 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
             "deps": [
                 {"id": "askill", "required": True, "installed": False, "status": "missing"},
                 {"id": "avault", "required": True, "installed": True, "status": "ready", "version": "0.1.6"},
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "upgrade_required",
+                    "version": "v7.2.105",
+                },
                 {"id": "show-runtime", "required": True, "installed": False, "status": "missing"},
                 {"id": "tmux", "required": False, "installed": False, "status": "missing"},
                 {"id": "git-runtime", "required": False, "installed": True, "status": "ready"},
@@ -1787,9 +2337,201 @@ def test_managed_dependencies_doctor_uses_one_status_contract(monkeypatch):
     assert offline_calls == [True]
     assert next(item for item in items if item.get("code") == "dependencies.askill.not_ready")["repair"]["target"] == "askill"
     assert next(item for item in items if item.get("code") == "dependencies.avault.ready")["status"] == "pass"
+    assert next(
+        item for item in items if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )["repair"]["target"] == "model-hub-engine"
     assert next(item for item in items if item.get("code") == "dependencies.git-runtime.ready")["status"] == "pass"
     assert next(item for item in items if item.get("code") == "dependencies.tmux.not_ready")["status"] == "warn"
     assert next(item for item in items if item.get("code") == "dependencies.node.not_ready")["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    (
+        "dependency_status",
+        "installed",
+        "required",
+        "reason",
+        "expected_severity",
+        "expected_repair",
+    ),
+    [
+        pytest.param("ready", True, False, None, "pass", False, id="ready"),
+        pytest.param(
+            "missing",
+            False,
+            False,
+            "memory_runtime_missing",
+            "warn",
+            True,
+            id="optional-missing",
+        ),
+        pytest.param(
+            "error",
+            False,
+            False,
+            "memory_runtime_install_failed",
+            "warn",
+            True,
+            id="optional-error",
+        ),
+        pytest.param(
+            "error",
+            False,
+            True,
+            "memory_runtime_install_failed",
+            "fail",
+            True,
+            id="required-error",
+        ),
+        pytest.param(
+            "unsupported",
+            False,
+            True,
+            "memory_runtime_unsupported",
+            "fail",
+            False,
+            id="required-unsupported",
+        ),
+    ],
+)
+def test_managed_dependencies_doctor_reports_memory_runtime_states(
+    monkeypatch,
+    dependency_status,
+    installed,
+    required,
+    reason,
+    expected_severity,
+    expected_repair,
+):
+    """MEMORY-RUNTIME-001: Doctor projects the disk-truthful runtime contract."""
+
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "memory-runtime",
+                    "required": required,
+                    "installed": installed,
+                    "status": dependency_status,
+                    "reason": reason,
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    runtime_item = next(
+        item
+        for item in items
+        if item.get("code") == f"dependencies.memory-runtime.{dependency_status}"
+    )
+    assert runtime_item["status"] == expected_severity
+    assert runtime_item["dependency_status"] == dependency_status
+    assert runtime_item.get("dependency_reason") == reason
+    assert runtime_item["dependency_required"] is required
+    assert (runtime_item.get("repair") or {}).get("target") == (
+        "memory-runtime" if expected_repair else None
+    )
+
+
+def test_managed_dependencies_doctor_probes_model_hub_engine_archive(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": False,
+                    "status": "missing",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+    probes = []
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda: SimpleNamespace(
+            probe_archive_reachability=lambda: probes.append(True)
+            or {"ok": True, "checked": True}
+        ),
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=True)
+
+    missing = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.not_ready"
+    )
+    assert missing["repair"]["target"] == "model-hub-engine"
+    assert probes == [True]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_label"),
+    [("en", "Model Hub engine (CPA)"), ("zh", "Model Hub 引擎（CPA）")],
+)
+@pytest.mark.parametrize(
+    ("status", "installed", "code"),
+    [("ready", True, "ready"), ("missing", False, "not_ready")],
+)
+def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
+    monkeypatch,
+    language,
+    expected_label,
+    status,
+    installed,
+    code,
+):
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": True,
+                    "installed": installed,
+                    "status": status,
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items()
+
+    item = next(
+        item
+        for item in items
+        if item.get("code") == f"dependencies.model-hub-engine.{code}"
+    )
+    assert expected_label in item["message"]
+    if language == "zh":
+        assert "Model Hub engine (CPA)" not in item["message"]
 
 
 def test_managed_dependencies_doctor_suppresses_unsupported_askill_repair(monkeypatch):
@@ -1838,6 +2580,44 @@ def test_managed_dependencies_doctor_does_not_offer_unsupported_platform_repair(
     assert unsupported["status"] == "warn"
     assert "repair" not in unsupported
     assert not any(item.get("code") == "dependencies.tmux.not_ready" for item in items)
+
+
+def test_managed_dependencies_doctor_treats_unsupported_cpa_as_nonfatal(monkeypatch):
+    monkeypatch.setattr(
+        cli.api,
+        "dependencies_status",
+        lambda **_kwargs: {
+            "deps": [
+                {
+                    "id": "model-hub-engine",
+                    "required": False,
+                    "installed": False,
+                    "status": "unsupported",
+                    "reason": "model_hub_engine_platform_unsupported",
+                },
+                {
+                    "id": "git-runtime",
+                    "required": False,
+                    "installed": True,
+                    "status": "ready",
+                },
+            ]
+        },
+    )
+
+    items = cli._managed_dependencies_doctor_items(deep=False)
+
+    unsupported = next(
+        item
+        for item in items
+        if item.get("code") == "dependencies.model-hub-engine.platform_unsupported"
+    )
+    assert unsupported["status"] == "warn"
+    assert "repair" not in unsupported
+    assert not any(
+        item.get("code") == "dependencies.model-hub-engine.not_ready"
+        for item in items
+    )
 
 
 def test_managed_dependencies_doctor_accepts_usable_system_git(monkeypatch):
@@ -1970,6 +2750,87 @@ def test_repair_managed_dependency_preserves_structured_download_error():
 
     assert result["status"] == "failed"
     assert result["download_error"] == error
+
+
+def test_memory_runtime_doctor_repair_uses_controller_ipc(monkeypatch):
+    calls = []
+
+    def install_runtime():
+        calls.append(True)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        install_runtime,
+    )
+
+    result = cli._repair_memory_runtime()
+
+    assert calls == [True]
+    assert result["target"] == "memory-runtime"
+    assert result["status"] == "repaired"
+
+
+def test_memory_runtime_doctor_repair_preserves_controller_failure(monkeypatch):
+    download_error = {"kind": "timeout", "attempts": 2}
+    monkeypatch.setattr(
+        "vibe.internal_client.memory_install_runtime_sync",
+        lambda: {
+            "status_code": 200,
+            "body": {
+                "ok": False,
+                "reason": "memory_runtime_install_failed",
+                "download_error": download_error,
+            },
+        },
+    )
+
+    result = cli._repair_memory_runtime()
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "memory_runtime_install_failed"
+    assert result["download_error"] == download_error
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "memory_runtime_preparation_import_timeout",
+        "memory_runtime_preparation_import_failed",
+        "memory_runtime_preparation_scrubber_timeout",
+        "memory_runtime_preparation_scrubber_failed",
+        "memory_runtime_preparation_sync_contract_failed",
+        "memory_runtime_preparation_failed",
+    ],
+)
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_doctor_localizes_bounded_memory_runtime_preparation_reasons(reason, language):
+    projected = cli._doctor_memory_reason(reason, language)
+
+    assert projected != reason
+    assert projected != "unknown error"
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
+        ),
+        (
+            "zh",
+            "记忆功能正在运行。请先在「设置 > 记忆」中关闭记忆，再修复运行时。",
+        ),
+    ],
+)
+def test_doctor_localizes_stopped_memory_repair_prerequisite(language, expected):
+    projected = cli._doctor_memory_reason(
+        "memory_runtime_install_requires_stopped_memory",
+        language,
+    )
+
+    assert projected == expected
 
 
 def test_show_runtime_doctor_deep_mode_distinguishes_missing_release_asset(monkeypatch):
@@ -2146,28 +3007,92 @@ def test_show_runtime_doctor_identifies_legacy_upstream_fallback(monkeypatch):
     assert "repair" not in next(item for item in items if item.get("code") == "show_runtime.not_ready")
 
 
+@pytest.mark.parametrize(
+    ("owner_result", "expected_status", "message_fragment"),
+    [
+        (
+            {
+                "ok": True,
+                "outcome": "healthy",
+                "provider": "manifest-cache",
+                "platform": "linux-x64",
+                "install_dir": "/runtime/old",
+            },
+            "skipped",
+            "no repair is needed",
+        ),
+        (
+            {
+                "ok": True,
+                "outcome": "repaired",
+                "was_installed": True,
+                "provider": "manifest-cache",
+                "platform": "linux-x64",
+                "install_dir": "/runtime/new",
+            },
+            "repaired",
+            "Reinstalled and started",
+        ),
+        (
+            {
+                "ok": False,
+                "outcome": "failed",
+                "reason": "runtime_start_verification_failed",
+                "verification": {"state": "undetermined", "detail": "probe failed"},
+                "verification_phase": "before",
+                "installed": True,
+            },
+            "failed",
+            "no reinstall was attempted",
+        ),
+        (
+            {
+                "ok": False,
+                "outcome": "failed",
+                "reason": "runtime_start_health_timeout",
+                "verification": {
+                    "state": "not_startable",
+                    "reason": "runtime_start_health_timeout",
+                },
+                "verification_phase": "after",
+                "was_installed": True,
+                "installed": True,
+            },
+            "failed",
+            "reinstalled but could not start",
+        ),
+    ],
+)
+def test_repair_show_runtime_renders_manager_owned_outcomes(
+    monkeypatch,
+    owner_result,
+    expected_status,
+    message_fragment,
+):
+    manager = SimpleNamespace(repair=lambda: owner_result)
+    monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+
+    result = cli._repair_show_runtime()
+
+    assert result["status"] == expected_status
+    assert message_fragment in result["message"]
+
+
 def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
     archive_url = "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"
     manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "archive": {"url": archive_url},
-            "installed": False,
-        },
-        prepare=lambda force=False: {
+        repair=lambda: {
             "ok": False,
+            "outcome": "failed",
+            "reason": "runtime_archive_download_failed",
             "provider": "manifest-cache",
             "platform": "linux-x64",
-            "reason": "runtime_archive_download_failed",
-            "status": {
-                "download_error": {
-                    "kind": "timeout",
-                    "message": "Connection timed out",
-                    "url": archive_url,
-                }
+            "download_error": {
+                "kind": "timeout",
+                "message": "Connection timed out",
+                "url": archive_url,
             },
-        },
+        }
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
 
@@ -2179,27 +3104,735 @@ def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
     assert archive_url in result["message"]
 
 
-def test_repair_show_runtime_prepares_missing_runtime(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("language", "message_fragment"), [("en", "Fix or remove"), ("zh", "\u4fee\u590d\u6216\u79fb\u9664")])
+def test_repair_show_runtime_renders_explicit_command_failure(
+    monkeypatch,
+    language,
+    message_fragment,
+):
     manager = SimpleNamespace(
-        status=lambda: {
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "archive": {"url": "https://github.com/avibe-bot/avibe/releases/download/v-test/runtime.tgz"},
-            "installed": False,
-        },
-        prepare=lambda force=False: {
-            "ok": True,
-            "provider": "manifest-cache",
-            "platform": "linux-x64",
-            "status": {"install_dir": str(tmp_path / "runtime")},
-        },
+        repair=lambda: {
+            "ok": False,
+            "outcome": "failed",
+            "reason": "runtime_start_health_timeout",
+            "explicit_command": "/custom/runtime",
+            "installed": True,
+        }
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
     result = cli._repair_show_runtime()
 
-    assert result["status"] == "repaired"
-    assert result["install_dir"] == str(tmp_path / "runtime")
+    assert result["status"] == "failed"
+    assert result["explicit_command"] == "/custom/runtime"
+    assert message_fragment in result["message"]
+
+
+def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "policy": {
+                "state": "skipped",
+                "reason": "VIBE_INSTALL_SKIP_SHOW_RUNTIME",
+            },
+            "install": {"state": "absent", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=False,
+            strict=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Show Runtime ready" not in captured.out
+    assert "VIBE_INSTALL_SKIP_SHOW_RUNTIME" in captured.err
+
+
+def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
+    monkeypatch,
+    capsys,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {
+                "install": {
+                    "state": "installed",
+                    "install_dir": "/runtime/show",
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: {
+            "ok": False,
+            "reason": "model_hub_engine_archive_download_failed",
+        },
+    )
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=False,
+            json=True,
+            strict=True,
+        )
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["model_hub_engine"] == {
+        "ok": False,
+        "reason": "model_hub_engine_archive_download_failed",
+    }
+
+
+@pytest.mark.parametrize(
+    ("cpa_result", "expected", "stream"),
+    (
+        ({"ok": True, "changed": True}, "Model Hub 引擎已安装。", "out"),
+        ({"ok": True, "changed": False}, "Model Hub 引擎已就绪。", "out"),
+        (
+            {"ok": False, "skipped": True, "reason": "offline"},
+            "Model Hub 引擎：已跳过（offline）。",
+            "out",
+        ),
+        (
+            {"ok": False, "reason": "download_failed"},
+            "Model Hub 引擎尚未就绪：download_failed",
+            "err",
+        ),
+    ),
+)
+def test_runtime_prepare_localizes_cpa_output(
+    monkeypatch,
+    capsys,
+    cpa_result,
+    expected,
+    stream,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        cli,
+        "_ensure_model_hub_engine_during_prepare",
+        lambda **_kwargs: cpa_result,
+    )
+
+    assert (
+        cli.cmd_runtime(
+            SimpleNamespace(
+                runtime_command="prepare",
+                offline=False,
+                force=False,
+                json=False,
+                strict=False,
+            )
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert expected in getattr(captured, stream)
+    assert "Model Hub engine" not in captured.out + captured.err
+
+
+def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": False,
+            "reason": "VIBE_SHOW_RUNTIME_BIN",
+            "policy": {
+                "state": "skipped",
+                "reason": "VIBE_SHOW_RUNTIME_BIN",
+            },
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
+
+    exit_code = cli.cmd_runtime(
+        SimpleNamespace(
+            runtime_command="prepare",
+            offline=False,
+            force=True,
+            json=False,
+            strict=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Show Runtime ready" not in captured.out
+    assert "VIBE_SHOW_RUNTIME_BIN" in captured.err
+
+
+@pytest.mark.parametrize("consumer", ["memory", "model-hub", "tmux"])
+def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
+    monkeypatch,
+    capsys,
+    tmp_path,
+    consumer,
+):
+    if consumer == "memory":
+        from avibe_memory.artifact import MemoryArtifactManager
+
+        manager = MemoryArtifactManager(
+            runtime_dir=tmp_path / "memory-runtime",
+            provider_root=tmp_path / "memory-provider",
+            offline=True,
+        )
+    elif consumer == "model-hub":
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        manager = EngineRuntimeManager(
+            runtime_dir=tmp_path / "model-hub-runtime",
+            offline=True,
+        )
+    else:
+        from core.tmux_runtime import TmuxRuntimeManager
+
+        manager = TmuxRuntimeManager(
+            runtime_dir=tmp_path / "tmux-runtime",
+            offline=True,
+        )
+
+    from core.managed_runtime import runtime_platform_tag
+
+    versions_dir = manager.runtime_dir / "versions"
+    current_install = versions_dir / "current"
+    stale_install = versions_dir / "stale"
+    current_install.mkdir(parents=True)
+    stale_install.mkdir()
+    manifest_sha = "a" * 64
+    current_archive_sha = "b" * 64
+    stale_archive_sha = "c" * 64
+    binary_sha = hashlib.sha256(b"fixture").hexdigest()
+    for install_dir, version, archive_sha in (
+        (current_install, "current", current_archive_sha),
+        (stale_install, "stale", stale_archive_sha),
+    ):
+        binary = install_dir / manager.spec.default_bin_path
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("fixture", encoding="utf-8")
+        binary.chmod(0o755)
+        (install_dir / manager.spec.metadata_filename).write_text(
+            json.dumps(
+                {
+                    "provider": "manifest",
+                    "runtime_id": manager.spec.runtime_id,
+                    "runtime_version": version,
+                    "platform": runtime_platform_tag(),
+                    "manifest_sha256": manifest_sha,
+                    "manifest_source": "package:tests/runtime-manifest.json",
+                    "archive_name": f"fixture-{version}.tar.gz",
+                    "archive_sha256": archive_sha,
+                    "binary_sha256": binary_sha,
+                    "bin_path": manager.spec.default_bin_path,
+                }
+            ),
+            encoding="utf-8",
+        )
+    (manager.runtime_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "provider": "manifest",
+                "runtime_id": manager.spec.runtime_id,
+                "runtime_version": "current",
+                "platform": runtime_platform_tag(),
+                "install_dir": str(current_install),
+                "manifest_sha256": manifest_sha,
+                "archive_sha256": current_archive_sha,
+                "bin_path": manager.spec.default_bin_path,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {"removed_count": 0, "candidate_count": 0},
+            }
+
+    def clean_consumer(*, keep_previous, dry_run):
+        assert keep_previous == 0
+        return manager.clean(keep_previous=keep_previous, dry_run=dry_run)
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: ((manager.spec.runtime_id, clean_consumer),),
+    )
+    parser = cli.build_parser()
+
+    preview_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--dry-run", "--json"]
+    )
+    assert cli.cmd_runtime(preview_args) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in preview[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert stale_install.is_dir()
+
+    real_args = parser.parse_args(
+        ["runtime", "clean", "--keep-previous", "0", "--json"]
+    )
+    assert cli.cmd_runtime(real_args) == 0
+    cleaned = json.loads(capsys.readouterr().out)
+    assert str(stale_install) in cleaned[manager.spec.runtime_id]["removed"]
+    assert current_install.is_dir()
+    assert not stale_install.exists()
+
+
+def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
+    from core import tmux_runtime
+    from avibe_memory import artifact as memory_artifact
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+
+    def clean_git(*, keep_previous, dry_run):
+        calls.append(("git", keep_previous, dry_run))
+        return {"ok": True, "removed": []}
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(cli, "_clean_git_runtime", clean_git)
+    monkeypatch.setattr(
+        memory_artifact,
+        "get_memory_artifact_manager",
+        lambda: FakeManager("memory-runtime"),
+    )
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert list(results) == [
+        "git",
+        "memory-runtime",
+        "model_hub_engine",
+        "tmux",
+    ]
+    assert calls == [
+        ("git", 2, True),
+        ("memory-runtime", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_isolates_missing_memory_implementation(monkeypatch):
+    from core import tmux_runtime
+    from vibe.model_hub_runtime import installer as model_hub_installer
+
+    calls = []
+    original_import = builtins.__import__
+
+    def core_only_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError(name, name="avibe_memory")
+        return original_import(name, *args, **kwargs)
+
+    class FakeManager:
+        def __init__(self, runtime_id):
+            self.runtime_id = runtime_id
+
+        def clean(self, *, keep_previous, dry_run):
+            calls.append((self.runtime_id, keep_previous, dry_run))
+            return {"ok": True, "removed": []}
+
+    monkeypatch.setattr(builtins, "__import__", core_only_import)
+    monkeypatch.setattr(
+        cli,
+        "_clean_git_runtime",
+        lambda **kwargs: calls.append(("git", kwargs["keep_previous"], kwargs["dry_run"]))
+        or {"ok": True, "removed": []},
+    )
+    monkeypatch.setattr(
+        model_hub_installer,
+        "EngineRuntimeManager",
+        lambda: FakeManager("model_hub_engine"),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "get_tmux_runtime_manager",
+        lambda: FakeManager("tmux"),
+    )
+
+    results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
+
+    assert results["memory-runtime"] == {
+        "ok": True,
+        "removed": [],
+        "skipped": True,
+        "reason": "memory_implementation_unavailable",
+    }
+    assert results["git"]["ok"] is True
+    assert results["model_hub_engine"]["ok"] is True
+    assert results["tmux"]["ok"] is True
+    assert calls == [
+        ("git", 2, True),
+        ("model_hub_engine", 2, True),
+        ("tmux", 2, True),
+    ]
+
+
+def test_runtime_clean_reports_broken_memory_implementation_import(monkeypatch):
+    original_import = builtins.__import__
+
+    def broken_memory_import(name, *args, **kwargs):
+        if name == "avibe_memory.artifact":
+            raise ModuleNotFoundError("missing companion dependency", name="memory_dependency")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_memory_import)
+    cleaners = dict(cli._managed_runtime_cleaners())
+
+    with pytest.raises(ModuleNotFoundError, match="missing companion dependency"):
+        cleaners["memory-runtime"](keep_previous=2, dry_run=True)
+
+
+def test_runtime_clean_returns_nonzero_and_reports_git_exception_reason(monkeypatch, capsys):
+    from core import git_runtime
+
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
+
+    def fail_git_manager():
+        raise OSError("git runtime directory unreadable")
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(git_runtime, "get_git_runtime_manager", fail_git_manager)
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: (("git", cli._clean_git_runtime),))
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "git_clean_failed" in captured.err
+    assert "Git Runtime" in captured.err
+
+
+def test_runtime_clean_returns_nonzero_for_show_failure_without_false_archive_success(monkeypatch, capsys):
+    class FailingShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": False,
+                "removed": [],
+                "archives": {
+                    "outcome": "skipped",
+                    "skipped_reason": "archive_inspection_failed",
+                },
+            }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FailingShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "archive_inspection_failed" in captured.err
+    assert "unknown" not in captured.err
+    assert "downloaded Show Runtime archive" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("archives", "expected_reason", "prints_partial_summary"),
+    [
+        (
+            {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+                "failed_count": 0,
+            },
+            "archive_inspection_failed",
+            False,
+        ),
+        ({"outcome": "skipped", "failed_count": 1}, "archive_removal_failed", False),
+        ({"outcome": "partial", "failed_count": 0}, "archive_removal_failed", True),
+    ],
+)
+def test_runtime_clean_nested_show_archive_failure_controls_output_and_exit(
+    monkeypatch,
+    capsys,
+    archives,
+    expected_reason,
+    prints_partial_summary,
+):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert expected_reason in captured.err
+    if prints_partial_summary:
+        assert "archive(s) could not be removed" in captured.err
+    else:
+        assert "downloaded Show Runtime archive(s) (0 B)" not in captured.out
+
+
+def test_runtime_clean_dry_run_partial_archive_preview_is_success(monkeypatch, capsys):
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {
+                "ok": True,
+                "removed": [],
+                "archives": {
+                    "outcome": "partial",
+                    "candidate_count": 1,
+                    "candidate_bytes": 1024,
+                    "failed_count": 0,
+                },
+            }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 1 downloaded Show Runtime archive(s) (1.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monkeypatch, capsys):
+    archives = {
+        "outcome": "skipped",
+        "skipped_reason": "archive_inspection_failed",
+        "failed_count": 0,
+    }
+
+    class ShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": archives}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: ShowRuntimeManager())
+    monkeypatch.setattr(cli, "_managed_runtime_cleaners", lambda: ())
+    args = cli.build_parser().parse_args(["runtime", "clean", "--json"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["archives"] == archives
+    assert captured.err == ""
+
+
+def test_runtime_clean_success_reports_every_consumer_and_exits_zero(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": ["show-old"], "archives": {"removed_count": 0}}
+
+    def cleaner(count):
+        return lambda **_kwargs: {"ok": True, "removed": [f"old-{index}" for index in range(count)]}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (
+            ("git", cleaner(1)),
+            ("memory-runtime", cleaner(2)),
+            ("model_hub_engine", cleaner(3)),
+            ("tmux", cleaner(4)),
+        ),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Removed 1 Git Runtime cache item(s)." in captured.out
+    assert "Removed 2 Memory Runtime cache item(s)." in captured.out
+    assert "Removed 3 Model Hub Runtime cache item(s)." in captured.out
+    assert "Removed 4 tmux Runtime cache item(s)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_previews_shared_consumer_archive_candidates(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"candidate_count": 0}}
+
+    def clean_memory(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "candidate_count": 2,
+                "candidate_bytes": 2048,
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("memory-runtime", clean_memory),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean", "--dry-run"])
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "Would remove 2 downloaded Memory Runtime archive(s) (2.0 KiB)." in captured.out
+    assert captured.err == ""
+
+
+def test_runtime_clean_does_not_render_shared_archive_failure_as_zero_success(monkeypatch, capsys):
+    class FakeShowRuntimeManager:
+        def clean(self, *, keep_previous=1, dry_run=False):
+            return {"ok": True, "removed": [], "archives": {"removed_count": 0}}
+
+    def clean_memory(**_kwargs):
+        return {
+            "ok": True,
+            "removed": [],
+            "archives": {
+                "outcome": "skipped",
+                "skipped_reason": "archive_inspection_failed",
+            },
+        }
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: FakeShowRuntimeManager())
+    monkeypatch.setattr(
+        cli,
+        "_managed_runtime_cleaners",
+        lambda: (("memory-runtime", clean_memory),),
+    )
+    args = cli.build_parser().parse_args(["runtime", "clean"])
+
+    assert cli.cmd_runtime(args) == 1
+    captured = capsys.readouterr()
+    assert "Memory Runtime cleanup failed (archive_inspection_failed)" in captured.err
+    assert "archive_inspection_failed" in captured.err
+    assert "downloaded Memory Runtime archive" not in captured.out
+
+
+@pytest.mark.parametrize("help_args", [("runtime", "--help"), ("runtime", "clean", "--help")])
+@pytest.mark.parametrize(
+    ("language", "consumer_scope", "failure_contract"),
+    [
+        ("en", "Show, Git, Memory, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Memory、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
+    ],
+)
+def test_runtime_clean_help_names_consumers_and_failure_exit(
+    monkeypatch,
+    capsys,
+    help_args,
+    language,
+    consumer_scope,
+    failure_contract,
+):
+    monkeypatch.setenv("COLUMNS", "240")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(help_args)
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert cli.i18n_t("runtime.clean.commandHelp", language) in output
+    assert consumer_scope in output
+    assert failure_contract in output
+
+
+@pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])
+def test_runtime_manager_migrates_legacy_source_to_packaged_manifest(
+    monkeypatch,
+    caplog,
+    tmp_path,
+    legacy_source,
+):
+    from core import show_runtime
+
+    monkeypatch.setenv("VIBE_SHOW_RUNTIME_SOURCE", legacy_source)
+    monkeypatch.setattr(show_runtime, "_WARNED_RETIRED_RUNTIME_SOURCES", set())
+    with caplog.at_level("WARNING", logger="core.show_runtime"):
+        manager = show_runtime.ShowRuntimeManager(
+            workspace_root=tmp_path / "show",
+            runtime_dir=tmp_path / "runtime",
+        )
+        second_manager = show_runtime.ShowRuntimeManager(
+            workspace_root=tmp_path / "show-2",
+            runtime_dir=tmp_path / "runtime-2",
+        )
+
+    assert manager.runtime_source == "manifest-cache"
+    assert second_manager.runtime_source == "manifest-cache"
+    warnings = [record.message for record in caplog.records if "is retired" in record.message]
+    assert warnings == [
+        f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source.lower()} is retired; using manifest-cache instead"
+    ]
 
 
 def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
@@ -2302,10 +3935,20 @@ def test_doctor_parser_accepts_show_runtime_repair_target():
 def test_doctor_parser_accepts_managed_dependency_repair_targets():
     parser = cli.build_parser()
 
-    for target in ("askill", "avault", "git-runtime", "tmux"):
+    for target in ("askill", "avault", "git-runtime", "memory-runtime", "tmux"):
         args = parser.parse_args(["doctor", "repair", target, "--yes"])
         assert args.doctor_repair_targets == [target]
     assert args.yes is True
+
+
+def test_doctor_parser_rejects_unknown_repair_targets(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as error:
+        parser.parse_args(["doctor", "repair", "not-a-repair-target"])
+
+    assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_doctor_parser_accepts_fast_and_deep_modes():

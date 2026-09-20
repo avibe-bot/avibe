@@ -77,7 +77,7 @@ while [ $# -gt 0 ]; do
             incus_args+=(--remote "$2")
             shift 2
             ;;
-        --allow-reset-paired-master|--dry-run|--clean|--force-deps|--no-build-ui|--yes)
+        --allow-reset-paired-master|--dry-run|--clean|--force-deps|--no-build-ui|--force-ui|--yes)
             incus_args+=("$1")
             shift
             ;;

@@ -27,9 +27,8 @@ export function movedOrder(ids: readonly string[], index: number, delta: number)
  *
  * It lives beside `movedOrder` because it is the other half of one rule: an arrow
  * key at either end, and a drag that lands back where it started, both produce a
- * NEW array holding the old order. Whoever persists has to compare contents, and a
- * `follow` backend forks to `custom` on the first write, so getting this wrong
- * costs the user their recommendation for an input that did nothing.
+ * NEW array holding the old order. Whoever persists has to compare contents so
+ * an input that did nothing never creates a write.
  */
 export const sameIds = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((id, i) => id === b[i]);

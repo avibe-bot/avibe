@@ -130,9 +130,14 @@ export const transcriptSelectionActions = (
  *  a page it cannot leave and that archive already forced offline. Answering
  *  ``false`` here puts it back on the transcript. ChatPage derives this rather
  *  than resetting ``showPageMode`` from an effect, so the fallback lands in the
- *  same render that flips ``readOnly``. */
-export const isShowPageActive = (readOnly: boolean, showPageMode: boolean): boolean =>
-  showPageMode && !readOnly;
+ *  same render that flips ``readOnly``. A definitive page-access denial follows
+ *  the same rule: the already-rendered private frame must disappear in the render
+ *  that observes the denial, before the state-reset effect persists Chat mode. */
+export const isShowPageActive = (
+  readOnly: boolean,
+  showPageMode: boolean,
+  accessDenied = false,
+): boolean => showPageMode && !readOnly && !accessDenied;
 
 /** Which Show Page controls the chat header offers.
  *
@@ -143,9 +148,9 @@ export const isShowPageActive = (readOnly: boolean, showPageMode: boolean): bool
  *     to create a missing one (``409 session_archived``, ``core/show_pages.py``).
  *     So Visualize can only end in that 409, or frame a page that is offline —
  *     never a working view.
- *   - Share's mutations (``update_visibility``, ``set_share_id``, ``rotate_share``)
- *     are refused by the same guard, and its popover re-ensures the page on open,
- *     so it 409s before it can render anything.
+ *   - Share's availability and access-settings mutations are refused by the same
+ *     guard, and its popover re-ensures the page on open, so it 409s before it can
+ *     render anything.
  *   - Annotating enqueues an annotation *message* into the session, which the
  *     messages POST refuses.
  *

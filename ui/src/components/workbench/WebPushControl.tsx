@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { Bell, BellOff, Loader2, Smartphone } from 'lucide-react';
 
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
@@ -22,11 +23,13 @@ type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabl
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { capabilities } = useInstanceAuthorization();
   const { showToast } = useToast();
   const [status, setStatus] = useState<Status>('checking');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
+  const canRegister = capabilities.can_read_instance;
 
   const refresh = async () => {
     const nextSupport = getWebPushSupportState();
@@ -55,9 +58,10 @@ export const WebPushControl: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!canRegister) return;
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canRegister]);
 
   const onEnable = async () => {
     setBusy(true);
@@ -97,7 +101,23 @@ export const WebPushControl: React.FC = () => {
         endpoint: subscription.endpoint,
       });
       if (result.ok) {
-        showToast(t('workbench.inbox.notifications.testSent'), 'success');
+        const blocked = result.normal_delivery;
+        if (blocked && blocked.authorized === false) {
+          // The channel works, but the normal-path authorization gate would
+          // currently skip this owner — explain which gate decided.
+          showToast(
+            `${t('workbench.inbox.notifications.testSent')} — ${t(
+              'workbench.inbox.notifications.normalBlocked',
+              {
+                disposition: blocked.disposition ?? 'unknown',
+                policy: blocked.policy ?? 'unknown',
+              },
+            )}`,
+            'warning',
+          );
+        } else {
+          showToast(t('workbench.inbox.notifications.testSent'), 'success');
+        }
       } else {
         showToast(
           t('workbench.inbox.notifications.testFailed', { count: result.failed ?? 0 }),
@@ -110,6 +130,15 @@ export const WebPushControl: React.FC = () => {
       setTesting(false);
     }
   };
+
+  if (!canRegister) {
+    return (
+      <Badge variant="secondary" className="h-8 rounded-lg px-3">
+        <BellOff className="size-3" />
+        {t('workbench.inbox.notifications.localOnly')}
+      </Badge>
+    );
+  }
 
   if (status === 'checking') {
     return (

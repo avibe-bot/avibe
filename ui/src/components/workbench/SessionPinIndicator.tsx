@@ -17,7 +17,7 @@ export const SessionPinIndicator: React.FC<SessionPinIndicatorProps> = ({ pinned
       role="img"
       aria-label={label}
       title={label}
-      className={clsx('flex shrink-0 text-cyan', className)}
+      className={clsx('flex shrink-0 text-cyan-ink', className)}
     >
       <Pin className="size-3" aria-hidden="true" />
     </span>

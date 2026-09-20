@@ -1,3 +1,4 @@
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useState } from 'react';
 import { Bot, FolderOpen, HelpCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -50,16 +51,6 @@ export interface RoutingConfigPanelProps {
   vibeAgents?: VibeAgentBrief[];
   defaultAgentName?: string | null;
   availableMessageTypes?: string[];
-  // Legacy backend-model props: no longer read here (AgentRoutePicker self-loads
-  // models + effort options). Kept on the interface so existing callers still
-  // type-check; a follow-up can drop them and the parents' model preloading.
-  opencodeOptions?: any;
-  claudeAgents?: { id: string; name: string }[];
-  claudeModels?: string[];
-  claudeModelLabels?: Record<string, string>;
-  claudeReasoningOptions?: Record<string, { value: string; label: string }[]>;
-  codexAgents?: { id: string; name: string }[];
-  codexModels?: string[];
   /** Custom footer slot — e.g., admin/remove actions on the users page. */
   footerActions?: React.ReactNode;
   /** Wrapper class — controls outer padding/border. Default: 'border-t border-border/60 px-5 py-4'. */
@@ -97,6 +88,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
 }) => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
 
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
@@ -178,6 +171,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               <label className="text-xs font-medium uppercase text-muted">{t('channelList.requireBind')}</label>
               <div className="flex h-9 items-center">
                 <ToggleSwitch
+                  disabled={!canManageAccessMembers}
                   enabled={effective}
                   onClick={() => onChange({ require_bind: !effective })}
                 />
@@ -262,7 +256,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         <div className="flex flex-wrap gap-2 text-sm">
           {availableMessageTypes.map((msgType) => {
             const checked = (value.show_message_types || []).includes(msgType);
-            const label = t(`channelList.messageType.${msgType}`);
+            const label = t(`channelList.messageType.${msgType}`, { defaultValue: `channelList.messageType.${msgType}` });
             return (
               <button
                 key={msgType}
@@ -277,14 +271,14 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                 className={clsx(
                   'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-medium transition-colors',
                   checked
-                    ? 'border-mint/40 bg-mint/15 text-mint'
+                    ? 'border-mint/40 bg-mint/15 text-mint-ink'
                     : 'border-border bg-foreground/[0.02] text-muted hover:border-border-strong hover:text-foreground'
                 )}
               >
                 <span
                   className={clsx(
                     'size-1.5 rounded-full',
-                    checked ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted/50'
+                    checked ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted/50'
                   )}
                 />
                 {label}

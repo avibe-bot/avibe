@@ -33,10 +33,11 @@ Conventions (see workbench-dispatch-architecture.md §6):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from config import paths
 from storage.workbench_sessions_service import (
+    ProjectAccessDeniedError,
     ReservedSessionError,
     SessionArchivedError,
     SessionBackendLockedError,
@@ -52,13 +53,17 @@ from storage.workbench_sessions_service import (
     list_sessions_page,
     require_enabled_agent_backend,
     require_enabled_agent_identity,
+    require_session_chat_access,
+    require_session_turn_authority,
     set_agent_status,
     touch_session,
+    touch_session_agent_activity,
     update_session,
 )
 from vibe.i18n import t as i18n_t
 
 __all__ = [
+    "ProjectAccessDeniedError",
     "SESSION_ARCHIVED_I18N_KEY",
     "ReservedSessionError",
     "SessionArchivedError",
@@ -73,9 +78,13 @@ __all__ = [
     "is_session_archived",
     "list_sessions",
     "list_sessions_page",
+    "require_session_chat_access",
+    "require_session_placement_authority",
+    "require_session_turn_authority",
     "set_agent_status",
     "session_archived_message",
     "touch_session",
+    "touch_session_agent_activity",
     "update_session",
     "reserve_agent_session",
     "reserve_standalone_agent_session",
@@ -166,6 +175,7 @@ def reserve_agent_session(
     db_path: Optional[Path] = None,
     require_enabled_agent: bool = False,
     expected_reference_agent_id: Optional[str] = None,
+    authorization_context: Any = None,
 ) -> Optional[str]:
     """Reserve a new ``agent_sessions`` row keyed by an IM-style scope.
 
@@ -189,6 +199,34 @@ def reserve_agent_session(
             metadata=metadata,
             require_enabled_agent=require_enabled_agent,
             expected_reference_agent_id=expected_reference_agent_id,
+            authorization_context=authorization_context,
+        )
+    finally:
+        service.close()
+
+
+def require_session_placement_authority(
+    *,
+    scope_key: str,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    db_path: Optional[Path] = None,
+    authorization_context: Any = None,
+) -> None:
+    """Admit where a stored definition will put the Sessions it has not created yet.
+
+    The reservation paths answer this as they reserve. A definition that creates one
+    Session per run has no reservation to answer it at, so it asks here — before the
+    row that would carry the placement into every future fire.
+    """
+
+    service = _open_legacy_service(db_path)
+    try:
+        service.require_placement_access(
+            scope_key=scope_key,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            authorization_context=authorization_context,
         )
     finally:
         service.close()
@@ -208,6 +246,7 @@ def reserve_standalone_agent_session(
     db_path: Optional[Path] = None,
     require_enabled_agent: bool = False,
     expected_reference_agent_id: Optional[str] = None,
+    authorization_context: Any = None,
 ) -> Optional[str]:
     """Reserve a background-capable session with no Scope."""
 
@@ -225,6 +264,7 @@ def reserve_standalone_agent_session(
             metadata=metadata,
             require_enabled_agent=require_enabled_agent,
             expected_reference_agent_id=expected_reference_agent_id,
+            authorization_context=authorization_context,
         )
     finally:
         service.close()

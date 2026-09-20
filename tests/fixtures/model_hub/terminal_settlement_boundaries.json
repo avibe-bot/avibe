@@ -1,0 +1,14 @@
+{
+  "source": "Owner ruling 2026-08-12: one forwarded terminal fact permits no second wire terminal",
+  "cases": [
+    { "forwarded_terminal": null, "settlement": "none", "write_terminal": false },
+    { "forwarded_terminal": null, "settlement": "silent", "write_terminal": false },
+    { "forwarded_terminal": null, "settlement": "copy", "write_terminal": true },
+    { "forwarded_terminal": "served", "settlement": "none", "write_terminal": false },
+    { "forwarded_terminal": "served", "settlement": "silent", "write_terminal": false },
+    { "forwarded_terminal": "served", "settlement": "copy", "write_terminal": false },
+    { "forwarded_terminal": "failed_terminal", "settlement": "none", "write_terminal": false },
+    { "forwarded_terminal": "failed_terminal", "settlement": "silent", "write_terminal": false },
+    { "forwarded_terminal": "failed_terminal", "settlement": "copy", "write_terminal": false }
+  ]
+}

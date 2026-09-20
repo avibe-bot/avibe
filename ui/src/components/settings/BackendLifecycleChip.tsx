@@ -5,11 +5,15 @@ import clsx from 'clsx';
 import { useApi, type BackendRuntimeInfo } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { Button } from '../ui/button';
-import { badgeVariants } from '../ui/badge-variants';
+import {
+  badgeVariants,
+  interactiveBadgeTriggerClassName,
+  mobileHeaderPopoverClassName,
+} from '../ui/badge-variants';
 import { cn } from '@/lib/utils';
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
-type Phase = 'idle' | 'loading' | 'upgrading' | 'restarting';
+type Operation = 'idle' | 'upgrading' | 'restarting';
 type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'error' | 'loading';
 type BadgeVariant = 'secondary' | 'success' | 'info' | 'warning' | 'destructive';
 
@@ -26,7 +30,10 @@ interface BackendLifecycleChipProps {
   name: string;
   enabled: boolean;
   cliStatus: CliStatus;
+  /** Setup describes executable availability separately from connection readiness. */
+  readyLabel?: string;
   onChanged?: (info?: BackendChipChange) => void | Promise<void>;
+  onOperationChange?: (pending: boolean) => void;
 }
 
 // Map lifecycle visual states to canonical Badge variants from the design
@@ -54,11 +61,11 @@ const deriveVisual = (
   enabled: boolean,
   cliStatus: CliStatus,
   runtime: BackendRuntimeInfo | null,
-  phase: Phase,
+  operation: Operation,
 ): Visual => {
   // An in-flight upgrade outranks a stale "disabled" — if the user toggles a
   // backend off mid-install we still want the progress affordance visible.
-  if (phase === 'upgrading') return 'updating';
+  if (operation === 'upgrading') return 'updating';
   if (!enabled) return 'disabled';
   if (cliStatus === 'missing') return 'error';
   // ``runtime.installed`` is probed against the *persisted* cli_path. When
@@ -90,13 +97,16 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   enabled,
   cliStatus,
   onChanged,
+  onOperationChange,
+  readyLabel,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [isOpen, setIsOpen] = React.useState(false);
   const [runtime, setRuntime] = React.useState<BackendRuntimeInfo | null>(null);
-  const [phase, setPhase] = React.useState<Phase>('idle');
+  const [runtimeLoading, setRuntimeLoading] = React.useState(false);
+  const [operation, setOperation] = React.useState<Operation>('idle');
   const popupRef = React.useRef<HTMLDivElement>(null);
   const isMountedRef = React.useRef(true);
   // Monotonic token guards against stale async writes when toggle/detect
@@ -124,7 +134,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const loadRuntime = React.useCallback(async () => {
     const myToken = ++loadTokenRef.current;
-    setPhase('loading');
+    setRuntimeLoading(true);
     let info: BackendRuntimeInfo | null = null;
     try {
       info = await api.getBackendRuntime(name);
@@ -135,29 +145,37 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       // unmounted while we were in flight.
       if (isMountedRef.current && loadTokenRef.current === myToken) {
         setRuntime(info);
-        setPhase('idle');
+        setRuntimeLoading(false);
       }
     }
   }, [api, name]);
 
-  // Refresh when the chip opens, when the user toggles enabled, or when the CLI
-  // path is freshly detected. Keeps the chip in sync with the surrounding card.
+  // Refresh when the user toggles enabled or when the CLI path is freshly
+  // detected. Runtime loading is independent from a long-running operation so
+  // a probe can never replace an active upgrade with stale version data.
   React.useEffect(() => {
     if (!enabled) {
       // Bump the token so any in-flight probe drops its result.
       loadTokenRef.current += 1;
       setRuntime(null);
+      setRuntimeLoading(false);
       return;
     }
-    if (cliStatus === 'ok' || isOpen) {
-      void loadRuntime();
-    }
-  }, [enabled, cliStatus, isOpen, loadRuntime]);
+    if (cliStatus === 'ok') void loadRuntime();
+  }, [enabled, cliStatus, loadRuntime]);
 
-  const visual = deriveVisual(enabled, cliStatus, runtime, phase);
+  // Opening asks for a fresh projection; closing is presentation-only and
+  // must not mutate lifecycle state.
+  React.useEffect(() => {
+    if (enabled && isOpen) void loadRuntime();
+  }, [enabled, isOpen, loadRuntime]);
+
+  const visual = deriveVisual(enabled, cliStatus, runtime, operation);
+  const busy = runtimeLoading || operation !== 'idle';
 
   const handleUpgrade = async () => {
-    setPhase('upgrading');
+    setOperation('upgrading');
+    onOperationChange?.(true);
     try {
       const result = await api.installAgent(name);
       if (result.ok) {
@@ -171,12 +189,14 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
-      if (isMountedRef.current) setPhase('idle');
+      onOperationChange?.(false);
+      if (isMountedRef.current) setOperation('idle');
     }
   };
 
   const handleRestart = async () => {
-    setPhase('restarting');
+    setOperation('restarting');
+    onOperationChange?.(true);
     try {
       const result = await api.restartBackend(name);
       showToast(
@@ -187,7 +207,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
     } catch (e) {
       showToast(String(e), 'error');
     } finally {
-      if (isMountedRef.current) setPhase('idle');
+      onOperationChange?.(false);
+      if (isMountedRef.current) setOperation('idle');
     }
   };
 
@@ -196,7 +217,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       case 'disabled':
         return t('backendLifecycle.statusDisabled');
       case 'ready':
-        return t('backendLifecycle.statusReady');
+        return readyLabel || t('backendLifecycle.statusReady');
       case 'updating':
         return t('backendLifecycle.statusUpdating');
       case 'update':
@@ -216,7 +237,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         onClick={() => setIsOpen((prev) => !prev)}
         className={cn(
           badgeVariants({ variant: BADGE_VARIANT[visual] }),
-          'cursor-pointer font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+          interactiveBadgeTriggerClassName,
+          'font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
         )}
         aria-label={chipLabel}
       >
@@ -228,7 +250,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
         <div
           className={clsx(
             'z-50 rounded-lg border border-border bg-popover text-popover-foreground shadow-xl',
-            'fixed inset-x-3 top-[4.5rem] max-h-[calc(100dvh-5.5rem)] overflow-auto',
+            mobileHeaderPopoverClassName,
             'md:absolute md:inset-x-auto md:right-0 md:top-full md:mt-2 md:w-72 md:max-h-none md:overflow-visible',
           )}
         >
@@ -240,11 +262,11 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                 size="icon"
                 className="h-7 w-7 text-muted hover:text-foreground"
                 onClick={() => void loadRuntime()}
-                disabled={phase !== 'idle'}
+                disabled={busy}
                 aria-label={t('common.refresh')}
                 title={t('common.refresh')}
               >
-                <RefreshCw size={14} className={phase === 'loading' ? 'animate-spin' : ''} />
+                <RefreshCw size={14} className={runtimeLoading ? 'animate-spin' : ''} />
               </Button>
               <Button
                 variant="ghost"
@@ -262,7 +284,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
             <ChipPopoverBody
               visual={visual}
               runtime={runtime}
-              phase={phase}
+              operation={operation}
               name={name}
             />
           </div>
@@ -270,13 +292,13 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
           {visual !== 'disabled' && visual !== 'updating' && (
             <div className="flex flex-wrap justify-end gap-2 border-t border-border px-4 py-3">
               {visual === 'update' && (
-                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={phase !== 'idle'}>
+                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.upgradeNow')}
                 </Button>
               )}
               {visual === 'error' && (
-                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={phase !== 'idle'}>
+                <Button variant="brand" size="xs" onClick={() => void handleUpgrade()} disabled={busy}>
                   <Download size={14} />
                   {t('backendLifecycle.reinstall')}
                 </Button>
@@ -286,9 +308,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
                   variant="secondary"
                   size="xs"
                   onClick={() => void handleRestart()}
-                  disabled={phase !== 'idle'}
+                  disabled={busy}
                 >
-                  <RotateCw size={14} className={phase === 'restarting' ? 'animate-spin' : ''} />
+                  <RotateCw size={14} className={operation === 'restarting' ? 'animate-spin' : ''} />
                   {t('backendLifecycle.restart')}
                 </Button>
               )}
@@ -303,9 +325,9 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 const ChipPopoverBody: React.FC<{
   visual: Visual;
   runtime: BackendRuntimeInfo | null;
-  phase: Phase;
+  operation: Operation;
   name: string;
-}> = ({ visual, runtime, phase, name }) => {
+}> = ({ visual, runtime, operation, name }) => {
   const { t } = useTranslation();
 
   if (visual === 'disabled') {
@@ -328,22 +350,22 @@ const ChipPopoverBody: React.FC<{
           <span className="font-mono font-medium text-foreground">{runtime.latest_version}</span>
         </div>
       )}
-      <StateBlock visual={visual} phase={phase} runtime={runtime} name={name} />
+      <StateBlock visual={visual} operation={operation} runtime={runtime} name={name} />
     </>
   );
 };
 
 const StateBlock: React.FC<{
   visual: Visual;
-  phase: Phase;
+  operation: Operation;
   runtime: BackendRuntimeInfo | null;
   name: string;
-}> = ({ visual, phase, runtime, name }) => {
+}> = ({ visual, operation, runtime, name }) => {
   const { t } = useTranslation();
 
-  if (phase === 'upgrading') {
+  if (operation === 'upgrading') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan">
+      <div className="flex items-center gap-2 rounded-md border border-cyan/25 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
         <RefreshCw size={16} className="shrink-0 animate-spin" />
         <span>{t('backendLifecycle.upgrading')}</span>
       </div>
@@ -351,7 +373,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'update') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold">
+      <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
         <AlertCircle size={16} className="shrink-0" />
         <span>
           {t('backendLifecycle.updateHint', {
@@ -372,7 +394,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'error') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+      <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
         <AlertCircle size={16} className="shrink-0" />
         <span>{t('backendLifecycle.errorHint', { name })}</span>
       </div>
@@ -380,7 +402,7 @@ const StateBlock: React.FC<{
   }
   if (visual === 'ready') {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint">
+      <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
         <Check size={16} className="shrink-0" />
         <span>{t('backendLifecycle.readyHint')}</span>
       </div>

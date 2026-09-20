@@ -71,10 +71,11 @@ Additional findings from the current codebase:
   catalog/auth operations, and OAuth web flows. UI-reachable wrappers should be
   converted as their routes are touched. Test-only or non-UI `asyncio.run`
   calls are not part of this acceptance criterion.
-- Tests should not be migrated only at the end. `tests/test_ui_remote_access_auth.py`
-  is the security contract for remote access and setup-host behavior; keep it
-  green after the substrate layer lands, then carry the rest of the UI test
-  files surface by surface.
+- Tests should not be migrated only at the end. Remote-access auth coverage is
+  split across `tests/test_ui_server_fastapi.py` and
+  `tests/ui_server_test_helpers.py`; keep those focused tests green after the
+  substrate layer lands, then carry the rest of the UI test files surface by
+  surface.
 - The current `run_ui_server()` tests monkeypatch `werkzeug.make_server`.
   They need to be rewritten around `uvicorn.Server` and the nonblocking
   remote-access reconcile behavior.
@@ -255,7 +256,9 @@ Tests use `app.test_client()` (Flask) extensively. Port pattern:
 
 `TestClient` is a thin sync wrapper around `httpx.Client`; it transparently runs the ASGI app under the hood. Most assertions stay byte-identical. Async fixtures (if any) switch to `pytest-asyncio` patterns.
 
-The biggest file: `tests/test_ui_remote_access_auth.py` — patches like `monkeypatch.setattr("vibe.ui_server.psutil...", ...)` still work because the module path is unchanged.
+The historical remote-access auth suite was later split into focused FastAPI
+tests; patches like `monkeypatch.setattr("vibe.ui_server.psutil...", ...)` still
+work because the module path is unchanged.
 
 ### WebSocket smoke route
 
@@ -281,7 +284,7 @@ The chat feature will land in a follow-up PR using this same pattern. We just ne
 | --- | --- |
 | 74 routes — long migration, easy to miss subtle response-shape differences | Migrate one router file at a time, run the existing test for that surface after each, smoke via curl. Don't merge until ALL test files pass and a manual smoke against the React UI is clean. |
 | Tests embedded in Flask test client semantics (cookies, sessions) | TestClient is largely API-compatible; deal with cookie domain quirks one test file at a time. Allocate ~25% of the migration budget for tests. |
-| CSRF / remote_access middleware: ordering bugs | Port one middleware at a time with a focused test. The `tests/test_ui_remote_access_auth.py` suite is the source of truth — keep it green. |
+| CSRF / remote_access middleware: ordering bugs | Port one middleware at a time with focused FastAPI tests in `tests/test_ui_server_fastapi.py`. |
 | Sentry integration regression | Init in lifespan startup; verify Sentry breadcrumbs still appear via the regression env's dev key. |
 | WSGI-specific subprocess launching pattern in `run_ui_server` | Uvicorn handles this natively in-process; keep the EADDRINUSE retry loop. |
 | Frontend assumptions about specific status codes / response shapes | Don't refactor any payload shape during the migration. Same path, same method, same JSON. |
@@ -294,7 +297,7 @@ The chat feature will land in a follow-up PR using this same pattern. We just ne
 Each phase ends with a green test run + a manual smoke. Commit between phases.
 
 1. **Bootstrap.** Add fastapi/uvicorn/python-multipart/httpx to `pyproject.toml`. Create `vibe/ui_routers/` directory with empty `__init__.py`. Create the new `app = FastAPI(lifespan=lifespan)` in `vibe/ui_server.py` ALONGSIDE the existing Flask `app` (rename Flask app temporarily, e.g. `_legacy_flask_app`). Wire `run_ui_server` to dispatch to whichever app a `VIBE_UI_FRAMEWORK=fastapi` env var selects. Implement `/health` on FastAPI as the canary route.
-2. **Middleware.** Port CSRF / remote_access auth / setup wizard gate / CSRF cookie / remote_access cookie hooks as FastAPI middleware. Carry the existing `tests/test_ui_remote_access_auth.py` through; it must stay green.
+2. **Middleware.** Port CSRF / remote_access auth / setup wizard gate / CSRF cookie / remote_access cookie hooks as FastAPI middleware. Keep the focused FastAPI auth tests green.
 3. **Static + Setup.** Port the SPA catch-all, `/setup/*`, `/auth/callback`, asset routes. The setup wizard is high-traffic; smoke through `./scripts/run_regression.sh` end-to-end after this phase.
 4. **Backends + agent CLI lifecycle.** Port `/backend/*`, `/agent/*`, `/cli/detect`. Drop `asyncio.run` from the corresponding `vibe/api.py` helpers as you go.
 5. **Backend OAuth + per-provider.** Port `/backend/<b>/auth/oauth/*` and `/backend/opencode/provider/*`. Delete `vibe-oauth-loop` thread; `_submit_oauth_coro` callers become `await`. This phase **fixes the cross-loop bug at the root**.

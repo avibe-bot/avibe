@@ -6,7 +6,14 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .base import NativeSessionProvider, build_tail_preview, dt_from_ts, normalize_title_text, parse_json_blob
+from .base import (
+    NativeSessionProvider,
+    build_tail_preview,
+    derive_first_prompt_title,
+    dt_from_ts,
+    normalize_title_text,
+    parse_json_blob,
+)
 from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
@@ -169,23 +176,23 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
         working_path: str,
         first_user_message: str = "",
     ) -> BackendSessionTitle | None:
-        if not self.db_path.exists():
-            return None
-        try:
-            with self._connect() as conn:
-                row = conn.execute(
-                    """
-                    SELECT title
-                    FROM session
-                    WHERE id = ? AND directory = ?
-                    LIMIT 1
-                    """,
-                    (native_session_id, working_path),
-                ).fetchone()
-        except Exception as exc:
-            logger.warning("Failed to read OpenCode session title %s: %s", native_session_id, exc)
-            return None
-        title = normalize_title_text(str(row[0] or "")) if row else ""
-        if not title or self.is_ignored_title(title):
-            return None
-        return BackendSessionTitle(title=title, source="backend", confidence="high")
+        title = ""
+        if self.db_path.exists():
+            try:
+                with self._connect() as conn:
+                    row = conn.execute(
+                        """
+                        SELECT title
+                        FROM session
+                        WHERE id = ? AND directory = ?
+                        LIMIT 1
+                        """,
+                        (native_session_id, working_path),
+                    ).fetchone()
+            except Exception as exc:
+                logger.warning("Failed to read OpenCode session title %s: %s", native_session_id, exc)
+                row = None
+            title = normalize_title_text(str(row[0] or "")) if row else ""
+        if title and not self.is_ignored_title(title):
+            return BackendSessionTitle(title=title, source="backend", confidence="high")
+        return derive_first_prompt_title(first_user_message)

@@ -1,15 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Compass, Download, Funnel, Info, Loader2, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
+import { Compass, Download, Info, Loader2, Lock, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { SkillBrief, SkillCheckItem, SkillScope, WorkbenchProject } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { BACKEND_LABEL, BACKEND_ORDER, backendsFromAgents, type Backend } from '../../lib/backendAccent';
 import { Button } from '../ui/button';
 import { SegmentedRadio } from '../ui/segmented';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 import { SkillRow } from './skills/SkillRow';
@@ -18,6 +16,8 @@ import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
 import { errorMessage } from '@/lib/errorMessage';
+import { Badge } from '../ui/badge';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const skillKey = (s: SkillBrief) => `${s.scope}:${s.name}`;
 
@@ -25,6 +25,8 @@ export const SkillsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const { capabilities } = useInstanceAuthorization();
+  const canManage = capabilities.can_use_skills;
 
   const [scope, setScope] = useState<SkillScope>('global');
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
@@ -36,9 +38,7 @@ export const SkillsPage: React.FC = () => {
   const [installingAskill, setInstallingAskill] = useState(false);
   const [projectNoFolder, setProjectNoFolder] = useState(false);
   const [search, setSearch] = useState('');
-  const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [busyBackend, setBusyBackend] = useState<Backend | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [showBrowse, setShowBrowse] = useState(false);
   const [checkMap, setCheckMap] = useState<Record<string, SkillCheckItem>>({});
@@ -48,8 +48,9 @@ export const SkillsPage: React.FC = () => {
   // A folderless project can't hold project-scoped skills (askill needs a real
   // cwd), so the add/browse flows treat it as global-only: the add dialog drops
   // the project-scope option, and browse installs land in global.
-  const projectHasFolder = Boolean(activeProject?.folder_path);
-  const addDialogProjectId = projectHasFolder ? activeProject?.id : undefined;
+  const projectHasFolder = Boolean(activeProject?.capabilities?.has_folder ?? activeProject?.folder_path);
+  const projectCanManage = canManage && (scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat));
+  const addDialogProjectId = scope === 'project' && projectCanManage && projectHasFolder ? activeProject?.id : undefined;
   const browseScope: SkillScope = scope === 'project' && projectHasFolder ? 'project' : 'global';
   const browseProjectId = browseScope === 'project' ? activeProject?.id : undefined;
 
@@ -104,10 +105,12 @@ export const SkillsPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  useEffect(() => api.connectWorkbenchEvents({ onAuthorizationChanged: () => refresh() }), [api, refresh]);
+
   // Fetch update status (askill check) once the list loads so rows can show an
   // "update available" badge. Best-effort; failures just clear it.
   useEffect(() => {
-    if (notInstalled || (scope === 'project' && !projectId)) {
+    if (!canManage || notInstalled || (scope === 'project' && !projectId)) {
       setCheckMap({});
       return;
     }
@@ -134,16 +137,15 @@ export const SkillsPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [api, scope, projectId, skills, notInstalled]);
+  }, [api, scope, projectId, skills, notInstalled, canManage]);
 
   const matches = useCallback(
     (skill: SkillBrief) => {
-      if (backendFilter !== 'all' && !backendsFromAgents(skill.agents).includes(backendFilter)) return false;
       const q = search.trim().toLowerCase();
       if (!q) return true;
       return skill.name.toLowerCase().includes(q) || (skill.description ?? '').toLowerCase().includes(q);
     },
-    [search, backendFilter],
+    [search],
   );
 
   const filtered = useMemo(() => skills.filter(matches), [skills, matches]);
@@ -157,23 +159,6 @@ export const SkillsPage: React.FC = () => {
     () => new Set(skills.filter((s) => scope !== 'project' || s.scope === 'project').map((s) => s.name)),
     [skills, scope],
   );
-
-  const onToggleBackend = async (backend: Backend, next: boolean) => {
-    if (!selected) return;
-    setBusyBackend(backend);
-    try {
-      const projectArg = selected.scope === 'project' ? projectId ?? undefined : undefined;
-      const res = next
-        ? await api.addSkill({ source: selected.path, scope: selected.scope, projectId: projectArg, backends: [backend] })
-        : await api.removeSkill(selected.name, { scope: selected.scope, projectId: projectArg, backends: [backend] });
-      if (!res.ok) showToast(res.error?.message ?? BACKEND_LABEL[backend], 'error');
-      await refresh();
-    } catch (err) {
-      showToast(errorMessage(err) ?? String(err), 'error');
-    } finally {
-      setBusyBackend(null);
-    }
-  };
 
   const onRemove = async () => {
     if (!selected) return;
@@ -277,16 +262,23 @@ export const SkillsPage: React.FC = () => {
           />
         </div>
 
-        <BackendFilter value={backendFilter} onChange={setBackendFilter} />
-
-        <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
-          <Compass className="size-3.5 text-cyan" />
-          {t('skills.browseRegistry')}
-        </Button>
-        <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
-          <Plus />
-          {t('skills.addSkill')}
-        </Button>
+        {projectCanManage ? (
+          <>
+            <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
+              <Compass className="size-3.5 text-cyan-ink" />
+              {t('skills.browseRegistry')}
+            </Button>
+            <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
+              <Plus />
+              {t('skills.addSkill')}
+            </Button>
+          </>
+        ) : !capabilities.can_use_skills ? (
+          <Badge variant="secondary" title={t('skills.remoteReadOnlyHint')}>
+            <Lock className="size-3" />
+            {t('skills.remoteReadOnly')}
+          </Badge>
+        ) : null}
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (
@@ -299,7 +291,7 @@ export const SkillsPage: React.FC = () => {
       ) : null}
 
       {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">{error}</div>
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
       ) : null}
 
       {notInstalled ? (
@@ -307,7 +299,7 @@ export const SkillsPage: React.FC = () => {
           <Terminal className="size-7 text-muted" />
           <div className="text-[14px] font-semibold text-foreground">{t('skills.notInstalled')}</div>
           <div className="max-w-md font-mono text-[11.5px] text-muted">{t('skills.notInstalledHint')}</div>
-          <Button
+          {projectCanManage ? <Button
             variant="brand"
             size="sm"
             className="mt-1"
@@ -331,7 +323,7 @@ export const SkillsPage: React.FC = () => {
           >
             {installingAskill ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
             {installingAskill ? t('skills.installing') : t('skills.installAskill')}
-          </Button>
+          </Button> : null}
         </div>
       ) : (
         // `minmax(0,1fr)` (not bare `1fr`) lets the list column shrink below its
@@ -351,7 +343,7 @@ export const SkillsPage: React.FC = () => {
                 ) : null}
                 <div className="flex flex-col gap-2">
                   {sectionLabel(
-                    <WandSparkles className="size-3.5 text-mint" />,
+                    <WandSparkles className="size-3.5 text-mint-ink" />,
                     t('skills.projectSectionLocal'),
                     t('skills.projectSectionLocalHint'),
                   )}
@@ -387,19 +379,18 @@ export const SkillsPage: React.FC = () => {
             <SkillDetailPanel
               skill={selected}
               projectName={activeProject?.display_name}
-              busyBackend={busyBackend}
               check={checkMap[skillKey(selected)]}
               updating={updating}
               onClose={() => setSelectedKey(null)}
-              onToggleBackend={onToggleBackend}
               onUpdate={onUpdate}
               onRemove={onRemove}
+              canManage={canManage && (selected.scope !== 'project' || Boolean(activeProject?.capabilities?.can_chat))}
             />
           ) : null}
         </div>
       )}
 
-      {showAdd ? (
+      {projectCanManage && showAdd ? (
         <AddSkillDialog
           defaultScope={scope}
           projectId={addDialogProjectId}
@@ -408,7 +399,7 @@ export const SkillsPage: React.FC = () => {
           onInstalled={afterDialog}
         />
       ) : null}
-      {showBrowse ? (
+      {projectCanManage && showBrowse ? (
         <BrowseRegistryDialog
           scope={browseScope}
           projectId={browseProjectId}
@@ -418,53 +409,5 @@ export const SkillsPage: React.FC = () => {
         />
       ) : null}
     </div>
-  );
-};
-
-interface BackendFilterProps {
-  value: Backend | 'all';
-  onChange: (next: Backend | 'all') => void;
-}
-
-// Compact funnel popover, mirroring AgentsPage's BackendFilter idiom.
-const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const label = value === 'all' ? t('skills.backendAll') : BACKEND_LABEL[value];
-  const dot = (key: Backend | 'all') =>
-    key === 'all' ? 'bg-muted' : key === 'claude' ? 'bg-mint' : key === 'opencode' ? 'bg-cyan' : 'bg-violet';
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-3 py-2 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <Funnel className="size-3 text-muted" />
-          <span className="text-muted">{t('skills.backendFilter')}:</span>
-          <span>{label}</span>
-          <ChevronDown className="size-3 text-muted" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-[180px] p-1">
-        {(['all', ...BACKEND_ORDER] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => {
-              onChange(key);
-              setOpen(false);
-            }}
-            className={clsx(
-              'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] transition',
-              value === key ? 'bg-mint-soft text-mint' : 'text-foreground hover:bg-foreground/[0.04]',
-            )}
-          >
-            <span className={clsx('size-2 rounded-full', dot(key))} />
-            <span>{key === 'all' ? t('skills.backendAll') : BACKEND_LABEL[key as Backend]}</span>
-          </button>
-        ))}
-      </PopoverContent>
-    </Popover>
   );
 };

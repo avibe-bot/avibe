@@ -21,6 +21,11 @@ import {
 export interface ComboboxOption {
   value: string
   label: string
+  /** A mark for this option, shown on its row AND on the trigger once it is the
+   *  selection — a picker whose closed state drops the mark is showing less than
+   *  the choice already contains. Expected to be a small inline glyph that
+   *  inherits `currentColor`, so it follows the theme like the label beside it. */
+  icon?: React.ReactNode
 }
 
 interface ComboboxProps {
@@ -32,10 +37,22 @@ interface ComboboxProps {
   emptyText?: string
   allowCustomValue?: boolean
   className?: string
+  /** For a labelled field: the `<label for>` target. */
+  id?: string
+  /** The field's label, for a control a `for` association cannot name — a
+   *  `<button>` is not a labelable element. The selection is appended to it: a
+   *  label alone would REPLACE the trigger's contents in the accessible name,
+   *  and those contents are the chosen option, which is the half of a picker a
+   *  screen reader most needs. Composed here rather than left to an
+   *  `aria-labelledby` self-reference, whose support is uneven. */
+  ariaLabel?: string
+  disabled?: boolean
   commitOnClose?: boolean
   createLabel?: (value: string) => string
   createHeading?: string
-  /** Show a folder icon before each option + the create row (design.pen group picker). */
+  /** The design.pen group-picker skin: one folder mark for every row plus its own
+   *  active fill and trailing check. A row layout, not the per-option `icon`
+   *  above — that one says which mark a row carries, this one which list it is. */
   withFolderIcon?: boolean
   /** When set, the create affordance renders as a bordered input + this-labelled button
    *  (design.pen `e3rPI`) instead of an inline command item. */
@@ -51,6 +68,9 @@ export function Combobox({
   emptyText = "No results found.",
   allowCustomValue = true,
   className,
+  id,
+  ariaLabel,
+  disabled = false,
   commitOnClose = false,
   createLabel,
   createHeading,
@@ -95,7 +115,7 @@ export function Combobox({
           "flex h-9 flex-1 items-center gap-2 border-mint/50 px-2.5",
         )}
       >
-        <Plus className="size-3.5 shrink-0 text-mint" />
+        <Plus className="size-3.5 shrink-0 text-mint-ink" />
         <span className="truncate text-sm text-foreground">{typed}</span>
       </span>
       <Button type="button" size="sm" onClick={() => commitCreate(typed)}>
@@ -105,7 +125,12 @@ export function Combobox({
   )
 
   return (
+    // `modal` unconditionally, matching Radix `Select`: a non-modal popover opened
+    // inside a Dialog has its wheel events cancelled by the Dialog's scroll lock,
+    // so the option list silently stops scrolling. Owning its own lock is a
+    // property of the surface, not something each call site should have to know.
     <Popover
+      modal
       open={open}
       onOpenChange={(next) => {
         // Only opt-in consumers (commitOnClose) commit a typed custom value on
@@ -119,9 +144,12 @@ export function Combobox({
     >
       <PopoverTrigger asChild>
         <button
+          id={id}
           type="button"
           role="combobox"
           aria-expanded={open}
+          aria-label={ariaLabel && [ariaLabel, displayValue].filter(Boolean).join(" ")}
+          disabled={disabled}
           className={cn(
             fieldBaseClass,
             "flex h-9 items-center justify-between px-3",
@@ -130,6 +158,7 @@ export function Combobox({
         >
           <span className={cn("flex items-center gap-2 truncate", !displayValue && "text-muted")}>
             {withFolderIcon && displayValue && <Folder className="size-4 shrink-0 text-muted" />}
+            {selectedOption?.icon}
             {displayValue || placeholder}
           </span>
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
@@ -175,21 +204,24 @@ export function Combobox({
                       key={option.value}
                       value={option.value}
                       onSelect={() => commitCreate(option.value)}
-                      className={cn(active && withFolderIcon && "bg-mint-soft text-mint data-[selected=true]:bg-mint-soft")}
+                      className={cn(active && withFolderIcon && "bg-mint-soft text-mint-ink data-[selected=true]:bg-mint-soft")}
                     >
                       {withFolderIcon ? (
                         <>
-                          <Folder className={cn("mr-2 h-4 w-4 shrink-0", active ? "text-mint" : "text-muted")} />
+                          <Folder className={cn("mr-2 h-4 w-4 shrink-0", active ? "text-mint-ink" : "text-muted")} />
                           <span className={cn("flex-1 truncate", active ? "font-semibold text-foreground" : "text-foreground")}>
                             {option.label}
                           </span>
-                          <Check className={cn("ml-2 h-4 w-4 text-mint", active ? "opacity-100" : "opacity-0")} />
+                          <Check className={cn("ml-2 h-4 w-4 text-mint-ink", active ? "opacity-100" : "opacity-0")} />
                         </>
                       ) : (
                         <>
                           <Check
                             className={cn("mr-2 h-4 w-4", active ? "opacity-100" : "opacity-0")}
                           />
+                          {option.icon && (
+                            <span className="mr-2 flex shrink-0 items-center">{option.icon}</span>
+                          )}
                           {option.label}
                         </>
                       )}

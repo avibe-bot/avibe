@@ -20,6 +20,7 @@ import {
   type ViewportPoint,
 } from '../../lib/showPageLaunch';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { Button } from '../ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 
@@ -140,44 +141,35 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
     else await dock.pin(sessionId);
   }, [dock, prepare, sessionId]);
 
-  useEffect(() => {
-    const onDragOver = (event: DragEvent) => {
-      const active = dragRef.current;
-      if (!active) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest(SHOW_PAGE_DOCK_DROP_SELECTOR)) {
-        return;
-      }
-      const point = { x: event.clientX, y: event.clientY };
-      if (!isShowPageWindowDrop(active.start, point)) {
-        if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
-        return;
-      }
-      event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
-    };
+  useRouteSurfaceWindowEvent('dragover', (event) => {
+    const active = dragRef.current;
+    if (!active) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(SHOW_PAGE_DOCK_DROP_SELECTOR)) {
+      return;
+    }
+    const point = { x: event.clientX, y: event.clientY };
+    if (!isShowPageWindowDrop(active.start, point)) {
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
 
-    const onDrop = (event: DragEvent) => {
-      const active = dragRef.current;
-      if (!active) return;
-      const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest(SHOW_PAGE_DOCK_DROP_SELECTOR)) return;
-      const point = { x: event.clientX, y: event.clientY };
-      if (!isShowPageWindowDrop(active.start, point)) return;
-      event.preventDefault();
-      dragRef.current = null;
-      endShowPageDrag();
-      setGestureActive(false);
-      void openWindow(point);
-    };
-
-    window.addEventListener('dragover', onDragOver);
-    window.addEventListener('drop', onDrop);
-    return () => {
-      window.removeEventListener('dragover', onDragOver);
-      window.removeEventListener('drop', onDrop);
-    };
-  }, [endShowPageDrag, openWindow, setGestureActive]);
+  useRouteSurfaceWindowEvent('drop', (event) => {
+    const active = dragRef.current;
+    if (!active) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(SHOW_PAGE_DOCK_DROP_SELECTOR)) return;
+    const point = { x: event.clientX, y: event.clientY };
+    if (!isShowPageWindowDrop(active.start, point)) return;
+    event.preventDefault();
+    dragRef.current = null;
+    endShowPageDrag();
+    setGestureActive(false);
+    void openWindow(point);
+  });
 
   const endDrag = () => {
     dragRef.current = null;
@@ -298,7 +290,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
               onClick={() => void openWindow()}
               className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
             >
-              <AppWindow className="size-3.5 shrink-0 text-cyan" />
+              <AppWindow className="size-3.5 shrink-0 text-cyan-ink" />
               <span>{t('chat.showPage.newWindow')}</span>
             </button>
             {linkHref && (
@@ -308,7 +300,7 @@ export const ShowPageLaunchControl: React.FC<ShowPageLaunchControlProps> = ({
                 onClick={() => void openLink()}
                 className="flex w-full items-center gap-2 whitespace-nowrap rounded-md px-2 py-1.5 text-left text-[12.5px] text-foreground transition-colors hover:bg-cyan-soft"
               >
-                <ExternalLink className="size-3.5 shrink-0 text-mint" />
+                <ExternalLink className="size-3.5 shrink-0 text-mint-ink" />
                 <span>{t('chat.showPage.newLink')}</span>
               </button>
             )}

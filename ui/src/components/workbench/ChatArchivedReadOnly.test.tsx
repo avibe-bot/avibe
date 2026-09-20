@@ -257,6 +257,39 @@ describe('archived Agent display names', () => {
   });
 });
 
+describe('nonterminal Agent output', () => {
+  it('keeps Agent identity but uses the muted boundary presentation', () => {
+    for (const message of [
+      { ...agentWithQuickReplies(), type: 'output', content: {} },
+      { ...agentWithQuickReplies(), type: 'result', content: {}, metadata: { detached: true } },
+    ] as WorkbenchMessage[]) {
+      const markup = render(
+        <MessageRow message={message} session={session()} messageFontSize={13} />,
+      );
+
+      expect(markup).toContain('lucide-bot');
+      expect(markup).toContain('bg-foreground/[0.03]');
+      expect(markup).not.toContain('bg-mint/[0.09]');
+    }
+  });
+
+  it('keeps a detached backend failure in the status presentation', () => {
+    const message = {
+      ...agentWithQuickReplies(),
+      type: 'notify',
+      content: {},
+      metadata: { detached: true, event: 'backend_failure' },
+    } as WorkbenchMessage;
+    const markup = render(
+      <MessageRow message={message} session={session()} messageFontSize={13} />,
+    );
+
+    expect(markup).toContain('lucide-bell');
+    expect(markup).toContain('bg-gold/[0.08]');
+    expect(markup).not.toContain('lucide-bot');
+  });
+});
+
 // ── Codex review #3 (ChatPage.tsx:2540) ───────────────────────────────────────
 // The previous round kept the Show Page toggle and the Share control on the
 // theory that the store already refuses archived mutations. That is the
@@ -304,6 +337,11 @@ describe('read-only header withdraws the Show Page controls', () => {
     expect(isShowPageActive(true, false)).toBe(false);
   });
 
+  it('withdraws an active Show Page frame on a definitive access denial', () => {
+    expect(isShowPageActive(false, true, false)).toBe(true);
+    expect(isShowPageActive(false, true, true)).toBe(false);
+  });
+
   it('renders an archived header with the title and badge but no Show Page button', () => {
     // Only the read-only header is reachable here: the live one renders
     // AgentRoutePicker, which calls useApi() and throws without an ApiProvider.
@@ -324,6 +362,7 @@ describe('read-only header withdraws the Show Page controls', () => {
           state: null,
           iframeRef: { current: null },
           handleIframeLoad: () => undefined,
+          handleShortcutKeyDown: () => undefined,
           enable: () => undefined,
           disable: () => undefined,
           setMode: () => undefined,
@@ -366,6 +405,7 @@ describe('read-only header withdraws the Show Page controls', () => {
           state: null,
           iframeRef: { current: null },
           handleIframeLoad: () => undefined,
+          handleShortcutKeyDown: () => undefined,
           enable: () => undefined,
           disable: () => undefined,
           setMode: () => undefined,
@@ -505,6 +545,7 @@ describe('archived conflicts converge whatever the verb', () => {
           state: null,
           iframeRef: { current: null },
           handleIframeLoad: () => undefined,
+          handleShortcutKeyDown: () => undefined,
           enable: () => undefined,
           disable: () => undefined,
           setMode: () => undefined,
@@ -615,6 +656,7 @@ describe('a runtime-owned system session is read-only for its own reason', () =>
           state: null,
           iframeRef: { current: null },
           handleIframeLoad: () => undefined,
+          handleShortcutKeyDown: () => undefined,
           enable: () => undefined,
           disable: () => undefined,
           setMode: () => undefined,
@@ -818,8 +860,9 @@ describe('Agent result metrics tail', () => {
     expect(markup.split(displayedFooter)).toHaveLength(2);
     expect(markup.indexOf('2026-07-27')).toBeLessThan(markup.indexOf(displayedFooter));
     expect(markup).toContain(
-      'opacity-0 transition-opacity duration-150 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
+      'opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100 pointer-coarse:opacity-100',
     );
+    expect(markup).not.toContain('transition-opacity');
     expect(markup).toContain('flex-wrap');
   });
 
@@ -941,6 +984,22 @@ describe('agent-authored local file links', () => {
     expect(routeMarkup).not.toContain('data-local-file-link');
     expect(routeMarkup).toContain('href="/apps/files"');
     expect(routeMarkup).toContain('target="_blank"');
+  });
+
+  it('opens Workbench chat routes in the current document', () => {
+    const props = {
+      session: session({ workdir: '/workspace/project' }),
+      messageFontSize: 13,
+      onOpenLocalFile: () => undefined,
+    };
+    const chatMessage = {
+      ...linkedMessage('agent'),
+      text: '[open chat](/chat/session-456)',
+    } as WorkbenchMessage;
+    const markup = render(<MessageRow {...props} message={chatMessage} />);
+    expect(markup).toContain('href="/chat/session-456"');
+    expect(markup).not.toContain('target="_blank"');
+    expect(markup).not.toContain('data-local-file-link');
   });
 
   it('lets the outer local link own clicks for a linked local image', () => {

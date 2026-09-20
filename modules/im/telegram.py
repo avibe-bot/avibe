@@ -19,12 +19,33 @@ from vibe.proxy import resolve_proxy
 from modules.agents.native_sessions import AgentNativeSessionService, NativeResumeSession
 from modules.agents.opencode.utils import format_claude_model_label
 
-from .base import BaseIMClient, FileAttachment, MessageContext, InlineButton, InlineKeyboard
+from .base import (
+    BaseIMClient,
+    FileAttachment,
+    FileDownloadResult,
+    MessageContext,
+    InlineButton,
+    InlineKeyboard,
+)
 from .formatters import TelegramFormatter
-from .message_facts import is_ordinary_telegram_text
+from .message_facts import (
+    is_original_human_telegram_attachment,
+    is_original_human_telegram_text,
+    telegram_message_kind,
+)
 from . import telegram_api
 
 logger = logging.getLogger(__name__)
+
+
+def _telegram_size_exceeds(value: object, max_bytes: int | None) -> bool:
+    if max_bytes is None:
+        return False
+    try:
+        size = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return size >= 0 and size > max_bytes
 
 
 @dataclass
@@ -613,7 +634,9 @@ class TelegramBot(BaseIMClient):
             message_id=context.message_id,
             platform="telegram",
             files=context.files,
-            is_ordinary_text=context.is_ordinary_text,
+            is_original_human_text=context.is_original_human_text,
+            is_original_human_attachment=context.is_original_human_attachment,
+            message_kind=context.message_kind,
             platform_specific={
                 **payload,
                 "is_topic_message": True,
@@ -743,7 +766,9 @@ class TelegramBot(BaseIMClient):
             thread_id=str(thread_id) if thread_id is not None else None,
             message_id=str(message.get("message_id")),
             files=files,
-            is_ordinary_text=is_ordinary_telegram_text(message, files),
+            is_original_human_text=is_original_human_telegram_text(message, files),
+            is_original_human_attachment=is_original_human_telegram_attachment(message, files),
+            message_kind=telegram_message_kind(message, files),
             platform="telegram",
             platform_specific={
                 "is_dm": chat.get("type") == "private",
@@ -1411,6 +1436,20 @@ class TelegramBot(BaseIMClient):
             "writing_hand": "✍",
             "thinking_face": "🤔",
             "shrug": "🤷",
+            # Terminal receipts. ``setMessageReaction`` accepts ONLY emoji from
+            # Telegram's fixed list, and neither ⏹️ nor ⚠️ is on it — sent raw,
+            # the whole call is rejected and the turn ends with no trace at all.
+            # These two stand-ins are on the list and carry the same reading:
+            # 🙊 for "stopped talking on your command" (the stop result is
+            # deliberately silent) and 😱 for the alarm of a runtime that died
+            # mid-turn. Both spellings of each source emoji are listed because
+            # the constants carry U+FE0F and callers may strip it.
+            "⏹️": "🙊",
+            "⏹": "🙊",
+            "stop_button": "🙊",
+            "⚠️": "😱",
+            "⚠": "😱",
+            "warning": "😱",
         }
         return aliases.get(normalized, normalized)
 
@@ -1516,6 +1555,60 @@ class TelegramBot(BaseIMClient):
         if max_bytes is not None and len(content) > max_bytes:
             raise ValueError("Downloaded file exceeds max_bytes")
         return content
+
+    async def download_file_to_path(
+        self,
+        file_info: Dict[str, Any],
+        target_path: str,
+        max_bytes: Optional[int] = None,
+        timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
+    ) -> FileDownloadResult:
+        """Resolve and stream a Telegram file without buffering it in memory."""
+
+        file_id = (
+            file_info.get("telegram_file_id")
+            or file_info.get("url")
+            or file_info.get("file_id")
+        )
+        if not file_id:
+            return FileDownloadResult(False, "Telegram file_id is required")
+        if _telegram_size_exceeds(file_info.get("size"), max_bytes):
+            return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
+        target = Path(target_path)
+        try:
+            file_result = await telegram_api.get_file(
+                self.config.bot_token,
+                str(file_id),
+                proxy_url=self._proxy_url,
+            )
+            resolved = file_result.get("result")
+            if not isinstance(resolved, dict) or not resolved.get("file_path"):
+                return FileDownloadResult(False, "Telegram file metadata is invalid")
+            if _telegram_size_exceeds(resolved.get("file_size"), max_bytes):
+                return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
+            download_options: Dict[str, Any] = {
+                "max_bytes": max_bytes,
+                "timeout_seconds": timeout_seconds,
+                "proxy_url": self._proxy_url,
+            }
+            if target_fd is not None:
+                download_options["target_fd"] = target_fd
+            await telegram_api.download_file_to_path(
+                self.config.bot_token,
+                str(resolved["file_path"]),
+                target,
+                **download_options,
+            )
+            return FileDownloadResult(True)
+        except telegram_api.TelegramFileTooLargeError:
+            if target_fd is None:
+                target.unlink(missing_ok=True)
+            return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
+        except Exception:
+            if target_fd is None:
+                target.unlink(missing_ok=True)
+            return FileDownloadResult(False, "Telegram file download failed")
 
     async def open_change_cwd_modal(self, trigger_id: Any, current_cwd: str, channel_id: str = None):
         context = trigger_id if isinstance(trigger_id, MessageContext) else None
@@ -1905,7 +1998,6 @@ class TelegramBot(BaseIMClient):
             build_reasoning_effort_options,
             resolve_model_reasoning_options,
             resolve_opencode_allowed_providers,
-            resolve_opencode_default_model,
             resolve_opencode_provider_preferences,
         )
 
@@ -1926,11 +2018,6 @@ class TelegramBot(BaseIMClient):
             target_model = state.opencode_model
             preferred = resolve_opencode_provider_preferences(state.opencode_default_config, target_model)
             allowed = resolve_opencode_allowed_providers(state.opencode_default_config, state.opencode_models)
-            default_model = resolve_opencode_default_model(
-                state.opencode_default_config,
-                state.opencode_agents,
-                state.opencode_agent,
-            )
             entries = build_opencode_model_option_items(
                 state.opencode_models,
                 max_total=24,
@@ -1938,8 +2025,6 @@ class TelegramBot(BaseIMClient):
                 allowed_providers=allowed,
             )
             options = [(self._t("common.default"), None)]
-            if default_model:
-                options[0] = (f"{self._t('common.default')} - {default_model}", None)
             options.extend((str(entry.get("label")), str(entry.get("value"))) for entry in entries if entry.get("value"))
             return options
         if field == "opencode_reasoning_effort":

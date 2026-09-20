@@ -43,7 +43,7 @@ export const MoreAccountSection: React.FC = () => {
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-surface">
       <div className="flex items-center gap-3 px-4 py-3">
-        <span className="grid size-9 shrink-0 place-items-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-[13px] font-semibold text-cyan">
+        <span className="grid size-9 shrink-0 place-items-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-[13px] font-semibold text-cyan-ink">
           {(email.split('@')[0]?.[0] ?? '?').toUpperCase()}
         </span>
         <div className="min-w-0 flex-1">
@@ -55,7 +55,7 @@ export const MoreAccountSection: React.FC = () => {
         type="button"
         onClick={signOut}
         disabled={signingOut}
-        className="flex w-full items-center gap-2 border-t border-border px-4 py-3 text-left text-sm font-medium text-destructive transition hover:bg-destructive/[0.06] disabled:opacity-60"
+        className="flex w-full items-center gap-2 border-t border-border px-4 py-3 text-left text-sm font-medium text-destructive-ink transition hover:bg-destructive/[0.06] disabled:opacity-60"
       >
         <LogOut className="size-4" />
         {signingOut ? t('appShell.signingOut') : t('appShell.signOut')}
@@ -91,7 +91,7 @@ export const MoreConnectionSection: React.FC = () => {
         <span
           className={clsx(
             'size-2.5 shrink-0 rounded-full',
-            isRunning ? 'bg-mint shadow-[0_0_9px_rgba(91,255,160,0.9)]' : 'bg-muted',
+            isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted',
           )}
         />
         <span className="flex-1 text-sm font-semibold">

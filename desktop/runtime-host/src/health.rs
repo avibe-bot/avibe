@@ -144,26 +144,21 @@ fn parse_runtime_identity_mismatch_body(body: &str) -> Option<RuntimeReadiness> 
         return None;
     };
     let object = payload.as_object()?;
-    let runtime_id = match object.get("desktop_runtime_id") {
-        Some(value) => Some(value.as_str()?),
-        None => None,
-    };
-    if !(object.len() == 4 || (object.len() == 5 && runtime_id.is_some()))
+    let runtime_id = object.get("desktop_runtime_id")?.as_str()?;
+    if object.len() != 5
         || object.get("schema_version").and_then(serde_json::Value::as_u64) != Some(1)
         || object.get("product").and_then(serde_json::Value::as_str) != Some("avibe")
         || object.get("ready").and_then(serde_json::Value::as_bool) != Some(false)
         || object.get("code").and_then(serde_json::Value::as_str) != Some("runtime_identity_mismatch")
-        || runtime_id.is_some_and(|value| {
-            value.len() != 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        })
+        || runtime_id.len() != 64
+        || !runtime_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
         return None;
     }
     Some(RuntimeReadiness {
-        desktop_runtime_id: runtime_id.map(str::to_owned),
+        desktop_runtime_id: Some(runtime_id.to_owned()),
     })
 }
 
@@ -352,10 +347,13 @@ mod tests {
             parse_runtime_identity_mismatch_body(
                 r#"{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch"}"#
             ),
-            Some(RuntimeReadiness {
-                desktop_runtime_id: None
-            })
+            None
         );
+        for invalid in ["", "bad", &"A".repeat(64)] {
+            assert!(parse_runtime_identity_mismatch_body(&format!(
+                r#"{{"schema_version":1,"product":"avibe","ready":false,"code":"runtime_identity_mismatch","desktop_runtime_id":"{invalid}"}}"#
+            )).is_none());
+        }
         assert!(parse_runtime_identity_mismatch_body(
             r#"{"schema_version":1,"product":"avibe","ready":false,"code":"controller_unavailable"}"#
         )

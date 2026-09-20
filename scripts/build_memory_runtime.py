@@ -14,12 +14,23 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-EVEROS_VERSION = "1.2.1"
-PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
+from avibe_memory.artifact_contract import (
+    EMBEDDED_PYTHON_VERSION,
+    EVEROS_VERSION,
+    run_cold_artifact_admission,
+)
+
+
+PYTHON_VERSION = EMBEDDED_PYTHON_VERSION
+LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 UV_VERSION = "0.9.18"
 BIN_PATH = "bin/python"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
@@ -49,6 +60,24 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@contextmanager
+def _temporary_directory(prefix: str) -> Iterator[Path]:
+    """Create scratch space beneath the canonical system temp directory."""
+
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
+
+
+@contextmanager
+def _short_socket_directory(prefix: str) -> Iterator[Path]:
+    """Create canonical scratch space short enough for Unix-domain sockets."""
+
+    temp_root = Path("/tmp").resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
 
 
 def _platform_tag() -> str:
@@ -138,8 +167,8 @@ def create_archive(*, runtime_root: Path, output: Path, platform: str) -> dict[s
 def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
     """Extract and smoke the final bytes in a new directory."""
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-verify-") as temporary_value:
-        destination = Path(temporary_value) / "runtime"
+    with _temporary_directory("avibe-memory-runtime-verify-") as temporary:
+        destination = temporary / "runtime"
         destination.mkdir()
         destination_resolved = destination.resolve()
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -166,9 +195,19 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         binary = _validate_runtime_tree(destination)
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
-        _smoke(binary, cwd=destination.parent)
-        with tempfile.TemporaryDirectory(prefix="mrv-health-", dir="/tmp") as health_home:
-            _sidecar_health_smoke(binary, effective_home=Path(health_home))
+        admission = run_cold_artifact_admission(binary)
+        print(
+            "Memory Runtime cold artifact admission: "
+            f"{admission.duration_ms} ms ({admission.reason or 'ok'})",
+            file=sys.stderr,
+        )
+        if not admission.ok:
+            raise SystemExit(
+                "Memory Runtime cold artifact admission failed: "
+                f"{admission.reason or 'memory_runtime_preparation_failed'}"
+            )
+        with _short_socket_directory("mrv-") as health_home:
+            _sidecar_health_smoke(binary, effective_home=health_home)
 
 
 def prune_runtime(runtime_root: Path) -> None:
@@ -234,13 +273,33 @@ def _sidecar_health_smoke(python: Path, *, effective_home: Path) -> None:
 import asyncio
 import sys
 from pathlib import Path
-from core.memory.everos import EverOSPort
-from core.memory.process import EverOSProcess, EverOSProcessSettings
+from types import SimpleNamespace
+from avibe_memory.everos import EverOSPort
+from avibe_memory.process import EverOSProcess, EverOSProcessSettings
+from avibe_memory.provider_root import ProviderRoot, ProviderRootMetadata
 
 async def verify() -> None:
+    effective_home = Path(sys.argv[2])
+    socket_path = effective_home / "memory" / ".rt" / "everos.sock"
+    provider_root = ProviderRoot(
+        effective_home / "memory" / "everos-root",
+        effective_home=effective_home,
+    )
+    provider_root_meta = SimpleNamespace(
+        provider_root_id="memory-runtime-release-smoke",
+    )
+    provider_root_format = f"everos-{sys.argv[3]}"
+    provider_root_metadata = ProviderRootMetadata(
+        provider_root_format=provider_root_format,
+        compatible_provider_root_formats=frozenset({provider_root_format}),
+        artifact_fingerprint="memory-runtime-release-smoke",
+    )
+    provider_root.ensure(provider_root_meta, provider_root_metadata)
+
     process = EverOSProcess(
         python=Path(sys.argv[1]),
-        effective_home=Path(sys.argv[2]),
+        effective_home=effective_home,
+        socket_path=socket_path,
         settings=EverOSProcessSettings(
             llm_base_url="https://llm.invalid/v1",
             llm_model="unused",
@@ -251,12 +310,16 @@ async def verify() -> None:
         ),
         startup_timeout_seconds=30,
         stop_timeout_seconds=10,
+        provider_root_guard=lambda: provider_root.require_owned(
+            provider_root_meta,
+            provider_root_metadata,
+        ),
     )
     started = await process.start()
     try:
         if not started:
-            raise RuntimeError(f"sidecar failed to start: {process.last_error}")
-        if not await EverOSPort(process.socket_path, sidecar_timeout_seconds=5).health():
+            raise RuntimeError("sidecar failed to start")
+        if not await EverOSPort(socket_path, sidecar_timeout_seconds=5).health():
             raise RuntimeError("sidecar UDS health endpoint failed")
     finally:
         await process.stop()
@@ -271,7 +334,15 @@ asyncio.run(verify())
     }
     try:
         subprocess.run(
-            [str(python), "-B", "-c", script, str(python), str(effective_home)],
+            [
+                str(python),
+                "-B",
+                "-c",
+                script,
+                str(python),
+                str(effective_home),
+                EVEROS_VERSION,
+            ],
             cwd=repository,
             env=env,
             check=True,
@@ -305,8 +376,7 @@ def build_runtime(
     if uv_identity.split()[:2] != ["uv", UV_VERSION]:
         raise SystemExit(f"Memory Runtime builder requires uv {UV_VERSION}")
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-") as temporary_value:
-        temporary = Path(temporary_value)
+    with _temporary_directory("avibe-memory-runtime-") as temporary:
         _run([uv_command, "python", "install", python_version], cwd=temporary)
         found = _run(
             [uv_command, "python", "find", "--no-project", "--managed-python", python_version],
@@ -376,6 +446,16 @@ def build_runtime(
     return archive, metadata
 
 
+def build_output(*, archive: Path, metadata: dict[str, object]) -> dict[str, object]:
+    """Return transport status with reusable manifest metadata kept explicit."""
+
+    return {
+        "ok": True,
+        "archive": str(archive),
+        "metadata": metadata,
+    }
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Build an Avibe-managed EverOS Memory Runtime archive.")
@@ -388,7 +468,11 @@ def main() -> int:
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--python-version", default=PYTHON_VERSION)
     parser.add_argument("--platform", choices=sorted(EXPECTED_PLATFORMS))
-    parser.add_argument("--metadata-output", type=Path)
+    parser.add_argument(
+        "--metadata-output",
+        type=Path,
+        help="Write generator-compatible Memory Runtime metadata JSON to this path.",
+    )
     args = parser.parse_args()
     archive, metadata = build_runtime(
         output_dir=args.output_dir,
@@ -400,7 +484,7 @@ def main() -> int:
     if args.metadata_output is not None:
         args.metadata_output.parent.mkdir(parents=True, exist_ok=True)
         args.metadata_output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"ok": True, "archive": str(archive), **metadata}, indent=2, sort_keys=True))
+    print(json.dumps(build_output(archive=archive, metadata=metadata), indent=2, sort_keys=True))
     return 0
 
 

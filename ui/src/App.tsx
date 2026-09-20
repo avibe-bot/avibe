@@ -21,7 +21,6 @@ import { VaultsPage } from './components/workbench/VaultsPage';
 import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
-import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
 import { RemoteAccessPage } from './components/RemoteAccessPage';
@@ -35,8 +34,14 @@ import { SettingsLogsPage } from './components/settings/SettingsLogsPage';
 import { SettingsMessagingPage } from './components/settings/SettingsMessagingPage';
 import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPage';
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
+import { SettingsGeneralPage } from './components/settings/SettingsGeneralPage';
+import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
+import { SettingsLayout } from './components/settings/SettingsLayout';
+import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
+import type { SessionInfo } from './context/ApiContext';
+import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
@@ -54,9 +59,13 @@ import {
     isSetupCheckBypassed,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
+    REMOTE_AUTH_STATE_EVENT,
+    reportRemoteAuthorizationState,
+    type RemoteAuthorizationState,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
+import { onPageReactivated } from './lib/pageActivity';
 
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
@@ -82,10 +91,7 @@ const ShowPageRoute = lazy(() =>
 const SettingsModelsPage = lazy(() =>
   import('./components/settings/models/SettingsModelsPage').then((m) => ({ default: m.SettingsModelsPage })),
 );
-import {
-  LegacyModelHubRoute,
-  ModelHubCapabilityGate,
-} from './components/settings/models/ModelHubCapabilityGate';
+import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
@@ -99,6 +105,13 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { PermissionsPage } from './features/permissions/PermissionsPage';
+import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
+
+const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
+  const { hash } = useLocation();
+  return <Navigate to={legacySettingsRedirectTarget(to, hash)} replace />;
+};
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -126,6 +139,31 @@ const RemoteLoginGate = ({ target }: { target: string }) => {
     }
 
     return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+};
+
+const RemoteAuthorizationGate = ({
+    state,
+    onRetry,
+}: {
+    state: 'revoked' | 'unavailable';
+    onRetry: () => void;
+}) => {
+    const { t } = useTranslation();
+    return (
+        <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
+            <Card className="max-w-md w-full">
+                <CardHeader>
+                    <CardTitle>{t(`remoteAuthorization.${state}.title`)}</CardTitle>
+                    <CardDescription>{t(`remoteAuthorization.${state}.body`)}</CardDescription>
+                </CardHeader>
+                {state === 'unavailable' ? (
+                    <CardContent>
+                        <Button onClick={onRetry}>{t('remoteAuthorization.retry')}</Button>
+                    </CardContent>
+                ) : null}
+            </Card>
+        </main>
+    );
 };
 
 // Server error codes (from the Web UI's enforce_remote_access_cookie guard)
@@ -187,7 +225,14 @@ const AccessBlocked = ({ code }: { code: string | null }) => {
     );
 };
 
-type GuardStatus = 'loading' | 'ready' | 'needs-setup' | 'remote-login-required' | 'access-blocked';
+type GuardStatus =
+    | 'loading'
+    | 'ready'
+    | 'needs-setup'
+    | 'remote-login-required'
+    | 'authorization-revoked'
+    | 'authorization-unavailable'
+    | 'access-blocked';
 
 const notificationClickPath = (value: unknown): string | null => {
     if (typeof value !== 'string' || !value.startsWith('/')) return null;
@@ -228,7 +273,7 @@ const WebPushNotificationNavigator = () => {
 // change and reset the layout to a "Loading..." div while the two API
 // calls round-tripped — that made every sidebar click feel like a full
 // page reload because ``<AppShell>`` got unmounted and re-mounted.
-const AuthGuard = ({ children }: { children: ReactNode }) => {
+export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { getConfig, getAuthSession } = useApi();
     const { t } = useTranslation();
     const location = useLocation();
@@ -236,6 +281,9 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
+    const [authorizationUnavailable, setAuthorizationUnavailable] = useState(false);
+    const authorizationUnavailableRef = useRef(false);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -251,25 +299,52 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
 
     useEffect(() => {
         const onRemoteAuthRequired = () => setGuardStatus('remote-login-required');
+        const onRemoteAuthorizationState = (event: Event) => {
+            const state = (event as CustomEvent<{ state?: RemoteAuthorizationState }>).detail?.state;
+            if (state === 'revoked') {
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                setGuardStatus('authorization-revoked');
+            } else if (state === 'unavailable') {
+                // This listener can still hold the previous guardStatus until its
+                // dependency effect re-runs, so track recovery independently.
+                authorizationUnavailableRef.current = true;
+                if (guardStatus === 'ready') {
+                    setAuthorizationUnavailable(true);
+                } else {
+                    setGuardStatus('authorization-unavailable');
+                }
+            } else if (state === 'current') {
+                const recoveredFromUnavailable = authorizationUnavailableRef.current
+                    || guardStatus === 'authorization-unavailable';
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                if (recoveredFromUnavailable) {
+                    setAuthCheckVersion((version) => version + 1);
+                }
+            } else if (state === 'changed') {
+                authorizationUnavailableRef.current = false;
+                setAuthorizationUnavailable(false);
+                setAuthCheckVersion((version) => version + 1);
+            }
+        };
         window.addEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
-        return () => window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
-    }, []);
+        window.addEventListener(REMOTE_AUTH_STATE_EVENT, onRemoteAuthorizationState);
+        return () => {
+            window.removeEventListener(REMOTE_AUTH_REQUIRED_EVENT, onRemoteAuthRequired);
+            window.removeEventListener(REMOTE_AUTH_STATE_EVENT, onRemoteAuthorizationState);
+        };
+    }, [guardStatus]);
 
     useEffect(() => {
         if (guardStatus !== 'remote-login-required' || !shouldDeferRemoteAuthRedirect()) return;
 
         let recheckStarted = false;
-        const recheckAfterLogin = () => {
-            if (document.visibilityState !== 'visible' || recheckStarted) return;
+        return onPageReactivated(() => {
+            if (recheckStarted) return;
             recheckStarted = true;
             setAuthCheckVersion((version) => version + 1);
-        };
-        document.addEventListener('visibilitychange', recheckAfterLogin);
-        window.addEventListener('focus', recheckAfterLogin);
-        return () => {
-            document.removeEventListener('visibilitychange', recheckAfterLogin);
-            window.removeEventListener('focus', recheckAfterLogin);
-        };
+        });
     }, [guardStatus]);
 
     useEffect(() => {
@@ -282,10 +357,37 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // transition is fine — it's the setup boundary, not every nav.
         setGuardStatus('loading');
 
-        checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ loginRequired, checkSetup }) => {
+        checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (cancelled) return;
+            setAuthorizationSession(session);
             if (loginRequired) {
                 setGuardStatus('remote-login-required');
+                return null;
+            }
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'revoked'
+            ) {
+                setGuardStatus('authorization-revoked');
+                return null;
+            }
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'unavailable'
+            ) {
+                setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
+                return null;
+            }
+            if (
+                session.remote
+                && session.authenticated
+                && session.authorization_state === 'current'
+                && !session.capabilities.can_manage_instance
+            ) {
+                setGuardStatus('ready');
                 return null;
             }
             if (!checkSetup) {
@@ -298,14 +400,36 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
                 const setupReady = typeof setupState?.needs_setup === 'boolean'
                     ? setupState.needs_setup === false
                     : hasConfiguredPlatformCredentials(config);
-                setGuardStatus(!config || !config.mode || !setupReady ? 'needs-setup' : 'ready');
+                if (!config || !config.mode || !setupReady) {
+                    setGuardStatus('needs-setup');
+                    return;
+                }
+                setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (cancelled) return;
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (cancelled) return;
+            if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
                 setGuardStatus('remote-login-required');
+                return;
+            }
+            if (
+                authCheck?.session.remote
+                && authCheck.session.authenticated
+                && authCheck.session.authorization_state === 'revoked'
+            ) {
+                setGuardStatus('authorization-revoked');
+                return;
+            }
+            if (
+                authCheck?.session.remote
+                && authCheck.session.authenticated
+                && authCheck.session.authorization_state === 'unavailable'
+            ) {
+                setGuardStatus('authorization-unavailable');
+                reportRemoteAuthorizationState('unavailable');
                 return;
             }
             if (authCheck && !authCheck.checkSetup) {
@@ -345,12 +469,29 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'remote-login-required') {
         return <RemoteLoginGate target={guardTarget} />;
     }
+    if (guardStatus === 'authorization-revoked') {
+        return (
+            <RemoteAuthorizationGate
+                state="revoked"
+                onRetry={() => undefined}
+            />
+        );
+    }
+    if (guardStatus === 'authorization-unavailable') {
+        return (
+            <RemoteAuthorizationGate
+                state="unavailable"
+                onRetry={() => reportRemoteAuthorizationState('changed')}
+            />
+        );
+    }
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
-    if (bypassSetupGuard) return children;
-    if (guardStatus === 'needs-setup') {
-        if (location.pathname === '/setup') return children;
+    if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
+        if (location.pathname === '/setup' && authorizationSession) {
+            return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
+        }
         // A wizard finish navigates from /setup to / before the re-validation
         // effect can flip `guardStatus` to loading. Without this render-time
         // bridge, the stale setup-required state immediately redirects back to
@@ -367,7 +508,33 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         }
         return <Navigate to="/setup" replace />;
     }
-    return children;
+    if (!authorizationSession) {
+        // Diagnostics / Logs remain reachable before a session exists so an
+        // unfinished install can still inspect doctor output. Once the session
+        // lands, wrap it so AppShell does not treat the owner as denied.
+        if (bypassSetupGuard) return children;
+        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+    }
+    return (
+        <>
+            <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>
+            {authorizationUnavailable ? (
+                <div
+                    role="status"
+                    className="fixed inset-x-3 bottom-3 z-[100] mx-auto flex max-w-xl items-center justify-between gap-3 border border-border bg-surface px-3 py-2 text-sm text-text shadow-lg"
+                >
+                    <span>{t('remoteAuthorization.unavailable.body')}</span>
+                    <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => reportRemoteAuthorizationState('changed')}
+                    >
+                        {t('remoteAuthorization.retry')}
+                    </Button>
+                </div>
+            ) : null}
+        </>
+    );
 };
 
 // Brief fallback while a lazy Apps route chunk loads (the pages render their own
@@ -501,6 +668,109 @@ const PwaRouteMemory = () => {
   return null;
 };
 
+const settingsRoute = () => (
+  <Route path="/settings" element={<SettingsLayout />}>
+    <Route index element={null} />
+    <Route path="general" element={<SettingsGeneralPage />} />
+    {/* Appearance was the theme page; General now owns the theme controls, so the
+        alias follows them. Account keeps pointing at Replies, which still owns it. */}
+    <Route path="appearance" element={<Navigate to="/settings/general" replace />} />
+    <Route path="account" element={<Navigate to="/settings/replies" replace />} />
+    <Route path="shortcuts" element={<SettingsShortcutsPage />} />
+    <Route path="service" element={<SettingsServicePage />} />
+    <Route path="platforms" element={<SettingsPlatformsPage />} />
+    <Route path="platforms/groups" element={<ChannelList isPage />} />
+    <Route path="platforms/users" element={<UserList />} />
+    <Route path="remote-access" element={<RemoteAccessPage />} />
+    <Route path="backends" element={<SettingsBackendsPage />} />
+    <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
+    <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
+    <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
+    <Route
+      path="models"
+      element={
+        <ModelHubCapabilityGate>
+          <Suspense fallback={<AppsRouteFallback />}>
+            <SettingsModelsPage />
+          </Suspense>
+        </ModelHubCapabilityGate>
+      }
+    />
+    <Route path="dependencies" element={<SettingsDependenciesPage />} />
+    <Route path="memory" element={<SettingsMemoryPage />} />
+    <Route path="replies" element={<SettingsMessagingPage />} />
+    <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
+    <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
+    <Route path="access" element={<PermissionsPage />} />
+  </Route>
+);
+
+const WorkbenchRouteSurface = () => {
+  const navigate = useNavigate();
+  // Keep mounting/focusing Search inside the tap so mobile keyboards can open.
+  // This must use the data-route navigate: descendant <Routes> drop flushSync.
+  const openSearch = () => { void navigate('/search', { flushSync: true }); };
+  return <SettingsOverlayRouteSurface
+    fallbackElement={<Navigate to="/" replace />}
+  >
+    <Route path="/setup" element={<Wizard />} />
+
+    {/* Workbench mode — `/` is the canvas root, the five capability
+        entries (Inbox + Agents/Skills/Harness/Vaults) live alongside it. */}
+    <Route path="/" element={<Workbench />} />
+    <Route path="/inbox" element={<InboxPage onOpenSearch={openSearch} />} />
+    <Route path="/search" element={<SearchPage />} />
+    <Route path="/agents" element={<AgentsPage />} />
+    <Route path="/skills" element={<SkillsPage />} />
+    <Route path="/harness" element={<HarnessPage />} />
+    <Route path="/vaults" element={<VaultsPage />} />
+    <Route path="/projects" element={<ProjectsPage />} />
+    <Route path="/more" element={<Navigate to="/" replace />} />
+
+    <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
+    <Route
+      path="/apps/files"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsFileBrowserPage />
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/terminal"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsTerminalPage />
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/editor"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <AppsEditorPage />
+        </Suspense>
+      }
+    />
+    <Route path="/apps/library" element={<LibraryRoute />} />
+    <Route
+      path="/apps/show/:sessionId"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <ShowPageRoute />
+        </Suspense>
+      }
+    />
+    <Route path="/chat/:sessionId" element={<ChatPage />} />
+
+    {settingsRoute()}
+
+    {LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => (
+      <Route key={from} path={from} element={<LegacySettingsRedirectRoute to={to} />} />
+    ))}
+  </SettingsOverlayRouteSurface>;
+};
+
 function RouterRoot() {
   return (
     <UnsavedChangesProvider>
@@ -517,131 +787,7 @@ const router = createBrowserRouter(
   createRoutesFromElements(
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>
-        <Route path="/setup" element={<Wizard />} />
-
-        {/* Workbench mode — `/` is the canvas root, the five capability
-            entries (Inbox + Agents/Skills/Harness/Vaults) live alongside
-            it. Commit 02 ships sidebar + placeholder pages; the real
-            module screens land in later commits. */}
-        <Route path="/" element={<Workbench />} />
-        <Route path="/inbox" element={<InboxPage />} />
-        <Route path="/search" element={<SearchPage />} />
-        <Route path="/agents" element={<AgentsPage />} />
-        <Route path="/skills" element={<SkillsPage />} />
-        <Route path="/harness" element={<HarnessPage />} />
-        <Route path="/vaults" element={<VaultsPage />} />
-        <Route path="/projects" element={<ProjectsPage />} />
-        {/* /more retired: the workbench Apps tab now summons the Dock drawer
-            (§7.1b), which absorbed the old More-page content. Redirect any
-            lingering link/bookmark home. */}
-        <Route path="/more" element={<Navigate to="/" replace />} />
-        {/* Apps layer — File Browser (Phase 1) + Terminal (Phase 2). The
-            sidebar Apps launcher opens these; /apps lands on the file browser. */}
-        <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
-        <Route
-          path="/apps/files"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsFileBrowserPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/apps/terminal"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsTerminalPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/apps/editor"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <AppsEditorPage />
-            </Suspense>
-          }
-        />
-        <Route path="/apps/library" element={<LibraryRoute />} />
-        {/* A pinned Show Page opened as an app. Desktop opens a window and hands
-            back to the canvas; mobile frames it full-screen (§7.1b). */}
-        <Route
-          path="/apps/show/:sessionId"
-          element={
-            <Suspense fallback={<AppsRouteFallback />}>
-              <ShowPageRoute />
-            </Suspense>
-          }
-        />
-        <Route path="/chat/:sessionId" element={<ChatPage />} />
-
-        {/* Control Panel mode — existing pages moved under /admin/* */}
-        <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
-        <Route path="/admin/dashboard" element={<Dashboard />} />
-        <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
-        <Route path="/admin/groups" element={<ChannelList isPage />} />
-        <Route path="/admin/users" element={<UserList />} />
-        {/* Show Pages moved into the App Library (workbench). Redirect the old
-            control-panel page (?view=pages so it lands on the Show Pages tab the
-            bookmark asked for) so bookmarks + external links keep working. */}
-        <Route path="/admin/show-pages" element={<Navigate to="/apps/library?view=pages" replace />} />
-        <Route path="/admin/logs" element={<SettingsLogsPage standalone />} />
-        {/* No client-side route at /admin/settings: Flask owns GET /settings as
-            a JSON API. The Flask handler redirects browser-Accept hits to
-            /admin/settings/service. */}
-        <Route path="/admin/settings/service" element={<SettingsServicePage />} />
-        <Route path="/admin/settings/platforms" element={<SettingsPlatformsPage />} />
-        <Route path="/admin/settings/backends" element={<SettingsBackendsPage />} />
-        <Route path="/admin/settings/backends/opencode" element={<SettingsOpencodeProviderPage />} />
-        <Route path="/admin/settings/backends/claude" element={<SettingsClaudeProviderPage />} />
-        <Route path="/admin/settings/backends/codex" element={<SettingsCodexProviderPage />} />
-        <Route
-          path="/admin/settings/models"
-          element={
-            <ModelHubCapabilityGate>
-              <Suspense fallback={<AppsRouteFallback />}>
-                <SettingsModelsPage />
-              </Suspense>
-            </ModelHubCapabilityGate>
-          }
-        />
-        <Route path="/admin/settings/dependencies" element={<SettingsDependenciesPage />} />
-        <Route path="/admin/settings/memory" element={<SettingsMemoryPage />} />
-        <Route path="/admin/settings/messaging" element={<SettingsMessagingPage />} />
-        <Route path="/admin/settings/diagnostics" element={<SettingsDiagnosticsPage />} />
-        <Route path="/admin/settings/logs" element={<SettingsLogsPage />} />
-
-        {/* Legacy redirects: old top-level paths → /admin/* equivalents.
-            Bookmarked URLs and external links keep working without a server
-            round-trip. */}
-        <Route path="/dashboard" element={<Navigate to="/admin/dashboard" replace />} />
-        <Route path="/groups" element={<Navigate to="/admin/groups" replace />} />
-        <Route path="/channels" element={<Navigate to="/admin/groups" replace />} />
-        <Route path="/users" element={<Navigate to="/admin/users" replace />} />
-        <Route path="/logs" element={<Navigate to="/admin/logs" replace />} />
-        {/* Exact /settings — the server used to redirect browser hits here
-            to the settings UI, but that handler moved to /api/settings in
-            the route migration. Keep the bookmark working client-side. */}
-        <Route path="/settings" element={<Navigate to="/admin/settings/service" replace />} />
-        <Route path="/settings/service" element={<Navigate to="/admin/settings/service" replace />} />
-        <Route path="/settings/platforms" element={<Navigate to="/admin/settings/platforms" replace />} />
-        <Route path="/settings/backends" element={<Navigate to="/admin/settings/backends" replace />} />
-        <Route path="/settings/backends/opencode" element={<Navigate to="/admin/settings/backends/opencode" replace />} />
-        <Route path="/settings/backends/claude" element={<Navigate to="/admin/settings/backends/claude" replace />} />
-        <Route path="/settings/backends/codex" element={<Navigate to="/admin/settings/backends/codex" replace />} />
-        <Route path="/settings/models" element={<LegacyModelHubRoute />} />
-        <Route path="/settings/dependencies" element={<Navigate to="/admin/settings/dependencies" replace />} />
-        <Route path="/settings/memory" element={<Navigate to="/admin/settings/memory" replace />} />
-        <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
-        <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
-        <Route path="/settings/logs" element={<Navigate to="/admin/settings/logs" replace />} />
-        <Route path="/remote-access" element={<Navigate to="/admin/remote-access" replace />} />
-        <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
-        <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
-        {/* The server intentionally serves the SPA shell for every extensionless
-            path. Keep stale bookmarks and retired push targets inside AuthGuard,
-            then recover authenticated/local clients to the workbench root. */}
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
     </Route>,
   ),

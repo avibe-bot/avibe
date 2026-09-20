@@ -306,7 +306,7 @@ Names/arg-keys differ per backend (Claude Capitalized `file_path`/`command`; Cod
 `bash`/`file_change` with `file`+`type`; OpenCode lowercase `file_path||path`; a
 restore path emits `` `name`: `arg` `` with no JSON) — hence the degrade. Pure
 helpers in `ui/src/lib/agentActivity.ts`: `parseToolCall` (name + parsed JSON args
-or `null`), `toolRecipe` (tier-1 known-tool recipe: command → `$ cmd`; read → dir
+or `null`), `toolRecipe` (tier-1 known-tool recipe: command → command body; read → dir
 muted + basename; edit/write → basename + op badge, op from name or Codex `type`;
 web/search/grep → quoted query/URL; task → description — case-insensitive prefix,
 paths probe `file_path`→`path`→`file`), `genericChips` (tier-2 ≤3 scalar chips +
@@ -315,6 +315,13 @@ oversize (>20k) → `args: null` → tier 3; `ActivityToolRow` also wraps the pa
 try/catch so nothing can blank a row. Rendered by `ToolSummary` in
 `AgentActivityGroup.tsx`. Unit-tested per tier + exception fallback in
 `agentActivity.test.ts`.
+
+Command summaries omit the decorative shell prompt and unwrap a single
+`bash`/`zsh`/`sh -c` or `-lc` invocation only when its command argument is a
+fully decoded literal word. Extra arguments, outer expansions, operators, and
+unrecognized syntax keep the original invocation visible. Nested shells are not
+recursively unwrapped. Stored arguments, expanded details, and JSON remain
+unchanged; this is a display-only projection shared by live and historical rows.
 
 ### B — Tool-row visibility eye toggle + `config.ui.show_tool_calls`
 

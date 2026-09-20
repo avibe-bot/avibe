@@ -26,6 +26,10 @@ from storage.models import (
     state_meta,
 )
 from storage.settings_service import make_scope_id, upsert_scope
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+)
 from config.v2_settings import make_thread_native_id, split_thread_native_id
 
 logger = logging.getLogger(__name__)
@@ -67,9 +71,7 @@ _refresh_locks_lock = threading.Lock()
 _refresh_locks: dict[str, threading.Lock] = {}
 _scheduled_refreshes_lock = threading.Lock()
 _scheduled_refreshes: set[str] = set()
-_migration_lock = threading.Lock()
 _legacy_migration_lock = threading.Lock()
-_migrated_db_paths: set[Path] = set()
 
 
 @dataclass
@@ -161,13 +163,26 @@ def _db_path(db_path: Path | None = None) -> Path:
 
 
 def _ensure_sqlite(db_path: Path | None = None) -> Path:
+    """Make the discovery tables usable, the same way every other store does.
+
+    This used to keep its own lock and its own set of already-migrated paths --
+    a third answer to a question `ensure_sqlite_state` and `run_migrations`
+    already answer between them, and a weaker one on both counts: the lock was
+    process-local, so it never excluded the Web UI process, and the memo skipped
+    `ensure_sqlite_state` entirely. Discovery can be the first code to touch the
+    database on a machine upgrading from JSON state, and when it was, it created
+    the schema without the JSON import every other entry point guarantees.
+    """
+
     target = _db_path(db_path)
+    if db_path is None:
+        from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+
+        ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+        return target
     guard_source_checkout_default_state_migration(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _migration_lock:
-        if target not in _migrated_db_paths:
-            run_migrations(target)
-            _migrated_db_paths.add(target)
+    run_migrations(target)
     return target
 
 
@@ -1000,10 +1015,17 @@ def _descendant_scope_rows(conn: Connection, scope_id: str) -> list[dict[str, An
     return descendants
 
 
-def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) -> dict[str, bool]:
+def _remove_scope_row_preserving_history(
+    conn: Connection, row: dict[str, Any]
+) -> tuple[dict[str, bool], bool]:
     """Delete one scope's settings, then delete or dismiss its scope row."""
     scope_id = str(row["id"])
-    conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+    settings_result = conn.execute(
+        scope_settings.delete().where(scope_settings.c.scope_id == scope_id)
+    )
+    runtime_settings_changed = bool(settings_result.rowcount) and str(
+        row["scope_type"]
+    ) in RUNTIME_SETTINGS_SCOPE_TYPES
     if _scope_has_history(conn, scope_id):
         now = _utc_now_iso()
         metadata = _json_loads(row["metadata_json"], {})
@@ -1013,9 +1035,9 @@ def _remove_scope_row_preserving_history(conn: Connection, row: dict[str, Any]) 
             .where(scopes.c.id == scope_id)
             .values(metadata_json=_json_dumps(metadata), updated_at=now)
         )
-        return {"removed": False, "dismissed": True}
+        return {"removed": False, "dismissed": True}, runtime_settings_changed
     result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
-    return {"removed": bool(result.rowcount), "dismissed": False}
+    return {"removed": bool(result.rowcount), "dismissed": False}, runtime_settings_changed
 
 
 def _clear_scope_debounce_entries(db_path: Path | None, rows: list[dict[str, Any]]) -> None:
@@ -1036,6 +1058,7 @@ def delete_scope(
     *,
     scope_type: str = CHANNEL_SCOPE_TYPE,
     db_path: Path | None = None,
+    user_context: Any = None,
 ) -> dict[str, bool]:
     """Remove a discovered scope and its settings without destroying history.
 
@@ -1054,16 +1077,35 @@ def delete_scope(
     Returns ``{"removed": bool, "dismissed": bool}``.
     """
     scope_id = make_scope_id(platform, scope_type, native_id)
+    from storage.agent_session_rows import reserve_write_lock
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    context = require_instance_role(user_context, "member")
     engine = _engine(db_path)
     try:
         with engine.begin() as conn:
+            reserve_write_lock(conn)
             row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
             if row is None:
                 return {"removed": False, "dismissed": False}
             descendants = _descendant_scope_rows(conn, scope_id)
+            if not context.can_manage_access_members:
+                removed_ids = [scope_id, *(item["id"] for item in descendants)]
+                settings = conn.execute(
+                    select(scope_settings.c.settings_json).where(scope_settings.c.scope_id.in_(removed_ids))
+                ).scalars()
+                # Removing a parent also removes thread overrides. All would
+                # return to the open default if rediscovered.
+                if any(json.loads(value or "{}").get("require_bind") for value in settings):
+                    raise InstanceAuthorizationError("owner")
+            runtime_settings_changed = False
             for descendant in reversed(descendants):
-                _remove_scope_row_preserving_history(conn, descendant)
-            outcome = _remove_scope_row_preserving_history(conn, dict(row))
+                _, descendant_changed = _remove_scope_row_preserving_history(conn, descendant)
+                runtime_settings_changed = runtime_settings_changed or descendant_changed
+            outcome, row_changed = _remove_scope_row_preserving_history(conn, dict(row))
+            runtime_settings_changed = runtime_settings_changed or row_changed
+            if runtime_settings_changed:
+                mark_runtime_settings_changed(conn)
             _clear_scope_debounce_entries(db_path, [dict(row), *descendants])
             return outcome
     finally:

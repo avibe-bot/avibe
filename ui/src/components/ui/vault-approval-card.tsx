@@ -10,6 +10,7 @@ import {
   type VaultSignedOperationContext,
   type VaultSourceSelector,
 } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { SigningAddressList } from './signing-address-list';
@@ -114,6 +115,7 @@ export const VaultApprovalCard: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
+  const { capabilities } = useInstanceAuthorization();
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
@@ -345,7 +347,7 @@ export const VaultApprovalCard: React.FC<{
   if (!card) {
     return (
       <div className="flex flex-col gap-3">
-        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">
           {t('vaults.approval.errors.loadFailed')}
         </div>
         <div className="flex justify-end">
@@ -357,7 +359,8 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || (!isSign && !option);
+  const canApprove = capabilities.can_use_vault_secrets;
+  const approveDisabled = busy || !canApprove || (!isSign && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -366,7 +369,7 @@ export const VaultApprovalCard: React.FC<{
         <div
           className={cn(
             'flex size-10 shrink-0 items-center justify-center rounded-xl',
-            isSign ? 'bg-violet/15 text-violet' : 'bg-gold/15 text-gold',
+            isSign ? 'bg-violet/15 text-violet-ink' : 'bg-gold/15 text-gold-ink',
           )}
         >
           {isSign ? <PenTool className="size-5" /> : <LockKeyhole className="size-5" />}
@@ -401,7 +404,7 @@ export const VaultApprovalCard: React.FC<{
             <Badge variant="secondary">{t('vaults.standard')}</Badge>
           )}
           {isKeypair ? (
-            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet">
+            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet-ink">
               <Wallet className="size-3" />
               {t('vaults.signing')}
             </Badge>
@@ -457,7 +460,7 @@ export const VaultApprovalCard: React.FC<{
                   aria-label={t('vaults.approval.copyDigest')}
                   className="shrink-0 pt-1 text-muted transition-colors hover:text-foreground"
                 >
-                  {copiedDigest ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5" />}
+                  {copiedDigest ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
                 </button>
               </div>
               {delivery.scheme ? <Badge variant="secondary" className="self-start">{delivery.scheme}</Badge> : null}
@@ -502,7 +505,7 @@ export const VaultApprovalCard: React.FC<{
           of the approval operation, so this card only shows the design's operation note. */}
       {needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
-          <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint" />
+          <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
           {isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
         </span>
       ) : null}
@@ -535,7 +538,7 @@ export const VaultApprovalCard: React.FC<{
       ) : null}
 
       {error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}
         </div>
       ) : null}
@@ -563,7 +566,7 @@ export const VaultApprovalCard: React.FC<{
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
-          <Button type="button" variant="outline" onClick={deny} disabled={busy}>
+          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
             {t('vaults.approval.deny')}
           </Button>
           <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>

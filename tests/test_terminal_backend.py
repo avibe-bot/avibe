@@ -34,7 +34,7 @@ from core.terminal_service import (
     _tmux_socket_name,
     sanitize_session_id,
 )
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
@@ -240,6 +240,11 @@ async def _open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path)
 
     monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
     monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+    # The process is fake; its PID may belong to the runner or a user's real
+    # process. Keep shutdown's group lookup and signal delivery fake as well.
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(terminal_service.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(terminal_service.os, "killpg", lambda pid, signum: signals.append((pid, signum)))
 
     service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
     try:
@@ -250,6 +255,7 @@ async def _open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path)
         await service.shutdown()
         for fd in opened_fds:
             terminal_service._close_fd(fd)
+    assert signals == [(4321, signal.SIGTERM)]
 
 
 def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
@@ -1428,6 +1434,62 @@ def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch)
     assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
+def test_remote_terminal_websocket_closes_when_authorization_becomes_unavailable(monkeypatch):
+    from vibe import remote_access
+
+    class BlockingTerminalService:
+        def start_reaper(self) -> None:
+            pass
+
+        async def handle_websocket(self, websocket, session_id, *, initial_cwd=None):
+            await asyncio.Event().wait()
+
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    monkeypatch.setattr(ui_server, "_terminal_origin_allowed", lambda websocket: True)
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", V2Config.default)
+    monkeypatch.setattr(ui_server, "_websocket_is_local_request", lambda *args: False)
+
+    async def authorize(*args, **kwargs):
+        payload = {
+            "email": "owner@example.com",
+            "sub": "remote-owner",
+            "instance_id": "inst-1",
+            "iat": 1,
+            "exp": 4_102_444_800,
+            "vibe_instance_id": "inst-1",
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
+        }
+        return payload, remote_access.AuthorizationResolution("current", payload=payload)
+
+    async def authorization_loss(*args, **kwargs):
+        return "unavailable"
+
+    monkeypatch.setattr(
+        ui_server,
+        "_remote_access_websocket_authorization",
+        authorize,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_wait_for_remote_session_authorization_loss",
+        authorization_loss,
+    )
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: BlockingTerminalService())
+    websocket = _RecordingWebSocket()
+    websocket.client = None
+    websocket.headers = {"host": "alex.avibe.bot"}
+    websocket.query_params = {}
+
+    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
+
+    assert websocket.calls == [
+        ("accept", None),
+        ("close", ui_server._AUTHORIZATION_UNAVAILABLE_WEBSOCKET_CLOSE_CODE),
+    ]
+
+
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -1611,25 +1673,36 @@ def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monk
     assert terminated == []
 
 
-def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeypatch, tmp_path):
+def test_remote_org_terminal_delete_is_subject_scoped(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
     config = _save_remote_config(tmp_path)
     user_one_effective = ui_server._terminal_effective_session_id("shared-session", "user-1")
+    user_two_effective = ui_server._terminal_effective_session_id("shared-session", "user-2")
     terminated: list[str] = []
 
     class _FakeService:
         async def terminate(self, session_id: str) -> bool:
             terminated.append(session_id)
-            return session_id == user_one_effective
+            return session_id == user_two_effective
 
     monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
 
     user_two_client = app.test_client()
     user_two_client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "user-2@example.com", "user-2"),
+        remote_session_cookie(
+            config,
+            "user-2@example.com",
+            "user-2",
+            role="viewer",
+            access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-user-2",
+            organization_role="member",
+            group_ids=[],
+        ),
         domain="alex.avibe.bot",
     )
     headers = csrf_headers(user_two_client, "https://alex.avibe.bot")
@@ -1646,13 +1719,13 @@ def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeyp
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert response.status_code == 404
+    assert response.status_code == 204
     assert malicious_response.status_code == 404
+    assert malicious_response.get_json()["error"] == "terminal_session_not_found"
     assert terminated == [
-        ui_server._terminal_effective_session_id("shared-session", "user-2"),
+        user_two_effective,
         ui_server._terminal_effective_session_id(user_one_effective, "user-2"),
     ]
-    assert user_one_effective not in terminated
 
 
 def test_terminal_service_ignores_invalid_limit_env(monkeypatch):

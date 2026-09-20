@@ -16,17 +16,59 @@ import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from storage.agent_session_rows import reserve_write_lock
-from storage.models import agents, scope_settings, scopes
+from storage import project_access_service
+from storage.models import agents, scope_settings, scopes, state_meta
+from vibe.authorization import (
+    AuthorizationContext,
+    require_instance_role,
+)
 
 
 PROJECT_PLATFORM = "avibe"
 PROJECT_SCOPE_TYPE = "project"
+PROJECT_ORDER_KEY = "workbench.project_order.v1"
+
+
+class ProjectOrderConflict(ValueError):
+    """The visible order changed since the client began its drag."""
+
+
+def _saved_project_order(conn: Connection) -> list[str]:
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == PROJECT_ORDER_KEY)).scalar_one_or_none()
+    try:
+        order = json.loads(raw) if raw else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return list(dict.fromkeys(item for item in order if isinstance(item, str))) if isinstance(order, list) else []
+
+
+def _complete_project_order(conn: Connection) -> list[str]:
+    all_ids = conn.execute(
+        select(scopes.c.native_id)
+        .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
+        .order_by(scopes.c.first_seen_at.asc(), scopes.c.id.asc())
+    ).scalars().all()
+    known = set(all_ids)
+    saved = [project_id for project_id in _saved_project_order(conn) if project_id in known]
+    saved_set = set(saved)
+    return saved + [project_id for project_id in all_ids if project_id not in saved_set]
+
+
+def _save_project_order(conn: Connection, order: list[str]) -> None:
+    statement = sqlite_insert(state_meta).values(
+        key=PROJECT_ORDER_KEY, value_json=json.dumps(order), updated_at=_utc_now_iso()
+    )
+    conn.execute(statement.on_conflict_do_update(
+        index_elements=[state_meta.c.key],
+        set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
+    ))
 
 
 def _utc_now_iso() -> str:
@@ -54,8 +96,12 @@ def _resolve_folder(folder_path: str) -> Path:
     return folder
 
 
-def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[str, Any]]:
-    """Find an existing avibe *project* scope whose folder matches ``workdir``.
+def _find_project_by_workdir(
+    conn: Connection,
+    context: AuthorizationContext,
+    workdir: str,
+) -> Optional[dict[str, Any]]:
+    """Find the visible avibe *project* scope whose folder matches ``workdir``.
 
     Only avibe project scopes are considered: IM channel scopes can carry
     their own ``scope_settings.workdir``, so matching across all scopes would
@@ -64,6 +110,15 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     so it lines up with how projects are stored. When legacy duplicates share a
     path, prefer an active row, then the most recently seen, so the pick is
     deterministic.
+
+    The visibility check lives *here* rather than in the caller, because a
+    folder path is a lookup key exactly as much as a project id is. Gating the
+    one caller would leave the next one free to skip it; gating the resolver
+    means every way of reaching a project row goes through the same check
+    ``list_projects`` applies. A hidden match raises ``LookupError`` — the same
+    404 the id-keyed paths answer with — rather than reporting "no match":
+    reporting no match would mint a second project scope over a folder a
+    restricted project already owns, which is a worse outcome than refusing.
     """
 
     row = (
@@ -91,6 +146,7 @@ def _find_project_by_workdir(conn: Connection, workdir: str) -> Optional[dict[st
     )
     if row is None:
         return None
+    _require_visible_project(conn, context, str(row["native_id"]))
     return {"scope_id": row["scope_id"], "native_id": row["native_id"], "enabled": row["enabled"]}
 
 
@@ -133,6 +189,23 @@ class ProjectAgentUnavailableError(ValueError):
     def __init__(self, *, agent_name: str) -> None:
         super().__init__(self.code)
         self.agent_name = agent_name
+
+
+class ProjectAgentAudienceError(ProjectAgentUnavailableError):
+    """Retained for the coded 400 contract; no longer raised at assignment time.
+
+    A project default used to be rejected unless its resource policy was
+    audience-wide. That check was removed: no predicate over policy shape is
+    both sound and usable (see ``core.vibe_agents`` above
+    ``resolve_usable_default_agent``). The ACL is now enforced per-principal at
+    use time, where a default the caller cannot use degrades to one they can.
+
+    The class stays so the ``project_agent_audience_restricted`` code remains a
+    recognized, machine-distinguishable member of the coded 400 family for any
+    client that still branches on it.
+    """
+
+    code = "project_agent_audience_restricted"
 
 
 # Single source of truth for the columns every project payload reads, so
@@ -193,6 +266,31 @@ def _project_dict(row: Any) -> dict[str, Any]:
     }
 
 
+def _project_for_context(
+    conn: Connection,
+    context: AuthorizationContext,
+    project: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the Project fields and capabilities safe for this caller."""
+
+    payload = dict(project)
+    project_id = str(project.get("id") or "")
+    effective_role = project_access_service.get_effective_project_role(
+        conn,
+        context,
+        project_id,
+    )
+    payload["capabilities"] = {
+        "can_chat": project_access_service.role_allows(effective_role, "editor"),
+        "has_folder": bool(payload.get("folder_path")),
+    }
+    if not project_access_service.role_allows(effective_role, "editor"):
+        # Effective Viewers must not disclose host-local filesystem details.
+        payload["folder_path"] = ""
+        payload["metadata"] = {}
+    return payload
+
+
 def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any], now: str) -> None:
     """Apply a partial ``scope_settings`` update, inserting the row if missing.
 
@@ -219,8 +317,14 @@ def _write_scope_settings(conn: Connection, scope_id: str, values: dict[str, Any
         conn.execute(update(scope_settings).where(scope_settings.c.scope_id == scope_id).values(**values))
 
 
-def list_projects(conn: Connection, *, include_archived: bool = False) -> list[dict[str, Any]]:
-    """Return all avibe projects sorted by recency, optionally including archived ones."""
+def list_projects(
+    conn: Connection,
+    *,
+    include_archived: bool = False,
+    navigation_order: bool = False,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return projects by recency unless a navigation consumer requests saved order."""
 
     query = (
         select(*_PROJECT_COLUMNS)
@@ -229,7 +333,10 @@ def list_projects(conn: Connection, *, include_archived: bool = False) -> list[d
             .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
         )
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
-        .order_by(scopes.c.last_seen_at.desc())
+        .order_by(
+            scopes.c.first_seen_at.asc() if navigation_order else scopes.c.last_seen_at.desc(),
+            scopes.c.id.asc(),
+        )
     )
     rows = conn.execute(query).mappings().all()
     out: list[dict[str, Any]] = []
@@ -238,18 +345,115 @@ def list_projects(conn: Connection, *, include_archived: bool = False) -> list[d
         if not include_archived and not enabled:
             continue
         out.append(_project_dict(row))
-    return out
+    context = require_instance_role(authorization_context, "viewer")
+    if navigation_order:
+        positions = {project_id: index for index, project_id in enumerate(_saved_project_order(conn))}
+        out.sort(key=lambda project: positions.get(project["id"], len(positions)))
+    return [
+        _project_for_context(conn, context, project)
+        for project in project_access_service.filter_accessible_projects(conn, context, out)
+    ]
 
 
-def get_project(conn: Connection, project_id: str) -> dict[str, Any]:
+def reorder_projects(
+    conn: Connection,
+    order: Any,
+    *,
+    expected_order: Any,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Reorder visible active projects while preserving every other project's slot."""
+    context = require_instance_role(authorization_context, "member")
+    for ids in (order, expected_order):
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("Project order must be a list of project ids.")
+        if len(ids) != len(set(ids)):
+            raise ValueError("Project order must not contain duplicate ids.")
+    if set(order) != set(expected_order):
+        raise ValueError("Project order must contain the same projects as its baseline.")
+    reserve_write_lock(conn)
+    visible = list_projects(conn, navigation_order=True, authorization_context=context)
+    if expected_order != [project["id"] for project in visible]:
+        raise ProjectOrderConflict("Project order changed. Refresh the list and try again.")
+
+    # Keep hidden and archived slots; a restricted caller can only permute the
+    # projects they can currently see. New projects follow all existing slots.
+    complete = _complete_project_order(conn)
+    visible_ids = set(order)
+    replacement = iter(order)
+    merged = [next(replacement) if project_id in visible_ids else project_id for project_id in complete]
+    _save_project_order(conn, merged)
+    return list_projects(conn, navigation_order=True, authorization_context=context)
+
+
+def _require_visible_project(
+    conn: Connection,
+    context: AuthorizationContext,
+    project_id: str,
+) -> None:
+    """Refuse a Project the caller cannot see, exactly as ``list_projects`` hides it.
+
+    The instance role says whether a principal may administer Projects at all;
+    it does not say *which* Projects. Those are two different questions, and
+    answering only the first is what let a caller who knows an id mutate a
+    restricted Project that ``list_projects`` correctly omits for them.
+
+    ``get_effective_project_role`` is the same helper the list path applies, so
+    the floor here is the visibility floor rather than a second predicate:
+    Instance Owner and Personal installs short-circuit inside it (a Personal
+    install has no Project ACL, so the instance role stays sufficient), an
+    ``inherit`` or absent policy yields the instance role, and a restricted
+    policy yields the caller's binding or nothing at all.
+
+    ``LookupError`` rather than a refusal, matching ``get_project``: a Project
+    the caller may not see must not be distinguishable from one that does not
+    exist, or the 403/404 split enumerates the restricted Projects.
+    """
+
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
+
+
+def get_project(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = require_instance_role(authorization_context, "viewer")
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
     scope_id = _make_scope_id(project_id)
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
+
+
+def get_project_workdir(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> str:
+    """Return the authorized Project workdir for internal runtime execution.
+
+    Remote Project payloads deliberately redact host paths. Runtime services
+    such as Skills and the project instruction editor still need the real cwd
+    after authorization, so keep that internal lookup separate from the HTTP
+    response projection instead of weakening ``get_project`` redaction.
+    """
+
+    context = require_instance_role(authorization_context, "viewer")
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
+    project = _project_payload(conn, _make_scope_id(project_id))
+    return str(project.get("folder_path") or "")
 
 
 def create_project(
     conn: Connection,
     folder_path: str,
     display_name: Optional[str] = None,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an avibe project, or reuse the existing one for this folder.
 
@@ -260,12 +464,19 @@ def create_project(
     after archiving, without a dedicated unarchive endpoint. The caller's
     ``display_name`` is intentionally ignored on reuse so re-opening a folder
     never clobbers a name the user set earlier; renaming stays explicit.
+
+    Reuse is a project lookup, so it carries the same visibility rule as every
+    other one: ``_find_project_by_workdir`` refuses a match the caller cannot
+    see, which is what stops a folder path from being a side door onto a
+    restricted project's payload — or onto reviving an archived one.
     """
 
+    context = require_instance_role(authorization_context, "member")
     folder = _resolve_folder(folder_path)
+    reserve_write_lock(conn)
     now = _utc_now_iso()
 
-    existing = _find_project_by_workdir(conn, str(folder))
+    existing = _find_project_by_workdir(conn, context, str(folder))
     if existing is not None:
         scope_id = existing["scope_id"]
         if not existing["enabled"]:
@@ -274,17 +485,18 @@ def create_project(
                 .where(scope_settings.c.scope_id == scope_id)
                 .values(enabled=1, updated_at=now)
             )
-        # Treat (re)opening as recent activity so the project sorts to the top.
+        # Keep the activity timestamp for consumers outside the fixed project tree.
         conn.execute(
             update(scopes)
             .where(scopes.c.id == scope_id)
             .values(last_seen_at=now, updated_at=now)
         )
-        return _project_payload(conn, scope_id)
+        return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
     project_id = _new_project_id()
     scope_id = _make_scope_id(project_id)
     name = (display_name or folder.name).strip() or project_id
+    order = _complete_project_order(conn)
 
     conn.execute(
         scopes.insert().values(
@@ -320,7 +532,8 @@ def create_project(
             updated_at=now,
         )
     )
-    return _project_payload(conn, scope_id)
+    _save_project_order(conn, [*order, project_id])
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def update_project(
@@ -335,6 +548,7 @@ def update_project(
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
     reasoning_effort: Any = _UNSET,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update a project's name, folder, and/or default Agent route.
 
@@ -343,7 +557,14 @@ def update_project(
     lets Project Settings clear the default back to "follow the global default"
     by sending ``None``s. Empty strings normalize to ``None`` so an empty pick
     clears too.
+
+    A newly selected default is checked for existence and availability only. It
+    is deliberately not validated against the project audience: the ACL is
+    enforced per-principal at use time, where a default a caller cannot use
+    degrades to one they can (``core.vibe_agents.resolve_usable_default_agent``).
     """
+    context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     reserve_write_lock(conn)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
@@ -393,10 +614,9 @@ def update_project(
         if selected_agent is None:
             raise ProjectAgentUnavailableError(agent_name=cleaned_agent_id)
         preserves_current_identity = cleaned_agent_id == current_agent_id
-        if not preserves_current_identity and (
-            not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None
-        ):
-            raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
+        if not preserves_current_identity:
+            if not bool(selected_agent["enabled"]) or selected_agent["archived_at"] is not None:
+                raise ProjectAgentUnavailableError(agent_name=selected_agent["name"])
         agent_name = selected_agent["name"]
     elif agent_name is not _UNSET:
         requested_agent = str(agent_name or "").strip() or None
@@ -408,15 +628,15 @@ def update_project(
             except ValueError as exc:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent) from exc
             available_agent = conn.execute(
-                select(agents.c.name)
+                select(agents.c.id, agents.c.name)
                 .where(agents.c.normalized_name == normalized_agent)
                 .where(agents.c.enabled == 1)
                 .where(agents.c.archived_at.is_(None))
                 .limit(1)
-            ).scalar_one_or_none()
+            ).mappings().first()
             if available_agent is None:
                 raise ProjectAgentUnavailableError(agent_name=requested_agent)
-            agent_name = available_agent
+            agent_name = available_agent["name"]
     for field_name, value in (
         ("agent_name", agent_name),
         ("agent_variant", agent_variant),
@@ -428,10 +648,17 @@ def update_project(
     if settings_values:
         _write_scope_settings(conn, scope_id, settings_values, now)
 
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
-def archive_project(conn: Connection, project_id: str) -> dict[str, Any]:
+def archive_project(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = require_instance_role(authorization_context, "member")
+    _require_visible_project(conn, context, project_id)
     scope_id = _make_scope_id(project_id)
     existing = conn.execute(select(scopes.c.id).where(scopes.c.id == scope_id)).scalar_one_or_none()
     if existing is None:
@@ -467,7 +694,7 @@ def archive_project(conn: Connection, project_id: str) -> dict[str, Any]:
         .where(scopes.c.id == scope_id)
         .values(updated_at=now)
     )
-    return _project_payload(conn, scope_id)
+    return _project_for_context(conn, context, _project_payload(conn, scope_id))
 
 
 def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:

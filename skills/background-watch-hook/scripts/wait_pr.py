@@ -15,7 +15,7 @@ import urllib.parse
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, NamedTuple
 
 try:  # POSIX only, which is every platform `vibe` runs the waiter on.
     import fcntl
@@ -33,6 +33,7 @@ from _github_wait_common import (  # noqa: E402
     github_get,
     github_graphql,
     github_request,
+    InitialRequestRetriesExhausted,
     LAST_DELIVERY_ENV,
     later_since,
     list_paginated,
@@ -40,11 +41,19 @@ from _github_wait_common import (  # noqa: E402
     max_id,
     min_interval_for_unauthenticated,
     REQUEST_TIMEOUT_SECONDS,
+    RETRY_EXIT_CODE,
     retry_initial_request,
     requests_per_poll,
     ResponseCache,
     squash,
     WATCH_ID_ENV,
+)
+from _github_actions_wait import (  # noqa: E402
+    DEFAULT_SUCCESS_CONCLUSIONS,
+    fetch_workflow_runs,
+    normalize_selected_runs,
+    render_actions_result,
+    select_matching_runs,
 )
 
 CODEX_REVIEW_PASS_REACTION_USERS = {
@@ -85,6 +94,19 @@ REVIEW_COMMENT_FINGERPRINTS_KEY = "review_comment_fingerprints"
 ISSUE_COMMENT_FINGERPRINTS_KEY = "issue_comment_fingerprints"
 REVIEW_THREAD_STATES_KEY = "review_thread_states"
 PR_SNAPSHOT_KEY = "snapshot"
+ACTIONS_SNAPSHOT_KEY = "actions"
+ACTIONS_OBSERVED_KEY = "actions_observed"
+
+
+class PRReport(NamedTuple):
+    """One delivery and the observations its pending transaction will commit."""
+
+    output: str | None
+    cursors: tuple[int, int, int, int, str]
+    pr_state: dict[str, Any]
+    actions: dict[str, Any] | None = None
+
+
 PR_FINGERPRINT_KEYS = (
     REVIEW_FINGERPRINTS_KEY,
     REVIEW_COMMENT_FINGERPRINTS_KEY,
@@ -552,6 +574,10 @@ def _fetch_state(
     cache: ResponseCache | None = None,
     review_comment_since: str | None = None,
     issue_comment_since: str | None = None,
+    ci_sha: str | None = None,
+    ci_branch: str | None = None,
+    ci_workflows: list[str] | None = None,
+    ci_max_pages: int = 3,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     base_url = f"https://api.github.com/repos/{encoded_repo}"
@@ -587,6 +613,37 @@ def _fetch_state(
         cache=cache,
     )
     review_threads, review_thread_requests = _fetch_review_threads(repo, pr_number, token)
+    actions: list[dict[str, Any]] = []
+    action_requests = 0
+    selected_ci_sha = ci_sha or (_current_pr_head_sha(pull_request) if ci_workflows else None)
+    if ci_workflows and not selected_ci_sha:
+        raise RuntimeError(
+            "GitHub PR response has no head SHA for current-head CI monitoring"
+        )
+    if selected_ci_sha and ci_workflows:
+        actions, action_requests = fetch_workflow_runs(
+            repo,
+            token,
+            branch=ci_branch,
+            head_sha=selected_ci_sha,
+            max_pages=ci_max_pages,
+            cache=cache,
+        )
+        # Actions are fetched after several independent PR requests. Re-read the
+        # mutable PR object after that window so a push cannot pair an old head with
+        # a terminal result from the exact SHA supplied by the caller.
+        pull_request = github_get(f"{base_url}/pulls/{pr_number}", token, cache=cache)
+        requests_after_actions = 1
+    else:
+        requests_after_actions = 0
+    if (
+        selected_ci_sha
+        and ci_workflows
+        and _current_pr_head_sha(pull_request).casefold() != selected_ci_sha.casefold()
+    ):
+        # The PR moved while this snapshot was assembled. The caller will report the
+        # head transition; never render Actions fetched for the previous head.
+        actions = []
     return (
         {
             "pull_request": pull_request,
@@ -595,6 +652,7 @@ def _fetch_state(
             "issue_comments": issue_comments,
             "reactions": reactions,
             "review_threads": review_threads,
+            "actions": actions,
         },
         (
             1
@@ -603,6 +661,8 @@ def _fetch_state(
             + issue_comment_requests
             + reaction_requests
             + review_thread_requests
+            + action_requests
+            + requests_after_actions
         ),
     )
 
@@ -850,7 +910,27 @@ def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
         json.dump({"pr_cursor": pr_cursor}, handle)
 
 
-def _watch_identity(args: argparse.Namespace) -> str:
+def _startup_failure_exit_code(error: Any) -> int:
+    """How a failure *before* the first poll should end this run.
+
+    Nothing has been observed yet, so no activity is lost by ending the run early.
+    A transient failure that merely outlasted the bounded startup retries -- a
+    truncated body on a large PR, a blip in the network -- must therefore exit
+    ``RETRY_EXIT_CODE`` so a managed retry-capable watch can re-arm itself instead
+    of dying and leaving the PR unwatched until somebody notices. Genuinely
+    terminal failures (a bad token, a PR that does not exist) still exit 1:
+    retrying those would poll forever without ever succeeding.
+    """
+
+    return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
+
+
+def _watch_identity(
+    args: argparse.Namespace,
+    *,
+    legacy_ci_sha: str | None = None,
+    include_ci_max_pages: bool = True,
+) -> str:
     """A stable digest of the options that decide what this watch reports.
 
     Ownership by repo and PR alone cannot tell two watches on the same PR apart --
@@ -864,17 +944,81 @@ def _watch_identity(args: argparse.Namespace) -> str:
     only in those can share cursors without losing anything.
     """
 
-    material = json.dumps(
-        {
-            "mode": "new-prs" if args.new_prs else "pr",
-            "actionable_only": bool(args.actionable_only),
-            "include_self_comments": bool(args.include_self_comments),
-            "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
-            "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
-        },
-        sort_keys=True,
-    )
+    material_fields = {
+        "mode": "new-prs" if args.new_prs else "pr",
+        "actionable_only": bool(args.actionable_only),
+        "include_self_comments": bool(args.include_self_comments),
+        "ignore_authors": sorted(_normalize_authors(args.ignore_author)),
+        "ignore_comment_patterns": sorted(set(args.ignore_comment_pattern or [])),
+    }
+    # Keep the v0.14 PR-only identity stable. Adding CI fields to that hash would
+    # make every existing PR-only state file look owned by a different watch after
+    # upgrading, even though its report contract has not changed.
+    if _ci_enabled(args):
+        material_fields.update(
+            {
+                "ci_branch": args.branch,
+                "ci_workflows": list(args.workflow or []),
+                "ci_success_conclusions": sorted(
+                    _parse_success_conclusions(args.success_conclusion)
+                ),
+            }
+        )
+        if include_ci_max_pages:
+            material_fields["ci_max_pages"] = args.max_pages
+        if legacy_ci_sha is not None:
+            material_fields["ci_sha"] = legacy_ci_sha
+    material = json.dumps(material_fields, sort_keys=True)
     return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
+
+
+def _legacy_watch_identity_aliases(
+    args: argparse.Namespace,
+    path: str | None,
+) -> set[str]:
+    """Return released combined identities that can be migrated at this path.
+
+    Before combined waiting was stabilized, the CI target SHA was part of the watch
+    identity. A head change therefore made an otherwise identical watch look foreign.
+    Only hashes derived from this path's own recorded PR/Actions head are accepted;
+    this is a narrow migration, not a general identity bypass.
+    """
+
+    if not path or not _ci_enabled(args):
+        return set()
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    if payload.get("version") != STATE_FILE_VERSION:
+        return set()
+    if payload.get("repo") != args.repo or payload.get("pr") != args.pr:
+        return set()
+
+    candidate_shas: set[str] = set()
+    for value in (args.sha, payload.get("head_sha")):
+        if isinstance(value, str) and value:
+            candidate_shas.add(value)
+    actions = payload.get(ACTIONS_SNAPSHOT_KEY)
+    if isinstance(actions, dict):
+        for runs in actions.values():
+            if not isinstance(runs, list):
+                continue
+            for run in runs:
+                if isinstance(run, dict):
+                    value = run.get("head_sha")
+                    if isinstance(value, str) and value:
+                        candidate_shas.add(value)
+    aliases = {
+        _watch_identity(args, legacy_ci_sha=sha, include_ci_max_pages=False)
+        for sha in candidate_shas
+    }
+    # The released combined identity omitted both the target SHA and page limit.
+    # Accept that exact old shape once so adding coverage cannot strand cursors.
+    aliases.add(_watch_identity(args, include_ci_max_pages=False))
+    return aliases
 
 
 def _managed_watch_id() -> str | None:
@@ -898,6 +1042,7 @@ def _owner_conflict(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> str | None:
     """Why ``owner`` is somebody else's claim on the path, or ``None`` when it is ours.
 
@@ -918,7 +1063,12 @@ def _owner_conflict(
     saved_repo, saved_pr, saved_watch, saved_owner = owner
     if saved_repo != repo or saved_pr != pr_number:
         return f"belongs to {saved_repo}#{saved_pr}, not {repo}#{pr_number}"
-    if saved_watch is not None and watch_identity is not None and saved_watch != watch_identity:
+    if (
+        saved_watch is not None
+        and watch_identity is not None
+        and saved_watch != watch_identity
+        and saved_watch not in (watch_identity_aliases or set())
+    ):
         return (
             f"belongs to another watch on {saved_repo}#{saved_pr} with different "
             "reporting filters"
@@ -940,6 +1090,7 @@ def _load_state_file(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> dict[str, Any]:
     """Read cursors left behind by an earlier run of this same waiter.
 
@@ -981,9 +1132,16 @@ def _load_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} {conflict}")
+    _validate_saved_actions(payload)
+    pending = payload.get(STAGED_KEY)
+    if isinstance(pending, dict) and isinstance(pending.get("cursors"), dict):
+        # Legacy pending transactions may contain only some cursor fields.
+        # Validate their effective state before acknowledgement can write it.
+        _validate_saved_actions({**payload, **pending["cursors"]})
     return payload
 
 
@@ -1171,6 +1329,7 @@ def _verify_state_file_writable(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
 ) -> None:
     """Claim the requested state file, and fail before the first poll if it is unusable.
 
@@ -1238,6 +1397,7 @@ def _verify_state_file_writable(
             pr_number=pr_number,
             watch_identity=watch_identity,
             watch_id=watch_id,
+            watch_identity_aliases=watch_identity_aliases,
         )
         if conflict is not None:
             return
@@ -1283,6 +1443,7 @@ def _write_state_file(
     pr_number: int | None,
     watch_identity: str | None = None,
     watch_id: str | None = None,
+    watch_identity_aliases: set[str] | None = None,
     **fields: Any,
 ) -> None:
     if not path:
@@ -1308,6 +1469,7 @@ def _write_state_file(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     if conflict is not None:
         raise StateFileOwnershipError(f"State file {path} now {conflict}")
@@ -1401,6 +1563,116 @@ def _saved_snapshot(saved: dict[str, Any]) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _saved_actions_snapshot(saved: dict[str, Any], key: str = ACTIONS_SNAPSHOT_KEY) -> dict[str, Any]:
+    return saved.get(key, {})
+
+
+def _validate_saved_actions(saved: dict[str, Any]) -> None:
+    """Reject corrupt history, never filter it into an apparently empty gate."""
+
+    for key in (ACTIONS_SNAPSHOT_KEY, ACTIONS_OBSERVED_KEY):
+        if key not in saved:
+            continue
+        value = saved[key]
+        if not isinstance(value, dict):
+            raise StateFileUnusableError(f"Saved {key} is malformed: expected a workflow mapping")
+        for workflow, runs in value.items():
+            if not isinstance(workflow, str) or not isinstance(runs, list):
+                raise StateFileUnusableError(f"Saved {key} is malformed: expected workflow run lists")
+            for run in runs:
+                if not isinstance(run, dict):
+                    raise StateFileUnusableError(f"Saved {key} is malformed: expected run objects")
+                run_id = run.get("id")
+                attempt = run.get("run_attempt")
+                if (
+                    not isinstance(run_id, (int, str))
+                    or isinstance(run_id, bool)
+                    or (isinstance(run_id, str) and not run_id)
+                    or any(
+                        run.get(field) is not None and not isinstance(run[field], str)
+                        for field in ("status", "conclusion", "head_sha", "head_branch")
+                    )
+                    or (
+                        attempt is not None
+                        and (not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1)
+                    )
+                ):
+                    raise StateFileUnusableError(f"Saved {key} is malformed: invalid run comparison fields")
+    if ACTIONS_SNAPSHOT_KEY in saved and ACTIONS_OBSERVED_KEY in saved:
+        if set(saved[ACTIONS_SNAPSHOT_KEY]) != set(saved[ACTIONS_OBSERVED_KEY]):
+            raise StateFileUnusableError("Saved actions_observed is malformed: workflow inventory differs from actions")
+
+
+def _actions_snapshot_regressed(current: dict[str, Any], previous: dict[str, Any]) -> bool:
+    """An incomplete inventory or older attempt cannot establish a new verdict."""
+
+    for workflow, previous_runs in previous.items():
+        current_runs = {run.get("id"): run for run in current.get(workflow, [])}
+        for previous_run in previous_runs:
+            current_run = current_runs.get(previous_run.get("id"))
+            if current_run is None:
+                return True
+            previous_attempt = previous_run.get("run_attempt")
+            current_attempt = current_run.get("run_attempt")
+            if isinstance(previous_attempt, int) and (
+                not isinstance(current_attempt, int) or current_attempt < previous_attempt
+            ):
+                return True
+    return False
+
+
+def _observe_actions(
+    previous: dict[str, Any], current: dict[str, Any], head_sha: str
+) -> dict[str, Any]:
+    """Remember known run IDs/attempts without treating observation as delivery."""
+
+    observed = {}
+    for workflow, runs in current.items():
+        known = {
+            run.get("id"): run
+            for run in previous.get(workflow, [])
+            if str(run.get("head_sha") or "").casefold() == head_sha.casefold()
+        }
+        for run in runs:
+            old_attempt = known.get(run.get("id"), {}).get("run_attempt")
+            new_attempt = run.get("run_attempt")
+            if isinstance(old_attempt, int) and (
+                not isinstance(new_attempt, int) or new_attempt < old_attempt
+            ):
+                continue
+            known[run.get("id")] = run
+        observed[workflow] = list(known.values())
+    return normalize_selected_runs(observed)
+
+
+def _ci_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.sha or args.branch or args.workflow or args.success_conclusion)
+
+
+def _validate_ci_args(args: argparse.Namespace) -> str | None:
+    provided = _ci_enabled(args)
+    if not provided:
+        return None
+    if args.pr is None:
+        return "CI monitoring requires --pr; --new-prs cannot be combined with --sha or --workflow"
+    if not args.workflow:
+        return "CI monitoring requires at least one --workflow"
+    if args.max_pages < 1:
+        return "--max-pages must be at least 1"
+    if len(set(args.workflow)) != len(args.workflow):
+        return "--workflow values must be unique"
+    return None
+
+
+def _parse_success_conclusions(values: list[str] | None) -> set[str]:
+    if not values:
+        return set(DEFAULT_SUCCESS_CONCLUSIONS)
+    result: set[str] = set()
+    for value in values:
+        result.update(item.strip() for item in value.split(",") if item.strip())
+    return result
+
+
 def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     if _saved_str(saved, "head_sha") is None:
@@ -1415,6 +1687,15 @@ def _missing_pr_baselines(saved: dict[str, Any]) -> list[str]:
     if not isinstance(saved.get(PR_SNAPSHOT_KEY), dict):
         missing.append(PR_SNAPSHOT_KEY)
     return missing
+
+
+def _missing_actions_baselines(saved: dict[str, Any], workflows: list[str]) -> list[str]:
+    value = saved.get(ACTIONS_SNAPSHOT_KEY)
+    if not isinstance(value, dict) or set(value) != set(workflows):
+        return [ACTIONS_SNAPSHOT_KEY]
+    if any(not isinstance(runs, list) for runs in value.values()):
+        return [ACTIONS_SNAPSHOT_KEY]
+    return []
 
 
 def _last_delivery() -> str | None:
@@ -1448,6 +1729,7 @@ def _resolve_staged_state(
     pr_number: int | None,
     watch_identity: str | None,
     watch_id: str | None,
+    watch_identity_aliases: set[str] | None = None,
     return_replay: bool = False,
 ) -> dict[str, Any] | tuple[dict[str, Any], str | None]:
     """Promote acknowledged state or replay its persisted event payload.
@@ -1477,6 +1759,7 @@ def _resolve_staged_state(
     resolved = {key: value for key, value in saved.items() if key != STAGED_KEY}
     if delivered:
         resolved.update(cursors)
+    _validate_saved_actions(resolved)
     print(
         (
             "An earlier report was delivered; advancing past it."
@@ -1496,6 +1779,7 @@ def _resolve_staged_state(
         pr_number=pr_number,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
         **fields,
     )
     return (resolved, None) if return_replay else resolved
@@ -1596,6 +1880,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write a complete current baseline to --state-file and exit without waiting",
     )
     parser.add_argument(
+        "--sha",
+        help=(
+            "Optional exact PR head SHA whose Actions runs should be monitored together with PR "
+            "activity. Omit it to follow the PR's current head across watch cycles"
+        ),
+    )
+    parser.add_argument(
+        "--branch",
+        help="Optional Actions head branch constraint used with --sha and --workflow",
+    )
+    parser.add_argument(
+        "--workflow",
+        action="append",
+        help=(
+            "Actions workflow name to monitor at --sha, or at the PR's current head when --sha is "
+            "omitted; repeatable and enables combined CI mode"
+        ),
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=3,
+        help="Maximum Actions run-list pages to inspect per poll in combined CI mode",
+    )
+    parser.add_argument(
+        "--success-conclusion",
+        action="append",
+        help=(
+            "Actions conclusion treated as successful in combined CI mode; repeatable or comma-separated. "
+            "Defaults to success,skipped,neutral."
+        ),
+    )
+    parser.add_argument(
         "--allow-unauthenticated",
         action="store_true",
         help="Allow polling without GitHub auth; the interval will be clamped to a safer minimum",
@@ -1605,6 +1922,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _build_parser().parse_args()
+
+    ci_error = _validate_ci_args(args)
+    if ci_error is not None:
+        print(ci_error, file=sys.stderr)
+        return 2
+    ci_enabled = _ci_enabled(args)
+    success_conclusions = _parse_success_conclusions(args.success_conclusion)
 
     cache = ResponseCache()
     # Everything that can reject the arguments runs BEFORE any state is claimed. A
@@ -1625,6 +1949,7 @@ def main() -> int:
         return 2
 
     watch_identity = _watch_identity(args)
+    watch_identity_aliases = _legacy_watch_identity_aliases(args, args.state_file)
     watch_id = _managed_watch_id()
     delivery_stamp = _last_delivery()
     two_phase = watch_id is not None
@@ -1644,6 +1969,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     replay_output = _staged_replay_output(saved, delivery_stamp)
     if replay_output is not None:
@@ -1682,7 +2008,7 @@ def main() -> int:
             )
             if viewer_result.error is not None:
                 print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
-                return 1
+                return _startup_failure_exit_code(viewer_result.error)
             viewer_login = viewer_result.value
         if token is not None and not viewer_login:
             print(
@@ -1720,6 +2046,10 @@ def main() -> int:
                 cache=cache,
                 review_comment_since=initial_review_comment_since,
                 issue_comment_since=initial_issue_comment_since,
+                ci_sha=args.sha if ci_enabled else None,
+                ci_branch=args.branch if ci_enabled else None,
+                ci_workflows=args.workflow if ci_enabled else None,
+                ci_max_pages=args.max_pages,
             )
         initial_pr_stop_after_id = None
         initial_pr_max_pages = None
@@ -1742,11 +2072,30 @@ def main() -> int:
     )
     if initial_request.error is not None:
         print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
-        return 1
+        return _startup_failure_exit_code(initial_request.error)
     if initial_request.value is None:
         print("Initial GitHub PR state request completed without a result", file=sys.stderr)
         return 1
+    selected_actions: dict[str, list[dict[str, Any]]] = {}
     state, requests_per_poll_count = initial_request.value
+    if args.pr is not None and ci_enabled and args.sha:
+        observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
+        if observed_head_sha.casefold() != args.sha.casefold():
+            print(
+                "Refusing to start a combined watch: PR head "
+                f"{observed_head_sha} does not match --sha {args.sha}. "
+                "Refresh the SHA and retry.",
+                file=sys.stderr,
+            )
+            return 2
+    if ci_enabled:
+        selected_ci_sha = args.sha or _current_pr_head_sha(state.get("pull_request"))
+        selected_actions = select_matching_runs(
+            state.get("actions", []),
+            workflows=args.workflow or [],
+            branch=args.branch,
+            head_sha=selected_ci_sha,
+        )
 
     # The remote target is now proven valid. Only now may this run create or adopt
     # its state path; a typo or inaccessible PR must leave no ownership claim.
@@ -1756,6 +2105,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     saved = _load_state_file(
         args.state_file,
@@ -1763,6 +2113,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
     )
     saved, replay_output = _resolve_staged_state(
         args.state_file,
@@ -1772,6 +2123,7 @@ def main() -> int:
         pr_number=args.pr,
         watch_identity=watch_identity,
         watch_id=watch_id,
+        watch_identity_aliases=watch_identity_aliases,
         return_replay=True,
     )
     if replay_output is not None:
@@ -1791,6 +2143,8 @@ def main() -> int:
         )
     )
     missing_baselines = _missing_pr_baselines(saved) if resumed and args.pr is not None else []
+    if ci_enabled and resumed and args.pr is not None:
+        missing_baselines.extend(_missing_actions_baselines(saved, args.workflow or []))
     if missing_baselines and not explicit_replay:
         print(
             "Saved PR state lacks required baseline(s): %s; use --catch-up, or remove "
@@ -1820,6 +2174,21 @@ def main() -> int:
     # they never decide independently whether to wake. Explicit replay/catch-up is
     # the deliberate exception: there the requested cursor streams are the contract.
     snapshot = None if args.catch_up or explicit_replay else (_saved_snapshot(saved) if resumed else None)
+    if not ci_enabled:
+        actions_snapshot = None
+    elif args.catch_up:
+        actions_snapshot = None
+    elif explicit_replay:
+        # Explicit cursor replay is a PR activity request, not a request to
+        # replay an already observed terminal Actions result.
+        actions_snapshot = normalize_selected_runs(selected_actions)
+    elif resumed:
+        actions_snapshot = normalize_selected_runs(_saved_actions_snapshot(saved))
+    else:
+        # Explicit PR cursor replay does not replay an unrelated already-terminal
+        # Actions result. A fresh normal watch still needs the current CI snapshot
+        # as its baseline to avoid waking on the seed itself.
+        actions_snapshot = normalize_selected_runs(selected_actions)
     review_comment_since = (
         _saved_str(saved, "review_comment_since")
         if resumed and args.since_review_comment_id is None
@@ -1852,6 +2221,26 @@ def main() -> int:
             ignore_patterns=ignore_patterns,
             review_threads_available=token is not None,
         )
+        actions_snapshot = normalize_selected_runs(selected_actions) if ci_enabled else None
+
+    # Explicit PR replay baselines CI at the current head, independently of the
+    # historical PR cursor. Explicit seed likewise adopts the current snapshot.
+    if ci_enabled and args.seed_state:
+        actions_snapshot = normalize_selected_runs(selected_actions)
+    actions_head_sha = observed_head_sha if explicit_replay or args.seed_state else tracked_head_sha
+    actions_observed = (
+        _observe_actions(
+            # Only a normal resume inherits old inventory. Replaying or
+            # establishing a fresh baseline must not retain omitted old runs.
+            {} if not resumed or args.seed_state or explicit_replay else (
+                _saved_actions_snapshot(saved, ACTIONS_OBSERVED_KEY)
+                if ACTIONS_OBSERVED_KEY in saved else _saved_actions_snapshot(saved)
+            ),
+            normalize_selected_runs(selected_actions),
+            args.sha or observed_head_sha,
+        )
+        if ci_enabled else {}
+    )
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1875,6 +2264,12 @@ def main() -> int:
         bootstrap_requests = 0
 
     if args.pr is not None:
+
+        def _active_ci_head_sha() -> str:
+            return args.sha or _current_pr_head_sha(state.get("pull_request"))
+
+        def _same_actions_head() -> bool:
+            return actions_head_sha is not None and actions_head_sha.casefold() == _active_ci_head_sha().casefold()
 
         def _initial_cursor(flag_value: int | None, saved_key: str, items_key: str) -> int:
             if flag_value is not None:
@@ -1915,8 +2310,8 @@ def main() -> int:
             file=sys.stderr,
         )
 
-        def _render(cursors: tuple[int, int, int, int, str]) -> tuple[str | None, int, int, int, int, str]:
-            return _render_activity(
+        def _render(cursors: tuple[int, int, int, int, str]) -> PRReport:
+            activity = _render_activity(
                 repo=args.repo,
                 pr_number=args.pr,
                 state=state,
@@ -1939,14 +2334,127 @@ def main() -> int:
                 ignored_authors=ignored_authors,
                 ignore_patterns=ignore_patterns,
             )
+            return PRReport(activity[0], activity[1:], state)
 
-        def _advance_since() -> None:
+        def _render_combined(
+            cursors: tuple[int, int, int, int, str],
+            *,
+            fallback_pr: PRReport | None = None,
+        ) -> PRReport:
+            pr_result = _render(cursors)
+            if pr_result.output is None and fallback_pr is not None and fallback_pr.output is not None:
+                pr_result = fallback_pr
+            if not ci_enabled:
+                return pr_result
+
+            # A transient PR head can itself be retained as evidence. Never
+            # attach another head's CI verdict to that observation's baseline.
+            if _current_pr_head_sha(pr_result.pr_state.get("pull_request")).casefold() != (
+                _current_pr_head_sha(state.get("pull_request")).casefold()
+            ):
+                return pr_result
+
+            actions_output = _render_new_actions()
+            if actions_output is None:
+                return pr_result
+            reported_actions = normalize_selected_runs(selected_actions)
+            output = actions_output if pr_result.output is None else f"{pr_result.output}\n{actions_output}"
+            return pr_result._replace(output=output, actions=reported_actions)
+
+        def _render_new_actions() -> str | None:
+            current_actions = normalize_selected_runs(selected_actions)
+            if _actions_snapshot_regressed(current_actions, actions_observed):
+                return None
+            # A push starts a new CI epoch even if it returns to an earlier SHA.
+            previous = actions_snapshot if _same_actions_head() else None
+            if previous is not None and current_actions == previous:
+                return None
+            output, _failed = render_actions_result(
+                repo=args.repo,
+                branch=args.branch,
+                head_sha=_active_ci_head_sha(),
+                selected=selected_actions,
+                success_conclusions=success_conclusions,
+            )
+            return output
+
+        def _advance_actions_baseline(report: PRReport) -> None:
+            nonlocal actions_snapshot, actions_head_sha
+            if not ci_enabled:
+                return
+            # Only a reported terminal result advances the notification baseline.
+            # Quiet polls and PR-only reports must not erase an acknowledged CI
+            # result. The existing pending transaction covers this state too.
+            report_head = args.sha or _current_pr_head_sha(report.pr_state.get("pull_request"))
+            if report.actions is not None:
+                actions_snapshot = report.actions
+            elif actions_head_sha is None or actions_head_sha.casefold() != report_head.casefold():
+                actions_snapshot = {workflow: [] for workflow in args.workflow}
+            actions_head_sha = report_head
+
+        def _refresh_actions() -> None:
+            nonlocal selected_actions, actions_observed
+            if ci_enabled:
+                selected_actions = select_matching_runs(
+                    state.get("actions", []),
+                    workflows=args.workflow or [],
+                    branch=args.branch,
+                    head_sha=_active_ci_head_sha(),
+                )
+                actions_observed = _observe_actions(
+                    actions_observed, normalize_selected_runs(selected_actions), _active_ci_head_sha()
+                )
+
+        def _actions_waiting_for_terminal_result() -> bool:
+            if not ci_enabled:
+                return False
+            current_actions = normalize_selected_runs(selected_actions)
+            previous = actions_snapshot if _same_actions_head() else None
+            if _actions_snapshot_regressed(current_actions, actions_observed):
+                return True
+            if previous is not None and current_actions == previous:
+                return False
+            actions_output, _failed = render_actions_result(
+                repo=args.repo,
+                branch=args.branch,
+                head_sha=_active_ci_head_sha(),
+                selected=selected_actions,
+                success_conclusions=success_conclusions,
+            )
+            return actions_output is None
+
+        def _adopt_report(report: PRReport) -> None:
+            nonlocal review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
+            nonlocal observed_head_sha, snapshot
+            nonlocal review_fingerprints, review_comment_fingerprints, issue_comment_fingerprints, review_thread_states
             nonlocal review_comment_since, issue_comment_since
-            review_comment_since = later_since(review_comment_since, state["review_comments"])
-            issue_comment_since = later_since(issue_comment_since, state["issue_comments"])
+            review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status = report.cursors
+            pr_state = report.pr_state
+            observed_head_sha = _current_pr_head_sha(pr_state.get("pull_request"))
+            review_comment_since = later_since(review_comment_since, pr_state["review_comments"])
+            issue_comment_since = later_since(issue_comment_since, pr_state["issue_comments"])
+            review_fingerprints = _fingerprint_map(pr_state["reviews"])
+            review_comment_fingerprints = _fingerprint_map(pr_state["review_comments"])
+            issue_comment_fingerprints = _fingerprint_map(pr_state["issue_comments"])
+            if token is not None:
+                raw_threads = pr_state.get("review_threads")
+                review_thread_states = _review_thread_state_map(
+                    raw_threads if isinstance(raw_threads, list) else []
+                )
+            snapshot = _normalized_pr_snapshot(
+                pr_state,
+                viewer_login=viewer_login,
+                ignore_self_comments=not args.include_self_comments,
+                actionable_only=args.actionable_only,
+                ignored_authors=ignored_authors,
+                ignore_patterns=ignore_patterns,
+                committed_snapshot=snapshot,
+                review_threads_available=token is not None,
+            )
+            _advance_actions_baseline(report)
 
         def _pr_state_fields() -> dict[str, Any]:
-            return {
+            fields = {
                 "review_cursor": review_cursor,
                 "review_comment_cursor": review_comment_cursor,
                 "issue_comment_cursor": issue_comment_cursor,
@@ -1963,6 +2471,10 @@ def main() -> int:
                 REVIEW_THREAD_STATES_KEY: dict(review_thread_states),
                 PR_SNAPSHOT_KEY: snapshot or {},
             }
+            if ci_enabled:
+                fields[ACTIONS_SNAPSHOT_KEY] = actions_snapshot or {workflow: [] for workflow in args.workflow}
+                fields[ACTIONS_OBSERVED_KEY] = actions_observed
+            return fields
 
         def _persist_pr_state(
             *,
@@ -1988,6 +2500,7 @@ def main() -> int:
                 pr_number=args.pr,
                 watch_identity=watch_identity,
                 watch_id=watch_id,
+                watch_identity_aliases=watch_identity_aliases,
                 **fields,
             )
 
@@ -2008,9 +2521,9 @@ def main() -> int:
             _persist_pr_state()
 
         def _settle(
-            first: tuple[str | None, int, int, int, int, str],
+            first: PRReport,
             pending: tuple[int, int, int, int, str],
-        ) -> tuple[str | None, int, int, int, int, str]:
+        ) -> PRReport:
             """Re-poll while a batch is still landing so it costs one Agent turn."""
 
             nonlocal state
@@ -2018,6 +2531,15 @@ def main() -> int:
                 return first
 
             best = first
+            best_pr = _render(pending)
+
+            def _fallback() -> PRReport:
+                # Revalidate against the latest successful poll, not a transient
+                # earlier candidate that may now equal the delivered baseline.
+                # PR evidence remains at-least-once even if a later collection
+                # omits it; only the provisional CI verdict can be withdrawn.
+                return _render_combined(pending, fallback_pr=best_pr)
+
             for _round in range(SETTLE_MAX_ROUNDS):
                 # The batch is already worth a turn, so waiting for the rest of it must
                 # not push the waiter past its own deadline: `vibe watch` kills the
@@ -2034,7 +2556,7 @@ def main() -> int:
                             "reporting the batch seen so far.",
                             file=sys.stderr,
                         )
-                        return best
+                        return _fallback()
                 time.sleep(settle_seconds)
                 settle_request = github_request(
                     lambda: _fetch_state(
@@ -2042,6 +2564,10 @@ def main() -> int:
                         args.pr,
                         token,
                         cache=cache,
+                        ci_sha=args.sha if ci_enabled else None,
+                        ci_branch=args.branch if ci_enabled else None,
+                        ci_workflows=args.workflow if ci_enabled else None,
+                        ci_max_pages=args.max_pages,
                     ),
                     unauthenticated=token is None,
                 )
@@ -2053,23 +2579,29 @@ def main() -> int:
                         f"Settle re-poll failed: {settle_request.error}; reporting the batch seen so far.",
                         file=sys.stderr,
                     )
-                    return best
+                    return _fallback()
                 if settle_request.value is None:
                     print(
                         "Settle re-poll returned no state; reporting the batch seen so far.",
                         file=sys.stderr,
                     )
-                    return best
+                    return _fallback()
                 state, _count = settle_request.value
+                _refresh_actions()
+                pr_candidate = _render(pending)
+                if pr_candidate.output is not None:
+                    best_pr = pr_candidate
+                if _actions_waiting_for_terminal_result():
+                    continue
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
-                candidate = _render(pending)
-                if candidate[0] is None:
-                    return best
-                if candidate[1:] == best[1:]:
+                candidate = _fallback()
+                if candidate.output is None:
+                    return candidate
+                if candidate.cursors == best.cursors:
                     return candidate
                 best = candidate
-            return best
+            return _fallback()
 
         pending_cursors = (
             review_cursor,
@@ -2078,42 +2610,19 @@ def main() -> int:
             reaction_cursor,
             pr_status,
         )
+        # Until a report is adopted, the committed PR head must stay paired
+        # with the saved snapshot, even if the first fetch already saw a push.
+        observed_head_sha = tracked_head_sha or observed_head_sha
         pre_event_fields = _pr_state_fields()
         initial_result = (
-            (None, *pending_cursors)
+            PRReport(None, pending_cursors, state)
             if args.seed_state
-            else _render(pending_cursors)
+            else _render_combined(pending_cursors)
         )
-        if initial_result[0] is not None and not args.catch_up:
+        if initial_result.output is not None and not args.catch_up:
             initial_result = _settle(initial_result, pending_cursors)
-        (
-            initial_output,
-            review_cursor,
-            review_comment_cursor,
-            issue_comment_cursor,
-            reaction_cursor,
-            pr_status,
-        ) = initial_result
-        observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
-        _advance_since()
-        review_fingerprints = _fingerprint_map(state["reviews"])
-        review_comment_fingerprints = _fingerprint_map(state["review_comments"])
-        issue_comment_fingerprints = _fingerprint_map(state["issue_comments"])
-        if token is not None:
-            raw_threads = state.get("review_threads")
-            review_thread_states = _review_thread_state_map(
-                raw_threads if isinstance(raw_threads, list) else []
-            )
-        snapshot = _normalized_pr_snapshot(
-            state,
-            viewer_login=viewer_login,
-            ignore_self_comments=not args.include_self_comments,
-            actionable_only=args.actionable_only,
-            ignored_authors=ignored_authors,
-            ignore_patterns=ignore_patterns,
-            committed_snapshot=snapshot,
-            review_threads_available=token is not None,
-        )
+        initial_output = initial_result.output
+        _adopt_report(initial_result)
         if initial_output is None:
             # Persisted even with nothing to report: the baseline this cycle
             # established is exactly what the next cycle must resume from.
@@ -2209,6 +2718,10 @@ def main() -> int:
                     args.pr,
                     token,
                     cache=cache,
+                    ci_sha=args.sha if ci_enabled else None,
+                    ci_branch=args.branch if ci_enabled else None,
+                    ci_workflows=args.workflow if ci_enabled else None,
+                    ci_max_pages=args.max_pages,
                 ),
                 unauthenticated=token is None,
             )
@@ -2261,7 +2774,7 @@ def main() -> int:
                 effective_interval = target_interval
 
         if args.pr is not None:
-            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
+            _refresh_actions()
             pending_cursors = (
                 review_cursor,
                 review_comment_cursor,
@@ -2270,37 +2783,11 @@ def main() -> int:
                 pr_status,
             )
             pre_event_fields = _pr_state_fields()
-            result = _render(pending_cursors)
-            if result[0] is not None:
+            result = _render_combined(pending_cursors)
+            if result.output is not None:
                 result = _settle(result, pending_cursors)
-            (
-                output,
-                review_cursor,
-                review_comment_cursor,
-                issue_comment_cursor,
-                reaction_cursor,
-                pr_status,
-            ) = result
-            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
-            _advance_since()
-            review_fingerprints = _fingerprint_map(state["reviews"])
-            review_comment_fingerprints = _fingerprint_map(state["review_comments"])
-            issue_comment_fingerprints = _fingerprint_map(state["issue_comments"])
-            if token is not None:
-                raw_threads = state.get("review_threads")
-                review_thread_states = _review_thread_state_map(
-                    raw_threads if isinstance(raw_threads, list) else []
-                )
-            snapshot = _normalized_pr_snapshot(
-                state,
-                viewer_login=viewer_login,
-                ignore_self_comments=not args.include_self_comments,
-                actionable_only=args.actionable_only,
-                ignored_authors=ignored_authors,
-                ignore_patterns=ignore_patterns,
-                committed_snapshot=snapshot,
-                review_threads_available=token is not None,
-            )
+            output = result.output
+            _adopt_report(result)
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.

@@ -17,10 +17,12 @@ from .utils import (
 
 __all__ = [
     "OpenCodeAgent",
+    "OpenCodeModelHubOverlayRequiredError",
     "OpenCodeServerManager",
     "build_claude_reasoning_options",
     "build_codex_reasoning_options",
     "build_reasoning_effort_options",
+    "project_opencode_model_hub_models",
     "resolve_model_reasoning_options",
 ]
 
@@ -30,8 +32,20 @@ def __getattr__(name: str):
         from .agent import OpenCodeAgent
 
         return OpenCodeAgent
-    if name == "OpenCodeServerManager":
-        from .server import OpenCodeServerManager
+    if name in {
+        "OpenCodeModelHubOverlayRequiredError",
+        "OpenCodeServerManager",
+        "project_opencode_model_hub_models",
+    }:
+        from .server import (
+            OpenCodeModelHubOverlayRequiredError,
+            OpenCodeServerManager,
+            project_opencode_model_hub_models,
+        )
 
-        return OpenCodeServerManager
+        return {
+            "OpenCodeModelHubOverlayRequiredError": OpenCodeModelHubOverlayRequiredError,
+            "OpenCodeServerManager": OpenCodeServerManager,
+            "project_opencode_model_hub_models": project_opencode_model_hub_models,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

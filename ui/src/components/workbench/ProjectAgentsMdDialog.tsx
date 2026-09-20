@@ -99,7 +99,7 @@ export const ProjectAgentsMdDialog: React.FC<{
           <span className="text-[12px] leading-relaxed text-foreground">
             {t('agentsMd.symlinkToggle')}
             {symlink && data.claude_is_regular_file && (
-              <span className="mt-0.5 block text-[11px] text-gold">
+              <span className="mt-0.5 block text-[11px] text-gold-ink">
                 {t('agentsMd.symlinkMigrateWarning')}
               </span>
             )}

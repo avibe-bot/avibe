@@ -94,16 +94,29 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
           header leaves room for that close X. */}
       {/* Definite height (not just max-h): the FilePreview kernel scrolls internally via h-full, which
           needs a resolved parent height — a content-driven box would collapse it. */}
-      <DialogContent aria-describedby={undefined} className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0 max-md:h-[82dvh]">
-        <div className="flex items-center gap-2 border-b border-border px-4 py-3 pr-12">
-          <FileText className="size-4 shrink-0 text-muted" />
+      <DialogContent
+        aria-describedby={undefined}
+        mobileSheetHeight="tall"
+        className="flex h-[80vh] w-full max-w-3xl flex-col gap-0 overflow-hidden p-0"
+      >
+        {/* ``items-start`` and ``shrink-0``: the title below is allowed to wrap, so the
+            icon and the actions stay on the first line beside it and the header keeps
+            its full height instead of being squeezed by the scrolling body. */}
+        <div className="flex shrink-0 items-start gap-2 border-b border-border px-4 py-3 pr-12">
+          <FileText className="mt-px size-4 shrink-0 text-muted" />
           <div className="min-w-0 flex-1">
-            <DialogTitle className="truncate text-[13px] font-semibold text-foreground">{name || t('chat.media.preview')}</DialogTitle>
+            {/* The name wraps rather than truncating. For an unsupported type this
+                title is the only place the filename exists at all — the body can only
+                say it cannot render the file — and a touch user has no hover to fall
+                back on, so an ellipsis here means the complete name is unreadable.
+                ``break-words`` also breaks an unbroken run, which is what a long
+                extension-less name usually is. */}
+            <DialogTitle className="break-words text-[13px] font-semibold leading-snug text-foreground">{name || t('chat.media.preview')}</DialogTitle>
             {metaLine && <div className="font-mono text-[10px] text-muted">{metaLine}</div>}
           </div>
           {text != null && (
             <Button variant="ghost" size="icon" className="size-8" onClick={copy} aria-label={t('common.copy')}>
-              {copied ? <Check className="size-4 text-mint" /> : <Copy className="size-4" />}
+              {copied ? <Check className="size-4 text-mint-ink" /> : <Copy className="size-4" />}
             </Button>
           )}
           {local && localPath ? (
@@ -111,14 +124,14 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
               type="button"
               variant="ghost"
               size="icon"
-              className="size-8 text-mint"
+              className="size-8 text-mint-ink"
               aria-label={t('chat.media.download')}
               onClick={() => downloadFile(localPath)}
             >
               <Download className="size-4" />
             </Button>
           ) : (
-            <Button asChild variant="ghost" size="icon" className="size-8 text-mint" aria-label={t('chat.media.download')}>
+            <Button asChild variant="ghost" size="icon" className="size-8 text-mint-ink" aria-label={t('chat.media.download')}>
               <a href={`${mediaUrl}?download=1`} download onClick={(e) => handleMediaDownloadClick(e, mediaUrl || '', name || undefined)}>
                 <Download className="size-4" />
               </a>

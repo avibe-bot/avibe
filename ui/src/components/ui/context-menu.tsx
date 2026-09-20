@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import clsx from 'clsx';
 
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
+
 // A cursor-positioned right-click menu, shared by the editor's file tree and the File Browser app.
 // Rendered inline (not portaled) so it inherits the surrounding window's theme scope, exactly like
 // the original FileTree menu it was extracted from. A full-viewport backdrop closes it on any click
@@ -22,7 +24,7 @@ export const ContextMenuItem: React.FC<{
     onClick={onClick}
     className={clsx(
       'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition',
-      danger ? 'text-destructive hover:bg-destructive/[0.1]' : 'text-foreground hover:bg-cyan-soft',
+      danger ? 'text-destructive-ink hover:bg-destructive/[0.1]' : 'text-foreground hover:bg-cyan-soft',
     )}
   >
     {icon !== undefined && <span className="grid size-4 shrink-0 place-items-center">{icon}</span>}
@@ -43,13 +45,24 @@ export const ContextMenu: React.FC<{
   /** Number of items, used to estimate height for vertical viewport clamping. */
   itemCount?: number;
 }> = ({ x, y, onClose, children, width = 196, itemCount = 4 }) => {
+  const active = useRouteSurfaceActive();
+
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [active, onClose]);
+
+  // The owner keeps its selected item and can render the menu again when its
+  // route returns to the foreground. Suspension withdraws this inline surface
+  // without asking the owner to close or discard that state.
+  if (!active) return null;
 
   // Clamp inside the viewport: a cursor near the right/bottom edge would otherwise overflow. The
   // height is an estimate (item count × row height + padding) — good enough to nudge it back in.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import tempfile
 import threading
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from config import paths
+from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -125,17 +125,7 @@ class DiscoveredChatsStore:
                     for platform, chats in self.state.chats.items()
                 },
             }
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=self.storage_path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, indent=2)
-                handle.write("\n")
-                tmp_path = Path(handle.name)
-            tmp_path.replace(self.storage_path)
+            write_atomic(self.storage_path, json.dumps(payload, indent=2) + "\n")
             try:
                 self._file_mtime = self.storage_path.stat().st_mtime
             except FileNotFoundError:

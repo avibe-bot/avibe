@@ -7,7 +7,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,10 +25,15 @@ from core.process_isolation import (
 from core.runtime_work import RuntimeWorkItem, RuntimeWorkLane, RuntimeWorkSupervisor
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
+    CIRCUIT_BREAKER_METADATA_KEY,
     DELIVERY_ACK_METADATA_KEY,
+    FOLLOW_UP_RUN_ID_METADATA_KEY,
     LAST_DELIVERY_ENV,
+    LIFETIME_STARTED_AT_METADATA_KEY,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
+    RECENT_EVENT_TIMESTAMPS_METADATA_KEY,
+    WATCH_CIRCUIT_OUTPUT_LIMIT,
     WATCH_ID_ENV,
     ManagedWatchService,
     ManagedWatchStore,
@@ -36,9 +41,11 @@ from core.watches import (
     _CycleResult,
     _cycle_env,
     _ManagedWatchRuntimeWorkHandler,
+    _recent_event_timestamps,
     _StaleWorkerRecovery,
 )
 from storage.background import (
+    WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
@@ -104,6 +111,25 @@ async def _start_watch_service(service: ManagedWatchService) -> None:
     startup_task = service._startup_task
     if startup_task is not None:
         await startup_task
+
+
+async def _await_fused_watch(
+    service: ManagedWatchService,
+    watch_id: str,
+    timeout: float = 10.0,
+) -> None:
+    """Wait for a watch to be fused instead of sleeping a fixed interval.
+
+    Fusing needs a real waiter subprocess to start and its result to reach the
+    raising store, so the wait covers a process spawn plus interpreter startup.
+    A fixed 0.12s was enough locally and not on a loaded CI runner, where the
+    assertion saw an empty fused set.
+    """
+
+    deadline = time.monotonic() + timeout
+    while watch_id not in service._fused_watch_ids:
+        assert time.monotonic() < deadline, "watch was never fused after the store error"
+        await asyncio.sleep(0.02)
 
 
 def _add_recovery_watch(
@@ -282,6 +308,47 @@ def test_managed_watch_store_recovery_accepts_empty_command_arguments(tmp_path: 
 
     assert [item.id for item in recovered] == [watch.id]
     assert recovered[0].command == [sys.executable, "wait.py", ""]
+
+
+def test_malformed_remote_context_disables_watch_before_waiter_spawn(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Legacy remote watch",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "raise AssertionError('must not run')"],
+        shell_command=None,
+        prefix=None,
+        cwd=str(tmp_path),
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    watch.metadata = {"resource_user_context": {"sub": "legacy-remote-user"}}
+    store.upsert_watch(watch)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    async def unexpected_run_cycle(*_args, **_kwargs):
+        raise AssertionError("remote-origin waiter must not spawn")
+
+    service._run_cycle = unexpected_run_cycle  # type: ignore[method-assign]
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.last_started_at is None
+    assert saved.last_error == "harness_access_forbidden"
 
 
 def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
@@ -541,6 +608,102 @@ def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     assert sqlite.get_watch(watch.id)["command"] == ["python3", "wait.py"]
 
 
+def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
+    tmp_path: Path,
+) -> None:
+    """HFR-479 -- the retiring cycle owns definition terminal fields forever."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    winner = ManagedWatchStore(tmp_path / "winner.json")
+    winner._sqlite = sqlite
+    late = ManagedWatchStore(tmp_path / "late.json")
+    late._sqlite = sqlite
+    watch = winner.add_watch(
+        name="ordered retirement",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    late.load()
+    late.maybe_reload()  # establish the invalidation baseline before retirement
+    requests = TaskExecutionStore(tmp_path / "requests")
+    requests._sqlite = sqlite
+
+    assert winner.mark_cycle_result(
+        watch.id,
+        exit_code=7,
+        error="terminal cycle failed",
+        disable=True,
+    )
+    late_run = requests.build_hook_send(
+        session_key="",
+        prompt="late cycle evidence",
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+    assert late.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=False,
+        queued_run=late_run.to_dict(),
+    )
+
+    stored = sqlite.get_watch(watch.id)
+    assert stored is not None
+    assert stored["retired_at"] is not None
+    assert stored["last_finished_at"] == stored["retired_at"]
+    assert stored["last_exit_code"] == 7
+    assert stored["last_error"] == "terminal cycle failed"
+    assert sqlite.get_run(late_run.id) is not None
+
+
+def test_cycle_start_preserves_last_completed_outcome_pair(tmp_path: Path) -> None:
+    """Starting a cycle must not tear the last completed cycle's outcome pair."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="retrying watch",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    assert store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="watch command exited with status 75",
+    )
+    assert store.mark_cycle_start(watch.id)
+
+    started = store.get_watch(watch.id)
+    assert started is not None and started.last_started_at is not None
+    assert (started.last_exit_code, started.last_error) == (
+        75,
+        "watch command exited with status 75",
+    )
+
+
 def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path) -> None:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -732,8 +895,11 @@ def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
-        await service.stop()
+        watch_task = service._active_tasks[watch.id]
+        try:
+            await asyncio.wait_for(asyncio.shield(watch_task), timeout=10)
+        finally:
+            await service.stop()
 
     asyncio.run(_run())
 
@@ -1179,6 +1345,709 @@ def test_managed_watch_service_forever_retries_only_allowed_exit_code(tmp_path: 
     assert request_store.list_pending() == []
 
 
+def test_managed_watch_service_once_retries_until_first_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-463: a retry result keeps a once Watch armed until its first event."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Wait until ready",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Continue after the event.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    results = iter(
+        [
+            _CycleResult(exit_code=75, stdout="", stderr="not ready", timed_out=False),
+            _CycleResult(exit_code=0, stdout="ready", stderr="", timed_out=False),
+        ]
+    )
+    calls = 0
+
+    async def fake_run_cycle(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return next(results)
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    service._running = True
+    service._requires_service_lease = False
+
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    pending = request_store.list_pending()
+    assert calls == 2
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 0
+    assert len(pending) == 1
+    assert pending[0].prompt.endswith("ready")
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_prefix", "expected_body"),
+    [
+        (
+            "en",
+            "Watch stopped after reaching its lifetime timeout.",
+            "Watch 'Bounded wait' reached its lifetime timeout after 0 second(s).",
+        ),
+        (
+            "zh",
+            "Watch 达到生命周期上限后已停止。",
+            "Watch「Bounded wait」已达到 0 秒的生命周期上限。",
+        ),
+    ],
+)
+def test_retrying_once_watch_lifetime_bounds_a_long_retry_delay(
+    tmp_path: Path,
+    monkeypatch,
+    language: str,
+    expected_prefix: str,
+    expected_body: str,
+) -> None:
+    """HFR-470: the overall lifetime truncates a once Watch retry delay."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Bounded wait",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0.05,
+        retry_exit_codes=[75],
+        retry_delay_seconds=10,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(config=SimpleNamespace(language=language)),
+        store=store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+
+    async def fake_run_cycle(*args, **kwargs):
+        return _CycleResult(exit_code=75, stdout="", stderr="not ready", timed_out=False)
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    service._running = True
+    service._requires_service_lease = False
+
+    started = time.monotonic()
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    assert time.monotonic() - started < 1
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 124
+    pending = request_store.list_pending()
+    assert len(pending) == 1
+    assert expected_prefix in pending[0].prompt
+    assert expected_body in pending[0].prompt
+
+
+@pytest.mark.parametrize("mode", ["once", "forever"])
+@pytest.mark.parametrize("origin_source", ["metadata", "legacy_created_at"])
+def test_watch_lifetime_origin_survives_supervisor_restart(
+    tmp_path: Path,
+    monkeypatch,
+    mode: str,
+    origin_source: str,
+) -> None:
+    """HFR-470: one armed episode keeps its deadline across supervisor restarts."""
+
+    path = tmp_path / "watches.json"
+    store = ManagedWatchStore(path)
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Bounded wait",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode=mode,
+        timeout_seconds=5,
+        lifetime_timeout_seconds=1,
+        retry_exit_codes=[75],
+        retry_delay_seconds=10,
+        post_to=None,
+        deliver_key=None,
+    )
+    expired_origin = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    if origin_source == "metadata":
+        watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY] = expired_origin
+    else:
+        watch.metadata.pop(LIFETIME_STARTED_AT_METADATA_KEY)
+        watch.created_at = expired_origin
+    store.upsert_watch(watch)
+
+    restarted_store = ManagedWatchStore(path)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=restarted_store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+
+    async def unexpected_cycle(*args, **kwargs):
+        raise AssertionError("a supervisor restart must not grant another cycle")
+
+    monkeypatch.setattr(service, "_run_cycle", unexpected_cycle)
+    service._running = True
+    service._requires_service_lease = False
+
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = restarted_store.get_watch(watch.id)
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 124
+    assert len(request_store.list_pending()) == 1
+
+
+@pytest.mark.parametrize("metadata_run_id", [None, "stale-run"])
+def test_watch_lifetime_retires_while_an_existing_follow_up_is_active(
+    tmp_path: Path,
+    monkeypatch,
+    metadata_run_id: str | None,
+) -> None:
+    """The actual queued Run owns expiry even when Watch metadata is absent or stale."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Bounded follow-up",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Inspect the event.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0.05,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    if metadata_run_id is not None:
+        assert store.mark_cycle_result(
+            watch.id,
+            exit_code=None,
+            error=None,
+            metadata_updates={FOLLOW_UP_RUN_ID_METADATA_KEY: metadata_run_id},
+        )
+    active = request_store.enqueue_hook_send(
+        session_key=watch.session_key,
+        prompt="existing event",
+        run_type="watch",
+        definition_id=watch.id,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+
+    async def unexpected_cycle(*args, **kwargs):
+        raise AssertionError("the follow-up fence must not admit another waiter")
+
+    monkeypatch.setattr(service, "_run_cycle", unexpected_cycle)
+    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0.005)
+    service._running = True
+    service._requires_service_lease = False
+
+    started = time.monotonic()
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    assert time.monotonic() - started < 1
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 124
+    assert "retired without starting another Run" in str(saved.last_error)
+    assert active.id in str(saved.last_error)
+    pending = request_store.list_pending()
+    assert [request.id for request in pending] == [active.id]
+
+
+def test_once_watch_retries_timeout_only_when_124_is_allowed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-471: timeout retries require explicit policy on a once Watch."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    watch = store.add_watch(
+        name="Retry one timeout",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Continue after the event.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[124],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    results = iter(
+        [
+            _CycleResult(exit_code=124, stdout="", stderr="", timed_out=True),
+            _CycleResult(exit_code=0, stdout="ready", stderr="", timed_out=False),
+        ]
+    )
+
+    async def fake_run_cycle(*args, **kwargs):
+        return next(results)
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    service._running = True
+    service._requires_service_lease = False
+
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    assert saved is not None and saved.enabled is False
+    assert saved.last_exit_code == 0
+    assert len(request_store.list_pending()) == 1
+
+
+def test_forever_watch_waits_for_previous_follow_up_before_rearming(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-464: queued/running follow-ups and cooldown both hold re-arm closed."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Disk pressure",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Inspect the new pressure event.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    calls = 0
+
+    async def fake_run_cycle(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _CycleResult(exit_code=0, stdout="event 1", stderr="", timed_out=False)
+        service._running = False
+        return _CycleResult(
+            exit_code=NO_EVENT_EXIT_CODE,
+            stdout="",
+            stderr=NO_EVENT_MARKER,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    monkeypatch.setattr(watches_module, "WATCH_MIN_REARM_SECONDS", 0.1)
+    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0.005)
+    service._running = True
+    service._requires_service_lease = False
+
+    async def _run() -> None:
+        task = asyncio.create_task(service._run_watch(watch.id))
+        for _ in range(100):
+            if request_store.list_pending():
+                break
+            await asyncio.sleep(0.01)
+        assert calls == 1
+        await asyncio.sleep(0.05)
+        assert calls == 1, "an unfinished event Run must hold the waiter closed"
+        request = request_store.list_pending()[0]
+        claimed = request_store.claim(request.id)
+        assert claimed is not None
+        request_store.complete(claimed, ok=True)
+        await asyncio.sleep(0.03)
+        assert calls == 1, "the post-Run re-arm delay must hold the waiter closed"
+        await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(_run())
+
+    assert calls == 2
+
+
+def test_atomic_watch_outbox_rejects_a_second_unsettled_follow_up(
+    tmp_path: Path,
+) -> None:
+    """HFR-466: atomic admission rejects a second unfinished Watch follow-up."""
+
+    store = ManagedWatchStore()
+    request_store = TaskExecutionStore()
+    assert store.sqlite_backend is not None
+    assert request_store.sqlite_backend is not None
+    assert store.sqlite_backend.db_path == request_store.sqlite_backend.db_path
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="single_flight")
+    watch = store.add_watch(
+        name="Single-flight watch",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Inspect it.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+
+    assert service._commit_cycle_result(
+        watch,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        prompt="first event",
+    )
+    reloaded = store.get_watch(watch.id)
+    assert reloaded is not None
+    assert not service._commit_cycle_result(
+        reloaded,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        prompt="duplicate event",
+    )
+
+    assert len(request_store.list_pending()) == 1
+    unsettled = request_store.get_unsettled_watch_run(watch.id)
+    assert unsettled is not None
+    assert unsettled["prompt"] == "first event"
+    saved = store.get_watch(watch.id)
+    assert saved is not None
+    assert saved.metadata[DELIVERY_ACK_METADATA_KEY] == 1
+
+
+def test_forever_watch_sixth_rapid_success_pauses_and_queues_one_repair_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-465: the sixth rapid event pauses once and preserves repair evidence."""
+
+    store = ManagedWatchStore()
+    request_store = TaskExecutionStore()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    session_id = _bare_watch_session_row(workdir=tmp_path, anchor="circuit_repair")
+    watch = store.add_watch(
+        name="Level-triggered disk alert",
+        session_key="",
+        session_id=session_id,
+        session_policy="existing",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix="Inspect the disk alert.",
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    calls = 0
+
+    async def fake_run_cycle(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        stdout = f"persistent level {calls}"
+        stderr = "diagnostic stderr"
+        if calls == 6:
+            stdout = ("old stdout\n" * 500) + stdout
+            stderr = ("old stderr\n" * 500) + stderr
+        return _CycleResult(
+            exit_code=0,
+            stdout=stdout,
+            stderr=stderr,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+    monkeypatch.setattr(watches_module, "WATCH_MIN_REARM_SECONDS", 0)
+    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0.001)
+    service._running = True
+    service._requires_service_lease = False
+
+    async def _run() -> None:
+        task = asyncio.create_task(service._run_watch(watch.id))
+        while not task.done():
+            for request in request_store.list_pending():
+                outcome = request.metadata.get(WATCH_HOOK_OUTCOME_METADATA_KEY)
+                if outcome != WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR:
+                    claimed = request_store.claim(request.id)
+                    assert claimed is not None
+                    request_store.complete(claimed, ok=True)
+            await asyncio.sleep(0.001)
+        await task
+
+    asyncio.run(_run())
+
+    saved = store.get_watch(watch.id)
+    pending = request_store.list_pending()
+    completed = request_store.list_runs(status="succeeded")
+    assert calls == 6
+    assert saved is not None and saved.enabled is False
+    assert saved.retired_at is None
+    assert saved.last_error is not None
+    assert "60 seconds" in saved.last_error
+    assert saved.metadata[DELIVERY_ACK_METADATA_KEY] == 5
+    assert len(saved.metadata[RECENT_EVENT_TIMESTAMPS_METADATA_KEY]) == 6
+    incident = saved.metadata[CIRCUIT_BREAKER_METADATA_KEY]
+    assert incident["repair_run_id"] == saved.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY]
+    assert len(incident["stdout"]) <= WATCH_CIRCUIT_OUTPUT_LIMIT
+    assert len(incident["stderr"]) <= WATCH_CIRCUIT_OUTPUT_LIMIT
+    assert incident["stdout"].endswith("persistent level 6")
+    assert incident["stderr"].endswith("diagnostic stderr")
+    assert len(completed) == 5
+    assert len(pending) == 1
+    assert pending[0].id in saved.last_error
+    assert (
+        pending[0].metadata[WATCH_HOOK_OUTCOME_METADATA_KEY]
+        == WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR
+    )
+    assert "Level-triggered disk alert" in pending[0].prompt
+    assert "persistent level 6" in pending[0].prompt
+    assert "allowed retry exit codes: 75" in pending[0].prompt
+    assert "vibe watch resume" in pending[0].prompt
+
+    restarted = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=ManagedWatchStore(),
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    restarted._running = True
+    restarted._requires_service_lease = False
+    asyncio.run(restarted._run_watch(watch.id))
+    assert len(request_store.list_pending()) == 1
+
+
+def test_watch_event_burst_window_excludes_successes_older_than_sixty_seconds() -> None:
+    now = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
+    timestamps = [
+        (now - timedelta(seconds=61)).isoformat(),
+        (now - timedelta(seconds=59)).isoformat(),
+        now.isoformat(),
+    ]
+
+    recent = _recent_event_timestamps(
+        {RECENT_EVENT_TIMESTAMPS_METADATA_KEY: timestamps},
+        now=now,
+    )
+
+    assert recent == timestamps[1:]
+
+
+def test_resuming_circuit_paused_watch_clears_window_but_keeps_repair_fence(
+    tmp_path: Path,
+) -> None:
+    """HFR-467: resume clears burst state without releasing the active repair Run."""
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Disk alert",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+        metadata={
+            FOLLOW_UP_RUN_ID_METADATA_KEY: "run-repair",
+            RECENT_EVENT_TIMESTAMPS_METADATA_KEY: ["2026-08-10T00:00:00+00:00"],
+            CIRCUIT_BREAKER_METADATA_KEY: {
+                "status": "tripped",
+                "repair_run_id": "run-repair",
+            },
+        },
+    )
+    store.set_enabled(watch.id, False)
+    prior_lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
+
+    resumed = store.set_enabled(watch.id, True)
+
+    assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in resumed.metadata
+    assert resumed.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-repair"
+    assert resumed.metadata[CIRCUIT_BREAKER_METADATA_KEY]["status"] == "resumed"
+    assert resumed.metadata[LIFETIME_STARTED_AT_METADATA_KEY] != prior_lifetime_origin
+
+
+def test_storage_resume_applies_the_same_circuit_reset_as_cli() -> None:
+    """HFR-468: storage and CLI resume paths apply the same circuit reset."""
+
+    store = ManagedWatchStore()
+    assert store.sqlite_backend is not None
+    watch = store.add_watch(
+        name="Disk alert",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+        metadata={
+            FOLLOW_UP_RUN_ID_METADATA_KEY: "run-repair",
+            RECENT_EVENT_TIMESTAMPS_METADATA_KEY: ["2026-08-10T00:00:00+00:00"],
+            CIRCUIT_BREAKER_METADATA_KEY: {
+                "status": "tripped",
+                "repair_run_id": "run-repair",
+            },
+        },
+    )
+    assert store.sqlite_backend.set_definition_enabled(
+        watch.id,
+        False,
+        definition_type="watch",
+    )
+    prior_lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
+    assert store.sqlite_backend.set_definition_enabled(
+        watch.id,
+        True,
+        definition_type="watch",
+    )
+
+    store.load()
+    resumed = store.get_watch(watch.id)
+    assert resumed is not None
+    assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in resumed.metadata
+    assert resumed.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-repair"
+    assert resumed.metadata[CIRCUIT_BREAKER_METADATA_KEY]["status"] == "resumed"
+    assert resumed.metadata[LIFETIME_STARTED_AT_METADATA_KEY] != prior_lifetime_origin
+
+
+def test_changing_watch_cwd_starts_a_fresh_burst_window(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    old_cwd = tmp_path / "old"
+    new_cwd = tmp_path / "new"
+    watch = store.add_watch(
+        name="Relative waiter",
+        session_key="slack::channel::C123",
+        command=["./wait.py"],
+        shell_command=None,
+        prefix="Inspect it.",
+        cwd=str(old_cwd),
+        mode="forever",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+        metadata={
+            RECENT_EVENT_TIMESTAMPS_METADATA_KEY: ["2026-08-10T00:00:00+00:00"],
+            FOLLOW_UP_RUN_ID_METADATA_KEY: "run-before-cwd-change",
+        },
+    )
+    lifetime_origin = watch.metadata[LIFETIME_STARTED_AT_METADATA_KEY]
+
+    updated = store.update_watch(
+        watch.id,
+        name=watch.name,
+        session_key=watch.session_key,
+        session_id=watch.session_id,
+        command=watch.command,
+        shell_command=watch.shell_command,
+        prefix=watch.prefix,
+        cwd=str(new_cwd),
+        mode=watch.mode,
+        timeout_seconds=watch.timeout_seconds,
+        lifetime_timeout_seconds=watch.lifetime_timeout_seconds,
+        retry_exit_codes=watch.retry_exit_codes,
+        retry_delay_seconds=watch.retry_delay_seconds,
+        post_to=watch.post_to,
+        deliver_key=watch.deliver_key,
+        agent_name=watch.agent_name,
+        session_policy=watch.session_policy,
+        message=watch.message,
+        metadata=watch.metadata,
+    )
+
+    assert RECENT_EVENT_TIMESTAMPS_METADATA_KEY not in updated.metadata
+    assert updated.metadata[FOLLOW_UP_RUN_ID_METADATA_KEY] == "run-before-cwd-change"
+    assert updated.metadata[LIFETIME_STARTED_AT_METADATA_KEY] == lifetime_origin
+
+
 def test_managed_watch_service_once_no_event_exit_finishes_without_follow_up(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
@@ -1467,8 +2336,8 @@ def test_managed_watch_service_fuses_watch_after_store_error(tmp_path: Path) -> 
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.12)
-        assert watch.id in service._fused_watch_ids
+        await _await_fused_watch(service, watch.id)
+        # Settle briefly: a fused store must not let the cycle start again.
         await asyncio.sleep(0.08)
         await service.stop()
 
@@ -1527,8 +2396,8 @@ def test_managed_watch_service_fuses_quiet_cycle_after_store_error(tmp_path: Pat
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.12)
-        assert watch.id in service._fused_watch_ids
+        await _await_fused_watch(service, watch.id)
+        # Settle briefly: a fused store must not let the cycle start again.
         await asyncio.sleep(0.08)
         await service.stop()
 
@@ -1617,7 +2486,6 @@ def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: 
     )
     service._running = True
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
 
     async def _run() -> None:
@@ -1633,7 +2501,7 @@ def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: 
     asyncio.run(_run())
 
     assert store.reloads > 0
-    assert store.lists == 0
+    assert store.lists == store.reloads
     assert runtime_store.writes == 0
 
 
@@ -1722,7 +2590,8 @@ def test_managed_watch_service_start_reaps_matching_stale_worker_before_reconcil
 
     asyncio.run(_run())
 
-    assert events == [("terminate", 4321), ("reconcile", None)]
+    assert events[0] == ("terminate", 4321)
+    assert events[1:] and all(event == ("reconcile", None) for event in events[1:])
 
 
 def test_managed_watch_service_start_does_not_reap_reused_pid(
@@ -1766,7 +2635,7 @@ def test_managed_watch_service_start_does_not_reap_reused_pid(
 
     asyncio.run(_run())
 
-    assert reconciles == 1
+    assert reconciles >= 1
     assert watch.id not in service._recovery_blocked_watch_ids
 
 
@@ -1939,7 +2808,7 @@ def test_managed_watch_service_start_ignores_dead_recorded_pid(
 
     asyncio.run(_run())
 
-    assert reconciles == 1
+    assert reconciles >= 1
 
 
 def test_managed_watch_service_start_reaps_group_after_leader_exit(
@@ -1982,7 +2851,8 @@ def test_managed_watch_service_start_reaps_group_after_leader_exit(
 
     asyncio.run(_run())
 
-    assert events == ["terminate-group", "reconcile"]
+    assert events[0] == "terminate-group"
+    assert events[1:] and all(event == "reconcile" for event in events[1:])
 
 
 def test_managed_watch_service_does_not_reap_unverified_group_after_leader_exit(
@@ -2185,6 +3055,152 @@ def test_hfr_179_watch_store_phases_are_single_flight_and_apply_on_loop(
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("backend", ["file", "sqlite"])
+@pytest.mark.parametrize("ordering", ["before_scan", "after_scan", "legacy"])
+def test_hfr_485_watch_reconciles_after_another_reader_consumes_reload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    ordering: str,
+) -> None:
+    """Issue #1995: a refreshed mirror is not an acknowledged scheduling change."""
+    monkeypatch.setattr(watches_module, "_publish_watch_definitions_updated", lambda: None)
+    monkeypatch.setattr(watches_module, "WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+    reader = ManagedWatchStore(tmp_path / "watches.json")
+    writer = ManagedWatchStore(tmp_path / "watches.json")
+    sqlite_stores = []
+    if backend == "sqlite":
+        for store in (reader, writer):
+            store._sqlite = SQLiteBackgroundTaskStore(tmp_path / "isolated.sqlite")
+            sqlite_stores.append(store._sqlite)
+            store.load()
+    reader.maybe_reload()
+    assert reader.maybe_reload() is False
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=reader,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._recovery_pending = False
+    handler = _ManagedWatchRuntimeWorkHandler(service)
+    started: list[str] = []
+    runtime_writes: list[dict] = []
+    write_runtime = service.runtime_store.write
+
+    def record_runtime_write(payload: dict) -> None:
+        runtime_writes.append(payload)
+        write_runtime(payload)
+
+    monkeypatch.setattr(service.runtime_store, "write", record_runtime_write)
+
+    async def _run() -> None:
+        new_started = asyncio.Event()
+        release_workers = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+
+        async def worker(watch_id: str) -> None:
+            started.append(watch_id)
+            if watch_id == "new-watch":
+                new_started.set()
+            try:
+                await release_workers.wait()
+            finally:
+                if watch_id == "new-watch":
+                    cleanup_started.set()
+                    await finish_cleanup.wait()
+
+        monkeypatch.setattr(service, "_run_watch", worker)
+
+        async def scan():
+            items, _ = await asyncio.to_thread(
+                handler.scan, limit=1, occupied=frozenset(), cursor=None,
+            )
+            return items[0]
+
+        service._running = True
+        legacy_task = None
+        try:
+            writer.upsert_watch(watches_module.ManagedWatch(
+                id="existing-watch", name="Existing", session_key="",
+            ))
+            assert await handler.process(await scan()) is True
+            await asyncio.sleep(0)
+            assert started == ["existing-watch"]
+            original_task = service._active_tasks["existing-watch"]
+
+            # Also cover a definition arriving after scan captured its old snapshot.
+            stale_item = await scan() if ordering == "after_scan" else None
+            writer.upsert_watch(watches_module.ManagedWatch(
+                id="new-watch", name="新 Watch", session_key="",
+            ))
+            assert await service._watch_store_call_async(
+                "existing-watch", "reload before follow-up fence", reader.maybe_reload,
+            ) is True
+            assert reader.get_watch("new-watch") is not None
+            assert reader.maybe_reload() is False
+
+            if ordering == "legacy":
+                legacy_task = asyncio.create_task(service._watch_store())
+            else:
+                if stale_item is not None:
+                    assert await handler.process(stale_item) is True
+                current = await scan()
+                assert {watch.id for watch in current.observation["watches"]} == {
+                    "existing-watch", "new-watch",
+                }
+                assert await handler.process(current) is True
+            await asyncio.wait_for(new_started.wait(), timeout=1)
+
+            writes_before_idle = len(runtime_writes)
+            for _ in range(3):
+                assert await handler.process(await scan()) is True
+            await asyncio.sleep(0)
+            assert started == ["existing-watch", "new-watch"]
+            assert service._active_tasks["existing-watch"] is original_task
+            assert len(runtime_writes) == writes_before_idle
+
+            # A consumed disabling change must still retire the existing owner.
+            writer.set_enabled("new-watch", False)
+            assert await service._watch_store_call_async(
+                "existing-watch", "reload", reader.maybe_reload,
+            ) is True
+            new_task = service._active_tasks["new-watch"]
+            assert await handler.process(await scan()) is True
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            writes_before_cleanup = len(runtime_writes)
+            for _ in range(3):
+                assert await handler.process(await scan()) is True
+            assert not new_task.done()
+            assert len(runtime_writes) == writes_before_cleanup
+            finish_cleanup.set()
+            await asyncio.gather(new_task, return_exceptions=True)
+            assert new_task.cancelled()
+            assert service._active_tasks["existing-watch"] is original_task
+            writer.set_enabled("new-watch", True)
+            new_started.clear()
+            assert await handler.process(await scan()) is True
+            await asyncio.wait_for(new_started.wait(), timeout=1)
+            assert started == ["existing-watch", "new-watch", "new-watch"]
+            assert service._active_tasks["new-watch"] is not new_task
+        finally:
+            service._running = False
+            finish_cleanup.set()
+            pending = list(service._active_tasks.values())
+            if legacy_task is not None:
+                pending.append(legacy_task)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        for store in sqlite_stores:
+            store.close()
+
+
 def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2197,7 +3213,6 @@ def test_hfr_179_watch_wake_during_reconcile_replays_after_owner_release(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = True
     reload_calls = 0
     persist_entered = asyncio.Event()
@@ -2256,7 +3271,6 @@ def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
     token = object()
     service._runtime_work_token = token  # type: ignore[assignment]
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
     service._recovery_blocked_watch_ids.add("watch-a")
     handler = _ManagedWatchRuntimeWorkHandler(service)
@@ -2265,7 +3279,6 @@ def test_hfr_179_blocked_watch_recovery_arms_generation_scoped_recheck(
         {
             "recovery": _StaleWorkerRecovery(True),
             "unblocked": (),
-            "changed": False,
             "watches": (),
             "store_error": None,
             "fused": False,
@@ -2298,7 +3311,6 @@ def test_hfr_179_pending_watch_recovery_uses_watch_lane_cadence(
         {
             "recovery": _StaleWorkerRecovery(False),
             "unblocked": (),
-            "changed": False,
             "watches": (),
             "store_error": None,
             "fused": False,
@@ -2322,7 +3334,6 @@ def test_hfr_179_watch_store_fuse_stops_generation_reads_and_retries(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = False
     reads = 0
 
@@ -2383,7 +3394,6 @@ def test_watch_runtime_state_persistence_failure_rearms_maintenance(
         runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
     )
     service._recovery_pending = False
-    service._reconcile_dirty = False
     service._runtime_state_dirty = True
 
     async def _persist_but_remain_dirty() -> None:
@@ -2396,7 +3406,6 @@ def test_watch_runtime_state_persistence_failure_rearms_maintenance(
         {
             "recovery": _StaleWorkerRecovery(True),
             "unblocked": (),
-            "changed": False,
             "watches": (),
         },
         rearm_after_process=False,
@@ -3097,12 +4106,12 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "expect_hook": "exited with code 2",
         "expect_exit_code": 2,
     },
-    # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
-    # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
-    # takes the lifetime branch BEFORE it ever reaches ``mark_cycle_start``. Writes in
-    # order: start #1, retry result #2, lifetime result #3.
+    # The supervisor's own deadline. The shared fixture arms the lifetime only after
+    # cycle 1's retry result has landed, then expires it after iteration 2 reloads the
+    # live mirror. The lifetime branch runs BEFORE ``mark_cycle_start``. Writes in order:
+    # start #1, retry result #2, lifetime result #3.
     "lifetime_expiry": {
-        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0.02, "retry_delay_seconds": 0.15},
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
         "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
         "occurrence": 3,
         "expect_hook": "reached its lifetime timeout",
@@ -3197,6 +4206,32 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
         return results[min(len(calls) - 1, len(results) - 1)]
 
     service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    if branch == "lifetime_expiry":
+        # Production reaches _sleep_before_retry only after the guarded retry-result
+        # stamp commits. Use that boundary as the condition; no wall-clock wait needed.
+        retry_result_landed = False
+        wait_for_follow_up_slot = service._wait_for_follow_up_slot
+
+        async def _mark_retry_result_landed(watch_arg, *, lifetime_started):  # noqa: ANN001
+            nonlocal retry_result_landed
+            assert calls == [watch_arg.id], "lifetime expiry must follow exactly one retry cycle"
+            retry_result_landed = True
+
+        async def _expire_after_next_reload(watch_id, *, lifetime_started):  # noqa: ANN001
+            slot = await wait_for_follow_up_slot(
+                watch_id,
+                lifetime_started=lifetime_started,
+            )
+            if retry_result_landed:
+                live_watch = store.get_watch(watch_id)
+                assert live_watch is not None
+                elapsed = asyncio.get_running_loop().time() - lifetime_started
+                assert elapsed > 0, "the retry result landed before the lifetime clock advanced"
+                live_watch.lifetime_timeout_seconds = elapsed
+            return slot
+
+        service._sleep_before_retry = _mark_retry_result_landed  # type: ignore[method-assign]
+        service._wait_for_follow_up_slot = _expire_after_next_reload  # type: ignore[method-assign]
     return store, service, watch, request_store, session_id, calls
 
 
@@ -4016,8 +5051,11 @@ def test_quiet_cycle_summary_keeps_the_end_of_a_long_waiter_report() -> None:
     assert squashed.startswith("…")
 
 
-def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: Path) -> None:
-    """A waiter learns whether an earlier report of its own was ever delivered.
+def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-469: a waiter learns whether its earlier report was delivered.
 
     A waiter cannot observe its own delivery: its stdout reaches the supervisor only
     after the process exits, so a waiter that wants to advance its own cursors past a
@@ -4081,8 +5119,20 @@ def test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered(tmp_path: P
         return scripted[min(len(told) - 1, len(scripted) - 1)]
 
     service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    monkeypatch.setattr(watches_module, "WATCH_MIN_REARM_SECONDS", 0)
+    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0.001)
 
-    asyncio.run(service._run_watch(watch.id))
+    async def _run() -> None:
+        task = asyncio.create_task(service._run_watch(watch.id))
+        while not task.done():
+            for request in request_store.list_pending():
+                claimed = request_store.claim(request.id)
+                if claimed is not None:
+                    request_store.complete(claimed, ok=True)
+            await asyncio.sleep(0.001)
+        await task
+
+    asyncio.run(_run())
 
     assert told[0] == "", "nothing has been reported yet"
     assert told[1], "the event was delivered, so the stamp has to have moved"

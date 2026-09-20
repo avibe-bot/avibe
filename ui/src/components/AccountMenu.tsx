@@ -24,7 +24,10 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
       }
     };
     const handleKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsOpen(false);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsOpen(false);
+      }
     };
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
@@ -49,7 +52,7 @@ export const AccountMenu: React.FC<{ openUpward?: boolean }> = ({ openUpward = f
         title={accountLabel}
         aria-haspopup="menu"
         aria-expanded={isOpen}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-[11px] font-semibold text-cyan transition hover:bg-cyan/[0.16] hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-cyan/35 bg-cyan/[0.08] text-[11px] font-semibold text-cyan-ink transition hover:bg-cyan/[0.16] hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
       >
         {initialFor(email)}
       </button>

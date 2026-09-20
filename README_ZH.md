@@ -41,7 +41,7 @@ Claude Code、Codex、OpenCode 都很能打。但是：
 **一条命令，把你自己的机器变成 AI 伙伴的家。** 你驱动的是*官方*的 Claude Code、Codex、OpenCode——从浏览器或任意聊天软件——而代码与密钥都留在你的机器上，avibe.bot 也看不到你的数据。
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash && vibe
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
 浏览器自动打开，跟着简短向导走完，你的机器就成了一个随处可达的 Agent OS。
@@ -88,7 +88,7 @@ Windows 上推荐用 WSL，兼容性最好——见 [从零用 WSL 跑 Avibe](do
 
 当一张图胜过一段话，Agent 直接给你一个实时网页——流程图、仪表盘、diff、报告或小应用。你可以对元素或截图原位评论，Agent 也能在你指的位置回答或直接改好页面。
 
-在 Chat 中点击**可视化**，即可把当前 Session 切换到它的 Show Page。将鼠标悬停在按钮上，可以改为在新的应用窗口或浏览器标签页中打开；也可以向下拖拽后松开，在指针位置放置一个新窗口，或拖到**应用**按钮上，把该 Show Page 固定到 Dock。
+在 Chat 中点击**可视化**，即可把当前 Session 切换到它的 Show Page。将鼠标悬停在按钮上，可以改为在新的应用窗口或浏览器标签页中打开；也可以向下拖拽后松开，在指针位置放置一个新窗口，或拖到**应用**按钮上，把该 Show Page 固定到应用栏。
 
 <img src="assets/screenshots/v4/show-page-zh.png" alt="Show Page 审阅界面，包含原位评论与 Agent 页面内回复" />
 

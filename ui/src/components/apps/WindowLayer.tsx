@@ -19,8 +19,10 @@ import {
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
 import { isDesktopViewport } from '../../lib/useIsDesktop';
+import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 
 const ShowPageWindow: React.FC<{
+  active: boolean;
   archived: boolean;
   iconVersion: string | null;
   layerHeight: number;
@@ -28,7 +30,7 @@ const ShowPageWindow: React.FC<{
   revalidateVersion: number;
   sessionId: string;
   win: WindowInstance;
-}> = ({ archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
+}> = ({ active, archived, iconVersion, layerHeight, layerWidth, revalidateVersion, sessionId, win }) => {
   const api = useApi();
   const { setTitle } = useWindowManager();
   const [status, setStatus] = useState<ShowPageWindowStatus>(sessionId ? 'loading' : 'missing');
@@ -59,24 +61,32 @@ const ShowPageWindow: React.FC<{
   const src = showPageWindowSource(sessionId, status, archived);
   return (
     <ShowPageAnnotationHost src={src}>
-      <AppWindow win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
+      <AppWindow active={active} win={win} layerWidth={layerWidth} layerHeight={layerHeight} iconVersion={iconVersion} />
     </ShowPageAnnotationHost>
   );
 };
 
-// The portal layer that hosts app windows. Covers the workbench main area (right
-// of the 240px sidebar on desktop). The layer itself is pointer-events-none so
+// The portal layer that hosts app windows. It spans the viewport so windows can
+// use the same geometry before and after route changes. The layer itself is pointer-events-none so
 // empty space passes clicks through to the workbench underneath; each AppWindow
 // re-enables pointer events on itself (minimized windows stay mounted but inert,
 // so their terminal/editor state survives a minimize). Desktop-only — mobile opens
 // apps full screen (P5), so no free-floating windows there.
-export const WindowLayer: React.FC = () => {
+export const WindowLayer: React.FC<{ active?: boolean }> = ({ active = true }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { order, pins } = useDock();
-  const { pages } = useShowPageInventory();
   const { windows, close, focus, minimize, openApp, restore, setParams, setTitle, confirmClose } =
     useWindowManager();
+  // The layer is mounted shell-wide so a window survives navigation, but it only
+  // reads the inventory once a window exists. Every other reader (Dock,
+  // MobileDockDrawer, app search) already gates on its own open state, so an
+  // empty layer is the last thing making /api/show-pages a per-document load.
+  // Both reads self-heal when the inventory lands: `icon_version` comes from a
+  // reactive snapshot, and the ⌘-number title falls back to the dock pin's
+  // `title_snapshot` exactly as it already does while the first fetch is in
+  // flight.
+  const { pages } = useShowPageInventory(windows.length > 0);
   // Any window open and NOT minimized — drives the layer's aria-hidden AND the
   // beforeunload guard (§7.1g).
   const anyShown = shouldGuardUnload(windows);
@@ -119,7 +129,9 @@ export const WindowLayer: React.FC = () => {
   // page — the chord falls through to the browser. Inside the terminal only Meta counts,
   // so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
   useEffect(() => {
+    if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
@@ -136,7 +148,7 @@ export const WindowLayer: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [close, minimize, confirmClose, standaloneTab]);
+  }, [active, close, minimize, confirmClose, standaloneTab]);
 
   // ⌥W closes the focused in-app window — a browser-safe alternative to ⌘W, which
   // the browser reserves for tab-close (not interceptable). Uses `code` (macOS
@@ -144,7 +156,9 @@ export const WindowLayer: React.FC = () => {
   // guard as the ⌘/Ctrl chord above. Text-entry surfaces (inputs, Monaco, terminal)
   // keep Option+W for character entry — consistent with the Alt+1-9 chord.
   useEffect(() => {
+    if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.code !== 'KeyW' || !e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return;
       const active = document.activeElement;
       if (inTextEntrySurface(active)) return;
@@ -155,7 +169,7 @@ export const WindowLayer: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [close, confirmClose]);
+  }, [active, close, confirmClose]);
 
   // While any app window is open and visible (not just minimized), guard tab-close
   // / navigation-away with the browser's native confirm — the window state
@@ -182,7 +196,9 @@ export const WindowLayer: React.FC = () => {
   // turn Option+digit into punctuation. Text inputs and terminals keep the chord
   // for character entry; the Windows layer is desktop-only.
   useEffect(() => {
+    if (!active) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (!isDesktopViewport()) return;
       const index = dockIndexFromShortcut(e);
       const target = e.target instanceof Element ? e.target : document.activeElement;
@@ -228,7 +244,7 @@ export const WindowLayer: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focus, openApp, restore, t]);
+  }, [active, focus, openApp, restore, t]);
 
   // Session mutations broadcast `session.activity`. Keep every open Show Page
   // window's title live, and treat archive as terminal for the frame plus every
@@ -269,38 +285,42 @@ export const WindowLayer: React.FC = () => {
   // actually shown (`anyShown`, computed above).
 
   return (
-    <div
-      ref={ref}
-      aria-hidden={!anyShown}
-      // Theme is per-window now (AppWindow sets it from each app's registry `lockTheme`): the File
-      // Browser follows the workbench light/dark, while the Editor and Terminal stay dark like a VS
-      // Code editor / a terminal. So the layer itself no longer forces a theme — each window opts in.
-      // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
-      // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
-      // (z-10), so a maximized window covers the whole sidebar, Apps launcher included.
-      className="pointer-events-none fixed inset-0 z-20 hidden md:block"
-    >
-      {windows.map((w) => {
-        // For a showpage window, join the inventory (already loaded above — no new
-        // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
-        const sid = w.appId === 'showpage' && typeof w.params?.sessionId === 'string' ? w.params.sessionId : undefined;
-        const iconVersion = sid ? pages.find((p) => p.session_id === sid)?.icon_version ?? null : null;
-        if (w.appId !== 'showpage') {
-          return <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
-        }
-        return (
-          <ShowPageWindow
-            key={w.id}
-            archived={Boolean(sid && archivedSessionIds.has(sid))}
-            iconVersion={iconVersion}
-            layerHeight={size.h}
-            layerWidth={size.w}
-            revalidateVersion={showPageRevalidateVersion}
-            sessionId={sid ?? ''}
-            win={w}
-          />
-        );
-      })}
-    </div>
+    <RouteSurfaceActivityBoundary active={active}>
+      <div
+        ref={ref}
+        aria-hidden={!active || !anyShown}
+        inert={!active || undefined}
+        // Theme is per-window now (AppWindow sets it from each app's registry `lockTheme`): the File
+        // Browser follows the workbench light/dark, while the Editor and Terminal stay dark like a VS
+        // Code editor / a terminal. So the layer itself no longer forces a theme — each window opts in.
+        // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
+        // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
+        // (z-10), but below the portaled Apps launcher and Dock (z-30).
+        className="pointer-events-none fixed inset-0 z-20 hidden md:block"
+      >
+        {windows.map((w) => {
+          // For a showpage window, join the inventory (already loaded above — no new
+          // fetch) to hand its own HTML icon to the title-bar chip (§7.1f/g).
+          const sid = w.appId === 'showpage' && typeof w.params?.sessionId === 'string' ? w.params.sessionId : undefined;
+          const iconVersion = sid ? pages.find((p) => p.session_id === sid)?.icon_version ?? null : null;
+          if (w.appId !== 'showpage') {
+            return <AppWindow active={active} key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} iconVersion={iconVersion} />;
+          }
+          return (
+            <ShowPageWindow
+              active={active}
+              key={w.id}
+              archived={Boolean(sid && archivedSessionIds.has(sid))}
+              iconVersion={iconVersion}
+              layerHeight={size.h}
+              layerWidth={size.w}
+              revalidateVersion={showPageRevalidateVersion}
+              sessionId={sid ?? ''}
+              win={w}
+            />
+          );
+        })}
+      </div>
+    </RouteSurfaceActivityBoundary>
   );
 };

@@ -25,6 +25,14 @@ from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
 
 
+@pytest.fixture(autouse=True)
+def _clear_web_push_delivery_dispositions():
+    from core import web_push_notifications
+
+    web_push_notifications._RECENT_DELIVERY_DISPOSITIONS.clear()
+    yield
+
+
 def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
     request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
     request_headers.update(headers or {})
@@ -95,6 +103,164 @@ def test_hfr_283_archive_run_cancellations_wake_runtime_consumers(monkeypatch):
     ]
 
 
+def test_session_archive_delegates_terminal_mutation_to_controller(
+    monkeypatch,
+    tmp_path,
+):
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage import workbench_sessions_service
+    from core.services import sessions as sessions_service
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Archive me",
+        )["id"]
+
+    events: list[str] = []
+    controller_call_active = False
+
+    async def _archive_via_controller(actual_session_id: str):
+        nonlocal controller_call_active
+        assert actual_session_id == session_id
+        with engine.connect() as conn:
+            assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+        events.append("controller")
+        controller_call_active = True
+        try:
+            with engine.begin() as conn:
+                session = sessions_service.archive_session(conn, session_id)
+        finally:
+            controller_call_active = False
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "session": session},
+        }
+
+    original_archive = sessions_service.archive_session
+
+    def _archive(conn, actual_session_id):
+        assert controller_call_active
+        events.append("archive")
+        return original_archive(conn, actual_session_id)
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(internal_client, "memory_archive_session", _archive_via_controller)
+    monkeypatch.setattr(sessions_service, "archive_session", _archive)
+    monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
+
+    client = app.test_client()
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert events == ["controller", "archive"]
+    with engine.connect() as conn:
+        assert workbench_sessions_service.get_session(conn, session_id)["status"] == "archived"
+
+
+def test_session_archive_fails_closed_when_controller_is_unavailable(
+    monkeypatch,
+    tmp_path,
+):
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage import workbench_sessions_service
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        session_id = workbench_sessions_service.create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="claude",
+            title="Keep active",
+        )["id"]
+
+    async def _unavailable(_session_id: str):
+        raise internal_client.InternalServerUnavailable("controller unavailable")
+
+    monkeypatch.setattr(internal_client, "memory_archive_session", _unavailable)
+    client = app.test_client()
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "session_archive_unavailable"
+    with engine.connect() as conn:
+        assert workbench_sessions_service.get_session(conn, session_id)["status"] == "active"
+
+
+@pytest.mark.parametrize("session_kind", ["missing", "reserved", "archived"])
+def test_session_archive_preflight_skips_controller_lifecycle_for_ineligible_rows(
+    monkeypatch,
+    tmp_path,
+    session_kind,
+):
+    from unittest.mock import AsyncMock
+
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.db import create_sqlite_engine
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import archive_session, create_session
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    session_id = "ses-missing"
+    with engine.begin() as conn:
+        if session_kind == "reserved":
+            session_id = WORKSPACE_NOTICE_SESSION_ID
+        elif session_kind == "archived":
+            project_dir = tmp_path / "project"
+            project_dir.mkdir()
+            project = create_project(conn, str(project_dir), display_name="Project")
+            session_id = create_session(
+                conn,
+                scope_id=project["scope_id"],
+                agent_backend="claude",
+            )["id"]
+            archive_session(conn, session_id)
+
+    archive_session = AsyncMock()
+    monkeypatch.setattr(internal_client, "memory_archive_session", archive_session)
+    client = app.test_client()
+
+    response = client.delete(
+        f"/api/sessions/{session_id}",
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == {
+        "missing": 404,
+        "reserved": 403,
+        "archived": 200,
+    }[session_kind]
+    archive_session.assert_not_awaited()
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
@@ -156,12 +322,13 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     monkeypatch.setattr(
         api,
         "save_thread_settings",
-        lambda payload: saved_payloads.append(payload) or {"ok": True, "settings": payload["settings"]},
+        lambda payload, *, user_context: saved_payloads.append(payload)
+        or {"ok": True, "settings": payload["settings"]},
     )
     monkeypatch.setattr(
         api,
         "delete_thread_settings",
-        lambda platform, channel_id, thread_id: deleted_scopes.append(
+        lambda platform, channel_id, thread_id, *, user_context: deleted_scopes.append(
             (platform, channel_id, thread_id)
         )
         or {"ok": True, "removed": True},
@@ -202,6 +369,41 @@ def test_thread_settings_routes_use_native_fastapi(monkeypatch):
     assert deleted.status_code == 200
     assert deleted.get_json() == {"ok": True, "removed": True}
     assert deleted_scopes == [("telegram", "-1001", "42")]
+
+
+def test_the_usage_read_is_served_natively_rather_than_from_a_compat_worker(monkeypatch):
+    """Review 4966281026 finding 4: this read blocks, so where it is served matters.
+
+    Summarising the ledger takes the lock its writers hold across an fsync. The
+    compat surface hands a sync handler to a threadpool worker, so serving it
+    there occupies a UI worker for as long as the disk takes — while the native
+    surface awaits it on the loop, which is what the async client below exists
+    for. `ui_compat` names its endpoints `<name>_compat_endpoint`, so the route
+    table is where the two are told apart.
+    """
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    asked: list[int] = []
+
+    class LedgerClient:
+        async def usage_summary(self, *, days: int) -> dict:
+            asked.append(days)
+            return {"window_days": days}
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: LedgerClient())
+
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/api/models/usage" and "GET" in route.methods
+    )
+    assert route.endpoint.__name__ == "model_hub_usage_get"
+
+    response = app.test_client().get("/api/models/usage?days=7")
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {"window_days": 7}
+    assert asked == [7]
 
 
 def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(monkeypatch):
@@ -556,6 +758,12 @@ def _machine_coded_error_builders():
             lambda: ui_server._show_page_error_response(_Coded("taken", "share_id_taken")),
             "share_id_taken",
             409,
+        ),
+        (
+            "show_page_missing",
+            lambda: ui_server._show_page_error_response(_Coded("missing", "show_page_not_found")),
+            "show_page_not_found",
+            404,
         ),
         ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
         (
@@ -1276,6 +1484,111 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert counts["runs"]["all"] == 4
 
 
+def test_harness_task_resume_rejects_orphaned_owner_without_target(
+    monkeypatch, tmp_path
+):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "orphaned-task",
+                "name": "Orphaned task",
+                "prompt": "run it",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": False,
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:00+00:00",
+                "metadata": {
+                    "orphaned_task_owner": {
+                        "reason_code": "task_owner_session_unavailable",
+                        "owner_session_id": "ses-removed",
+                    }
+                },
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/orphaned-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_owner_session_unavailable"
+    assert body["error"]["code"] == "task_owner_session_unavailable"
+    assert "Create a replacement Task" in body["hint"]
+    assert body["details"] == {
+        "task_id": "orphaned-task",
+        "owner_session_id": "ses-removed",
+    }
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("orphaned-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["resume_blocked"] == {
+        "code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed",
+    }
+
+
+def test_harness_task_resume_rejects_retired_one_shot(monkeypatch, tmp_path):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "retired-task",
+                "name": "Retired task",
+                "prompt": "run it",
+                "schedule_type": "at",
+                "run_at": "2026-08-11T00:00:00+00:00",
+                "timezone": "UTC",
+                "enabled": False,
+                "retired_at": "2026-08-11T00:00:01+00:00",
+                "retirement_reason": "schedule_missed",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:01+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/retired-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_schedule_retired"
+    assert body["details"] == {"task_id": "retired-task"}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("retired-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["retirement_reason"] == "schedule_missed"
+
+
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
@@ -1453,6 +1766,8 @@ def test_project_patch_forwards_stable_agent_ids_and_localizes_conflicts(monkeyp
         headers=csrf_headers(client),
     )
 
+    authorization_context = captured.pop("authorization_context")
+    assert authorization_context.is_instance_owner
     assert captured == {
         "project_id": "proj-stale",
         "display_name": None,
@@ -1501,6 +1816,29 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
     assert data["setup_completed"] is False
     assert data["setup_state"]["needs_setup"] is True
     assert not paths.get_config_path().exists(), "GET must not persist a config file"
+
+
+def test_show_page_api_timeout_round_trips_through_config_routes(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    client = app.test_client()
+
+    initial = client.get("/api/config")
+    updated = client.post(
+        "/api/config",
+        json={"runtime": {"show_page_api_timeout_seconds": 12.5}},
+        headers=csrf_headers(client),
+    )
+    fetched = client.get("/api/config")
+
+    assert initial.status_code == 200
+    assert initial.get_json()["runtime"]["show_page_api_timeout_seconds"] == 90.0
+    assert updated.status_code == 200
+    assert updated.get_json()["runtime"]["show_page_api_timeout_seconds"] == 12.5
+    assert fetched.status_code == 200
+    assert fetched.get_json()["runtime"]["show_page_api_timeout_seconds"] == 12.5
 
 
 def test_first_config_post_starts_remote_access_monitoring(monkeypatch, tmp_path):
@@ -1711,6 +2049,37 @@ def test_config_post_hot_reconciles_platform_runtime_credential_change(monkeypat
     assert reconcile_calls == [True]
 
 
+def test_config_post_invalidates_controller_activity_flag_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    api.save_config(_full_config_payload())
+    invalidate_calls: list[bool] = []
+
+    async def _invalidate_activity_streaming():
+        invalidate_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(
+        internal_client,
+        "invalidate_activity_streaming",
+        _invalidate_activity_streaming,
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"ui": {"show_agent_activity": True}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["activity_streaming_runtime"]
+    assert runtime == {"ok": True, "hot_reconciled": True, "body": {"ok": True}}
+    assert invalidate_calls == [True]
+
+
 def test_platform_runtime_fields_changed_detects_primary_only_change():
     from config.v2_config import V2Config
 
@@ -1731,6 +2100,39 @@ def test_platform_runtime_fields_changed_detects_primary_only_change():
             previous,
             current,
             {"platforms": {"enabled": ["discord", "slack"], "primary": "slack"}},
+        )
+        is True
+    )
+
+
+def test_platform_runtime_fields_changed_ignores_idempotent_list_operation():
+    from config.v2_config import V2Config
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    previous = V2Config.from_payload(payload)
+    current = V2Config.from_payload(payload)
+
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"__avibe_list_ops": {"platforms.enabled": {"add": ["discord"]}}},
+        )
+        is False
+    )
+
+    current = V2Config.from_payload(
+        {
+            **payload,
+            "platforms": {"enabled": ["discord", "slack"], "primary": "discord"},
+        }
+    )
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"__avibe_list_ops": {"platforms.enabled": {"add": ["slack"]}}},
         )
         is True
     )
@@ -1942,8 +2344,16 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     async def _reconcile_agent_backends(_backends):
         raise AssertionError("Agent backend reconcile should not run")
 
+    async def _invalidate_activity_streaming():
+        raise AssertionError("Agent Activity cache invalidation should not run")
+
     monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
     monkeypatch.setattr(internal_client, "reconcile_agent_backends", _reconcile_agent_backends)
+    monkeypatch.setattr(
+        internal_client,
+        "invalidate_activity_streaming",
+        _invalidate_activity_streaming,
+    )
 
     client = app.test_client()
     response = client.post("/api/config", json={"show_duration": False}, headers=csrf_headers(client))
@@ -1951,6 +2361,7 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
     assert response.status_code == 200
     assert "platform_runtime" not in response.get_json()
     assert "agent_backend_runtime" not in response.get_json()
+    assert "activity_streaming_runtime" not in response.get_json()
 
 
 def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):
@@ -2083,6 +2494,37 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
     assert result["restart"] == {"job_id": "followup"}
     assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
     assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
+def test_terminal_restart_failure_does_not_block_config_restart_retry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(
+        runtime.get_restart_status_path(),
+        {
+            "ok": False,
+            "state": "failed",
+            "job_id": "failed-upgrade",
+            "supervisor_pid": 4242,
+            "error": "new release failed readiness",
+        },
+    )
+    scheduled: list[dict] = []
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": None, "ui_pid": 22})
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: scheduled.append(kwargs) or {"job_id": "retry"},
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result == {"ok": True, "restart": {"job_id": "retry"}}
+    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
@@ -2305,6 +2747,265 @@ def test_json_api_gzip_skips_sse_streaming_response():
     assert materialized_response is materialized
     assert materialized_response.body == body
     assert "Content-Encoding" not in materialized_response.headers
+
+
+def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_path):
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import create_session
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            project = projects_service.create_project(conn, str(project_dir))
+            session = create_session(conn, scope_id=project["scope_id"], agent_backend="codex")
+    finally:
+        engine.dispose()
+
+    async def collect_next_live_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                initial_chunks = [await iterator.__anext__() for _ in range(3)]
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                broker.publish("authorization.changed", {"project_ids": ["hidden-project"]})
+                broker.publish("message.new", {"session_id": session["id"]})
+                live_chunks = [
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+                    for _ in range(2)
+                ]
+            finally:
+                await iterator.aclose()
+        chunks = [*initial_chunks, *live_chunks]
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(collect_next_live_event())
+
+    assert "event: authorization.changed" in body
+    assert "event: message.new" in body
+    assert "hidden-project" not in body
+    assert "hidden-secret" not in body
+
+
+def test_workbench_events_heartbeat_proves_liveness_on_its_own_clock(monkeypatch, tmp_path):
+    """A browser must be able to tell a quiet stream from a dead one.
+
+    The keep-alive comment cannot say it -- ``EventSource`` never surfaces a
+    comment -- so the stream emits an observable frame on a wall-clock cadence
+    that no amount of traffic can suppress.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    # Only to keep the test quick. The client reads the cadence off the frame
+    # rather than assuming the shipped value.
+    monkeypatch.setattr(ui_server, "WORKBENCH_EVENT_HEARTBEAT_INTERVAL_S", 0.05)
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_heartbeats() -> tuple[str, str, str]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
+                idle = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+                # A stream carrying events this viewer may not see is silent
+                # from the browser's side while being anything but idle, so a
+                # cadence measured from the last delivered frame would leave
+                # exactly this subscriber unable to prove its stream alive.
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                busy = await asyncio.wait_for(iterator.__anext__(), timeout=2)
+            finally:
+                await iterator.aclose()
+        return handshake[1], decode(idle), decode(busy)
+
+    connected, idle, busy = asyncio.run(collect_heartbeats())
+
+    # The handshake declares the cadence before anything proves it. That promise
+    # is what lets a client hold a brand-new stream to a deadline: without it, a
+    # stream that opens and then goes silent has nothing to have broken, and the
+    # client's only options are to trust it for a whole window or to watchdog
+    # servers that never promised anything.
+    assert "event: connected" in connected
+    assert '"interval_ms":50' in connected
+
+    assert "event: heartbeat" in idle
+    # The cadence rides along here too, because only a heartbeat is proof, and
+    # proof is what the staleness window is measured from.
+    assert '"interval_ms":50' in idle
+    assert "event: heartbeat" in busy
+    assert "hidden-secret" not in busy
+
+
+def test_workbench_events_end_a_subscriber_whose_queue_overflowed(monkeypatch, tmp_path):
+    """A subscriber that lost an event is not a subscriber any more.
+
+    The broker's per-subscriber queue is bounded, so "slow subscriber" and "lost
+    events" are one condition -- and nothing else on the wire betrays it: the
+    socket stays open and the heartbeats keep proving it alive. Ending the stream
+    is the repair, because the client's reconnect path gets a fresh empty queue
+    and catches consumers up exactly once, with backoff if the load that
+    overflowed the queue is still going. Announcing the hole on this stream
+    instead keeps a full queue full: the next iteration finds another discard and
+    announces again, starving the payload frames it was warning about.
+    """
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_end() -> tuple[int, list[str], bool, int]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            frames: list[str] = []
+            ended = False
+            try:
+                handshake = [decode(await iterator.__anext__()) for _ in range(3)]
+                sub_id = int(json.loads(handshake[1].split("data: ", 1)[1])["sub_id"])
+                # Park the stream inside its read loop before overflowing the
+                # queue. A discard from before the loop started is already
+                # covered by the handshake the client just received, so only a
+                # later one is worth acting on.
+                pending = asyncio.create_task(iterator.__anext__())
+                await asyncio.sleep(0)
+
+                for index in range(400):
+                    broker.publish("session.activity", {"session_id": f"ses{index}"})
+                # One yield runs the whole batch of ``call_soon_threadsafe``
+                # handoffs, so every discard has happened by the time the count
+                # is read.
+                await asyncio.sleep(0)
+                dropped = broker.dropped_count(sub_id)
+
+                # Bounded well below the ~200 frames still sitting in the queue:
+                # a stream that kept serving them would run out of the budget
+                # rather than end, which is the failure this asserts against.
+                for _ in range(5):
+                    awaitable = pending if pending is not None else iterator.__anext__()
+                    pending = None
+                    try:
+                        frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                    except StopAsyncIteration:
+                        ended = True
+                        break
+            finally:
+                await iterator.aclose()
+        # Read after the generator has exited: its ``finally`` releases the
+        # subscription, so the client's reconnect starts from a clean slate
+        # rather than inheriting a count that would end the new stream too.
+        return dropped, frames, ended, broker.dropped_count(sub_id)
+
+    dropped, frames, ended, dropped_after_release = asyncio.run(collect_until_end())
+
+    assert dropped > 0
+    assert ended
+    assert dropped_after_release == 0
+    # Not by announcing the hole on the stream that has it: nothing about a
+    # subscriber whose view is incomplete is worth another frame.
+    assert not [frame for frame in frames if "workbench.events.gap" in frame]
+
+
+def test_workbench_events_allow_show_events_when_show_gate_allows(monkeypatch, tmp_path) -> None:
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    async def collect_show_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(
+                instance_role="viewer",
+                subject="viewer-1",
+                email="viewer@example.com",
+                instance_access_source="organization_group",
+                organization_id="org-1",
+                organization_member_id="member-1",
+                organization_role="member",
+                is_remote=True,
+            )
+            monkeypatch.setattr(
+                ui_server,
+                "_show_page_resource_access_allowed",
+                lambda context, session_id: session_id == "show-session-1",
+            )
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish(
+                    "show.event",
+                    {
+                        "session_id": "show-session-1",
+                        "payload": {
+                            "screenshot": {
+                                "path": "/private/host/path.png",
+                                "attachmentId": "attachment-1",
+                            }
+                        },
+                    },
+                )
+                await asyncio.sleep(0)
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    body = asyncio.run(collect_show_event())
+
+    assert "event: show.event" in body
+    assert "show-session-1" in body
+    assert "/private/host/path.png" not in body
+
+
+def test_local_workbench_events_ignore_legacy_authorization_refresh_deadline():
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect_until_expired() -> list[str | bytes]:
+            with app.test_request_context("/api/events"):
+                g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+                g.remote_authorization_refresh_at = ui_server.time.time()
+                response = await ui_server.workbench_events()
+                iterator = response.body_iterator.__aiter__()
+                try:
+                    chunks = [await iterator.__anext__() for _ in range(3)]
+                    next_chunk = asyncio.create_task(iterator.__anext__())
+                    await asyncio.sleep(0)
+                    broker.publish("authorization.changed", {"project_ids": []})
+                    chunks.append(await asyncio.wait_for(next_chunk, timeout=1))
+                finally:
+                    await iterator.aclose()
+            return chunks
+
+    chunks = asyncio.run(collect_until_expired())
+    assert len(chunks) == 4
+    assert "event: authorization.changed" in chunks[-1]
 
 
 def test_json_api_gzip_skips_attachments_and_existing_encoding():
@@ -2943,9 +3644,79 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
     )
 
     assert sent.status_code == 200
-    assert sent.get_json() == {"ok": True, "sent": 1, "failed": 0}
+    sent_body = sent.get_json()
+    assert sent_body["ok"] is True
+    assert sent_body["sent"] == 1
+    assert sent_body["failed"] == 0
     assert sends[0][0]["endpoint"] == subscription["endpoint"]
     assert sends[0][1]["title"] == "Hello"
+    # The test surface carries the same authorization evaluation the normal
+    # path applies, so a successful test send can be compared against the
+    # normal-only gates (#1434). A local install has no remote gates.
+    normal_delivery = sent_body["normal_delivery"]
+    assert normal_delivery["user_key"] == "local"
+    assert normal_delivery["policy"] == "local"
+    assert normal_delivery["authorized"] is True
+    assert normal_delivery["recent_deliveries"] == []
+
+
+def test_web_push_status_reports_normal_delivery_diagnostics(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    status = client.post("/api/web-push/status", json={}, headers=headers)
+    assert status.status_code == 200
+    body = status.get_json()
+    assert body["ok"] is True
+    normal_delivery = body["normal_delivery"]
+    assert normal_delivery["user_key"] == "local"
+    assert normal_delivery["policy"] == "local"
+    assert normal_delivery["authorized"] is True
+    assert normal_delivery["disposition"] is None
+    assert normal_delivery["recent_deliveries"] == []
+
+
+def test_web_push_status_reads_cross_process_delivery_dispositions(monkeypatch, tmp_path):
+    """The status surface reads dispositions persisted by the delivery process.
+
+    Normal delivery runs in the controller process while this endpoint runs in
+    the UI process, so the disposition ring must round-trip through storage.
+    """
+
+    from core import web_push_notifications
+    from core.chat_discovery import set_state_meta
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    controller_entry = {
+        "at": "2026-08-14T00:00:00Z",
+        "message_id": "msg_controller",
+        "session_id": "ses_controller",
+        "owners": {"local": {"policy": "local", "disposition": "sent", "reason": ""}},
+        "disposition": "sent",
+    }
+    other_entry = {
+        "at": "2026-08-14T00:01:00Z",
+        "message_id": "msg_other",
+        "session_id": "ses_other",
+        "owners": {"remote:user-a": {"policy": "personal", "disposition": None, "reason": ""}},
+        "disposition": "sent",
+    }
+    set_state_meta(
+        web_push_notifications._DELIVERY_DISPOSITIONS_STATE_KEY,
+        [controller_entry, other_entry],
+    )
+
+    client = app.test_client()
+    status = client.post("/api/web-push/status", json={}, headers=csrf_headers(client))
+    assert status.status_code == 200
+    normal_delivery = status.get_json()["normal_delivery"]
+    # Newest first, scoped to the calling local owner: the remote entry stays
+    # private to its own owner's diagnostics.
+    assert normal_delivery["recent_deliveries"] == [controller_entry]
 
 
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
@@ -2985,7 +3756,9 @@ def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path
     )
 
     assert sent.status_code == 200
-    assert sent.get_json() == {"ok": True, "sent": 1, "failed": 0}
+    assert sent.get_json()["ok"] is True
+    assert sent.get_json()["sent"] == 1
+    assert sent.get_json()["failed"] == 0
     assert [send[0]["endpoint"] for send in sends] == [subscriptions[0]["endpoint"]]
 
 

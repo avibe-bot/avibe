@@ -3,7 +3,8 @@
 import logging
 import os
 import time
-from typing import Any, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any, Optional, TypeVar
 from config.platform_registry import get_platform_descriptor
 from core.bind_security import BindAttemptLimiter
 from core.message_context import (
@@ -11,6 +12,7 @@ from core.message_context import (
     requires_typed_user_session_key,
     resolve_context_thread_id,
 )
+from core.memory_adapter import SessionReset
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -19,6 +21,9 @@ from modules.im import MessageContext, InlineKeyboard, InlineButton
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
+
+
+_NewSessionResult = TypeVar("_NewSessionResult")
 
 
 class CommandHandlers(BaseHandler):
@@ -113,12 +118,14 @@ class CommandHandlers(BaseHandler):
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
         return f"{platform}::{self._get_settings_key(context)}"
 
-    def _session_anchor_for_new(self, context: MessageContext) -> str:
+    def _session_anchors_for_new(self, context: MessageContext) -> tuple[str, Optional[str]]:
         session_handler = getattr(self.controller, "session_handler", None)
         getter = getattr(session_handler, "get_base_session_id", None)
         if callable(getter):
             try:
-                return getter(context)
+                canonical_anchor = getter(context)
+                if isinstance(canonical_anchor, str) and canonical_anchor:
+                    return canonical_anchor, canonical_anchor
             except Exception:
                 logger.debug("Failed to resolve session anchor for /new", exc_info=True)
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
@@ -128,9 +135,38 @@ class CommandHandlers(BaseHandler):
             base_id = context.thread_id or context.channel_id or context.user_id
         else:
             if thread_id:
-                return build_thread_session_anchor(platform, context.channel_id, thread_id)
+                return build_thread_session_anchor(platform, context.channel_id, thread_id), None
             base_id = context.message_id or context.channel_id or context.user_id
-        return f"{platform}_{base_id}"
+        return f"{platform}_{base_id}", None
+
+    async def _run_session_lifecycle_for_new(
+        self,
+        session_anchor: Optional[str],
+        operation: Callable[[], Awaitable[_NewSessionResult]],
+    ) -> _NewSessionResult:
+        """Run `/new` in the core session generation boundary."""
+
+        turn_manager = getattr(self.controller, "session_turns", None)
+        turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
+        if session_anchor and callable(turn_lifecycle):
+            return await turn_lifecycle(
+                session_anchor,
+                operation,
+                deadline_seconds=0.0,
+            )
+        return await operation()
+
+    def _offer_session_reset(self, session_anchor: str | None) -> None:
+        if not session_anchor:
+            return
+        adapter = getattr(self.controller, "memory_adapter", None)
+        offer = getattr(adapter, "offer", None)
+        if not callable(offer):
+            return
+        try:
+            offer(SessionReset(session_anchor))
+        except Exception:
+            logger.debug("Session reset observation failed", exc_info=True)
 
     def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
         keys = [session_key]
@@ -527,35 +563,57 @@ class CommandHandlers(BaseHandler):
         try:
             im_client = self._get_im_client(context)
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
-            if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
-                topic_context = await im_client.start_new_topic_session(context)
-                if topic_context is not None:
-                    await im_client.send_message(topic_context, f"🆕 {self._t('command.new.started')}")
-                    logger.info("Started new Telegram topic session for user %s", context.user_id)
-                    return
-            session_key = self._get_session_key(context)
-            session_anchor = self._session_anchor_for_new(context)
-            sessions = getattr(self.controller, "sessions", None)
-            clear_base = getattr(sessions, "clear_session_base", None)
+            # Resolve the old session before Telegram can create a replacement
+            # topic. The new topic context is not a valid identity for this flush.
+            session_anchor, memory_session_anchor = self._session_anchors_for_new(context)
             # ``/new`` deletes the session rows that scheduled tasks and watches may
-            # be pinned to. Storage pauses those definitions rather than orphaning
-            # them (archive soft-deletes because it is terminal; ``/new`` is an
-            # everyday command), and names ``/new`` as the cause. The ledger is how
-            # that count reaches this reply without every layer in between — four
-            # backend adapters included — growing a return value.
-            # Imported lazily: ``core.handlers`` must stay importable without
-            # sqlite3 (``storage/__init__`` pulls in the migration importer), an
-            # invariant the native-session lightweight-import test pins.
-            from storage.session_reclaim import session_teardown_context
+            # be pinned to. Wait briefly for in-flight capture, then always reset
+            # (a stalled or failed Memory flush must not fail the command).
+            async def _reset_session() -> tuple[bool, list[dict[str, Any]]]:
+                if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
+                    topic_context = await im_client.start_new_topic_session(context)
+                    if topic_context is not None:
+                        await im_client.send_message(topic_context, f"🆕 {self._t('command.new.started')}")
+                        logger.info("Started new Telegram topic session for user %s", context.user_id)
+                        return True, []
 
-            with session_teardown_context(reason=self._t("command.new.pausedReason")) as reclaimed:
-                for key in self._compat_session_keys_for_new(context, session_key):
-                    await self.controller.agent_service.clear_sessions(key)
-                    if callable(clear_base):
-                        try:
-                            clear_base(key, session_anchor)
-                        except Exception:
-                            logger.debug("Failed to clear session base for %s:%s", key, session_anchor, exc_info=True)
+                session_key = self._get_session_key(context)
+                sessions = getattr(self.controller, "sessions", None)
+                clear_base = getattr(sessions, "clear_session_base", None)
+                # Storage pauses bound definitions rather than orphaning them
+                # (archive soft-deletes because it is terminal; ``/new`` is an
+                # everyday command), and names ``/new`` as the cause. The ledger
+                # carries those counts to the reply without widening four backend
+                # adapter return values. Imported lazily to keep ``core.handlers``
+                # importable without sqlite3.
+                from storage.session_reclaim import session_teardown_context
+
+                with session_teardown_context(reason=self._t("command.new.pausedReason")) as reclaimed:
+                    for key in self._compat_session_keys_for_new(context, session_key):
+                        await self.controller.agent_service.clear_sessions(key)
+                        if callable(clear_base):
+                            try:
+                                clear_base(key, session_anchor)
+                            except Exception:
+                                logger.debug(
+                                    "Failed to clear session base for %s:%s",
+                                    key,
+                                    session_anchor,
+                                    exc_info=True,
+                                )
+                return False, reclaimed
+
+            async def _reset_and_offer() -> _NewSessionResult:
+                result = await _reset_session()
+                self._offer_session_reset(memory_session_anchor)
+                return result
+
+            topic_started, reclaimed = await self._run_session_lifecycle_for_new(
+                memory_session_anchor,
+                _reset_and_offer,
+            )
+            if topic_started:
+                return
             full_response = f"🆕 {self._t('command.new.started')}"
             # Split by definition type: tasks and watches are paused by the same
             # reclaim but are managed by two different command groups, and
@@ -581,7 +639,8 @@ class CommandHandlers(BaseHandler):
             logger.error(f"Error starting new session: {e}", exc_info=True)
             try:
                 channel_context = self._get_channel_context(context)
-                await im_client.send_message(channel_context, f"❌ {self._t('error.clearSession', error=str(e))}")
+                error_message = self._t("error.clearSession", error=str(e))
+                await im_client.send_message(channel_context, f"❌ {error_message}")
             except Exception as send_error:
                 logger.error(f"Failed to send error message: {send_error}", exc_info=True)
 

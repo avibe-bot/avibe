@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.13.0
+version: 0.17.4
 ---
 
 # Background Watch Hook
@@ -30,7 +30,7 @@ Prefer `vibe watch` when the wait should be inspectable, pausable, resumable, or
 - `vibe watch list`, `vibe watch show`, `vibe watch update`, `vibe watch pause`, `vibe watch resume`, `vibe watch remove`
   Use these to inspect and manage the watch after creation.
 - `scripts/wait_pr.py`
-  Bundled waiter example for one common case: GitHub PR review activity.
+  Bundled GitHub waiter for PR activity, with optional exact-head Actions monitoring.
 
 ## Use `vibe watch` First
 
@@ -159,10 +159,23 @@ For `vibe watch add`:
 - default is `21600` seconds
 - `0` means no per-cycle timeout
 - `--forever` means re-arm after each detected event
-- forever retries only when the waiter exits with an allowed `--retry-exit-code`; other failures stop the watch and send a failure follow-up
+- an allowed `--retry-exit-code` keeps either mode waiting; a once Watch stops after its first event
 - `--lifetime-timeout` limits the whole long-running watch; default is `0` meaning run until killed
 
-This separation matters: a forever watch can still use a bounded timeout for each cycle.
+This separation matters: a once Watch may now have several retry cycles, and a forever
+Watch can still use a bounded timeout for each cycle.
+
+Exit `0` means one new reportable event, never merely that a condition remains true.
+For a persistent level, return an allowed retry code (default `75`) until a new edge is
+observed. Exit `64` plus `avibe-watch: no-event` on stderr is a completed cycle with
+nothing worth reporting. A forever waiter must keep a durable cursor, state transition,
+or domain cooldown so it cannot emit the same level repeatedly.
+
+Avibe admits only one queued/running follow-up per Watch. A forever Watch re-arms after
+that Agent Run settles and a five-second safety delay. If the waiter still produces six
+successful events within 60 seconds, Avibe pauses the Watch and sends the target Agent
+one repair message containing the bounded latest waiter output. The Agent should inspect
+and fix the waiter, and resume only after verifying an unambiguous, reversible fix.
 
 ## Bundled Waiter Example
 
@@ -170,10 +183,15 @@ This skill ships bundled GitHub waiters:
 
 - `scripts/wait_pr.py`
   Waits for GitHub PR review activity, including reviews, inline review comments, PR conversation comments, PR status transitions such as `draft -> open`, `open -> merged`, or `open -> closed`, and the special Codex `+1` reaction on the PR body. It can also wait for newly opened PRs in a repository.
+  When one or more `--workflow` values are provided for a specific PR, the same
+  waiter also watches every matching Actions run at the PR's current head and
+  optional branch. Add `--sha` only to pin a one-shot wait to one exact head.
 - `scripts/wait_issue.py`
   Waits for GitHub issue activity, either newly opened issues in a repository or new comments on a single issue.
 - `scripts/wait_action.py`
-  Waits for selected GitHub Actions workflow runs on a specific commit SHA to finish. Workflow failures are reported as an event so the follow-up turn can inspect and handle them.
+  Waits for selected GitHub Actions workflow runs on a specific commit SHA to finish
+  when there is no PR activity stream to combine with them. Workflow failures are
+  reported as an event so the follow-up turn can inspect and handle them.
 
 Use bundled waiters as examples or as ready-to-run building blocks. The main skill is still `vibe watch`; the waiter is only the thing that blocks until the condition is met.
 When running a bundled script through `uv`, prefer `uv run --no-project ...` so the script does not accidentally attach itself to an unrelated parent project.
@@ -185,36 +203,104 @@ opts into retrying that code. Exit code `64` with the
 `avibe-watch: no-event` marker means a cycle finished with nothing worth an Agent
 turn.
 
-The waiter is distributed with this skill, not with the caller's repository.
-Resolve the active skill directory before constructing a watch command:
+**A waiter detects change; the follow-up Agent Run makes the decision.** Keep that
+split when writing your own. A waiter that fires only once a composite gate is
+satisfied — CI green *and* a verdict bound to the exact head *and* zero unresolved
+threads — must match the shape of every signal in that gate, and it can only match
+the shapes its author has already seen. A wrong predicate then produces silence,
+which is indistinguishable from "nothing has happened yet", so it can sit on a retry
+exit code for hours after the state it was armed for arrived. The bundled waiters
+avoid that by reporting the change and leaving the judgment to the turn that has the
+whole picture. One caveat on the CI half: `render_actions_result` reports nothing
+while a requested workflow is missing, so a `--workflow` value that never matches —
+renamed, misspelled, or never triggered on this branch — never yields a CI event. PR
+activity still comes through, so the watch keeps firing; it is the CI verdict that
+silently never arrives. Check the name against a head that actually ran it.
+
+A predicate never seen to fire has not been tested. Verify it the way the delivery
+loop below is armed — seed the baseline, produce one event, confirm exit `0` — not by
+starting it on an event that already exists: an edge-triggered waiter is supposed to
+adopt that as its baseline, and one that fires there is level-triggered and will
+re-report forever. `--catch-up` is the bundled waiters' explicit replay mode for
+deliberately processing history.
+
+Run bundled waiters relative to the directory containing this loaded `SKILL.md`.
+The examples below use `BACKGROUND_WATCH_HOOK_DIR` for that directory:
 
 ```bash
-BACKGROUND_WATCH_HOOK_SKILL_FILE="${BACKGROUND_WATCH_HOOK_SKILL_FILE:-}"
-if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
-  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  for SKILL_FILE in \
-    "$REPO_ROOT/skills/background-watch-hook/SKILL.md" \
-    "$REPO_ROOT/.agents/skills/background-watch-hook/SKILL.md"; do
-    if [ -f "$SKILL_FILE" ]; then
-      BACKGROUND_WATCH_HOOK_SKILL_FILE="$SKILL_FILE"
-      break
-    fi
-  done
-fi
-if [ -z "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ]; then
-  for SKILL_ROOT in "${CODEX_HOME:-$HOME/.codex}/skills" "${AGENTS_HOME:-$HOME/.agents}/skills"; do
-    [ -d "$SKILL_ROOT" ] || continue
-    BACKGROUND_WATCH_HOOK_SKILL_FILE="$(find "$SKILL_ROOT" -path '*/background-watch-hook/SKILL.md' -print -quit)"
-    [ -n "$BACKGROUND_WATCH_HOOK_SKILL_FILE" ] && break
-  done
-fi
-test -f "$BACKGROUND_WATCH_HOOK_SKILL_FILE"
-BACKGROUND_WATCH_HOOK_DIR="$(dirname "$BACKGROUND_WATCH_HOOK_SKILL_FILE")"
+BACKGROUND_WATCH_HOOK_DIR="<directory containing the loaded SKILL.md>"
 ```
 
 ## GitHub Example Waiter
 
-Use the bundled GitHub waiter only when the watched thing is PR review activity.
+For a PR delivery loop, prefer one durable combined `wait_pr.py` watch. It observes
+PR review, comment, reaction, thread, lifecycle, and head-change events together
+with selected Actions workflows for the PR's current head. Use `--forever` and one
+state file for the whole loop: when a push changes the head, the next cycle fetches
+Actions for the new exact SHA without replacing the Watch or rebuilding its PR
+baseline. Use `wait_pr.py` without CI arguments for PR-only monitoring. Use
+`wait_action.py` only for an Actions wait that is not attached to a PR.
+
+### Preferred PR + CI watch
+
+At least one repeatable `--workflow` enables combined CI monitoring. Omit `--sha`
+for the normal delivery loop: each cycle resolves the PR's current head and queries
+Actions for that exact SHA. `--branch`, `--max-pages`, and `--success-conclusion`
+remain optional. Add `--sha` only when the caller intentionally wants a fixed-head
+one-shot wait. The waiter stays quiet while a requested run is missing or still
+running, then reports the complete exact-head result when every requested workflow
+has terminal runs. Every distinct matching run ID is included, so an earlier failed
+rerun remains visible to the follow-up turn. Set the forever Watch's `--timeout 0`:
+the default 21600-second per-cycle timeout treats six quiet hours as a terminal
+failure, which is not a meaningful end condition for a PR delivery loop.
+
+The durable Actions snapshot is the notification baseline, not the latest poll.
+Missing runs, nonterminal responses, and older rerun attempts do not erase a
+previously reported result. A new head starts a new baseline; complete terminal
+results for new run IDs, rerun attempts, or conclusions still wake the Agent.
+An inventory missing a previously known run cannot establish a new CI verdict.
+Review/comment/thread activity remains reportable while CI is incomplete.
+The current head's known run inventory is retained separately from notification
+progress, including through a PR-only report or a restart. Existing cursor files
+are accepted without reseeding; notification history already overwritten by an
+older waiter cannot be reconstructed.
+Explicit `--catch-up` and PR cursor replay reset the observed run inventory to
+the initial current response, just as `--seed-state` does. Catch-up reports
+current completed CI; explicit PR replay baselines unrelated CI silently.
+Permitted fresh manual initialization also adopts the current inventory.
+Subsequent polls retain newly observed runs normally. Do not use these reset
+modes when re-arming an existing Watch.
+
+```bash
+STATE_FILE="$HOME/.avibe/state/watch-cursors/pr-151-review.json"
+BRANCH="$(gh pr view 151 --repo avibe-bot/avibe --json headRefName --jq .headRefName)"
+
+uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+  --repo avibe-bot/avibe --pr 151 \
+  --branch "$BRANCH" \
+  --workflow lint \
+  --actionable-only \
+  --state-file "$STATE_FILE" --seed-state
+
+vibe watch add \
+  --name "Watch PR 151 review and CI" \
+  --forever \
+  --timeout 0 \
+  --message "PR #151 has new review activity, a head change, or current-head CI activity. Fetch the latest PR and Actions state, resolve actionable findings, and leave this durable combined Watch armed until close-out. Summarise the round here in one or two lines; do not post that summary as a PR comment." \
+  -- \
+  uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
+    --repo avibe-bot/avibe --pr 151 \
+    --branch "$BRANCH" \
+    --workflow lint \
+    --actionable-only --settle 20 --state-file "$STATE_FILE" --interval 60 \
+    --timeout 0
+
+# After the seeded Watch is confirmed live, push or post the review trigger.
+# Keep this same state file and Watch for every later head and review round.
+```
+
+Do not combine `--new-prs` with CI arguments. A new PR has no stable exact-head
+gate until the follow-up turn resolves its head and workflow set.
 
 One-shot watch:
 
@@ -237,9 +323,19 @@ vibe watch add \
     --interval 60
 ```
 
-Before a push or review trigger, seed an owner-specific state file from the
-current complete PR snapshot. Arm the post-action watch with that exact file so
-activity that lands during the handoff remains visible.
+Before the first watched push or review trigger in the delivery loop, seed an
+owner-specific state file from the current complete PR snapshot. Arm the forever
+Watch with that exact file and confirm it is live before taking the watched action.
+Set `--timeout 0` on both sides of the `--` command separator: the first disables
+the Watch supervisor's per-cycle deadline, while the second disables the bundled
+waiter's own default six-hour deadline. GitHub request timeouts remain bounded inside
+the waiter. A nonzero timeout at either layer is for a Watch whose lack of an event
+by that deadline is itself reportable.
+After the Watch starts, never reseed or replace its state between rounds: a later
+event may already exist, and turning it into the new baseline silently drops it.
+The forever Watch promotes each delivered batch and compares the next cycle against
+that durable pre-event snapshot, including activity that landed while the Agent
+follow-up was running.
 
 Use `--catch-up` only when deliberately processing historical activity. It is
 not a substitute for the pre-action baseline in a review loop.
@@ -293,8 +389,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
 vibe watch add \
   --name "Monitor PR 151 reviews" \
   --forever \
-  --timeout 21600 \
-  --lifetime-timeout 86400 \
+  --timeout 0 \
+  --lifetime-timeout 0 \
   --message "PR #151 has new review activity. Fetch the latest review state and resolve the actionable findings on the PR. Then summarise the round here in one or two lines -- which findings you resolved and what changed -- and do not post that summary as a PR comment. Save a longer message for the review passing, the loop being blocked, or a decision that needs the user." \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
@@ -303,7 +399,8 @@ vibe watch add \
     --actionable-only \
     --settle 20 \
     --state-file "$STATE_FILE" \
-    --interval 60
+    --interval 60 \
+    --timeout 0
 ```
 
 Always pass `--state-file` to a `--forever` watch. Each cycle is a fresh waiter
@@ -382,10 +479,14 @@ GitHub-specific notes:
   so edits and deletions remain observable, reactions are filtered server-side with
   `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
   against the rate limit — an idle watch can poll for hours for free
-- PR activity also includes the special case where `chatgpt-codex-connector` or
-  `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of
-  posting a comment; pass reactions remain visible even when `--event-limit` is
-  reached
+- a Codex verdict arrives in more than one shape and the waiter reports all of them:
+  findings as a review with inline comments, and a pass as either a `+1` reaction on
+  the PR body or a PR conversation comment. Pass reactions remain visible even when
+  `--event-limit` is reached. A predicate keyed to reviews alone never sees a pass.
+  Whether a reported pass *counts* — bot author, pass phrase, reviewed SHA against the
+  current head, and the different qualification a bodyless reaction carries — is a
+  judgment the follow-up turn makes against this repo's review rules, and is not
+  something a waiter should encode
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
 - a changed PR head is reported as activity so a new push cannot leave the review
   loop asleep
@@ -417,7 +518,7 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo av
 uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_issue.py" --repo avibe-bot/avibe --issue 157 --interval 60
 ```
 
-GitHub Actions for a pushed commit:
+Standalone GitHub Actions for a pushed commit that is not being monitored through a PR:
 
 ```bash
 vibe watch add \

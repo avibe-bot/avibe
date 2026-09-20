@@ -10,7 +10,7 @@ import pytest
 
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
-from tests.test_ui_remote_access_auth import _remote_peer, _save_config
+from tests.ui_server_test_helpers import _remote_peer, _save_config
 from vibe import api, ui_server
 from vibe.ui_server import app
 
@@ -68,6 +68,7 @@ def test_dock_default_is_builtins_only(monkeypatch, tmp_path):
 
     result = api.get_dock()
 
+    assert BUILTIN_DOCK_IDS == ("files", "terminal", "editor", "library")
     assert result["ok"] is True
     assert result["dock"]["order"] == list(BUILTIN_DOCK_IDS)
     assert result["dock"]["pins"] == []

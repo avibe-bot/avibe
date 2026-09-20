@@ -12,6 +12,7 @@ from core.message_output import (
     terminal_output_for,
     terminal_turn_output,
 )
+from core.native_dispatch_phase import prewrite_user_stop_requested
 from core.runtime_activation import (
     RuntimeActivationIdentity,
     RuntimeActivationRegistry,
@@ -367,6 +368,20 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
+            from core.agent_model_selection import require_agent_model
+            from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+
+            if agent.name in SUPPORTED_AGENT_BACKENDS:
+                has_subagent_model = request.subagent_model is not None
+                selected_model = require_agent_model(
+                    request.subagent_model if has_subagent_model else request.vibe_agent_model,
+                    agent.name,
+                    getattr(getattr(self.controller, "config", None), "language", "en"),
+                )
+                if has_subagent_model:
+                    request.subagent_model = selected_model
+                else:
+                    request.vibe_agent_model = selected_model
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a
@@ -381,6 +396,48 @@ class AgentService:
             # make the scheduled tidy a no-op and leave the bubble stuck. Release
             # inside the scheduled task's finally; fall back to a synchronous
             # release if the emit can't be scheduled so the gate never leaks.
+            # A durable pre-write Stop already owns the terminal receipt and has
+            # proven that no native write happened. Release this adapter gate
+            # synchronously: deferring it behind the generic terminal tidy can
+            # leave the next turn waiting forever if that best-effort emit stalls.
+            if prewrite_user_stop_requested(request.context):
+                dispatcher = getattr(self.controller, "message_dispatcher", None)
+                status_key_for_context = getattr(dispatcher, "status_key_for_context", None)
+                consolidated_key = (
+                    status_key_for_context(request.context)
+                    if callable(status_key_for_context)
+                    else None
+                )
+                self.release_runtime_turn_key(runtime_key, gate.token)
+                cleanup = getattr(
+                    dispatcher,
+                    "finish_prewrite_stop_surfaces",
+                    None,
+                )
+                if callable(cleanup) and consolidated_key is not None:
+                    try:
+                        async def _cleanup_prewrite_stop_surfaces() -> None:
+                            try:
+                                await cleanup(
+                                    request.context,
+                                    consolidated_key=consolidated_key,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to clean prewrite Stop surfaces",
+                                    exc_info=True,
+                                )
+
+                        cleanup_task = asyncio.create_task(_cleanup_prewrite_stop_surfaces())
+                        self._background_tasks.add(cleanup_task)
+                        cleanup_task.add_done_callback(self._background_tasks.discard)
+                    except Exception:
+                        logger.debug(
+                            "Failed to schedule prewrite Stop surface cleanup",
+                            exc_info=True,
+                        )
+                raise
+
             emit = getattr(self.controller, "emit_agent_message", None)
             scheduled = False
             if callable(emit):
@@ -411,28 +468,46 @@ class AgentService:
             if not scheduled:
                 self.release_runtime_turn(request.context)
             raise
-        except Exception:
-            # The message handler converts backend exceptions into a terminal
-            # error result using the same context. Try that shared terminal path
-            # here too; if delivery itself is broken, the finally below still
-            # releases this turn's token so later prompts cannot hang forever.
+        except Exception as error:
+            # The caller owns the user-facing failure copy. Invoke that shared
+            # reporter while this runtime Turn is still current, so its notify
+            # receipt is part of the terminal failure contract before the gate is
+            # released. Direct AgentService callers without a reporter retain the
+            # silent terminal fallback below.
             try:
-                emit = getattr(self.controller, "emit_agent_message", None)
-                if callable(emit):
+                failure_handler = getattr(request, "failure_handler", None)
+                if callable(failure_handler):
+                    request.failure_handled = True
                     try:
-                        await emit(
-                            request.context,
-                            "result",
-                            "",
-                            is_error=True,
-                            level="silent",
-                            output=terminal_output_for(request),
-                        )
+                        handled = failure_handler(error)
+                        if inspect.isawaitable(handled):
+                            await handled
                     except Exception:
-                        logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
+                        logger.exception("Failed to report backend exception before Turn release")
+                        await self._emit_exception_terminal_fallback(request)
+                else:
+                    await self._emit_exception_terminal_fallback(request)
             finally:
                 self.release_runtime_turn(request.context)
             raise
+
+    async def _emit_exception_terminal_fallback(self, request: AgentRequest) -> None:
+        """Best-effort settlement for callers without a visible failure owner."""
+
+        emit = getattr(self.controller, "emit_agent_message", None)
+        if not callable(emit):
+            return
+        try:
+            await emit(
+                request.context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=terminal_output_for(request),
+            )
+        except Exception:
+            logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
 
     async def clear_sessions(self, session_key: str) -> Dict[str, int]:
         cleared: Dict[str, int] = {}
@@ -1110,6 +1185,17 @@ class AgentService:
             return True
         finally:
             self.release_runtime_turn_tokens(runtime_tokens)
+
+    async def invalidate_model_hub_runtime(self, agent_name: str) -> bool:
+        """Invalidate future Hub-only runtime state without disturbing Direct work."""
+        agent = self.agents.get(agent_name)
+        if agent is None:
+            return False
+        invalidate = getattr(agent, "invalidate_model_hub_runtime", None)
+        if not callable(invalidate):
+            return False
+        await invalidate()
+        return True
 
 
 @dataclass

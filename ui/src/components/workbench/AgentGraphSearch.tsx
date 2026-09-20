@@ -202,7 +202,7 @@ const ResultRow: React.FC<{
         </>
       ) : (
         <>
-          <span className="shrink-0 rounded bg-violet/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet">
+          <span className="shrink-0 rounded bg-violet/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-ink">
             {t('agents.graph.search.triggerTag')}
           </span>
           <span className="min-w-0 flex-1 truncate font-medium text-foreground">
@@ -212,7 +212,7 @@ const ResultRow: React.FC<{
         </>
       )}
       {outside && (
-        <span className="shrink-0 rounded bg-gold/15 px-1.5 py-0.5 text-[10px] font-medium text-gold">
+        <span className="shrink-0 rounded bg-gold/15 px-1.5 py-0.5 text-[10px] font-medium text-gold-ink">
           {t('agents.graph.search.outsideFilters')}
         </span>
       )}

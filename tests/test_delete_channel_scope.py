@@ -7,7 +7,7 @@ from vibe import api
 def test_delete_channel_scope_rejects_non_channel_scope(monkeypatch) -> None:
     calls: list[tuple] = []
 
-    def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None):
+    def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None, user_context=None):
         calls.append((platform, native_id, scope_type))
         return {"removed": True, "dismissed": False}
 
@@ -22,7 +22,7 @@ def test_delete_channel_scope_rejects_non_channel_scope(monkeypatch) -> None:
 def test_delete_channel_scope_allows_channel(monkeypatch) -> None:
     calls: list[tuple] = []
 
-    def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None):
+    def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None, user_context=None):
         calls.append((platform, native_id, scope_type))
         return {"removed": True, "dismissed": False}
 

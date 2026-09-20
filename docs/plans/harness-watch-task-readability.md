@@ -65,13 +65,15 @@ without a backfill; legacy disabled watches remain truthfully `paused`.
 | `paused` | `enabled = 0` and it did **not** end on its own | 4 |
 | `finished` | `enabled = 0` and it ended on its own | 1,228 |
 
-`paused` vs `finished`, per type:
+`paused` vs `finished`, per type. Follow-up issue #1036 replaced the Task
+wall-clock inference below with the same persisted `retired_at` fact used by
+Watches; the old measured count remains historical context only:
 
 | Type | Rule for `finished` | Rows |
 | --- | --- | ---: |
 | watch, `mode = once` | `retired_at IS NOT NULL` | forward writes |
 | watch, `mode = forever` | `retired_at IS NOT NULL` | forward writes |
-| scheduled, `schedule_type = at` | no future fire remains | 50 |
+| scheduled, `schedule_type = at` | `retired_at IS NOT NULL` | 50 (historical) |
 | watch, `mode = once`, never fired | → `paused` | 2 |
 | scheduled, `schedule_type = cron`, disabled | → `paused` | 2 |
 
@@ -99,12 +101,13 @@ list and detail for **both** `scheduled` and `watch` definitions.
 
 ```
 lifecycle_state:  'running' | 'waiting' | 'paused' | 'finished'
-lifecycle_detail: 'normal' | 'timeout' | 'error' | null   # non-null only when finished
+lifecycle_detail: 'normal' | 'timeout' | 'error' | 'missed' | null   # non-null only when finished
 next_run_at:      string | null    # ISO-8601; cron via APScheduler CronTrigger, one-shot = run_at
 waiting_since:    string | null    # last_started_at, when waiting
 running_since:    string | null    # started_at of the in-flight run, when running
 process_alive:    boolean | null   # watches only; from the runtime:<watch_id> row. null = unknown
-retired_at:       string | null    # watches only; supervisor persisted retirement marker
+retired_at:       string | null    # persisted terminal transition for Tasks and Watches
+retirement_reason: 'schedule_consumed' | 'schedule_missed' | null   # Tasks only
 ```
 
 `running_since` was added during review, and is the one change to this frozen
@@ -122,10 +125,11 @@ show a real number:
 counts: { running, waiting, paused, finished, total }
 ```
 
-**Non-goals.** The one nullable retirement marker and its forward-only migration
-are the complete schema change; there is no backfill and no inferred legacy
-retirement. The row **title** is computed client-side by reusing R1's fallback
-helper — it is deliberately not a server field.
+**Migration policy.** Neither retirement field is backfilled from edit times,
+run history, or elapsed wall-clock time. Legacy rows remain unknown. Issue #1036
+added the nullable Task reason because a consumed schedule and a missed schedule
+have different product outcomes that cannot be reconstructed from `retired_at`
+alone. The row **title** remains client-side.
 
 ### 3.2 Two write-side corrections review forced (behavior changes)
 

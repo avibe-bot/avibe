@@ -18,7 +18,12 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
-from .message_facts import is_ordinary_discord_text
+from .message_facts import (
+    discord_message_kind,
+    is_original_human_discord_attachment,
+    is_original_human_discord_text,
+)
+from .download_target import open_download_target
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -30,7 +35,6 @@ from modules.agents.opencode.utils import (
     build_reasoning_effort_options,
     resolve_model_reasoning_options,
     resolve_opencode_allowed_providers,
-    resolve_opencode_default_model,
     resolve_opencode_provider_preferences,
 )
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
@@ -226,6 +230,9 @@ class DiscordBot(BaseIMClient):
                 message_id=context.message_id,
                 platform_specific=context.platform_specific,
                 files=context.files,
+                is_original_human_text=context.is_original_human_text,
+                is_original_human_attachment=context.is_original_human_attachment,
+                message_kind=context.message_kind,
             )
 
         return await self._run_on_client_loop(_impl())
@@ -274,6 +281,9 @@ class DiscordBot(BaseIMClient):
                     message_id=context.message_id,
                     platform_specific=next_payload,
                     files=context.files,
+                    is_original_human_text=context.is_original_human_text,
+                    is_original_human_attachment=context.is_original_human_attachment,
+                    message_kind=context.message_kind,
                 )
 
             return await self._run_on_client_loop(_reply_impl())
@@ -290,6 +300,9 @@ class DiscordBot(BaseIMClient):
                 message_id=context.message_id,
                 platform_specific=context.platform_specific,
                 files=context.files,
+                is_original_human_text=context.is_original_human_text,
+                is_original_human_attachment=context.is_original_human_attachment,
+                message_kind=context.message_kind,
             )
 
         return await self._run_on_client_loop(_impl())
@@ -824,6 +837,7 @@ class DiscordBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         url = file_info.get("url") or file_info.get("url_private_download") or file_info.get("url_private")
         if not url:
@@ -836,15 +850,21 @@ class DiscordBot(BaseIMClient):
                         return FileDownloadResult(False, f"Download failed with HTTP {response.status}")
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             total_size += len(chunk)
                             if max_bytes is not None and total_size > max_bytes:
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)
@@ -1077,7 +1097,8 @@ class DiscordBot(BaseIMClient):
                 message_id=str(message.id),
                 platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                 files=files,
-                is_ordinary_text=is_ordinary_discord_text(message, files),
+                is_original_human_text=is_original_human_discord_text(message, files),
+                message_kind=discord_message_kind(message, files),
             )
             if await self.dispatch_text_command(command_context, content, allow_plain_bind=allow_plain_bind):
                 return
@@ -1092,7 +1113,8 @@ class DiscordBot(BaseIMClient):
                     message_id=str(message.id),
                     platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
                     files=files,
-                    is_ordinary_text=is_ordinary_discord_text(message, files),
+                    is_original_human_text=is_original_human_discord_text(message, files),
+                    message_kind=discord_message_kind(message, files),
                 )
                 await self.on_message_callback(context, "")
             return
@@ -1105,7 +1127,9 @@ class DiscordBot(BaseIMClient):
             message_id=str(message.id),
             platform_specific={"platform": "discord", "message": message, "is_dm": is_dm},
             files=files,
-            is_ordinary_text=is_ordinary_discord_text(message, files),
+            is_original_human_text=is_original_human_discord_text(message, files),
+            is_original_human_attachment=is_original_human_discord_attachment(message, files),
+            message_kind=discord_message_kind(message, files),
         )
 
         if self.on_message_callback:
@@ -1633,12 +1657,7 @@ class DiscordBot(BaseIMClient):
 
                 if self.selected_backend == "opencode":
                     opencode_agent_names = _unique_agent_names(opencode_agents)
-                    default_model_str = resolve_opencode_default_model(
-                        opencode_default_config,
-                        opencode_agents,
-                        self.oc_agent if self.oc_agent not in ("__default__", None) else None,
-                    )
-                    target_model = self.oc_model if self.oc_model not in (None, "__default__") else default_model_str
+                    target_model = self.oc_model if self.oc_model not in (None, "__default__") else None
                     preferred_providers = resolve_opencode_provider_preferences(
                         opencode_default_config,
                         target_model,
@@ -1683,8 +1702,6 @@ class DiscordBot(BaseIMClient):
                     self.add_item(agent_select)
 
                     default_label = self.outer._t("common.default")
-                    if default_model_str:
-                        default_label = f"{default_label} - {default_model_str}"
                     model_options = [
                         discord.SelectOption(
                             label=_prefixed_label("discord.labels.model", default_label),

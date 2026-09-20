@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkbenchMessage } from '../context/ApiContext';
+import orderFixture from './agentActivity.order.fixture.json';
 import {
-  activityDurationParts,
+  activityGroupsForForeground,
   activityRowFromMessage,
   filterActivityRows,
+  formatActivityElapsedClock,
   genericChips,
   groupFromWire,
   initialLiveActivity,
@@ -98,6 +100,79 @@ describe('toolRecipe (tier 1: known-tool recipes, backend-agnostic)', () => {
     expect(toolRecipe('bash', { command: 'ls', status: 'completed', exit_code: 0 })).toEqual({
       kind: 'command',
       command: 'ls',
+    });
+  });
+
+  describe('shell command summaries preserve the literal command body', () => {
+    const bodies = [
+      'git status --short',
+      'npm test',
+      'printf "%s\\n" "it\'s ready"',
+      'printf "%s" "$HOME"; echo `pwd` && cat *.txt | head -n 2',
+      'printf "你好"\nprintf "done"',
+      '/bin/bash -c "npm test"',
+    ];
+    const quoteForms = [
+      (body: string) => `'${body.replace(/'/g, `'"'"'`)}'`,
+      (body: string) => `'${body.replace(/'/g, `'\\''`)}'`,
+      (body: string) => `"${body.replace(/["\\$`]/g, '\\$&')}"`,
+    ];
+
+    it.each(bodies)('decodes only the outer wrapper around %j', (body) => {
+      for (const shell of ['zsh', '/bin/zsh', '/bin/bash', '/usr/bin/sh', '/opt/homebrew/bin/bash']) {
+        for (const flag of ['-lc', '-c']) {
+          for (const quote of quoteForms) {
+            const command = `${shell} ${flag} ${quote(body)}`;
+            const args = Object.freeze({ command, status: 'completed', exit_code: 0, output: 'done' });
+            const raw = `🔧 \`bash\` \`${JSON.stringify(args)}\``;
+            const parsed = parseToolCall(raw);
+
+            expect(toolRecipe(parsed.name, args)).toEqual({ kind: 'command', command: body });
+            expect(parsed.args).toEqual(args);
+            expect(parsed.raw).toBe(raw);
+            expect(toolParams(args).find((param) => param.key === 'command')?.value).toBe(command);
+          }
+        }
+      }
+    });
+
+    it.each([
+      ['/bin/zsh -lc pwd', 'pwd'],
+      ['/bin/zsh -lc npm\\ test', 'npm test'],
+      ['/bin/zsh -lc npm" test"', 'npm test'],
+      ['/bin/zsh -lc "printf \\q"', 'printf \\q'],
+    ])('decodes equivalent literal-word forms: %s', (command, expected) => {
+      expect(toolRecipe('exec_command', { cmd: command })).toEqual({ kind: 'command', command: expected });
+    });
+
+    it.each([
+      ' extra-argument', ' --flag', ' > output.txt', ' 2>&1', ' | cat',
+      ' && npm test', '; npm test', '\nnpm test', ' # comment', '\u00a0', '\u2003',
+    ])('retains the full invocation when a wrapper has a suffix %j', (suffix) => {
+      const command = `/bin/zsh -lc 'git status --short'${suffix}`;
+      expect(toolRecipe('bash', { command })).toEqual({ kind: 'command', command });
+    });
+
+    it.each([
+      'git status --short',
+      'echo /bin/zsh -lc pwd',
+      'env NAME=value /bin/zsh -lc pwd',
+      'sudo /bin/zsh -lc pwd',
+      '/bin/fish -c pwd',
+      '/bin/zsh -e -lc pwd',
+      '/bin/zsh -lc $COMMAND',
+      '/bin/zsh -lc "$COMMAND"',
+      '/bin/zsh -lc "${COMMAND}"',
+      '/bin/zsh -lc "$(cat script.sh)"',
+      '/bin/zsh -lc "`cat script.sh`"',
+      '/bin/zsh -lc *.sh',
+      '/bin/zsh -lc "unterminated',
+      '/bin/zsh -lc trailing\\',
+      '/bin/zsh -lc',
+      '/bin/zsh -lc ""',
+      '/bin/zsh -lc "  "',
+    ])('falls back unchanged outside the literal-wrapper contract: %s', (command) => {
+      expect(toolRecipe('bash', { command })).toEqual({ kind: 'command', command });
     });
   });
 
@@ -219,16 +294,18 @@ describe('filterActivityRows (B: eye toggle filters tool rows only)', () => {
   });
 });
 
-describe('activityDurationParts', () => {
-  it('splits into whole-second minutes/seconds (units applied via i18n)', () => {
-    expect(activityDurationParts(45000)).toEqual({ minutes: 0, seconds: 45 });
-    expect(activityDurationParts(83000)).toEqual({ minutes: 1, seconds: 23 });
-    expect(activityDurationParts(600000)).toEqual({ minutes: 10, seconds: 0 });
+describe('formatActivityElapsedClock', () => {
+  it('adds hours and days only when those units become meaningful', () => {
+    expect(formatActivityElapsedClock(0, 'd')).toBe('00:00');
+    expect(formatActivityElapsedClock(59 * 60_000 + 59_000, 'd')).toBe('59:59');
+    expect(formatActivityElapsedClock(60 * 60_000, 'd')).toBe('01:00:00');
+    expect(formatActivityElapsedClock(23 * 3_600_000 + 59 * 60_000 + 59_000, 'd')).toBe('23:59:59');
+    expect(formatActivityElapsedClock((24 + 14) * 3_600_000 + 33 * 60_000 + 11_000, 'd')).toBe('1d 14:33:11');
   });
 
-  it('returns null for null/negative', () => {
-    expect(activityDurationParts(null)).toBeNull();
-    expect(activityDurationParts(-5)).toBeNull();
+  it('clamps invalid or negative elapsed values to zero', () => {
+    expect(formatActivityElapsedClock(-1, 'd')).toBe('00:00');
+    expect(formatActivityElapsedClock(Number.NaN, 'd')).toBe('00:00');
   });
 });
 
@@ -294,6 +371,48 @@ describe('groupFromWire', () => {
   });
 });
 
+describe('activityGroupsForForeground', () => {
+  const settled = groupFromWire({
+    id: 'settled',
+    anchor_message_id: 'result',
+    anchor_position: 'before',
+    open: false,
+    status: 'done',
+    steps: 2,
+    duration_ms: 1000,
+  });
+  const open = groupFromWire({
+    id: 'open',
+    anchor_message_id: 'prompt',
+    anchor_position: 'after',
+    open: true,
+    status: 'interrupted',
+    steps: 1,
+    duration_ms: null,
+  });
+
+  it('withholds open groups while foreground state is unknown', () => {
+    expect(activityGroupsForForeground([settled, open], 'unknown')).toEqual({
+      settled: [settled],
+      inflight: null,
+    });
+  });
+
+  it('promotes the latest open group only while the turn is running', () => {
+    expect(activityGroupsForForeground([settled, open], 'running')).toEqual({
+      settled: [settled],
+      inflight: open,
+    });
+  });
+
+  it('renders an open group as settled only after authoritative idle', () => {
+    expect(activityGroupsForForeground([settled, open], 'idle')).toEqual({
+      settled: [settled, open],
+      inflight: null,
+    });
+  });
+});
+
 describe('activityRowFromMessage', () => {
   it('derives kind from the message type', () => {
     const assistant = activityRowFromMessage({ id: 'm1', type: 'assistant', text: 'thinking', created_at: 't1' } as WorkbenchMessage);
@@ -304,7 +423,10 @@ describe('activityRowFromMessage', () => {
 });
 
 describe('liveActivityReducer (generation invariant)', () => {
-  const row = (id: string): ActivityRow => ({ id, kind: 'tool_call', text: id, created_at: `t-${id}` });
+  const row = (id: string): ActivityRow => ({
+    id, kind: 'tool_call', text: id,
+    created_at: new Date(Date.UTC(2026, 8, 5, 0, 0, Number(id) || 0)).toISOString(),
+  });
 
   it('turn_start bumps the generation and clears the buffer', () => {
     let s = initialLiveActivity();
@@ -313,6 +435,22 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(s.gen).toBe(1);
     expect(s.rows).toEqual([]);
     expect(s.startedAt).toBeNull();
+  });
+
+  it('reset invalidates the visible generation and clears every live field', () => {
+    let s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    s = liveActivityReducer(s, { type: 'row', row: row('a'), now: 1 });
+    const visibleGen = s.gen;
+    s = liveActivityReducer(s, { type: 'reset' });
+    expect(s).toEqual({ gen: visibleGen + 1, settled: false, rows: [], startedAt: null });
+
+    const stale = liveActivityReducer(s, {
+      type: 'rehydrate_for_gen',
+      gen: visibleGen,
+      rows: [row('stale')],
+      startedAt: 1,
+    });
+    expect(stale.rows).toEqual([]);
   });
 
   it('rows append within a generation; the first stamps startedAt', () => {
@@ -349,7 +487,7 @@ describe('liveActivityReducer (generation invariant)', () => {
     expect(cleared.rows).toEqual([]);
   });
 
-  it('rehydrate_for_gen fills only an empty buffer of the current generation', () => {
+  it('rehydrate_for_gen preserves the live tail and only applies to its generation', () => {
     const s = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
     const gen = s.gen;
     const hydrated = liveActivityReducer(s, {
@@ -359,11 +497,110 @@ describe('liveActivityReducer (generation invariant)', () => {
       startedAt: 50,
     });
     expect(hydrated.rows.map((r) => r.id)).toEqual(['x', 'y']);
-    // Does not clobber an already-filled buffer, nor a stale generation:
+    // Re-reading a snapshot preserves newer live rows without duplicating overlap.
     const withLive = liveActivityReducer(hydrated, { type: 'row', row: row('z'), now: 60 });
-    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('w')], startedAt: 70 });
+    const noClobber = liveActivityReducer(withLive, { type: 'rehydrate_for_gen', gen, rows: [row('x'), row('y')], startedAt: 50 });
     expect(noClobber.rows.map((r) => r.id)).toEqual(['x', 'y', 'z']);
     const staleGen = liveActivityReducer(hydrated, { type: 'rehydrate_for_gen', gen: gen - 1, rows: [row('w')], startedAt: 70 });
     expect(staleGen.rows.map((r) => r.id)).toEqual(['x', 'y']);
+  });
+
+  it('merges durable history with overlapping live rows in emission order', () => {
+    const history = Array.from({ length: 300 }, (_, index) => row(String(index)));
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    state = liveActivityReducer(state, { type: 'row', row: history[299], now: 500 });
+    state = liveActivityReducer(state, { type: 'row', row: row('300'), now: 600 });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen, rows: history, startedAt: 100,
+    });
+    expect(state.rows).toEqual([...history, row('300')]);
+    expect(state.startedAt).toBe(100);
+    expect(liveActivityReducer(state, { type: 'row', row: history[299], now: 700 })).toBe(state);
+  });
+
+  it.each(['overlapping', 'disjoint'] as const)('retains emission order when the durable window moves (%s)', (window) => {
+    const rows = Array.from({ length: 6 }, (_, i): ActivityRow => ({
+      id: `${i % 2 ? 'evt' : 'msg'}_${(1_700_000_000_000_000 + i).toString(16).padStart(15, '0')}12345678`,
+      kind: i % 2 ? 'tool_call' : 'assistant',
+      text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    let state = liveActivityReducer(initialLiveActivity(), {
+      type: 'rehydrate_for_gen', gen: 0, rows: rows.slice(0, 3), startedAt: 100,
+    });
+    state = liveActivityReducer(state, {
+      type: 'rehydrate_for_gen', gen: state.gen,
+      rows: rows.slice(window === 'overlapping' ? 2 : 3), startedAt: 200,
+    });
+    expect(state.rows).toEqual(rows);
+    expect(state.startedAt).toBe(100);
+  });
+
+  it.each(['legacy ids', 'clock ids'] as const)('preserves durable tie order across hydration windows with %s', (idShape) => {
+    // The endpoint orders equal emission clocks by id, not locale or source.
+    const ids = idShape === 'legacy ids'
+      ? ['evt_A', 'evt_a', 'msg_A', 'msg_a', 'opaque_A', 'opaque_a']
+      : Array.from({ length: 6 }, (_, i) => `${i < 3 ? 'evt' : 'msg'}_${(1_700_000_000_000_000).toString(16).padStart(15, '0')}${String(i).padStart(8, '0')}`);
+    const rows = ids.map((id, i): ActivityRow => ({
+      id, kind: id.startsWith('msg_') ? 'assistant' : 'tool_call', text: `step ${i}`,
+      created_at: '2023-11-14T22:13:20Z',
+    }));
+    // Cover every boundary, including a later disjoint snapshot and a stale
+    // earlier snapshot after reconnect. The union must always match durable order.
+    for (let split = 1; split < rows.length; split += 1) {
+      for (const overlap of [0, 1]) {
+        const windows = [rows.slice(0, split), rows.slice(split - overlap)];
+        for (const snapshots of [windows, [...windows].reverse()]) {
+          let state = initialLiveActivity();
+          for (const snapshot of snapshots) {
+            state = liveActivityReducer(state, {
+              type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+            });
+          }
+          expect(state.rows).toEqual(rows);
+        }
+      }
+    }
+  });
+
+  it('does not rehydrate a settled generation or the next turn', () => {
+    let state = liveActivityReducer(initialLiveActivity(), { type: 'turn_start' });
+    const late = { type: 'rehydrate_for_gen' as const, gen: state.gen, rows: [row('old')], startedAt: 1 };
+    state = liveActivityReducer(state, { type: 'settle' });
+    expect(liveActivityReducer(state, late)).toBe(state);
+    state = liveActivityReducer(state, { type: 'turn_start' });
+    expect(liveActivityReducer(state, late)).toBe(state);
+  });
+});
+
+describe('durable Activity order contract', () => {
+  // This same fixture is asserted against real SQLite grouping by the Python
+  // service test, including migrated tool hashes whose clocks are metadata-only.
+  const wireRows = orderFixture.rows.map(({ id, kind, text, created_at, order_micros }) => ({
+    id, kind: kind as ActivityRow['kind'], text, created_at, order_micros,
+  }));
+  const rows = groupFromWire({
+    id: wireRows[0].id, anchor_message_id: null, anchor_position: 'after',
+    open: true, status: 'interrupted', steps: wireRows.length, duration_ms: null,
+    rows: wireRows,
+  }).rows!;
+
+  it.each(['forward', 'reverse'] as const)('preserves server ordering across %s hydration windows and live overlap', (arrival) => {
+    for (let split = 0; split <= rows.length; split += 1) {
+      const snapshots = [rows.slice(0, split), rows.slice(Math.max(0, split - 1))];
+      if (arrival === 'reverse') snapshots.reverse();
+      const migrated = wireRows[3];
+      let state = liveActivityReducer(initialLiveActivity(), {
+        type: 'row', now: 100,
+        row: { id: migrated.id, kind: migrated.kind, text: migrated.text, created_at: migrated.created_at },
+      });
+      for (const snapshot of snapshots) {
+        state = liveActivityReducer(state, {
+          type: 'rehydrate_for_gen', gen: state.gen, rows: snapshot, startedAt: 100,
+        });
+      }
+      expect(state.rows).toEqual(wireRows);
+      expect(liveActivityReducer(state, { type: 'row', row: rows[3], now: 200 })).toBe(state);
+    }
   });
 });

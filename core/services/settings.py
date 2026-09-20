@@ -26,16 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from config import SettingsStore, paths
-from config.platform_registry import WORKBENCH_PLATFORM_ID
 from config.v2_config import (
-    AgentsConfig,
-    ClaudeConfig,
-    CodexConfig,
-    ModelHubConfig,
-    OpenCodeConfig,
-    PlatformsConfig,
-    RuntimeConfig,
-    SlackConfig,
     V2Config,
 )
 
@@ -61,26 +52,7 @@ def default_config() -> V2Config:
     starts workbench-only (no external IM enabled) — see below.
     """
 
-    return V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(bot_token="", app_token=""),
-        # Workbench-only first-run state. The always-on Avibe Workbench is the
-        # sole inbound surface and no external IM is enabled yet, so ``enabled``
-        # MUST start empty — overriding the PlatformsConfig ``["slack"]``
-        # dataclass default. Otherwise a fresh install (or the wizard's "skip
-        # chat platforms" path) would persist a setup-completed config with
-        # Slack enabled and empty credentials — a phantom transport. ``primary``
-        # anchors to the workbench; the user adds real IMs explicitly later.
-        platforms=PlatformsConfig(enabled=[], primary=WORKBENCH_PLATFORM_ID),
-        runtime=RuntimeConfig(default_cwd=str(Path.home() / "work")),
-        agents=AgentsConfig(
-            opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
-            claude=ClaudeConfig(enabled=True, cli_path="claude"),
-            codex=CodexConfig(enabled=False, cli_path="codex"),
-        ),
-        model_hub=ModelHubConfig(),
-    )
+    return V2Config.default()
 
 
 def load_config(
@@ -108,11 +80,27 @@ def load_config(
     """
 
     target = config_path or paths.get_config_path()
-    if not target.exists():
-        if default_factory is None:
+
+    if default_factory is None:
+        # Pure read: no lock and NO side effects — ``V2Config.load``
+        # unconditionally ``ensure_data_dirs()`` (creating the whole
+        # home tree), and taking the config file lock would mkdir the
+        # config directory too. A caller asking for a must-exist config
+        # must not mutate its environment; check existence first and
+        # raise without loading. A bare read cannot lose updates.
+        if not target.exists():
             raise FileNotFoundError(f"V2 config not found at {target}")
-        default = default_factory()
-        default.save(target)
+        return V2Config.load(target)
+
+    from config.v2_config import config_file_lock
+
+    # Create-if-absent under the cross-process file lock (#1458 stage
+    # ③): the existence check and the seeding save are one atomic step
+    # (see the matching note in vibe.runtime.ensure_config).
+    with config_file_lock(target):
+        if not target.exists():
+            default = default_factory()
+            default.save(target)
     return V2Config.load(target)
 
 

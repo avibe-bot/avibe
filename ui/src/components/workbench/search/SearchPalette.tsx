@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { AlertCircle, Loader2, Search } from 'lucide-react';
 
 import { appTabHref, tabModifierLabel, type LaunchModifiers } from '../../../apps/appLaunch';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { isComposingKey } from '@/lib/imeComposition';
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
@@ -38,15 +40,63 @@ const FooterHint: React.FC<{ keyLabel: string; label: string }> = ({ keyLabel, l
 // server-driven; the Apps section filters the built-in registry + Show Pages
 // inventory client-side. Selecting a message routes to /chat/<session>?msg=<message>.
 export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) => {
+  const active = useRouteSurfaceActive();
+  const current = useRef({ active, open, onClose });
+  useLayoutEffect(() => { current.current = { active, open, onClose }; }, [active, open, onClose]);
+  // A genuine close retires this search. Suspension keeps its input owner but
+  // unmounts the presentation and its data/focus effects.
+  return open ? <SearchSession
+    active={active}
+    onClose={() => {
+      if (current.current.active && current.current.open) current.current.onClose();
+    }}
+    onCloseAutoFocus={(event) => {
+      if (!current.current.active || current.current.open) event.preventDefault();
+    }}
+  /> : null;
+};
+
+const SearchSession = ({ active, onClose, onCloseAutoFocus }: {
+  active: boolean;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) => {
+  const live = useRef(true);
+  useLayoutEffect(() => {
+    live.current = true;
+    return () => { live.current = false; };
+  }, []);
+  const [query, setQuery] = useState('');
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  return active ? <SearchPresentation
+    query={query} setQuery={setQuery}
+    includeArchived={includeArchived} setIncludeArchived={setIncludeArchived}
+    selectedKey={selectedKey} setSelectedKey={setSelectedKey}
+    onClose={() => { if (live.current) onClose(); }} onCloseAutoFocus={onCloseAutoFocus}
+  /> : null;
+};
+
+const SearchPresentation = ({ query, setQuery, includeArchived, setIncludeArchived,
+  selectedKey, setSelectedKey, onClose, onCloseAutoFocus }: {
+  query: string;
+  setQuery: (value: string) => void;
+  includeArchived: boolean;
+  setIncludeArchived: (value: boolean) => void;
+  selectedKey: string | null;
+  setSelectedKey: (value: string | null) => void;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [query, setQuery] = useState('');
-  // Opt-in only, and reset on every open (see onOpenAutoFocus) — the palette
-  // already resets the query there, and a sticky archived filter would quietly
-  // change what ⌘K returns by default.
-  const [includeArchived, setIncludeArchived] = useState(false);
+  const presented = useRef(false);
+  useInsertionEffect(() => {
+    presented.current = true;
+    return () => { presented.current = false; };
+  }, []);
   const { results, loading, error } = useMessageSearch(query, { includeArchived });
-  const { results: appResults, loading: appsLoading } = useAppSearchResults(query, open);
+  const { results: appResults, loading: appsLoading } = useAppSearchResults(query);
   const openSearchApp = useOpenSearchApp();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -67,7 +117,6 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
     [appResults, results],
   );
 
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   // A changed result set falls back to its first row without a state-sync
   // effect. Arrow navigation only stores an explicit key while it stays valid.
   const selectedTarget = flatTargets.find((target) => target.key === selectedKey) ?? flatTargets[0];
@@ -83,6 +132,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
       : null;
 
   const handleSelect = (sessionId: string, messageId: string) => {
+    if (!presented.current) return;
     navigate(`/chat/${encodeURIComponent(sessionId)}?msg=${encodeURIComponent(messageId)}`);
     onClose();
   };
@@ -90,6 +140,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   // `launch` carries the activating event's modifiers, so ⌘/Ctrl+click AND
   // ⌘/Ctrl+Enter open the app in a browser tab (§7.1m).
   const handleAppSelect = (result: (typeof appResults)[number], launch?: LaunchModifiers) => {
+    if (!presented.current) return;
     openSearchApp(result, launch);
     onClose();
   };
@@ -105,9 +156,9 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
     // While an IME composition is active (Chinese/Japanese/Korean candidate
     // selection), ArrowUp/Down/Enter belong to the IME — navigating candidates
     // and committing the chosen one. Intercepting them would steal those keys
-    // from the input. ``keyCode === 229`` is the legacy IME-in-progress signal
-    // for browsers that don't set ``isComposing`` on the synthetic event.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    // from the input. The two signals a browser may announce this through are
+    // read by the shared guard.
+    if (isComposingKey(e)) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       moveSelection(1);
@@ -143,7 +194,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   const showHint = trimmed.length === 0;
 
   return (
-    <Dialog open={open} onOpenChange={(next) => (next ? undefined : onClose())}>
+    <Dialog open onOpenChange={(next) => { if (!next && presented.current) onClose(); }}>
       <DialogPortal>
         <DialogOverlay className="bg-[#05050B]/85" />
         <DialogPrimitive.Content
@@ -152,11 +203,9 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             // Focus the query field rather than the first row, so typing flows
             // straight into the search input.
             e.preventDefault();
-            setQuery('');
-            setSelectedKey(null);
-            setIncludeArchived(false);
-            inputRef.current?.focus();
+            if (presented.current) inputRef.current?.focus();
           }}
+          onCloseAutoFocus={onCloseAutoFocus}
           aria-describedby={undefined}
           className="fixed left-1/2 top-[120px] z-50 flex max-h-[min(640px,calc(100dvh-160px))] w-[720px] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_32px_80px_-16px_rgba(0,0,0,0.75)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95"
         >
@@ -164,7 +213,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
 
           {/* Query row — mint search glyph + input + Esc pill. */}
           <div className="flex shrink-0 items-center gap-3 border-b border-border px-[18px] py-4">
-            <Search className="size-[18px] shrink-0 text-mint" />
+            <Search className="size-[18px] shrink-0 text-mint-ink" />
             <Input
               ref={inputRef}
               variant="bare"
@@ -199,7 +248,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             )}
             {showError && (
               <div className="px-2.5 py-10">
-                <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive">
+                <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive-ink">
                   <AlertCircle className="size-4 shrink-0" />
                   <span>{t('workbench.search.error')}</span>
                 </div>

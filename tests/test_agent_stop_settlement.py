@@ -101,6 +101,7 @@ class AgentStopSettlementTests(unittest.IsolatedAsyncioTestCase):
             "/tmp": SimpleNamespace(is_alive=True, send_request=AsyncMock(return_value={}))
         }
         agent._event_handler = SimpleNamespace(clear_pending=lambda turn_id: SimpleNamespace())
+        agent._user_stopped_turn_ids = set()
         agent._remove_ack_reaction = AsyncMock()
         emit = AsyncMock()
         agent.controller = SimpleNamespace(emit_agent_message=emit)

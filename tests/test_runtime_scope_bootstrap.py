@@ -263,15 +263,38 @@ class StartScopedServiceResultTests(unittest.TestCase):
 
 
 class WaitForServiceReadyTests(unittest.TestCase):
-    """Public wait that resolves the authoritative owner for any caller."""
+    """Public wait: resolve the authoritative owner, then wait for it to be up."""
 
     def test_returns_resolved_owner_when_spawn_pid_is_a_wrapper(self):
         # spawn pid never records itself; the lock holder is a different pid.
         with ExitStack() as stack:
             stack.enter_context(patch("vibe.runtime.service_pid_recorded", side_effect=[False, True]))
             stack.enter_context(patch("vibe.runtime._adopt_scoped_service_owner", return_value=999))
+            stack.enter_context(patch("vibe.runtime.service_instance_started", return_value=True))
             stack.enter_context(patch("vibe.runtime.time.sleep"))
             self.assertEqual(runtime.wait_for_service_ready(111, 5.0), 999)
+
+    def test_an_owner_that_holds_the_lock_and_dies_is_never_reported_ready(self):
+        # The lock is taken before the database is migrated, so this is what a
+        # release with a bad migration looks like from out here: a real owner,
+        # briefly, and then nothing. Reporting it ready is what leaves an
+        # upgraded instance dark with a restart recorded as succeeded.
+        with ExitStack() as stack:
+            stack.enter_context(patch("vibe.runtime.service_pid_recorded", return_value=True))
+            stack.enter_context(patch("vibe.runtime.service_instance_started", return_value=False))
+            stack.enter_context(patch("vibe.runtime.pid_alive", return_value=False))
+            stack.enter_context(patch("vibe.runtime.time.sleep"))
+            self.assertIsNone(runtime.wait_for_service_ready(111, 5.0))
+
+    def test_an_owner_still_starting_is_waited_out_rather_than_declared_ready(self):
+        times = iter([0.0, 0.0, 10.0])
+        with ExitStack() as stack:
+            stack.enter_context(patch("vibe.runtime.service_pid_recorded", return_value=True))
+            stack.enter_context(patch("vibe.runtime.service_instance_started", return_value=False))
+            stack.enter_context(patch("vibe.runtime.pid_alive", return_value=True))
+            stack.enter_context(patch("vibe.runtime.time.sleep"))
+            stack.enter_context(patch("vibe.runtime.time.monotonic", side_effect=lambda: next(times)))
+            self.assertIsNone(runtime.wait_for_service_ready(111, 5.0))
 
     def test_returns_none_when_no_owner_appears(self):
         times = iter([0.0, 0.0, 10.0])

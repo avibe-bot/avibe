@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotifyMessageType, isTerminalAgentMessage, isTranscriptMessage } from './chatMessageTypes';
+import {
+  isAgentActivityBoundaryMessage,
+  isBoundaryMessage,
+  isDetachedCompletionMessage,
+  isNotifyMessageType,
+  isRetryableFailureNotice,
+  isTerminalAgentMessage,
+  isTranscriptMessage,
+  shouldRefreshAgentActivityForMessage,
+} from './chatMessageTypes';
+import { messageTypeNames, specFor } from './messageTypes';
 
 describe('isTranscriptMessage', () => {
   it('shows the rows the transcript has always shown, and hides process log', () => {
@@ -70,5 +80,94 @@ describe('isTerminalAgentMessage', () => {
       }),
     ).toBe(false);
     expect(isTerminalAgentMessage({ author: 'user', type: 'result' })).toBe(false);
+  });
+
+  it('never lets a detached legacy result settle the active turn', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isTerminalAgentMessage({ author: 'agent', type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+
+  it('keeps replayed failure notices retryable without granting foreground authority', () => {
+    const message = {
+      author: 'agent', source: 'agent', type: 'notify',
+      metadata: {
+        event: 'backend_failure', replayed: true, detached: false,
+        turn_id: 'interrupted-turn', failure_id: 'turn:interrupted-turn',
+      },
+    };
+    expect(isTerminalAgentMessage(message)).toBe(false);
+    expect(isAgentActivityBoundaryMessage(message)).toBe(false);
+    expect(isDetachedCompletionMessage(message)).toBe(false);
+    expect(isTranscriptMessage(message)).toBe(true);
+    expect(isRetryableFailureNotice(message)).toBe(true);
+    expect(shouldRefreshAgentActivityForMessage(message)).toBe(true);
+    expect(isTerminalAgentMessage({
+      ...message, metadata: { ...message.metadata, replayed: false },
+    })).toBe(true);
+    expect(isTerminalAgentMessage({ author: 'agent', type: 'result', metadata: { replayed: true } })).toBe(true);
+  });
+});
+
+describe('isBoundaryMessage', () => {
+  it('recognizes current output rows and legacy detached results', () => {
+    expect(isBoundaryMessage({ type: 'output' })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result', metadata: { detached: true } })).toBe(true);
+    expect(isBoundaryMessage({ type: 'result' })).toBe(false);
+  });
+
+  it('keeps every status-rendered type in its notification family when detached', () => {
+    const statusTypes = messageTypeNames().filter((type) => specFor(type).render === 'status');
+    expect(statusTypes.length).toBeGreaterThan(0);
+    for (const type of statusTypes) {
+      expect(isBoundaryMessage({ type, metadata: { detached: true } }), type).toBe(false);
+    }
+  });
+});
+
+describe('isAgentActivityBoundaryMessage', () => {
+  it('advances Activity only for the catalog effective boundary role', () => {
+    for (const type of messageTypeNames()) {
+      const spec = specFor(type);
+      for (const detached of [false, true]) {
+        for (const event of [undefined, ...spec.terminalWhenEvents]) {
+          const message = { type, metadata: { detached, event } };
+          const isBoundary = spec.activityRole === 'boundary'
+            && !(detached && spec.detachedCompletion)
+            && event === undefined;
+          expect(isAgentActivityBoundaryMessage({ ...message, author: 'agent' }), type).toBe(isBoundary);
+          expect(isAgentActivityBoundaryMessage({ ...message, author: 'user' }), type).toBe(false);
+        }
+      }
+    }
+  });
+});
+
+describe('isDetachedCompletionMessage', () => {
+  it('classifies lifecycle provenance independently from presentation', () => {
+    for (const type of ['result', 'error', 'notify']) {
+      expect(isDetachedCompletionMessage({ type, metadata: { detached: true } }), type).toBe(true);
+    }
+    expect(isDetachedCompletionMessage({ type: 'output', metadata: { detached: true } })).toBe(false);
+    expect(isDetachedCompletionMessage({ type: 'result' })).toBe(false);
+  });
+});
+
+describe('shouldRefreshAgentActivityForMessage', () => {
+  it('refreshes Activity groups for terminal replies and detached completions', () => {
+    for (const type of ['output', 'result', 'error']) {
+      expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type }), type).toBe(true);
+    }
+    for (const type of ['result', 'error', 'notify']) {
+      expect(
+        shouldRefreshAgentActivityForMessage({ author: 'agent', type, metadata: { detached: true } }),
+        type,
+      ).toBe(true);
+    }
+  });
+
+  it('ignores non-boundary process and user rows', () => {
+    expect(shouldRefreshAgentActivityForMessage({ author: 'agent', type: 'assistant' })).toBe(false);
+    expect(shouldRefreshAgentActivityForMessage({ author: 'user', type: 'result' })).toBe(false);
   });
 });

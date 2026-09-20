@@ -5,7 +5,8 @@ import { FileText } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../../context/ApiContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { InfoHint } from '../ui/info-hint';
@@ -28,7 +29,11 @@ export const ProjectSettingsDialog: React.FC<{
 }> = ({ project, open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
-  const { setProjectDefaultAgent } = useWorkbenchProjectsTree();
+  const { setProjectDefaultAgent, isSavingDefaultAgent } = useWorkbenchProjectsActions();
+  const { capabilities } = useInstanceAuthorization();
+  const canManageProjects = capabilities.can_manage_projects;
+  const canEditAgentsMd = canManageProjects;
+  const canEditDefaultAgent = canManageProjects;
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
 
@@ -53,7 +58,7 @@ export const ProjectSettingsDialog: React.FC<{
   // current default, so the picker reflects a save as soon as it lands.
   const current = project.default_agent ?? null;
 
-  const handleRouteChange = async (patch: AgentRoutePatch) => {
+  const handleRouteChange = (patch: AgentRoutePatch) => {
     // The picker emits partial patches (a model-only pick is just {model}), so
     // merge onto the stored default and persist the full 5-field route. A field
     // PRESENT in the patch wins (incl. an explicit null that clears it); an
@@ -67,11 +72,11 @@ export const ProjectSettingsDialog: React.FC<{
       reasoning_effort:
         'reasoning_effort' in patch ? patch.reasoning_effort ?? null : current?.reasoning_effort ?? null,
     };
-    try {
-      await setProjectDefaultAgent(project.id, merged, current?.agent_id ?? null);
-    } catch {
-      // apiFetch already surfaced the error toast; keep the dialog open.
-    }
+    // Applied to the shared cache within the click (which re-renders `current`
+    // here), persisted behind it: nothing to await, nothing to catch. The
+    // compare-and-set token is the provider's business — `current` is the
+    // optimistic route, which is exactly what it must not expect.
+    setProjectDefaultAgent(project.id, merged);
   };
 
   return (
@@ -94,6 +99,7 @@ export const ProjectSettingsDialog: React.FC<{
             </section>
 
             {/* 2. Default Agent (backend + model + effort). */}
+            {canEditDefaultAgent ? (
             <section className="flex flex-col gap-1.5">
               <div className="flex items-center gap-1.5">
                 <span className="text-[12px] font-semibold text-foreground">
@@ -108,6 +114,7 @@ export const ProjectSettingsDialog: React.FC<{
                 value={current ?? {}}
                 agents={agents}
                 onChange={handleRouteChange}
+                saving={isSavingDefaultAgent(project.id)}
                 defaultLabel={t('projectSettings.defaultAgent.followGlobal')}
                 align="start"
                 modal
@@ -115,8 +122,10 @@ export const ProjectSettingsDialog: React.FC<{
                 onNavigateAway={onClose}
               />
             </section>
+            ) : null}
 
             {/* 3. Project guidance prompt → the existing AGENTS.md editor. */}
+            {canEditAgentsMd ? (
             <section className="flex flex-col gap-1.5">
               <span className="text-[12px] font-semibold text-foreground">{t('projectSettings.guidance.label')}</span>
               <Button
@@ -134,12 +143,15 @@ export const ProjectSettingsDialog: React.FC<{
                 {project.folder_path ? t('projectSettings.guidance.hint') : t('projectSettings.guidance.noFolder')}
               </span>
             </section>
+            ) : null}
           </div>
         </DialogContent>
       </Dialog>
 
       {/* The guidance editor layers on top; the AGENTS.md file lives in the folder. */}
-      <ProjectAgentsMdDialog project={project} open={agentsMdOpen} onClose={() => setAgentsMdOpen(false)} />
+      {canEditAgentsMd ? (
+        <ProjectAgentsMdDialog project={project} open={agentsMdOpen} onClose={() => setAgentsMdOpen(false)} />
+      ) : null}
     </>
   );
 };

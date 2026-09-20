@@ -165,7 +165,7 @@ export const SessionActionMenu: React.FC<{
                 action.disabled
                   ? 'cursor-not-allowed text-muted hover:bg-transparent'
                   : action.danger
-                    ? 'text-pink hover:bg-pink/[0.08]'
+                    ? 'text-pink-ink hover:bg-pink/[0.08]'
                     : 'text-foreground hover:bg-foreground/[0.04]',
               )}
             >

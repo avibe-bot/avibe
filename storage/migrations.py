@@ -15,13 +15,16 @@ from alembic.script import ScriptDirectory
 from config import paths
 from storage.backups import create_sqlite_migration_backup, prune_state_backups
 from storage.db import create_sqlite_engine, sqlite_url
+from storage.lock import MigrationFileLock, migration_lock_path_for
 
 
 logger = logging.getLogger(__name__)
 
 # Alembic's EnvironmentContext installs module-level proxies while an upgrade
 # runs. Concurrent store initialization can otherwise tear down another
-# thread's proxy and surface errors such as KeyError("config").
+# thread's proxy and surface errors such as KeyError("config"). This owns that
+# hazard and nothing else: the proxies are per interpreter, not per database, so
+# it must stay global, and it says nothing about other processes.
 _MIGRATION_LOCK = threading.RLock()
 
 INITIAL_REVISION = "20260501_0001"
@@ -52,19 +55,27 @@ HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
     "agent_runs",
     "show_pages",
+    "show_page_access_entries",
     "messages",
     "message_deliveries",
     "session_turns",
     "agent_events",
+    "skill_usage_daily",
     "show_session_events",
     "media_objects",
+    "media_object_references",
     "web_push_subscriptions",
+    "project_access_policies",
+    "project_access_bindings",
+    "remote_access_authorizations",
     "vault_secrets",
     "vault_requests",
     "vault_grants",
     "vault_audit",
     "vault_auth_factors",
     "vault_operation_challenges",
+    "resource_access_policies",
+    "resource_access_groups",
 }
 PRE_SHOW_SESSION_EVENTS_HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
@@ -108,11 +119,14 @@ PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS = {
         "callback_error",
         "callback_run_id",
         "callback_completed_at",
+        "callback_terminal_turn_id",
         "cancel_requested",
         "cancel_requested_at",
     },
 }
 HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
+    "run_definitions": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["run_definitions"]
+    | {"retirement_reason"},
     "agent_sessions": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["agent_sessions"]
     | {
         "composer_draft_text",
@@ -137,11 +151,43 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
+    "show_page_access_entries": {
+        "page_id",
+        "kind",
+        "value",
+        "organization_id",
+        "created_at",
+    },
     "web_push_subscriptions": {"device_id"},
+    "remote_access_authorizations": {
+        "instance_id",
+        "subject",
+        "email",
+        "scope_kind",
+        "scope_ref",
+        "authorization_state",
+        "claims_json",
+        "expires_at",
+        "created_at",
+        "last_checked_at",
+        "updated_at",
+    },
     "vault_requests": {"callback_status"},
     "vault_grants": {"agent_ready", "agent_ready_at"},
     "vault_auth_factors": {"credential_id", "public_key", "alg", "sign_count"},
     "vault_operation_challenges": {"challenge_hash", "rp_id", "origin", "expires_at", "consumed_at"},
+    "resource_access_policies": {
+        "organization_id",
+        "owner_user_id",
+        "owner_email",
+        "access_level",
+        "policy_revision",
+        "last_applied_control_plane_revision",
+        "created_by_user_id",
+        "updated_by_user_id",
+    },
+    "resource_access_groups": {"organization_id", "group_id"},
 }
 UNRELEASED_OLD_INITIAL_TABLES = [
     "session_messages",
@@ -159,6 +205,17 @@ UNRELEASED_OLD_INITIAL_TABLES = [
     "scopes",
     "schema_meta",
     "alembic_version",
+]
+# The members above that no release could have produced, which is what makes the presence
+# of one evidence of an unreleased build. `scopes` is in INITIAL_TABLES and every stamped
+# database has `alembic_version` -- the check below requires it a few lines earlier -- so
+# testing the full list proved nothing: any database short of INITIAL_TABLES matched, and
+# a released one then had its `scopes` and its stamp dropped out from under it. Derived
+# rather than written out, so a table added to INITIAL_TABLES leaves this correct.
+UNRELEASED_ONLY_INITIAL_TABLES = [
+    table
+    for table in UNRELEASED_OLD_INITIAL_TABLES
+    if table not in INITIAL_TABLES and table != "alembic_version"
 ]
 
 
@@ -179,14 +236,43 @@ def run_migrations(
     revision: str = "head",
     prune_backups_after_upgrade: bool = True,
 ) -> None:
+    """Bring one SQLite state database to `revision`, one migrator at a time.
+
+    Exclusion belongs here rather than at the call sites, because "at most one
+    migrator per database" is a property of the database, and a call site can
+    only promise it for itself. It was previously promised by `ensure_sqlite_state`
+    alone, which left every other entry point -- the discovery helpers, a store
+    constructed with an explicit `db_path`, the background-table bootstrap --
+    running `command.upgrade` against a file another process could be upgrading
+    at the same moment. The controller and the Web UI are separate processes on
+    one state directory, so that pairing is the ordinary case, not a corner.
+
+    Both locks are load-bearing and neither substitutes for the other: the file
+    lock is machine-wide and per database, and `_MIGRATION_LOCK` is per
+    interpreter and global, guarding Alembic's module-level proxies.
+
+    The file lock is taken first, and always first, which is what makes the pair
+    deadlock-free. Taking the global one first would also let a thread hold every
+    database's migrations in this process while it waits on a foreign process --
+    a remote stall propagating into unrelated local work.
+
+    The wait is deliberately unbounded. A file lock is released by the OS when
+    its holder dies, so the only way to wait forever is for a live process to
+    still be migrating -- and a migration's duration is bounded by the data, not
+    by anything we could name here. Any deadline would be a guess that turns a
+    slow, correct upgrade into a failed startup for every other entry point.
+    Waiting is logged with the holder's pid so the wait stays diagnosable.
+    """
+
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     guard_source_checkout_default_state_migration(target_db)
-    with _MIGRATION_LOCK:
-        _run_migrations_locked(
-            target_db,
-            revision=revision,
-            prune_backups_after_upgrade=prune_backups_after_upgrade,
-        )
+    with MigrationFileLock(migration_lock_path_for(target_db), timeout_seconds=None):
+        with _MIGRATION_LOCK:
+            _run_migrations_locked(
+                target_db,
+                revision=revision,
+                prune_backups_after_upgrade=prune_backups_after_upgrade,
+            )
 
 
 def _run_migrations_locked(
@@ -198,13 +284,9 @@ def _run_migrations_locked(
     cfg = alembic_config(target_db)
     backup_revisions = _migration_backup_revisions(target_db, cfg, revision)
     if backup_revisions is not None:
-        current_revisions, target_revisions = backup_revisions
-        backup_path = create_sqlite_migration_backup(
-            target_db,
-            from_revisions=current_revisions,
-            to_revisions=target_revisions,
-        )
-        logger.info("Created pre-migration SQLite backup at %s", backup_path)
+        _current_revisions, target_revisions = backup_revisions
+        backup_path = create_sqlite_migration_backup(target_db, to_revisions=target_revisions)
+        logger.info("Pre-migration SQLite rollback point at %s", backup_path)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
@@ -252,10 +334,10 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
     """Repair head indexes even when the tables already pass readiness checks.
 
     ``metadata.create_all`` can produce every required table and column without
-    the expression indexes owned by migrations 0039/0041/0042. Such a database
-    correctly skips schema migration, so store construction must still enter the
-    index repair path. Correct expression indexes are detected byte-for-byte
-    against their owning migration DDL and are not rebuilt on ordinary opens.
+    migration-owned indexes. Such a database correctly skips schema migration,
+    so store construction must still enter the index repair path. Correct indexes
+    are detected byte-for-byte against their owning migration DDL and are not
+    rebuilt on ordinary opens.
     """
 
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
@@ -263,8 +345,8 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
         return
     with sqlite3.connect(target_db) as conn:
         tables = _table_names(conn)
-        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_expression_indexes_ready(conn):
-            _ensure_agent_runs_expression_indexes(conn)
+        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_managed_indexes_ready(conn):
+            _ensure_agent_runs_managed_indexes(conn)
             conn.commit()
 
 
@@ -330,7 +412,7 @@ def _reset_unreleased_initial_schema_drift(db_path: Path) -> None:
         version = conn.execute("select version_num from alembic_version").fetchone()
         if version != (INITIAL_REVISION,):
             return
-        if not any(table in tables for table in UNRELEASED_OLD_INITIAL_TABLES):
+        if not any(table in tables for table in UNRELEASED_ONLY_INITIAL_TABLES):
             return
 
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -501,6 +583,7 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "message_payload_json": "TEXT",
         "last_run_id": "VARCHAR",
         "retired_at": "VARCHAR",
+        "retirement_reason": "VARCHAR",
     }.items():
         if column not in definition_columns:
             conn.execute(f'alter table "run_definitions" add column "{column}" {column_type}')
@@ -543,6 +626,7 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "callback_error": "TEXT",
         "callback_run_id": "VARCHAR",
         "callback_completed_at": "VARCHAR",
+        "callback_terminal_turn_id": "VARCHAR",
         "cancel_requested": "INTEGER not null default 0",
         "cancel_requested_at": "VARCHAR",
     }.items():
@@ -686,8 +770,8 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
-    if not _agent_runs_expression_indexes_ready(conn):
-        _ensure_agent_runs_expression_indexes(conn)
+    if not _agent_runs_managed_indexes_ready(conn):
+        _ensure_agent_runs_managed_indexes(conn)
 
 
 #: The ``agent_runs`` index migrations whose DDL the head-schema repair path must also
@@ -698,18 +782,30 @@ _AGENT_RUNS_INDEX_REVISION_MODULES = (
     "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index",
     "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
     "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
+    "storage.alembic.versions.20260811_0051_callback_terminal_turn_identity",
 )
-#: Columns the three index expressions read. A head-shaped database has all of them, but
+#: Columns the managed indexes read. A head-shaped database has all of them, but
 #: this helper is also reached from ``_repair_head_required_columns`` on older drifted
 #: shapes, and ``create index`` on a missing column raises rather than skipping.
-_AGENT_RUNS_INDEX_COLUMNS = frozenset({"definition_id", "created_at", "completed_at", "metadata_json"})
+_AGENT_RUNS_INDEX_COLUMNS = frozenset(
+    {
+        "definition_id",
+        "created_at",
+        "completed_at",
+        "metadata_json",
+        "callback_terminal_turn_id",
+        "session_id",
+        "run_type",
+        "source_kind",
+    }
+)
 
 
 def _normalized_index_sql(value: object) -> str:
     return " ".join(str(value or "").split()).casefold()
 
 
-def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
+def _agent_runs_managed_indexes_ready(conn: sqlite3.Connection) -> bool:
     if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
         return True
     for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
@@ -723,11 +819,12 @@ def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
-    """Install the 0039/0041/0042 ``agent_runs`` indexes on a head-shaped database.
+def _ensure_agent_runs_managed_indexes(conn: sqlite3.Connection) -> None:
+    """Install migration-owned ``agent_runs`` indexes on a head-shaped database.
 
     ``_ensure_head_indexes`` promises that a head-shaped unversioned database ends up
-    with every index head has, and until now it silently lagged head by these three.
+    with every index head has. It once silently lagged the three performance indexes;
+    the same repair path now owns the callback identity index too.
     Two lanes make that gap reachable without any migration ever running: a database
     born from ``metadata.create_all`` satisfies ``background_tables_ready`` (tables and
     columns only — never indexes), so ``SQLiteBackgroundTaskStore`` accepts it as ready
@@ -850,6 +947,23 @@ def _ensure_vault_authz_indexes(conn: sqlite3.Connection, tables: set[str]) -> N
         )
 
 
+def _ensure_resource_access_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
+    if "resource_access_policies" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_org_level "
+            "on resource_access_policies (organization_id, access_level, resource_kind)"
+        )
+        conn.execute(
+            "create index if not exists ix_resource_access_policies_owner "
+            "on resource_access_policies (owner_user_id, resource_kind)"
+        )
+    if "resource_access_groups" in tables:
+        conn.execute(
+            "create index if not exists ix_resource_access_groups_group "
+            "on resource_access_groups (organization_id, group_id, resource_kind)"
+        )
+
+
 def _delete_historical_message_tool_calls(conn: sqlite3.Connection, tables: set[str]) -> None:
     if "messages" not in tables:
         return
@@ -878,6 +992,7 @@ def _ensure_head_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:
     _ensure_messages_query_indexes(conn, tables)
     _ensure_agent_events_indexes(conn, tables)
     _ensure_vault_authz_indexes(conn, tables)
+    _ensure_resource_access_indexes(conn, tables)
 
 
 def _missing_head_schema_description(conn: sqlite3.Connection, tables: set[str]) -> str:

@@ -2,27 +2,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config.v2_config import V2Config
 from core.controller import Controller
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from modules.agents.model_hub import resolve_model_hub_launch, resolve_opencode_overlay_launch
 
 
-def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
+def test_controller_leaves_model_hub_aggregate_absent_when_explicitly_disabled(monkeypatch):
     import core.handlers.model_hub as model_hub
+    import vibe.model_hub_runtime as model_hub_runtime
 
     factory_calls = 0
+    adapter = object()
 
     def create_service():
         nonlocal factory_calls
         factory_calls += 1
         return object()
 
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
+    monkeypatch.setattr(
+        model_hub_runtime,
+        "get_model_hub_engine_adapter",
+        lambda: adapter,
+    )
     controller = Controller.__new__(Controller)
 
     controller._init_model_hub()
@@ -30,21 +40,31 @@ def test_controller_leaves_model_hub_aggregate_absent_by_default(monkeypatch):
     assert controller.model_hub_service is None
     assert controller.model_hub_turn_gateway is None
     assert controller.model_hub_runtime is None
+    assert controller.model_hub_engine_adapter is adapter
     assert factory_calls == 0
 
 
-def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeypatch):
+@pytest.mark.parametrize("env_value", [None, "1"])
+def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable(monkeypatch, tmp_path, env_value):
     import core.handlers.model_hub as model_hub
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
+    import vibe.model_hub_runtime as model_hub_runtime
+    from vibe import api, backend_model_catalog
 
-    service = object()
+    service = SimpleNamespace(
+        reconcile_builtin_models=AsyncMock(return_value=[]),
+    )
     calls = []
 
     class Gateway:
-        def __init__(self, value):
-            calls.append(("gateway", value))
+        def __init__(self, value, *, language_provider):
+            calls.append(("gateway", value, language_provider))
             self.service = value
+            self.language_provider = language_provider
+            self.correlation = TurnCorrelationRegistry(
+                BoundedProvenanceStore(tmp_path / "provenance.json"),
+            )
 
     class Router:
         def __init__(self, *, service, turn_gateway):
@@ -52,7 +72,11 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
             self.service = service
             self.turn_gateway = turn_gateway
 
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    if env_value is None:
+        monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
+    adapter = object()
     captured = {}
 
     def create_service(**kwargs):
@@ -60,9 +84,46 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
         return service
 
     monkeypatch.setattr(model_hub, "create_default_service", create_service)
+    monkeypatch.setattr(
+        model_hub_runtime,
+        "get_model_hub_engine_adapter",
+        lambda: adapter,
+    )
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
+    refresh_callbacks = []
+    monkeypatch.setattr(
+        backend_model_catalog,
+        "set_remote_catalog_refresh_completed",
+        refresh_callbacks.append,
+    )
+    presence_probes = []
+    probe_failure = [False]
+    block_full_probe = [False]
+    opencode_present = [False]
+    full_probe_started = threading.Event()
+    full_probe_release = threading.Event()
+
+    def resolve_cli_paths(binaries, *, include_npm_global=True):
+        presence_probes.append((binaries, include_npm_global))
+        if probe_failure[0]:
+            raise OSError("CLI inventory unavailable")
+        result = {
+            binary: f"/usr/bin/{binary}" if binary == "codex" else None
+            for binary in binaries
+        }
+        if "opencode" in result and opencode_present[0]:
+            result["opencode"] = "/usr/bin/opencode"
+        if block_full_probe[0] and len(binaries) > 1:
+            full_probe_started.set()
+            full_probe_release.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(api, "resolve_cli_paths", resolve_cli_paths)
     controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(language="zh")
+    controller._loop = None
+    controller._shutdown_requested = False
     controller.vibe_agent_store = SimpleNamespace(
         get_default_agent=lambda: SimpleNamespace(
             backend="codex",
@@ -76,12 +137,202 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_turn_gateway.service is service
     assert controller.model_hub_runtime.service is service
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
+    assert captured["adapter"] is adapter
     assert captured["requested_model_override"]("codex") == "agent-model"
     assert captured["requested_model_override"]("claude") is None
+    assert captured["cli_present_override"]("codex") is True
+    assert captured["cli_present_override"]("claude") is False
+    service.reconcile_builtin_models.assert_awaited_once_with(notify=False)
+    assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
+    assert presence_probes == [(["claude", "codex", "opencode"], False)]
+    probe_failure[0] = True
+    captured["cli_presence_refresh"](True, ("opencode",))
+    assert captured["cli_present_override"]("codex") is True
+    assert presence_probes[-1] == (["opencode"], True)
+
+    probe_failure[0] = False
+    block_full_probe[0] = True
+    full_refresh = threading.Thread(
+        target=captured["cli_presence_refresh"],
+        args=(True, None),
+    )
+    full_refresh.start()
+    assert full_probe_started.wait(timeout=0.5)
+    opencode_present[0] = True
+    captured["cli_presence_refresh"](True, ("opencode",))
+    full_probe_release.set()
+    full_refresh.join(timeout=0.5)
+    assert not full_refresh.is_alive()
+    assert captured["cli_present_override"]("opencode") is True
+    assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
-        ("gateway", service),
+        ("gateway", service, controller.model_hub_turn_gateway.language_provider),
         ("router", service, controller.model_hub_turn_gateway),
     ]
+
+    # Exercise the initializer's real callback binding, not a second test-only
+    # binding: one registry publishes material changes for its live Session.
+    registry = controller.model_hub_turn_gateway.correlation
+    assert callable(registry.on_recovery_changed)
+    token = registry.credentials("codex", "fixture-controller", "turn-live")
+    registry.begin_gateway_request(
+        backend="codex", token=token, requested_model_id="agent-model",
+    )
+    controller.session_turns = SimpleNamespace(in_flight={
+        "ses-live": SimpleNamespace(
+            task=SimpleNamespace(done=lambda: False),
+            context=SimpleNamespace(platform_specific={"turn_token": "turn-live"}),
+        ),
+        "ses-peer": SimpleNamespace(
+            task=SimpleNamespace(done=lambda: False),
+            context=SimpleNamespace(platform_specific={"turn_token": "turn-peer"}),
+        ),
+    })
+    publish = Mock()
+    monkeypatch.setattr("core.inbox_events.bus.publish", publish)
+    progress = {
+        "phase": "waiting", "attempt_count": 1, "source_id": "src_recovery01",
+        "reason": "network", "started_at": "2026-09-09T00:00:00+00:00",
+        "next_eligible_at": "2026-09-09T00:00:01+00:00",
+        "window_end": "2026-09-09T00:02:00+00:00",
+    }
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=progress)
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=dict(progress))
+    publish.assert_called_once_with(
+        "session.activity", {"session_id": "ses-live", "event": "model_recovery"},
+    )
+    assert registry.recovery_snapshot("turn-live") == [{**progress, "request_id": "one"}]
+    publish.reset_mock()
+    registry.update_recovery("turn-live", backend="codex", request_id="one", snapshot=None)
+    publish.assert_called_once_with(
+        "session.activity", {"session_id": "ses-live", "event": "model_recovery"},
+    )
+    assert registry.recovery_snapshot("turn-live") == []
+    assert not registry.store.path.exists()
+
+    refresh_callbacks[0]()
+
+    async def drain_refresh() -> None:
+        controller._loop = asyncio.get_running_loop()
+        controller._schedule_model_hub_snapshot_reconcile()
+        await controller._model_hub_snapshot_reconcile_task
+
+    asyncio.run(drain_refresh())
+    assert service.reconcile_builtin_models.await_count == 2
+
+    runtime_config = object()
+    latest = SimpleNamespace(
+        model_hub=SimpleNamespace(
+            agents={"codex": SimpleNamespace(mode="hub")},
+        ),
+        agents=SimpleNamespace(codex=runtime_config),
+    )
+    controller.backend_restart_coordinator = SimpleNamespace(
+        request_restart=AsyncMock(return_value="restarted"),
+    )
+    controller.agent_service = SimpleNamespace(
+        invalidate_model_hub_runtime=AsyncMock(),
+        refresh_runtime_config=AsyncMock(),
+    )
+    monkeypatch.setattr(V2Config, "load", classmethod(lambda _cls: latest))
+
+    asyncio.run(captured["backend_catalog_changed"]("codex"))
+
+    assert controller.config.model_hub is latest.model_hub
+    controller.backend_restart_coordinator.request_restart.assert_awaited_once_with(
+        "codex"
+    )
+    controller.agent_service.invalidate_model_hub_runtime.assert_not_awaited()
+    controller.agent_service.refresh_runtime_config.assert_not_awaited()
+
+    latest.model_hub.agents["codex"].mode = "direct"
+    controller.backend_restart_coordinator.request_restart.reset_mock()
+
+    asyncio.run(captured["backend_catalog_changed"]("codex"))
+
+    controller.agent_service.invalidate_model_hub_runtime.assert_awaited_once_with(
+        "codex"
+    )
+    controller.backend_restart_coordinator.request_restart.assert_not_awaited()
+    controller.agent_service.refresh_runtime_config.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_controller_periodic_tick_reconciles_cross_process_snapshot_changes():
+    reconciled = asyncio.Event()
+
+    async def reconcile_builtin_models():
+        reconciled.set()
+        return []
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+    )
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+    controller._model_hub_snapshot_reconcile_interval_seconds = 0.01
+
+    controller._start_model_hub_snapshot_reconcile_loop()
+    await asyncio.wait_for(reconciled.wait(), 1)
+    controller._shutdown_requested = True
+    await controller._stop_model_hub_snapshot_reconciliation()
+
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
+    assert controller._model_hub_snapshot_reconcile_task is None
+
+
+@pytest.mark.anyio
+async def test_controller_shutdown_joins_reconcile_and_rejects_late_completion():
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+    service_stopped = asyncio.Event()
+    calls = []
+
+    async def reconcile_builtin_models():
+        calls.append("reconcile")
+        reconcile_started.set()
+        await release_reconcile.wait()
+        return []
+
+    async def stop():
+        calls.append("stop")
+        service_stopped.set()
+
+    controller = Controller.__new__(Controller)
+    controller.model_hub_service = SimpleNamespace(
+        reconcile_builtin_models=reconcile_builtin_models,
+        stop=stop,
+    )
+    controller.runtime_work_supervisor = None
+    controller._runtime_work_tokens = []
+    controller._shutdown_tainted = False
+    controller._loop = asyncio.get_running_loop()
+    controller._shutdown_requested = False
+    controller._model_hub_snapshot_refresh_pending = threading.Event()
+    controller._model_hub_snapshot_reconcile_task = None
+    controller._model_hub_snapshot_reconcile_loop_task = None
+    controller._model_hub_snapshot_reconcile_stopping = False
+
+    controller._model_hub_snapshot_refresh_completed()
+    await asyncio.wait_for(reconcile_started.wait(), 1)
+
+    controller._shutdown_requested = True
+    shutdown = asyncio.create_task(controller._stop_runtime_work_stack())
+    await asyncio.sleep(0)
+    controller._model_hub_snapshot_refresh_completed()
+    release_reconcile.set()
+    await asyncio.wait_for(service_stopped.wait(), 1)
+    await shutdown
+
+    assert calls == ["reconcile", "stop"]
+    assert not controller._model_hub_snapshot_refresh_pending.is_set()
+    assert controller._model_hub_snapshot_reconcile_task is None
+    assert controller._model_hub_snapshot_reconcile_loop_task is None
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

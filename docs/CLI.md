@@ -122,18 +122,159 @@ vibe status
 }
 ```
 
+### `vibe skill`
+
+Avibe gives Claude, Codex, and OpenCode one managed Skill catalog and suppresses
+their native Skill catalogs on Avibe-dispatched Turns.
+
+```bash
+vibe skill list [--page N]
+vibe skill load -- <name>
+```
+
+`list` prints the currently available names and descriptions in stable order,
+25 per page. Page 1 is also included in the Agent's system prompt; use the
+next-page command shown in the output when more Skills are available. `load`
+prints only the selected Skill body inside a `skill_content` element. Its
+`directory` attribute is an absolute path so the Agent can read references and
+run scripts stored beside `SKILL.md`.
+
+Avibe discovers existing Skills without moving them:
+
+- project Skills under `.agents/skills`, `.codex/skills`, `.claude/skills`, or
+  `.opencode/skills`, from the working directory up to the Session's bound Avibe
+  project base. This boundary can sit above a nested Git checkout. Standalone
+  commands without a bound project use the first Git root instead;
+- global Skills under `~/.agents/skills`, the configured Codex and Claude Skill
+  directories, the OpenCode directory under `XDG_CONFIG_HOME`, and enabled
+  Claude plugin Skill directories; and
+- Avibe built-ins plus Codex's bundled system Skills.
+
+Built-ins win name conflicts, then project Skills, then global Skills. Within a
+project the nearer directory wins; at the same depth the order is `.agents`,
+`.codex`, `.claude`, then `.opencode`. User Skills win over Codex bundled
+defaults; enabled Claude plugin Skills follow the four static user directories
+but also win over those defaults. New global installs should use
+`~/.agents/skills/<name>`; project installs should use
+`<project>/.agents/skills/<name>`.
+
+Every command resolves from disk, and every new Avibe-dispatched Turn rebuilds
+the Catalog. Adding, editing, or deleting a Skill is therefore visible in an
+existing Session without restarting Avibe or creating a new Session. Existing
+conversation history is not rewritten.
+
+#### Local Skill statistics and privacy
+
+Skill statistics are **enabled by default**, including after an upgrade when
+`runtime.skill_observability_enabled` is absent from the configuration. Avibe
+records catalog offers and load outcomes locally for future Harness optimization;
+an offer or load does not prove that the Agent followed a Skill or completed a task.
+
+The records include Skill names (including private project/global Skills), source
+categories, SHA-256 identity/descriptor/content-version hashes, timestamps,
+load results, durations, body byte counts, and available Session/project/Turn,
+backend/platform, and Avibe-version associations. Names and Session links remain
+identifiable: hashing does not make these statistics anonymous. Unknown execution
+attribution stays unknown. Statistics are stored in the local SQLite database,
+using `agent_events` and `skill_usage_daily`; there is no statistics dashboard or
+cloud upload. This feature adds no stored copies of Skill bodies, descriptions,
+prompts, credentials, or plaintext filesystem paths. Normal delivery of a loaded
+Skill to your configured Agent/model is unchanged.
+
+To stop new recording, set `runtime.skill_observability_enabled` to JSON `false`
+in the active `config/config.json` under the Avibe state root. That root is
+`$AVIBE_HOME` when explicitly configured, otherwise `$HOME/.avibe` (or the
+legacy `$HOME/.vibe_remote` when the new root is absent). Merge this field into
+the existing configuration; do not replace the whole file with this fragment:
+
+```json
+{
+  "runtime": {
+    "skill_observability_enabled": false
+  }
+}
+```
+
+The recorder rereads this setting before writing, so a restart is not required.
+Disabling statistics does not disable Skill discovery/loading or delete history.
+If you do not want future records or retained history, disable first, then clear.
+
+### `vibe data skill-usage`
+
+Instance Owner-only local maintenance; these commands return JSON diagnostics,
+not a Skill popularity ranking. The same owner boundary applies to reading these
+statistics through `vibe data query`.
+
+```bash
+vibe data skill-usage --json
+vibe data skill-usage --clear --yes --json
+```
+
+The first command reports `enabled`, raw-event and daily-row counts, retention
+windows, the first-observation marker, and `cleared_through`. After opting out,
+confirm `enabled` is `false`. The clear command requires both `--clear` and
+`--yes`; it deletes only Skill statistics, leaves conversations and other event
+types intact, and reports deleted row counts. A clear watermark rejects delayed
+pre-clear observations. Clearing does not disable collection: new activity can
+immediately create new records while the setting remains enabled.
+
+Raw Skill events have a 90-day retention window; daily statistics retain 365 UTC
+dates including today. Daily rows are still Session-associated, not anonymous
+global totals. Cleanup runs in bounded background batches while the controller
+runs, so expired rows can remain until maintenance catches up. These windows
+apply independently of the Skill-collection and tool-trace-retention switches.
+Archiving a Session does not delete its statistics; physically purging the
+Session removes its associated Skill events and daily rows.
+
+Clear and retention are logical deletion, not secure erasure or guaranteed disk
+space reclamation: old data may remain in SQLite WAL/free pages or backups.
+Restoring a database backup also restores its historical statistics and clear
+watermark; clear again after a restore when needed. No historical conversation
+scan or backfill is performed by this feature.
+
 ### `vibe memory`
 
-Read scoped local Memory or queue durable context to remember — facts the user explicitly asked to save, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. This command does not start a service and has no clear, configuration, export, or delete subcommands.
+Read scoped local Memory or submit context for best-effort, process-local capture — facts the user explicitly asked to remember, and conclusions the Agent distills on its own from the conversation and from work on this machine, including lasting environment or account facts it meets in files or tool output — through the existing mode-0600 controller socket. Acceptance does not guarantee provider delivery or persistence. This command does not start a service and has no clear, configuration, export, or delete subcommands.
 
-`status` works from a normal terminal. `profile`, `search`, and `remember` require an eligible Agent shell where Avibe has injected the current Session context; running them from a normal terminal returns `memory_access_denied`.
+Memory Settings' Processing Record retains up to 50 recent write anomalies for
+this service process. It distinguishes an unknown submitted result from captures
+discarded before submission; consecutive discarded captures share an
+`affected_count`. Native engine recovery preserves these observations, while a
+service restart or explicit data clear removes them. The source is partial,
+not a complete failure history; sanitized service logs retain operational events.
+An unknown capture is never automatically replayed. A healthy engine does not
+prove an earlier write completed. Add and flush wait for the native six-minute
+processing budget plus a ten-second response margin.
+
+`status` works from a normal terminal. `profile`, `list`, `search`, and `remember`
+require an eligible Agent shell where Avibe has injected the current Session
+context; running them from a normal terminal returns `memory_access_denied`.
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory search <query> [--limit 1..20] [--json]
-vibe memory remember <text> [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
+vibe memory search <query> [--project <slug>] [--mode {hybrid|keyword|vector|agentic}] [--limit 1..100] [--json]
+vibe memory remember <text> [--project <slug>] [--json]
 ```
+
+List returns valid processed episodes newest first. It uses EverOS's exact
+1-based page semantics, defaults to 20 episodes per page, and exposes each
+episode's opaque entry id in JSON. The Agent CLI accepts `default` or one
+catalogued named project; `--project all` is reserved for the Settings UI.
+Listing is an explicit inspection command and is not added to the injected
+Personal Memory prompt.
+
+Search defaults to `--mode hybrid` with `--limit 8`. Use `keyword` for exact
+terms, `vector` for semantic matches, and reserve `agentic` for complex,
+multi-hop recall. Agentic searches are bounded to 30 seconds and require the
+configured LLM, embedding, and rerank capabilities. They fail closed when any
+required capability is unavailable, and `--project all --mode agentic` is not
+supported.
+
+EverOS returns an empty `atomic_facts` list for agentic episode results. When
+EverOS receives unlimited `top_k`, agent case and skill results are capped at
+10; the Avibe CLI always sends its explicit bounded `--limit` value.
 
 ### `vibe doctor`
 
@@ -154,6 +295,7 @@ vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
 vibe doctor repair git-runtime --yes
+vibe doctor repair model-hub-engine --yes
 vibe doctor repair show-runtime --yes
 vibe doctor repair tmux --yes
 ```
@@ -164,7 +306,7 @@ vibe doctor repair tmux --yes
 - Agent CLI availability (Claude Code, OpenCode, Codex)
 - Runtime home migration state
 - Runtime process, install, and restart metadata state
-- askill, avault, Git Runtime, Show Runtime, tmux, and Node.js readiness through one dependency diagnostic group
+- askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js readiness through one dependency diagnostic group
 - `vibe doctor --deep` also probes missing dependencies without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
 
@@ -175,6 +317,12 @@ Start the guided Avibe Cloud remote-access setup.
 ```bash
 vibe remote
 ```
+
+The remote Workbench uses the same Instance role and Project/Agent/Show Page ACLs
+as the local UI. Viewers can read permitted resources, Editors can use runtime
+surfaces where their Project and Agent access allows it, and Owners can manage
+the Instance. Connection, Origin/CSRF, approval, and path-safety checks still
+apply independently.
 
 **Flow:**
 - The CLI explains what remote access does before asking for anything.
@@ -328,12 +476,13 @@ new Run into an active native Turn, starts it immediately when idle, or moves th
 same Delivery to the durable P3 queue after a definitive refusal/not-active
 receipt. It does not interrupt the active Turn.
 
-`--send-now` is valid only with an existing `--session-id`. Avibe persists the
-new Run at P3 first, then promotes the exact FIFO head through P1. With an active
-Turn that head steers the same native Turn; when idle it starts normally. Older
-queued work remains ahead of the new Run. `vibe session send-now` uses the same
-exact-head promotion without adding a message. A stale head is refused rather
-than replaced by the next queued item, and neither form calls Stop.
+`--send-now` is valid only with an existing `--session-id` and explicitly selects
+the normal content-bearing P1 behavior: the new message steers an active native
+Turn, starts immediately when idle, and falls back to P3 after a definitive
+refusal. It never promotes an older queued message. `vibe session send-now` is
+the content-free P1 operation: it promotes the exact existing FIFO head without
+adding a message. A stale head is refused rather than replaced by the next queued
+item, and neither command calls Stop.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new
@@ -411,6 +560,8 @@ for one-shot session creation. `vibe watch remove` hides the watch from manageme
 views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.
+`--timeout` defaults to 21600 seconds; an explicit `--timeout 0` disables the
+per-cycle timeout, while any positive value is persisted unchanged.
 
 ### `vibe version`
 
@@ -562,10 +713,11 @@ The web UI (`http://127.0.0.1:5123`) provides the same controls:
 | Variable | Description |
 |----------|-------------|
 | `OPENCODE_PORT` | Override OpenCode server port (default: 4096) |
-| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | Set to any non-blank value to turn off the policy that redirects backend-native session-only background tools (background subagents, self-scheduled wakeups, non-durable in-session cron jobs, native workflows) to the Harness, because their result is lost when the agent process exits. How much this changes depends on the backend: a Claude session on a current SDK denies all four; a Claude session on an SDK without argument-aware tool hooks can only match tool names, so it denies `Workflow` alone; Codex and OpenCode install no gate at all and are guided by the injected prompt only. Setting the variable changes only the enforcement claim in the injected prompt and silences the advisory attached to background shells; the prompt still routes agents to `vibe agent run` / `vibe task add` / `vibe watch add` first, which remains the recommendation in every case. |
 
 ## See Also
 
 - [Slack Setup Guide](SLACK_SETUP.md)
 - [Telegram Setup Guide](TELEGRAM_SETUP.md)
 - [Codex Setup Guide](CODEX_SETUP.md)
+
+The Memory profile switch can disable profile reads and automatic profile processing without deleting existing memory or changing ordinary search.

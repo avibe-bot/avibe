@@ -11,7 +11,9 @@ use std::time::Duration;
 use tokio::time::{sleep, Instant};
 
 use crate::health::{HealthProbe, RuntimeReadiness};
-use crate::launcher::{LaunchError, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, RuntimeRemovalState};
+use crate::launcher::{
+    LaunchError, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher, RuntimeRemovalState, StartupReceipt,
+};
 use crate::origin::LoopbackOrigin;
 use crate::status::{BootstrapNotice, BootstrapNoticeCode, BootstrapStatus};
 
@@ -106,13 +108,29 @@ pub struct RuntimeHost {
     probe: Arc<dyn HealthProbe>,
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
-    launched_runtime: Mutex<Option<LaunchAttempt>>,
+    launched_runtime: Mutex<LaunchState>,
 }
 
 struct LaunchAttempt {
     runtime: LaunchedRuntime,
     launcher: Arc<dyn ResolvedRuntimeLauncher>,
+}
+
+#[derive(Default)]
+struct LaunchState {
+    attempt: Option<LaunchAttempt>,
+    ownership: Option<(Arc<dyn ResolvedRuntimeLauncher>, StartupReceipt)>,
     stopping: bool,
+}
+
+impl LaunchState {
+    fn capture_ownership(&mut self) {
+        if let Some(attempt) = &self.attempt {
+            if let Some(receipt) = attempt.runtime.watch.owned_receipt() {
+                self.ownership = Some((attempt.launcher.clone(), receipt.clone()));
+            }
+        }
+    }
 }
 
 impl RuntimeHost {
@@ -121,7 +139,7 @@ impl RuntimeHost {
             probe,
             launcher,
             settings,
-            launched_runtime: Mutex::new(None),
+            launched_runtime: Mutex::new(LaunchState::default()),
         }
     }
 
@@ -131,45 +149,43 @@ impl RuntimeHost {
 
     /// Whether this host retains a launch attempt for launch deduplication.
     pub fn has_launched(&self) -> bool {
-        self.launched_runtime().is_some()
+        self.launched_runtime().attempt.is_some()
     }
 
     pub fn has_owned_runtime(&self) -> bool {
-        self.launched_runtime()
-            .as_ref()
-            .is_some_and(|attempt| attempt.runtime.watch.owned_receipt().is_some())
+        self.launched_runtime().ownership.is_some()
     }
 
     pub async fn stop_owned_runtime(&self) -> Result<(), LaunchError> {
         let (launcher, receipt) = {
-            let mut launched = self.launched_runtime();
-            let owned = launched.as_mut().ok_or(LaunchError::NotOwned)?;
-            let receipt = owned
-                .runtime
-                .watch
-                .owned_receipt()
-                .cloned()
-                .ok_or(LaunchError::NotOwned)?;
-            if owned.stopping {
+            let mut state = self.launched_runtime();
+            let ownership = state.ownership.clone().ok_or(LaunchError::NotOwned)?;
+            if state.stopping
+                || state
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| !attempt.runtime.watch.succeeded() && !attempt.runtime.watch.failed())
+            {
                 return Err(LaunchError::RuntimeStop);
             }
-            owned.stopping = true;
-            (owned.launcher.clone(), receipt)
+            state.stopping = true;
+            ownership
         };
         let stopping = launcher.clone();
         let result = tokio::task::spawn_blocking(move || stopping.stop(&receipt))
             .await
             .map_err(|_| LaunchError::RuntimeStop)
             .and_then(|result| result);
-        let mut owned = self.launched_runtime();
-        if owned
+        let mut state = self.launched_runtime();
+        if state
+            .ownership
             .as_ref()
-            .is_some_and(|owned| Arc::ptr_eq(&owned.launcher, &launcher))
+            .is_some_and(|(owner, _)| Arc::ptr_eq(owner, &launcher))
         {
             if result.is_ok() || matches!(result, Err(LaunchError::OwnershipLost)) {
-                *owned = None;
-            } else if let Some(owned) = owned.as_mut() {
-                owned.stopping = false;
+                *state = LaunchState::default();
+            } else {
+                state.stopping = false;
             }
         }
         result
@@ -186,7 +202,7 @@ impl RuntimeHost {
     /// This does not stop a process. It only allows the next bootstrap run to
     /// launch again if the Runtime cannot be adopted.
     pub fn reset_after_confirmed_runtime_loss(&self) {
-        *self.launched_runtime() = None;
+        *self.launched_runtime() = LaunchState::default();
     }
 
     /// Gracefully stops and removes an app-private Runtime owned by this host.
@@ -210,7 +226,7 @@ impl RuntimeHost {
             .await
             .map_err(|_| LaunchError::RuntimeRemoval)??;
         if removed {
-            *self.launched_runtime() = None;
+            *self.launched_runtime() = LaunchState::default();
         }
         Ok(removed)
     }
@@ -264,7 +280,11 @@ impl RuntimeHost {
         // mismatch response still authorizes the bundled successor to stop the
         // superseded desktop-managed service before launching.
         if !handover_performed
-            && self.probe.mismatched_runtime_identity(&origin).await.is_some()
+            && self
+                .probe
+                .mismatched_runtime_identity(&origin)
+                .await
+                .is_some_and(|identity| identity.desktop_runtime_id.is_some())
             && resolved_launcher
                 .as_ref()
                 .is_some_and(|launcher| launcher.expected_runtime_id().is_some())
@@ -355,7 +375,11 @@ impl RuntimeHost {
                         .as_ref()
                         .is_some_and(|launcher| launcher.requires_handover(&readiness));
             } else if !handover_performed {
-                needs_polling_handover = self.probe.mismatched_runtime_identity(&origin).await.is_some()
+                needs_polling_handover = self
+                    .probe
+                    .mismatched_runtime_identity(&origin)
+                    .await
+                    .is_some_and(|identity| identity.desktop_runtime_id.is_some())
                     && resolved_launcher
                         .as_ref()
                         .is_some_and(|launcher| launcher.expected_runtime_id().is_some());
@@ -377,7 +401,7 @@ impl RuntimeHost {
                     );
                 }
                 handover_performed = true;
-                *self.launched_runtime() = None;
+                *self.launched_runtime() = LaunchState::default();
                 if let Err(error) = self.launch_if_needed(resolved_launcher.clone()) {
                     return publish(
                         sink,
@@ -440,60 +464,66 @@ impl RuntimeHost {
         .map_err(|_| LaunchError::EndpointOutput)?
     }
 
-    fn launched_runtime(&self) -> MutexGuard<'_, Option<LaunchAttempt>> {
-        self.launched_runtime
+    fn launched_runtime(&self) -> MutexGuard<'_, LaunchState> {
+        let mut state = self
+            .launched_runtime
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A successful receipt can arrive between bootstrap attempts. Capture it
+        // before releasing a completed helper's retry slot.
+        state.capture_ownership();
+        state
     }
 
     fn launch_if_needed(&self, resolved_launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>) -> Result<(), LaunchError> {
-        let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|owned| owned.stopping) {
+        let mut state = self.launched_runtime();
+        if state.stopping {
             return Err(LaunchError::RuntimeStop);
         }
-        // A previous `vibe start` may have exited zero without producing a
-        // ready UI. Check and replace it under one lock so a just-completed
-        // helper cannot strand this Retry between inspection and launch.
-        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
-            *launched = None;
+        if state
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.succeeded())
+        {
+            state.attempt = None;
         }
-        if launched.is_none() {
-            let resolved_launcher = match resolved_launcher {
+        if state.attempt.is_none() {
+            let launcher = match resolved_launcher {
                 Some(resolved) => resolved,
                 None => self.launcher.resolve()?,
             };
-            *launched = Some(LaunchAttempt {
-                runtime: resolved_launcher.launch()?,
-                launcher: resolved_launcher,
-                stopping: false,
+            state.attempt = Some(LaunchAttempt {
+                runtime: launcher.launch()?,
+                launcher,
             });
         }
         Ok(())
     }
 
-    /// Clears a launch only after its retained watch proves that it failed.
-    ///
-    /// A successful short-lived launcher and an unobservable long-running
-    /// launcher both remain retained, preserving the at-most-one launch
-    /// contract across retries without granting stop authority.
+    /// A failed helper releases its retry slot without erasing an earlier receipt.
     fn clear_failed_launch(&self) -> bool {
-        let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.failed()) {
-            *launched = None;
+        let mut state = self.launched_runtime();
+        if state
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.failed())
+        {
+            state.attempt = None;
             return true;
         }
         false
     }
 
-    /// Releases a completed zero-exit launcher after readiness did not follow.
-    ///
-    /// This does not stop a Runtime. It only allows the next bootstrap run to
-    /// invoke the idempotent start command again. A launcher still running or
-    /// otherwise unobservable remains retained, so attempts never overlap.
+    /// Readiness timeout releases only a completed helper, never stop authority.
+    /// Pending helpers remain retained so Retry cannot overlap a live launch.
     fn clear_successful_launch(&self) -> bool {
-        let mut launched = self.launched_runtime();
-        if launched.as_ref().is_some_and(|owned| owned.runtime.watch.succeeded()) {
-            *launched = None;
+        let mut state = self.launched_runtime();
+        if state
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.succeeded())
+        {
+            state.attempt = None;
             return true;
         }
         false
@@ -666,6 +696,32 @@ mod tests {
         assert!(!host.has_owned_runtime());
         assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
         assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_then_late_ready_retry_preserves_scoped_stop_authority() {
+        let launcher = Arc::new(RecordingLauncher::default());
+        let host = RuntimeHost::new(
+            Arc::new(TransientProbe(AtomicBool::new(false))),
+            launcher.clone(),
+            RuntimeHostSettings {
+                ready_timeout: Duration::ZERO,
+                ..RuntimeHostSettings::default()
+            },
+        );
+        assert_eq!(
+            host.bootstrap(&DiscardStatus).await.notice.code,
+            BootstrapNoticeCode::ReadyTimeout
+        );
+        assert!(!host.has_launched(), "completed helper releases the retry slot");
+        assert!(host.has_owned_runtime(), "timeout is not evidence of ownership loss");
+        assert_eq!(host.bootstrap(&DiscardStatus).await.phase, crate::BootstrapPhase::Ready);
+        assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+        host.stop_owned_runtime()
+            .await
+            .expect("retained receipt authorizes scoped stop");
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+        assert!(!host.has_owned_runtime());
     }
 
     #[tokio::test]

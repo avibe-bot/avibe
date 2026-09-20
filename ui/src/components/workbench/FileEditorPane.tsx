@@ -8,6 +8,7 @@ import { useWindowCloseGuard } from '../../context/WindowManagerContext';
 import { Button } from '../ui/button';
 import { FilesApiError, fileBrowserErrorMessage, fileMeta, readText, writeFile } from '../../lib/filesApi';
 import { editorPreviewKind } from '../../lib/filePreview';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { FilePreview } from '../ui/file-preview';
 
 // Monaco (the VS Code kernel) is heavy; lazy-load it so it stays out of the main
@@ -105,6 +106,8 @@ export const FileEditorPane: React.FC<{
    * be a redundant second header. Standalone uses keep the header (default).
    */
   chromeless?: boolean;
+  /** Keep Monaco on the IDE's dark theme even when the pane header is visible on mobile. */
+  forceDark?: boolean;
   /** Live status for the IDE status bar: 1-based cursor position plus the model's resolved
    *  indentation (insertSpaces / tabSize). Forwarded straight to Monaco's onCursorChange. */
   onCursor?: (line: number, column: number, indent: { insertSpaces: boolean; tabSize: number }) => void;
@@ -123,7 +126,7 @@ export const FileEditorPane: React.FC<{
    * window-level ⌘S itself — scoped by this flag so only the foreground tab saves.
    */
   saveHotkey?: boolean;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, headerActions, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onOpenFile, headerActions, onDirtyChange, chromeless = false, forceDark = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -153,17 +156,12 @@ export const FileEditorPane: React.FC<{
   // While previewing, Monaco (the usual ⌘S owner) is unmounted, so the foreground tab registers a
   // window-level ⌘S. `saveRef` holds the latest save() so the listener never saves a stale buffer.
   const saveRef = useRef<() => void>(() => {});
-  useEffect(() => {
-    if (!(saveHotkey && previewable && mode === 'preview')) return;
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') {
-        e.preventDefault();
-        void saveRef.current();
-      }
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [saveHotkey, previewable, mode]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's') {
+      event.preventDefault();
+      void saveRef.current();
+    }
+  }, saveHotkey && Boolean(previewable) && mode === 'preview', true);
 
   // Tracks the path the last read targeted, so a rename (path changing from one real file to another)
   // can be told apart from an initial open or a forced reload.
@@ -431,7 +429,7 @@ export const FileEditorPane: React.FC<{
       )}
 
       {error && (
-        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">
+        <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">
           {error}
         </div>
       )}
@@ -441,9 +439,9 @@ export const FileEditorPane: React.FC<{
           single-file page; wraps to two rows on narrow widths. Hidden while the Compare overlay is
           open, which carries its own copy of the actions. */}
       {conflict && !comparing && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warning/40 bg-warning/[0.08] px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-gold/40 bg-gold/[0.08] px-3 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 text-[11.5px] text-foreground">
-            <AlertTriangle className="size-3.5 shrink-0 text-warning" />
+            <AlertTriangle className="size-3.5 shrink-0 text-gold-ink" />
             <span className="min-w-0">{t('apps.editor.conflict.message')}</span>
           </div>
           {conflictActions('bar')}
@@ -488,10 +486,10 @@ export const FileEditorPane: React.FC<{
               language={language}
               path={monacoPath}
               readOnly={readOnly}
-              // Monaco is JS-themed (it can't read the window's `data-theme="dark"` CSS), so in the
-              // IDE (chromeless = the dark-locked Editor window) force the dark theme; otherwise a
-              // light global theme would leave a white Monaco slab inside the dark window (dnYPx is dark).
-              dark={chromeless || resolvedTheme === 'dark'}
+              // Monaco is JS-themed (it can't read the window's `data-theme="dark"` CSS). The
+              // mobile IDE keeps its file header visible, so the visual-header flag is separate
+              // from the theme policy that keeps the whole IDE dark.
+              dark={forceDark || chromeless || resolvedTheme === 'dark'}
               onChange={(value) => setText(value)}
               onSave={() => void save()}
               onCursorChange={onCursor}
@@ -521,7 +519,7 @@ export const FileEditorPane: React.FC<{
                   original={diskText}
                   modified={text}
                   language={language}
-                  dark={chromeless || resolvedTheme === 'dark'}
+                  dark={forceDark || chromeless || resolvedTheme === 'dark'}
                 />
               </Suspense>
             </div>

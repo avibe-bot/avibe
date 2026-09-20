@@ -7,10 +7,65 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from modules.agents.codex.transport import CodexTransport, STREAM_BUFFER_LIMIT
+from modules.agents.codex.transport import (
+    AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+    CodexRPCError,
+    CodexResponseTooLargeError,
+    CodexTransport,
+    STREAM_BUFFER_LIMIT,
+)
+
+
+def _forced_config_args() -> tuple[str, ...]:
+    return tuple(
+        arg
+        for override in AVIBE_APP_SERVER_CONFIG_OVERRIDES
+        for arg in ("-c", override)
+    )
 
 
 class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oversized_stdout_fails_all_pending_requests_with_typed_cause(self):
+        """MESSAGE-DELIVERY-032: preserve framing failure instead of retryable EOF."""
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        stdout = asyncio.StreamReader(limit=64)
+        stdout.feed_data(b'{"result":"' + b"x" * 100 + b'"}\n')
+        transport._process = SimpleNamespace(stdout=stdout, returncode=None)
+        pending = [asyncio.get_running_loop().create_future() for _ in range(2)]
+        transport._pending = dict(enumerate(pending))
+        transport._reader_task = asyncio.create_task(transport._reader_loop())
+        await transport._reader_task
+        for future in pending:
+            with self.assertRaises(CodexResponseTooLargeError) as caught:
+                await future
+            self.assertNotIsInstance(caught.exception, ConnectionError)
+        self.assertFalse(transport.is_alive)
+        self.assertEqual(transport._pending, {})
+
+    async def test_normal_stdout_eof_remains_a_connection_error(self):
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        stdout = asyncio.StreamReader()
+        stdout.feed_eof()
+        transport._process = SimpleNamespace(stdout=stdout, returncode=None)
+        pending = asyncio.get_running_loop().create_future()
+        transport._pending[1] = pending
+        await transport._reader_loop()
+        with self.assertRaisesRegex(ConnectionError, "stdout closed"):
+            await pending
+
+    async def test_rpc_errors_preserve_protocol_rejection_identity(self):
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        for code in (-32600, -32601, -32602, -32603, -32000):
+            with self.subTest(code=code):
+                future = asyncio.get_running_loop().create_future()
+                transport._pending[1] = future
+                await transport._dispatch({"id": 1, "error": {"code": code, "message": "failure"}})
+                with self.assertRaises(CodexRPCError) as caught:
+                    await future
+                self.assertEqual(caught.exception.code, code)
+                self.assertEqual(caught.exception.request_rejected, code in {-32600, -32601, -32602})
+                self.assertNotIn(1, transport._pending)
+
     async def test_cancelled_initialize_stops_unpublished_transport(self):
         initialize_started = asyncio.Event()
 
@@ -29,12 +84,23 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
             binary="codex",
             cwd="/tmp",
             runtime_args=["-c", 'model_provider="avibe"'],
-            extra_args=["-c", "features.memories=true"],
+            extra_args=[
+                "-c",
+                "features.memories=true",
+                "-c",
+                "features.plugins=true",
+                "-c",
+                "features.multi_agent=true",
+                "-c",
+                "tools.experimental_request_user_input.enabled=true",
+            ],
         )
 
-        async def wait_for_initialize(_method, _params):
-            initialize_started.set()
-            await asyncio.Event().wait()
+        async def wait_for_initialize(method, _params):
+            if method == "initialize":
+                initialize_started.set()
+                await asyncio.Event().wait()
+            return {}
 
         async def stop_transport():
             transport._cleanup_tasks()
@@ -69,8 +135,127 @@ class CodexTransportHealthTests(unittest.IsolatedAsyncioTestCase):
                 "-c",
                 "features.memories=true",
                 "-c",
-                "features.memories=false",
+                "features.plugins=true",
+                "-c",
+                "features.multi_agent=true",
+                "-c",
+                "tools.experimental_request_user_input.enabled=true",
+                *_forced_config_args(),
             ),
+        )
+
+        initialize_params = transport.send_request.await_args.args[1]
+        self.assertEqual(
+            initialize_params,
+            {
+                "clientInfo": {
+                    "name": "avibe",
+                    "title": "Avibe",
+                    "version": "1.0.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+
+    async def test_start_probes_turn_collaboration_mode_support(self):
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport.send_request = AsyncMock(
+            side_effect=[{}, {"data": [{"mode": "default"}]}]
+        )
+        transport.send_notification = AsyncMock()
+        transport.stop = AsyncMock(side_effect=transport._cleanup_tasks)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            await transport.start()
+
+        self.assertTrue(transport.supports_turn_collaboration_mode)
+        self.assertEqual(
+            [call.args[0] for call in transport.send_request.await_args_list],
+            ["initialize", "collaborationMode/list"],
+        )
+        transport.stop.assert_not_awaited()
+        transport._cleanup_tasks()
+
+    async def test_start_falls_back_when_turn_collaboration_probe_is_unsupported(self):
+        class _Stream:
+            async def readline(self):
+                await asyncio.Event().wait()
+
+        process = SimpleNamespace(
+            pid=123,
+            returncode=None,
+            stdin=None,
+            stdout=_Stream(),
+            stderr=_Stream(),
+        )
+        transport = CodexTransport(binary="codex", cwd="/tmp")
+        transport.send_request = AsyncMock(
+            side_effect=[{}, RuntimeError("method not found")]
+        )
+        transport.send_notification = AsyncMock()
+        transport.stop = AsyncMock(side_effect=transport._cleanup_tasks)
+
+        with (
+            patch(
+                "modules.agents.codex.transport.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ),
+            patch("modules.agents.codex.transport.process_identity", return_value={}),
+            patch("modules.agents.codex.transport.log_process_snapshot"),
+        ):
+            await transport.start()
+
+        self.assertFalse(transport.supports_turn_collaboration_mode)
+        self.assertTrue(transport.is_initialized)
+        transport.stop.assert_not_awaited()
+        transport._cleanup_tasks()
+
+    def test_app_server_policy_disables_competing_host_surfaces(self):
+        disabled = set(AVIBE_APP_SERVER_CONFIG_OVERRIDES)
+
+        self.assertTrue(
+            {
+                "features.apps=false",
+                "features.goals=false",
+                "features.hooks=false",
+                "features.memories=false",
+                "features.multi_agent=false",
+                "features.plugins=false",
+                "features.terminal_visualization_instructions=false",
+                "skills.include_instructions=false",
+                "tools.experimental_request_user_input.enabled=false",
+            }.issubset(disabled)
+        )
+        # ``agents`` is a role-definition table in older supported Codex
+        # releases; native delegation is disabled through the feature gate.
+        self.assertNotIn("agents.enabled=false", disabled)
+        self.assertNotIn("features.fast_mode=false", disabled)
+        self.assertNotIn("features.image_generation=false", disabled)
+        self.assertNotIn("features.shell_tool=false", disabled)
+        self.assertNotIn("web_search=disabled", disabled)
+
+    def test_app_server_policy_preserves_client_developer_messages(self):
+        self.assertIn(
+            "features.retain_client_developer_messages=true",
+            AVIBE_APP_SERVER_CONFIG_OVERRIDES,
         )
 
     async def test_reader_task_failure_marks_transport_not_alive(self):

@@ -4,13 +4,14 @@ import subprocess
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from config.v2_config import (
     AgentsConfig,
     CodexConfig,
+    ModelHubBackendModelConfig,
     PlatformsConfig,
     RuntimeConfig,
     SlackConfig,
@@ -109,7 +110,7 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
     assert fake_manager.closed_loop is not None
 
 
-def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
+def test_opencode_options_treats_disabled_model_hub_as_direct(monkeypatch):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
 
@@ -153,6 +154,8 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
             },
         ),
     )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
     monkeypatch.setattr(
@@ -176,9 +179,369 @@ def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
     result = asyncio.run(api.opencode_options_async("~/workspace"))
 
     assert result["ok"] is True
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "ui-agents"
+
+
+def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _ForbiddenServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            raise AssertionError("Hub options must not acquire the OpenCode server")
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    v2_config.model_hub.agents["opencode"].models = [
+        ModelHubBackendModelConfig(
+            id="deepseek-v3.2",
+            display_name="DeepSeek V3.2",
+            supports_reasoning=True,
+            reasoning_efforts=["high"],
+            native_protocol="openai_responses",
+        ),
+        ModelHubBackendModelConfig(
+            id="claude-opus-5",
+            display_name="Claude Opus 5",
+            supports_reasoning=True,
+            reasoning_efforts=["max"],
+            native_protocol="anthropic",
+        ),
+    ]
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    load_config = Mock(return_value=v2_config)
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(load_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        opencode_module,
+        "OpenCodeServerManager",
+        _ForbiddenServerManager,
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is True
+    load_config.assert_called_once_with()
+    assert result["data"]["agents"] == []
+    assert result["data"]["defaults"] == {}
+    assert result["data"]["source"] == "model hub projection (persisted)"
+    assert result["data"]["live"] is False
+    assert api._OPENCODE_OPTIONS_CACHE == {}
+    providers = {
+        provider["id"]: provider
+        for provider in result["data"]["models"]["providers"]
+    }
+    assert set(providers) == {"avibe-openai", "avibe-anthropic"}
+    assert set(providers["avibe-openai"]["models"]) == {"deepseek-v3.2"}
+    assert set(providers["avibe-anthropic"]["models"]) == {"claude-opus-5"}
+    assert "native_protocol" not in providers["avibe-openai"]["models"]["deepseek-v3.2"]
+    assert result["data"]["reasoning_options"] == {
+        "deepseek-v3.2": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "high", "label": "High"},
+        ],
+        "claude-opus-5": [
+            {"value": "__default__", "label": "(Default)"},
+            {"value": "max", "label": "Max"},
+        ],
+    }
+
+
+def test_opencode_empty_hub_projection_does_not_poison_direct_cache(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        ensure_calls = 0
+
+        async def ensure_running(self):
+            self.ensure_calls += 1
+
+        async def get_available_agents(self, directory):
+            return [{"name": "build"}]
+
+        async def get_available_models(self, directory, *, model_hub_models=None):
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            return None
+
+    manager = _FakeManager()
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_custom_provider_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(api, "_read_opencode_user_model_index", AsyncMock(return_value={}))
+
+    hub_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+    v2_config.model_hub.agents["opencode"].mode = "direct"
+    direct_result = asyncio.run(
+        api.opencode_options_async("/tmp/workspace", model_hub_models={})
+    )
+
+    assert hub_result["data"]["agents"] == []
+    assert direct_result["data"]["agents"] == [{"name": "build"}]
+    assert manager.ensure_calls == 1
+    assert api._OPENCODE_OPTIONS_CACHE["/tmp/workspace"]["mode"] == "direct"
+
+
+def test_opencode_options_rereads_hub_mode_at_launch_boundary(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+    from modules.agents.opencode import server as opencode_server_module
+
+    direct_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    hub_config.model_hub.agents["opencode"].mode = "hub"
+    configs = iter((direct_config, hub_config))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: next(configs)))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module.OpenCodeServerManager, "_instance", None)
+    monkeypatch.setattr(
+        opencode_server_module,
+        "ensure_plugin_installed",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Hub refusal must happen before server setup")
+        ),
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is False
+    assert "Gateway mode" in result["error"]
+
+
+def test_opencode_options_cache_tracks_current_model_hub_projection(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    projections = []
+
+    class _FakeManager:
+        async def ensure_running(self):
+            return "http://127.0.0.1:4096"
+
+        async def get_available_agents(self, directory):
+            return []
+
+        async def get_available_models(self, directory, *, model_hub_models=None):
+            projections.append(model_hub_models)
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    manager = _FakeManager()
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return manager
+
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(
+        opencode_module,
+        "build_reasoning_effort_options",
+        lambda models, model_key: [],
+    )
+    first = {"custom/first": {"id": "custom/first"}}
+    second = {"custom/second": {"id": "custom/second"}}
+
+    asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=first,
+        )
+    )
+    cached = asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=first,
+        )
+    )
+    asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=second,
+        )
+    )
+
+    assert cached["cached"] is True
+    assert projections == [first, second]
+
+
+def test_opencode_options_does_not_fall_back_across_model_hub_projections(
+    monkeypatch,
+):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        async def ensure_running(self):
+            raise RuntimeError("daemon unavailable")
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return _FakeManager()
+
+    stale_projection = {"custom/old": {"id": "custom/old"}}
+    current_projection = {"custom/new": {"id": "custom/new"}}
+    monkeypatch.setattr(
+        api,
+        "_OPENCODE_OPTIONS_CACHE",
+        {
+            "/tmp/workspace": {
+                "data": {"models": {"providers": []}},
+                "updated_at": time.monotonic(),
+                "model_hub_projection": json.dumps(
+                    stale_projection,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+        },
+    )
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    result = asyncio.run(
+        api.opencode_options_async(
+            "/tmp/workspace",
+            model_hub_models=current_projection,
+        )
+    )
+
+    assert result == {"ok": False, "error": "daemon unavailable"}
+
+
+def test_sync_opencode_options_delegates_snapshot_loading(monkeypatch):
+    calls = []
+
+    async def options(cwd):
+        calls.append(cwd)
+        return {"ok": True, "data": {"models": {"providers": []}}}
+
+    monkeypatch.setattr(api, "opencode_options_async", options)
+
+    result = api.opencode_options("/tmp/workspace")
+
+    assert result["ok"] is True
+    assert calls == ["/tmp/workspace"]
 
 
 def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
@@ -225,9 +588,52 @@ def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatc
 
     assert server is fake_manager
     fake_manager.ensure_running.assert_awaited_once()
+    assert "model_hub_overlay_required" not in captured_kwargs
     governor = captured_kwargs["resource_governor"]
     assert governor.mode == "enabled"
     assert governor.config["agent_group_name"] == "provider-ui-agents"
+
+
+def test_opencode_provider_settings_return_structured_hub_refusal(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    refusal = opencode_module.OpenCodeModelHubOverlayRequiredError(
+        "controller overlay is not ready"
+    )
+    fake_manager = SimpleNamespace(ensure_running=AsyncMock(side_effect=refusal))
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return fake_manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(default_cwd="."),
+    )
+    v2_config.model_hub.agents["opencode"].mode = "hub"
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    result = asyncio.run(api.get_opencode_providers_async())
+
+    assert result["ok"] is False
+    assert fake_manager.ensure_running.await_count == 1
 
 
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):
@@ -247,6 +653,15 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
                     {"id": "openai", "models": {"gpt-5": {}}},
                     {"id": "poe", "models": {"claude-opus-4": {}}},
                     {"id": "alibaba-cn", "models": {"qwen-max": {}}},
+                    {
+                        "id": "custom",
+                        "models": {
+                            "first-model": {
+                                "vibe_remote": {"model_hub_projected": True}
+                            },
+                            "native-model": {},
+                        },
+                    },
                 ],
                 "default": {
                     "openai": "gpt-5",
@@ -304,8 +719,10 @@ def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_
     result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
 
     providers = result["data"]["models"]["providers"]
-    assert [p["id"] for p in providers] == ["openai"]
-    assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
+    assert [p["id"] for p in providers] == ["openai", "custom"]
+    custom = next(provider for provider in providers if provider["id"] == "custom")
+    assert set(custom["models"]) == {"first-model"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_path):
@@ -389,7 +806,7 @@ def test_opencode_options_keeps_legacy_config_api_key_provider(monkeypatch, tmp_
 
     providers = result["data"]["models"]["providers"]
     assert [p["id"] for p in providers] == ["poe"]
-    assert result["data"]["models"]["default"] == {"poe": "claude-opus-4"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_does_not_readd_unconfigured_user_model_provider(
@@ -579,7 +996,7 @@ def test_opencode_options_filters_catalog_provider_with_only_stale_user_model(
     assert result["ok"] is True
     providers = result["data"]["models"]["providers"]
     assert [p["id"] for p in providers] == ["openai"]
-    assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
+    assert result["data"]["models"]["default"] == {}
 
 
 def test_opencode_options_preserves_models_when_provider_catalog_fails(
@@ -922,15 +1339,14 @@ def test_opencode_options_includes_keyless_custom_provider_models(monkeypatch, t
     providers = result["data"]["models"]["providers"]
     ids = [provider["id"] for provider in providers]
     assert ids == ["openai", "llama.cpp"]
-    assert result["data"]["models"]["default"] == {
-        "openai": "gpt-5",
-        "llama.cpp": "local-model",
-    }
+    assert result["data"]["models"]["default"] == {}
     local = next(provider for provider in providers if provider["id"] == "llama.cpp")
     assert local["models"] == {"local-model": {"name": "local-model", "vibe_remote": {"user_model": True}}}
 
 
-def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch, tmp_path):
+def test_opencode_provider_catalog_uses_native_models_for_provider_probes(
+    monkeypatch, tmp_path
+):
     class _FakeServer:
         async def get_providers(self):
             return {
@@ -942,6 +1358,9 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
             return {}
 
         async def get_available_models(self, directory):
+            raise AssertionError("provider probes must not use the projected catalog")
+
+        async def get_native_available_models(self, directory):
             return {
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
@@ -978,29 +1397,28 @@ def test_opencode_provider_catalog_keeps_builtin_overrides_read_only(monkeypatch
     result = asyncio.run(api.get_opencode_providers_async())
 
     entry = result["providers"][0]["model_entries"][0]
+    assert result["providers"][0]["models"] == ["gpt-5"]
     assert entry["id"] == "gpt-5"
     assert entry["reasoning_efforts"] == ["high"]
     assert entry["user_managed"] is False
 
 
 @pytest.mark.parametrize(
-    ("available_models", "runtime_model", "expected_model"),
+    ("available_models", "runtime_model"),
     [
-        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None, "gpt-5.3-chat-latest"),
-        ({"gpt-5.3-chat-latest": {}}, None, "gpt-5.3-chat-latest"),
+        ({"gpt-5.3-chat-latest": {}, "gpt-5.4": {}}, None),
+        ({"gpt-5.3-chat-latest": {}}, None),
         (
             {"gpt-5.3-chat-latest": {}, "gpt-5.4": {}, "gpt-5.4-runtime": {}},
             "openai/gpt-5.4-runtime",
-            "gpt-5.4-runtime",
         ),
     ],
 )
-def test_opencode_provider_catalog_prefers_runtime_agent_model(
+def test_opencode_provider_catalog_ignores_native_default_models(
     monkeypatch,
     tmp_path,
     available_models,
     runtime_model,
-    expected_model,
 ):
     class _FakeServer:
         async def get_providers(self):
@@ -1023,6 +1441,8 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
                 "default": {"openai": "gpt-5.3-chat-latest"},
             }
 
+        get_native_available_models = get_available_models
+
         async def close_http_session(self, *, loop=None):
             pass
 
@@ -1030,7 +1450,7 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
             return "build"
 
         def get_agent_model_from_config(self, agent_name):
-            return runtime_model if agent_name == "build" else None
+            raise AssertionError(f"Native model {runtime_model} must not be read")
 
     async def _fake_get_server():
         return _FakeServer()
@@ -1052,7 +1472,8 @@ def test_opencode_provider_catalog_prefers_runtime_agent_model(
     result = asyncio.run(api.get_opencode_providers_async())
 
     provider = next(provider for provider in result["providers"] if provider["id"] == "openai")
-    assert provider["default_model"] == expected_model
+    assert "default_model" not in provider
+    assert set(provider["models"]) == set(available_models)
 
 
 def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
@@ -1073,6 +1494,8 @@ def test_opencode_provider_catalog_marks_keyless_custom_provider_configured(
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
             }
+
+        get_native_available_models = get_available_models
 
         async def close_http_session(self, *, loop=None):
             pass
@@ -1135,6 +1558,8 @@ def test_opencode_provider_catalog_keeps_custom_provider_without_vibe_meta(
                 "providers": [{"id": "openai", "models": {"gpt-5": {}}}],
                 "default": {"openai": "gpt-5"},
             }
+
+        get_native_available_models = get_available_models
 
         async def close_http_session(self, *, loop=None):
             pass
@@ -1270,6 +1695,8 @@ def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_ba
 
 
 def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypatch):
+    from core.agent_auth_service import WebAuthFlow
+
     async def _start_web_setup(backend, *, force_reset=True, provider_id=None):
         async def _mark_completed():
             await asyncio.sleep(0.01)
@@ -1279,7 +1706,7 @@ def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypa
         flow.waiter_task = task
         return flow
 
-    flow = SimpleNamespace(
+    flow = WebAuthFlow(
         flow_id="flow-sync",
         backend="codex",
         state="awaiting_code",
@@ -1305,6 +1732,82 @@ def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypa
         time.sleep(0.01)
     assert flow.state == "success"
     assert flow.waiter_task.done()
+
+
+def test_start_oauth_web_blocks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.start_oauth_web_async("codex"))
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
+
+
+def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
+    from core.agent_auth_service import BackendLoginInProgressError
+
+    service = SimpleNamespace(
+        start_web_setup=AsyncMock(
+            side_effect=BackendLoginInProgressError("openai", "codex")
+        )
+    )
+    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service)
+
+    result = asyncio.run(api.start_oauth_web_async("codex"))
+
+    assert result == {
+        "ok": False,
+        "error": "native_login_in_progress",
+        "detail": "openai（codex）登录正在进行中，请先完成或取消后再重新发起。",
+    }
+
+
+def test_submit_oauth_web_code_rechecks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.submit_oauth_web_code_async("flow-1", "code-1"))
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
+
+
+def test_remove_backend_auth_blocks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.remove_backend_auth_async("codex"))
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
+
+
+def test_remove_claude_oauth_credentials_blocks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.remove_claude_oauth_credentials_async())
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
 
 
 def test_detect_cli_prefers_claude_local(monkeypatch, tmp_path):
@@ -1346,6 +1849,35 @@ def test_detect_cli_supports_explicit_path(monkeypatch, tmp_path):
 
     assert result["found"] is True
     assert result["path"] == str(binary_path)
+
+
+def test_resolve_cli_path_stops_before_npm_after_common_path_match(monkeypatch, tmp_path):
+    codex_path = tmp_path / ".local" / "bin" / "codex"
+    codex_path.parent.mkdir(parents=True)
+    codex_path.write_text("#!/bin/sh\n")
+    codex_path.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("npm discovery must not run after a direct match"),
+    )
+
+    assert api.resolve_cli_path("codex") == str(codex_path)
+
+
+def test_resolve_cli_path_fast_probe_never_queries_npm(monkeypatch, tmp_path):
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(
+        api,
+        "_npm_global_binary_candidates",
+        lambda _binary: pytest.fail("fast presence probes must not query npm"),
+    )
+
+    assert api.resolve_cli_path("missing-cli", include_npm_global=False) is None
 
 
 @pytest.fixture
@@ -1457,7 +1989,7 @@ def test_detect_cli_sorts_prerelease_numerically_in_nvm(monkeypatch, tmp_path, o
     assert result["path"] == str(rc10)
 
 
-def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path):
+def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only_tmp_binaries):
     npm_path = tmp_path / "tools" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
@@ -1579,15 +2111,9 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     installed = tmp_path / "backends" / "codex" / "releases" / "new" / "codex"
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
 
-    class Config:
-        def __init__(self):
-            self.agents = SimpleNamespace(codex=SimpleNamespace(cli_path="codex"))
-            self.saved = 0
-
-        def save(self):
-            self.saved += 1
-
-    config = Config()
+    config = api.V2Config.default()
+    config.agents.codex.cli_path = "codex"
+    config.save()
     invalidated: list[str] = []
 
     def fake_install(name, *, activate):
@@ -1595,7 +2121,6 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
         assert activate(str(installed)) is None
         return SimpleNamespace(path=str(installed), version="1.2.3", output="installed")
 
-    monkeypatch.setattr(api, "load_config", lambda: config)
     monkeypatch.setattr(api, "resolve_cli_path", lambda value: None)
     monkeypatch.setattr(api, "desktop_backend_toolchain", lambda: object())
     monkeypatch.setattr(api, "install_desktop_backend", fake_install)
@@ -1612,8 +2137,7 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     assert result["managed_by"] == "desktop"
     assert result["path"] == str(installed)
     assert result["message"] == "Codex installed successfully."
-    assert config.agents.codex.cli_path == str(installed)
-    assert config.saved == 1
+    assert api.V2Config.load().agents.codex.cli_path == str(installed)
     assert invalidated == ["codex"]
 
 
@@ -1712,6 +2236,129 @@ def test_backend_runtime_checks_updates_for_private_backend(monkeypatch, tmp_pat
     assert result["managed_by"] == "desktop"
     assert result["latest_version"] == "1.1.0"
     assert result["has_update"] is True
+
+
+def test_resolve_cli_paths_queries_npm_prefix_once_for_a_backend_batch(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    npm_path = tmp_path / "tools" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+    inactive_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "npm"
+    )
+    inactive_npm.parent.mkdir(parents=True, exist_ok=True)
+    inactive_npm.write_text("#!/bin/sh\n")
+    inactive_npm.chmod(0o755)
+
+    prefix_path = tmp_path / ".npm-global"
+    expected = {}
+    for binary in ("claude", "codex", "opencode"):
+        path = prefix_path / "bin" / binary
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        expected[binary] = str(path)
+
+    calls = []
+
+    class CompletedProcess:
+        returncode = 0
+        stdout = f"{prefix_path}\n"
+        stderr = ""
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        return CompletedProcess()
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(npm_path) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    assert api.resolve_cli_paths(list(expected)) == expected
+    assert calls == [[str(npm_path), "config", "get", "prefix"]]
+
+
+def test_resolve_cli_paths_finds_backend_in_inactive_nvm_version_without_npm_query(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    active_npm = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v22.18.0"
+        / "bin"
+        / "npm"
+    )
+    active_npm.parent.mkdir(parents=True, exist_ok=True)
+    active_npm.write_text("#!/bin/sh\n")
+    active_npm.chmod(0o755)
+    inactive_codex = (
+        tmp_path
+        / ".nvm"
+        / "versions"
+        / "node"
+        / "v18.20.0"
+        / "bin"
+        / "codex"
+    )
+    inactive_codex.parent.mkdir(parents=True, exist_ok=True)
+    inactive_codex.write_text("#!/bin/sh\n")
+    inactive_codex.chmod(0o755)
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        api.shutil,
+        "which",
+        lambda binary: str(active_npm) if binary == "npm" else None,
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an NVM bin match must not require npm prefix discovery"
+        ),
+    )
+
+    assert api.resolve_cli_paths(["codex"]) == {"codex": str(inactive_codex)}
+
+
+def test_resolve_cli_paths_preserves_completed_paths_when_other_probes_fail(
+    monkeypatch,
+):
+    def resolve(binary, *, include_npm_global):
+        assert include_npm_global is False
+        if binary == "codex":
+            raise OSError("NVM inventory changed during discovery")
+        return f"/resolved/{binary}" if binary == "claude" else None
+
+    def fail_prefix_probe():
+        raise OSError("npm disappeared")
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve)
+    monkeypatch.setattr(api, "_npm_global_prefixes", fail_prefix_probe)
+
+    assert api.resolve_cli_paths(["claude", "codex", "opencode"]) == {
+        "claude": "/resolved/claude",
+        "codex": None,
+        "opencode": None,
+    }
 
 
 def test_install_agent_returns_resolved_path(monkeypatch):
@@ -2218,8 +2865,9 @@ def test_claude_models_merge_catalog_and_settings(monkeypatch, tmp_path):
     result = api.claude_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][0] == "claude-fable-5"
-    assert result["models"][1] == "claude-opus-5"
+    assert result["models"][0] == "claude-fable-5-1"
+    assert result["models"][1] == "claude-fable-5"
+    assert result["models"][2] == "claude-opus-5"
     assert "opus" in result["models"]
     assert "sonnet" in result["models"]
     assert "haiku" in result["models"]
@@ -2277,7 +2925,12 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+    assert result["models"][:4] == [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
     assert result["models"].index("gpt-5.4") < result["models"].index("gpt-5.4-mini")
     assert "gpt-5.3-codex-spark" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
@@ -2306,9 +2959,14 @@ def test_codex_models_falls_back_when_cli_cache_missing(monkeypatch, tmp_path):
     result = api.codex_models(schedule_refresh=False)
 
     assert result["ok"] is True
-    assert result["models"][:3] == ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-    assert "custom-codex-model" in result["models"]
-    assert "legacy-codex" in result["models"]
+    assert result["models"][:4] == [
+        "gpt-6-astra",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
+    assert "custom-codex-model" not in result["models"]
+    assert "legacy-codex" not in result["models"]
     assert "gpt-5.1-codex-max" in result["models"]
     assert "gpt-5.1-codex-mini" in result["models"]
 
@@ -2379,12 +3037,22 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
                         "name": "DeepSeek",
                         "models": {"deepseek-chat": {"vibe_remote": {"user_model": True}}},
                     },
+                    {
+                        "id": "avibe-openai",
+                        "name": "Avibe · OpenAI",
+                        "models": {
+                            "gpt-5": {
+                                "vibe_remote": {"model_hub_projected": True},
+                            }
+                        },
+                    },
                 ],
                 "default": {"anthropic": "claude-x"},
             },
             "reasoning_options": {
                 "anthropic/claude-x": [{"value": "__default__"}, {"value": "low"}, {"value": "high"}],
                 "deepseek/deepseek-chat": [{"value": "low"}],
+                "gpt-5": [{"value": "high"}],
             },
         },
     }
@@ -2398,16 +3066,63 @@ def test_agent_model_options_opencode_overlay_and_provider_filter(monkeypatch):
     providers = {p["id"]: p for p in result["providers"]}
     assert providers["deepseek"]["custom"] is True
     assert providers["anthropic"]["custom"] is False
+    assert "avibe-openai" not in providers
     by_value = {m["value"]: m for m in result["models"]}
     # custom-provider models + reasoning + source annotation flow through unchanged
     assert by_value["anthropic/claude-x"]["reasoning_efforts"] == ["low", "high"]
-    assert by_value["anthropic/claude-x"]["default"] is True
+    assert all("default" not in model for model in result["models"])
     assert by_value["anthropic/claude-x"]["source"] == "catalog"
     assert by_value["deepseek/deepseek-chat"]["source"] == "user"
+    assert by_value["gpt-5"] == {
+        "value": "gpt-5",
+        "source": "catalog",
+        "reasoning_efforts": ["high"],
+    }
 
     filtered = api.agent_model_options("opencode", provider="deepseek")
     assert [p["id"] for p in filtered["providers"]] == ["deepseek"]
     assert all(m["provider"] == "deepseek" for m in filtered["models"])
+
+
+def test_agent_model_options_preserves_hub_projection_provenance(monkeypatch):
+    import vibe.opencode_config as opencode_config
+
+    monkeypatch.setattr(
+        api,
+        "opencode_options",
+        lambda cwd: {
+            "ok": True,
+            "data": {
+                "models": {
+                    "providers": [
+                        {
+                            "id": "avibe-openai",
+                            "models": {
+                                "deepseek-v3.2": {
+                                    "vibe_remote": {"model_hub_projected": True}
+                                }
+                            },
+                        }
+                    ],
+                    "default": {},
+                },
+                "reasoning_options": {},
+                "source": "model hub projection (persisted)",
+                "live": False,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        opencode_config,
+        "read_opencode_custom_providers",
+        lambda **kwargs: {},
+    )
+
+    result = api.agent_model_options("opencode")
+
+    assert result["source"] == "model hub projection (persisted)"
+    assert result["live"] is False
+    assert [model["value"] for model in result["models"]] == ["deepseek-v3.2"]
 
 
 def test_codex_agents_merges_global_and_project(monkeypatch, tmp_path):
@@ -2891,6 +3606,7 @@ def test_telegram_auth_test_returns_response(monkeypatch):
         return {"id": 1, "username": "vibe_remote_bot"}
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("123456:test-token")
 
@@ -2906,6 +3622,7 @@ def test_telegram_auth_test_uses_stored_token_when_request_omits_secret(monkeypa
 
     monkeypatch.setattr(api, "_telegram_get_me", fake_get_me)
     monkeypatch.setattr(api, "_stored_platform_secret", lambda platform, field: "123456:stored-token")
+    monkeypatch.setattr("vibe.proxy.resolve_proxy", lambda proxy_url: proxy_url)
 
     result = api.telegram_auth_test("")
 
@@ -2998,6 +3715,8 @@ def test_telegram_topic_settings_materialize_inherited_mention_default(tmp_path,
 
         assert saved["ok"] is True
         assert saved["settings"]["require_mention"] is False
+        # The API commits through a private store; consumers refresh by revision.
+        assert store.maybe_reload() is True
         assert store.find_thread("-1001", "42", platform="telegram").require_mention is False
     finally:
         SettingsStore.reset_instance()
@@ -3066,7 +3785,7 @@ def test_vibe_agent_api_localizes_archive_refusal(tmp_path, monkeypatch):
 
 def test_vibe_agent_api_localizes_invalid_reference_metadata_on_rename(monkeypatch):
     class RefusingStore:
-        def rename(self, _name, _new_name):
+        def rename(self, _name, _new_name, *, user_context=None):
             raise api.AgentReferenceRewriteError()
 
         def close(self):

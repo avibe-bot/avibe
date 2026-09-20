@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import pytest
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +35,19 @@ from storage.background import (
     OWED_NOTICE_INDEX,
     RUN_INTERRUPTION_REASONS,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    enqueue_run_in_connection,
     owed_notice_eligible,
+    run_update_event_transaction,
 )
+
+
+@pytest.fixture(autouse=True)
+def _prepare_behavior_state(tmp_path, sqlite_db_factory, request):
+    # These cases exercise Harness behavior against the real current schema,
+    # not the migration path that produces it.
+    if not request.node.get_closest_marker("no_sqlite_template"):
+        sqlite_db_factory(tmp_path / "state" / "vibe.sqlite")
 
 
 def _store(tmp_path: Path) -> tuple[SQLiteBackgroundTaskStore, TaskExecutionStore]:
@@ -43,6 +55,53 @@ def _store(tmp_path: Path) -> tuple[SQLiteBackgroundTaskStore, TaskExecutionStor
     requests = TaskExecutionStore(tmp_path / "task_requests")
     requests._sqlite = sqlite
     return sqlite, requests
+
+
+def _seed_query_history(sqlite: SQLiteBackgroundTaskStore, payloads: list[dict]) -> None:
+    # Static query fixtures need the same durable rows, not one commit per row.
+    with run_update_event_transaction(sqlite.engine) as connection:
+        for payload in payloads:
+            enqueue_run_in_connection(connection, sqlite._run_values(payload))
+
+
+def test_query_history_batch_matches_individual_writes(tmp_path, sqlite_db_factory):
+    from storage.models import agent_runs
+
+    sqlite_db_factory(tmp_path / "reference" / "state" / "vibe.sqlite")
+    reference, _ = _store(tmp_path / "reference")
+    batched, _ = _store(tmp_path)
+    payloads = [
+        {
+            "id": f"run-{index % 2}", "definition_id": "fixture",
+            "request_type": "scheduled", "status": status,
+            "created_at": _EPOCH, "completed_at": _EPOCH,
+            "agent_backend": "codex" if index == 0 else None,
+            "metadata": {"owed_failure_notice": {"state": "pending", "attempts": index}},
+        }
+        for index, status in enumerate(("failed", "succeeded", "running"))
+    ]
+    commits = []
+
+    def committed(connection):
+        commits.append(True)
+
+    try:
+        for store in (reference, batched):
+            _task(store, "fixture")
+        for payload in payloads:
+            reference.enqueue_run(payload)
+        event.listen(batched.engine, "commit", committed)
+        try:
+            _seed_query_history(batched, payloads)
+        finally:
+            event.remove(batched.engine, "commit", committed)
+        assert commits == [True]
+        with reference.engine.connect() as fresh, batched.engine.connect() as clone:
+            statement = select(agent_runs).order_by(agent_runs.c.id)
+            assert fresh.execute(statement).fetchall() == clone.execute(statement).fetchall()
+    finally:
+        reference.close()
+        batched.close()
 
 
 _EPOCH = "2026-07-01T00:00:00+00:00"
@@ -1193,8 +1252,9 @@ def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: P
     sqlite, _ = _store(tmp_path)
     _task(sqlite, "task-pred-plan", session_policy="create_per_run")
     backlog = 1200
+    history = []
     for index in range(backlog):
-        sqlite.enqueue_run(
+        history.append(
             {
                 "id": f"run-backlog-{index:05d}",
                 "request_type": "scheduled",
@@ -1205,6 +1265,8 @@ def test_the_predecessor_read_is_bounded_and_seeks_rather_than_scans(tmp_path: P
                 "created_at": f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00",
             }
         )
+
+    _seed_query_history(sqlite, history)
 
     anchor_created = "2026-07-29T00:00:00+00:00"
     now = "2026-07-29T00:05:00+00:00"
@@ -1565,7 +1627,7 @@ def _write_raw_metadata_json(sqlite: SQLiteBackgroundTaskStore, run_id: str, blo
     assert _raw_metadata_json(sqlite, run_id) == blob, "the fixture blob must survive the write"
 
 
-def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -> None:
+def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path, sqlite_schema_db_factory) -> None:
     """Subordinate to HFR-084/HFR-072 — malformed metadata is READ-ONLY to the stamp.
 
     ``_merge_owed_failure_notice`` decoded the column with ``_json_loads(..., {})``
@@ -1596,6 +1658,7 @@ def test_a_terminal_writer_never_rewrites_unparseable_metadata(tmp_path: Path) -
             # exercised on one writer; the truncated blob is exercised on all four.
             if blob != "{broken" and writer != "record_run_output":
                 continue
+            sqlite_schema_db_factory(tmp_path / f"{writer}-{blobs.index(blob)}" / "state" / "vibe.sqlite")
             sqlite, requests = _store(tmp_path / f"{writer}-{blobs.index(blob)}")
             if writer == "coalesced":
                 run = requests.enqueue_agent_run(
@@ -2053,15 +2116,17 @@ def test_a_failed_watch_notice_renders_watch_commands(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("outcome", "headline_key"),
+    ("outcome", "definition_enabled", "headline_key"),
     [
-        ("event", "harness.notice.watchProcessingFailed"),
-        ("waiter_failure", "harness.notice.watchFailureReportFailed"),
+        ("event", True, "harness.notice.watchProcessingFailed"),
+        ("waiter_failure", False, "harness.notice.watchFailureReportFailed"),
+        ("circuit_repair", False, "harness.notice.watchCircuitRepairFailed"),
     ],
 )
 def test_watch_notice_copy_preserves_the_waiter_outcome(
     tmp_path: Path,
     outcome: str,
+    definition_enabled: bool,
     headline_key: str,
 ) -> None:
     """A failed reporting Turn cannot turn a waiter failure into an event."""
@@ -2073,7 +2138,12 @@ def test_watch_notice_copy_preserves_the_waiter_outcome(
     from vibe.i18n import t as i18n_t
 
     sqlite, requests = _store(tmp_path)
-    _watch(sqlite, "watch-copy", name="CI waiter")
+    _watch(
+        sqlite,
+        "watch-copy",
+        name="CI waiter",
+        enabled=definition_enabled,
+    )
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
     store._sqlite = sqlite
     store.load()
@@ -2111,20 +2181,74 @@ def test_watch_notice_copy_preserves_the_waiter_outcome(
         assert "detected an event" not in body
 
 
-def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("definition_state", ["resumed", "deleted"])
+def test_circuit_repair_failure_copy_does_not_claim_a_stale_pause_state(
+    tmp_path: Path,
+    definition_state: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore
+    from storage.background import WATCH_HOOK_OUTCOME_METADATA_KEY
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-repair-state", name="Disk waiter", enabled=True)
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    store._sqlite = sqlite
+    store.load()
+    run = requests.enqueue_hook_send(
+        session_key="slack::channel::C1",
+        prompt="repair the Watch",
+        run_type="watch",
+        definition_id="watch-repair-state",
+        metadata={WATCH_HOOK_OUTCOME_METADATA_KEY: "circuit_repair"},
+    )
+    claimed = requests.claim(run.id)
+    assert claimed is not None
+    requests.complete(
+        claimed,
+        ok=False,
+        error="repair Agent failed",
+        task_id="watch-repair-state",
+    )
+    if definition_state == "deleted":
+        assert sqlite.remove_task("watch-repair-state")
+
+    service = ScheduledTaskService.__new__(ScheduledTaskService)
+    service.store = store
+    service.request_store = requests
+    service.controller = SimpleNamespace(
+        platform_settings_managers={},
+        session_turn_gate=None,
+    )
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    body = service._failure_notice_body(
+        sqlite.get_run(run.id),
+        sqlite.owed_failure_notice(run.id),
+    )
+
+    generic = i18n_t("harness.notice.watchFollowUpFailed", "en").format(
+        name="Disk waiter" if definition_state == "resumed" else "watch-repair-state"
+    )
+    assert generic in body
+    assert "remains paused" not in body
+
+
+def test_a_retired_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
     """The task-side twin of the retired-watch copy fix — FINISHED IS NOT PAUSED.
 
-    A failed ``at`` task is disabled by ``mark_task_result(disable_one_shot=True)``
-    before its notice renders, so the generic disabled branch told the user the task
+    A consumed ``at`` task is disabled and retired before its notice renders, so
+    the generic disabled branch told the user the task
     was PAUSED and offered ``vibe task resume`` — while the canonical lifecycle
-    projection (``definition_lifecycle_expression``) classifies a past one-shot as
+    projection (``definition_lifecycle_expression``) classifies the persisted retirement as
     FINISHED and the CLI reads the same combination as a failed one-shot. One
     surface's copy contradicted every other surface and named a lifecycle action
     that re-arms nothing.
 
-    The distinction is read through the projection's own question —
-    ``compute_next_run_at`` returns ``None`` exactly when the named instant is
-    behind us — so the copy and the badge cannot disagree. The explicit re-run
+    The distinction is read through the projection's own persisted marker, so
+    the copy and the badge cannot disagree. The explicit re-run
     affordance is retained: ``vibe task run`` is real and is the honest next step
     for a failed one-shot.
 
@@ -2138,7 +2262,7 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
     from vibe.i18n import t as i18n_t
 
     sqlite, requests = _store(tmp_path)
-    # The instant is named and behind us; ``mark_task_result`` left the switch off.
+    # The scheduler consumed this instant and persisted that transition.
     _task(
         sqlite,
         "task-once",
@@ -2147,6 +2271,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         cron=None,
         run_at="2026-07-20T00:00:00+00:00",
         enabled=False,
+        retired_at=_EPOCH,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
     )
     _task(sqlite, "task-paused", name="paused cron", enabled=False)
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -2184,10 +2310,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         f"a genuinely paused cron task keeps the resume copy: {control!r}"
     )
 
-    # A naive ``run_at`` is resolved in the task's own timezone by both the SQL
-    # lifecycle projection and ``compute_next_run_at``. This Shanghai wall clock
-    # is one hour in the past there but seven hours ahead if misread as UTC, so it
-    # consumes the exact disagreement the SQLite connection UDF closes.
+    # A naive ``run_at`` is resolved in the task's own timezone for the next-fire
+    # projection. Lifecycle itself reads only the persisted retirement fact.
     from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
@@ -2208,6 +2332,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         run_at=naive_past_shanghai,
         timezone="Asia/Shanghai",
         enabled=False,
+        retired_at=_EPOCH,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
     )
     store.load()
     assert sqlite.definition_lifecycle_state("task-tz", definition_type="task") == "finished"
@@ -2229,7 +2355,7 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         {"failure_id": "failure:run-tz", "interrupt_reason": None},
     )
     assert i18n_t("harness.notice.taskFinished", "en") in tz_body, (
-        f"the copy and badge must both read the task-zone instant as FINISHED: {tz_body!r}"
+        f"the copy and badge must both read persisted retirement as FINISHED: {tz_body!r}"
     )
     assert "vibe task resume task-tz" not in tz_body, f"a finished task must not offer resume: {tz_body!r}"
 
@@ -6426,11 +6552,12 @@ def _callback_session(
         )
 
 
-def _persist_callback_result(
+def _persist_callback_receipt(
     sqlite_store,
     run_id: str,
     *,
     text: str,
+    message_type: str = "result",
     delivery_suppressed: bool = False,
 ) -> None:
     """Materialize the durable message receipt that a callback success requires."""
@@ -6445,7 +6572,7 @@ def _persist_callback_result(
             platform="avibe",
             author="agent",
             source="agent",
-            message_type="result",
+            message_type=message_type,
             text=text,
             metadata={
                 "run_id": run_id,
@@ -6486,7 +6613,11 @@ def _notice_drain_service(tmp_path: Path, sqlite_store, requests) -> tuple[Any, 
     return service, delivered
 
 
-def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -> None:
+@pytest.mark.parametrize("receipt_type", ["result", "output"])
+def test_failed_run_with_callback_delivers_exactly_one_message(
+    tmp_path: Path,
+    receipt_type: str,
+) -> None:
     """Owed by the plan (corrected 2026-07-29): a pending callback IS the delivery.
 
     A failed run carrying ``callback_session_id`` gets a user-visible result turn
@@ -6553,7 +6684,12 @@ def test_failed_run_with_callback_delivers_exactly_one_message(tmp_path: Path) -
             terminal_status="succeeded",
         )
         assert delivered_callback["terminal_transition"]
-        _persist_callback_result(sqlite, callback.id, text="callback delivered")
+        _persist_callback_receipt(
+            sqlite,
+            callback.id,
+            text="callback delivered",
+            message_type=receipt_type,
+        )
         sqlite.update_owed_failure_notice("run-cb", next_attempt_at=None)
         asyncio.run(service._drain_failure_notices())
         notice = sqlite.owed_failure_notice("run-cb")
@@ -6835,7 +6971,7 @@ def test_owed_notice_takes_over_when_callback_receipt_is_in_a_hidden_session(
         terminal_status="succeeded",
     )
     assert recorded["terminal_transition"]
-    _persist_callback_result(sqlite, callback.id, text="hidden callback body")
+    _persist_callback_receipt(sqlite, callback.id, text="hidden callback body")
     assert sqlite.run_callback_state("run-cb-hidden") == "failed"
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
@@ -6876,7 +7012,7 @@ def test_suppressed_callback_history_is_not_visible_delivery_evidence(
         text="local callback history",
         terminal_status="succeeded",
     )
-    _persist_callback_result(
+    _persist_callback_receipt(
         sqlite,
         callback.id,
         text="local callback history",
@@ -7541,7 +7677,7 @@ def test_hfr_440_one_sibling_callback_suppresses_the_whole_turn_fallback(
         text="shared Turn callback delivered",
         terminal_status="succeeded",
     )
-    _persist_callback_result(sqlite, callback.id, text="shared Turn callback delivered")
+    _persist_callback_receipt(sqlite, callback.id, text="shared Turn callback delivered")
 
     service, delivered = _notice_drain_service(tmp_path, sqlite, requests)
     import core.scheduled_tasks as scheduled_tasks
@@ -7741,7 +7877,7 @@ def test_hfr_449_canceled_parent_keeps_armed_callback_evidence(
                 text="callback delivered",
                 terminal_status="succeeded",
             )
-            _persist_callback_result(sqlite, callback.id, text="callback delivered")
+            _persist_callback_receipt(sqlite, callback.id, text="callback delivered")
         assert sqlite.cancel_run(parent.id)
         return parent, callback
 
@@ -8462,12 +8598,13 @@ def _seed_streak_history(
     """
 
     _task(sqlite_store, definition_id)
+    history = []
     for index in range(total):
         # Successes every seventh run, so the streak containing any given failure is
         # at most six rows long while the lifetime is ``total``.
         status = "succeeded" if ever_succeeded and index % 7 == 0 else "failed"
         instant = f"2026-07-01T{index // 3600:02d}:{(index // 60) % 60:02d}:{index % 60:02d}+00:00"
-        sqlite_store.enqueue_run(
+        history.append(
             {
                 "id": f"run-{index:05d}",
                 "request_type": "scheduled",
@@ -8479,6 +8616,7 @@ def _seed_streak_history(
                 "metadata": {"owed_failure_notice": {"state": "pending", "attempts": 0}},
             }
         )
+    _seed_query_history(sqlite_store, history)
 
 
 def test_the_streak_read_is_bounded_and_seeks_rather_than_scans(tmp_path: Path) -> None:
@@ -11448,7 +11586,10 @@ def test_an_interruption_notice_never_prints_the_raw_wire_reason(tmp_path: Path)
     ``tests/test_i18n_backend_keys.py`` so a new reason cannot ship unlabelled.
     """
 
-    from core.run_settlement import RUN_INTERRUPTION_REASONS as REASONS
+    from core.run_settlement import (
+        RUN_INTERRUPTION_REASONS as REASONS,
+        SETTLED_BY_RESTARTED,
+    )
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-zh-reason", name="daily report")
@@ -11462,7 +11603,8 @@ def test_an_interruption_notice_never_prints_the_raw_wire_reason(tmp_path: Path)
         assert reason not in body, (
             f"the raw wire reason {reason!r} leaked into user-visible copy: {body}"
         )
-        assert "被中断" in body, f"the interrupted headline must still render: {body}"
+        expected_copy = "重启停止" if reason == SETTLED_BY_RESTARTED else "被中断"
+        assert expected_copy in body, f"the interruption must still render: {body}"
 
 
 def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
@@ -11503,6 +11645,58 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     assert failure_notices.NOTICE_REASON_UNKNOWN_I18N_KEY not in body, (
         f"nor the dotted key path: {body}"
     )
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_hfr_475_restart_notice_is_one_calm_action_without_internal_details(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """A restart notice names readable work but never exposes an orphaned id."""
+
+    from types import SimpleNamespace
+
+    from core.run_settlement import SETTLED_BY_RESTARTED
+    from core.scheduled_tasks import ScheduledTaskService
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-release", name="Watch release", mode="once")
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language=language, platform="avibe")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    def _body(definition_id: str, run_id: str) -> str:
+        _settled_run(
+            sqlite,
+            definition_id,
+            run_id,
+            status="failed",
+            at="2026-08-11T04:47:17+00:00",
+            metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+        )
+        return service._failure_notice_body(
+            sqlite.get_run(run_id),
+            {
+                "failure_id": run_id,
+                "interrupt_reason": SETTLED_BY_RESTARTED,
+            },
+        )
+
+    named = _body("watch-release", "run-restart-named")
+    assert named == i18n_t(
+        "harness.notice.restartStopped",
+        language,
+        name="Watch release",
+    )
+    assert "\n" not in named
+
+    opaque_definition_id = "b366664bf5db"
+    unnamed = _body(opaque_definition_id, "run-restart-unnamed")
+    assert unnamed == i18n_t("harness.notice.restartStoppedUnnamed", language)
+    assert opaque_definition_id not in unnamed
+    assert "run-restart-unnamed" not in unnamed
+    assert "\n" not in unnamed
 
 
 def _settled_run(
@@ -12203,6 +12397,200 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     )
 
 
+def test_watch_cycle_outcome_pair_is_published_atomically(
+    tmp_path: Path,
+) -> None:
+    """A held reader cannot straddle publication of the next cycle outcome."""
+
+    from core.watches import ManagedWatchStore
+
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="atomic outcome",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert store.mark_cycle_result(watch.id, exit_code=0, error=None)
+    previous_outcome = (0, None)
+    next_outcome = (75, "watch command exited with status 75")
+
+    reader_has_old_exit_code = threading.Event()
+    writer_finished = threading.Event()
+    observed_outcomes: list[tuple[int | None, str | None]] = []
+    reader_errors: list[BaseException] = []
+    writer_errors: list[BaseException] = []
+
+    class _BlockingNamespace(dict):
+        def __getitem__(self, key):
+            value = super().__getitem__(key)
+            if key == "last_exit_code":
+                reader_has_old_exit_code.set()
+                if not writer_finished.wait(timeout=5):
+                    raise AssertionError("writer did not publish while the reader was paused")
+            return value
+
+    # ``watch`` is the mutation result retained by its caller and therefore the cached
+    # object whose namespace publication updates. Pause its outcome reader after the
+    # first old value has been fetched, then let the writer publish the complete next
+    # namespace before the reader fetches the second value.
+    watch.__dict__ = _BlockingNamespace(watch.__dict__)
+
+    def _read_result() -> None:
+        try:
+            observed_outcomes.append(watch.last_cycle_outcome)
+        except BaseException as exc:
+            reader_errors.append(exc)
+
+    def _write_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=next_outcome[0],
+                error=next_outcome[1],
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+        finally:
+            writer_finished.set()
+
+    reader = threading.Thread(target=_read_result)
+    reader.start()
+    assert reader_has_old_exit_code.wait(timeout=5)
+    writer = threading.Thread(target=_write_result)
+    writer.start()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert not writer_errors
+    assert not reader_errors
+    assert observed_outcomes == [previous_outcome]
+
+    visible_after = store.get_watch(watch.id)
+    assert visible_after is not None
+    assert visible_after is watch
+    assert visible_after.last_cycle_outcome == next_outcome
+    persisted_after = ManagedWatchStore(tmp_path / "watches.json").get_watch(watch.id)
+    assert persisted_after is not None
+    assert persisted_after.last_cycle_outcome == next_outcome
+
+
+def test_watch_write_and_mirror_publication_exclude_same_store_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A newer durable edit cannot be replaced by an older pending publication."""
+
+    from core.watches import ManagedWatchStore
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+
+    def _sqlite_watch_store() -> ManagedWatchStore:
+        store = ManagedWatchStore(tmp_path / "unused-watches.json")
+        store._sqlite = SQLiteBackgroundTaskStore(db_path)
+        store.load()
+        return store
+
+    store = _sqlite_watch_store()
+    other = _sqlite_watch_store()
+    watch = store.add_watch(
+        name="atomic publication",
+        session_key="",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    other.load()
+
+    candidate_committed = threading.Event()
+    allow_publication = threading.Event()
+    newer_edit_committed = threading.Event()
+    reload_started = threading.Event()
+    reload_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    reloader_errors: list[BaseException] = []
+    sqlite = store.sqlite_backend
+    assert sqlite is not None
+    original_upsert = sqlite.upsert_watch
+
+    def _pause_after_commit(*args, **kwargs):
+        landed = original_upsert(*args, **kwargs)
+        candidate_committed.set()
+        if not allow_publication.wait(timeout=5):
+            raise AssertionError("test did not release the pending mirror publication")
+        return landed
+
+    monkeypatch.setattr(sqlite, "upsert_watch", _pause_after_commit)
+
+    def _write_cycle_result() -> None:
+        try:
+            assert store.mark_cycle_result(
+                watch.id,
+                exit_code=75,
+                error="watch command exited with status 75",
+            )
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    def _write_newer_edit_and_reload() -> None:
+        try:
+            assert candidate_committed.wait(timeout=5)
+            other.set_enabled(watch.id, False)
+            newer_edit_committed.set()
+            reload_started.set()
+            store.load()
+        except BaseException as exc:
+            reloader_errors.append(exc)
+        finally:
+            reload_finished.set()
+
+    writer = threading.Thread(target=_write_cycle_result)
+    reloader = threading.Thread(target=_write_newer_edit_and_reload)
+    writer.start()
+    reloader.start()
+    assert candidate_committed.wait(timeout=5)
+    assert newer_edit_committed.wait(timeout=5)
+    assert reload_started.wait(timeout=5)
+    assert not reload_finished.wait(timeout=0.1), (
+        "same-store reload must wait for durable write plus mirror publication"
+    )
+    allow_publication.set()
+    writer.join(timeout=5)
+    reloader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reloader.is_alive()
+    assert not writer_errors
+    assert not reloader_errors
+    visible = store.get_watch(watch.id)
+    other_sqlite = other.sqlite_backend
+    assert other_sqlite is not None
+    persisted = other_sqlite.get_watch(watch.id)
+    assert visible is not None
+    assert visible.enabled is False
+    assert persisted is not None
+    assert persisted["enabled"] is False
+
+
 def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     tmp_path: Path,
     monkeypatch,
@@ -12287,17 +12675,65 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
         runtime_store=runtime_store,
     )
 
-    def _ready() -> bool:
-        row = watch_store.get_watch(watch.id)
-        return (
-            len(_watch_hook_runs(requests)) >= 2
-            and row is not None
-            and row.last_exit_code == 75
+    # HFR-464 serializes Watch follow-ups. This scenario is about failure-notice
+    # deduplication, so settle each event Run before allowing the next event and
+    # remove the unrelated five-second production cooldown from the test clock.
+    monkeypatch.setattr("core.watches.WATCH_MIN_REARM_SECONDS", 0)
+    controller, _dispatcher, _touched = _live_turn_dispatcher()
+    executor = _execution_service(tmp_path, controller, sqlite, requests)
+
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
         )
+    )
+    first_hook = _watch_hook_runs(requests)[0]
+    first_claim = requests.claim(first_hook.id)
+    assert first_claim is not None
+    asyncio.run(executor._execute_claimed_request(first_claim))
 
-    asyncio.run(_drive_watch_service(service, watch.id, until=_ready, limit=800))
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=lambda: len(_watch_hook_runs(requests)) == 1,
+        )
+    )
+    second_hook = _watch_hook_runs(requests)[0]
+    second_claim = requests.claim(second_hook.id)
+    assert second_claim is not None
+    asyncio.run(executor._execute_claimed_request(second_claim))
 
-    hooks = sorted(_watch_hook_runs(requests), key=lambda row: (row.created_at, row.id))
+    sentinel = "watch command exited with status 75"
+
+    def _last_completed_cycle_is_retry() -> bool:
+        row = watch_store.get_watch(watch.id)
+        return row is not None and row.last_cycle_outcome == (75, sentinel)
+
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=watch_store,
+        request_store=requests,
+        runtime_store=runtime_store,
+    )
+    asyncio.run(
+        _drive_watch_service(
+            service,
+            watch.id,
+            until=_last_completed_cycle_is_retry,
+            limit=800,
+        )
+    )
+
+    hooks = [first_hook, second_hook]
     assert len(hooks) == 2, f"two events must queue two follow-up deliveries: {hooks}"
 
     saved = watch_store.get_watch(watch.id)
@@ -12308,17 +12744,9 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert saved.retired_at is None and saved.last_finished_at is None, (
         f"nor stamp a retirement on a watch that is still running: {saved}"
     )
-    sentinel = "watch command exited with status 75"
     assert saved.last_error == sentinel and saved.last_exit_code == 75, (
         f"the premise for the last assertion below — the last cycle was a retry: {saved}"
     )
-
-    controller, _dispatcher, _touched = _live_turn_dispatcher()
-    executor = _execution_service(tmp_path, controller, sqlite, requests)
-    for hook in hooks:
-        claimed = requests.claim(hook.id)
-        assert claimed is not None
-        asyncio.run(executor._execute_claimed_request(claimed))
 
     for hook in hooks:
         run = sqlite.get_run(hook.id)

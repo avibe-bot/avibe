@@ -20,10 +20,27 @@ import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import {
+  appShellScrollElement,
+  clearProjectVisibleCount,
+  holdMobileProjectsListForChatReturn,
+  markMobileProjectsListRestored,
+  readAppShellScrollTop,
+  readMobileProjectsListSnapshot,
+  rememberMobileProjectsListCounts,
+  rememberMobileProjectsListOnPageLeave,
+  rememberMobileProjectsListScroll,
+  revealMoreVisibleCount,
+  visibleSessionCountFor,
+  writeAppShellScrollTop,
+  type MobileProjectsVisibleCounts,
+} from '../../lib/mobileProjectsListMemory';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -35,13 +52,17 @@ import { mobileSessionActions } from './chatSessionActions';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { SessionPinIndicator } from './SessionPinIndicator';
+import { SESSION_STATUS_DOT_MOTION_CLASS } from './sessionRowLayout';
+import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
 
+// Same status → colour mapping the desktop sidebar draws, and the same pulse
+// while the agent is running; the two surfaces share the motion class so a
+// running session reads the same way on a phone as on a desktop.
 const DOT: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_7px_rgba(91,255,160,0.9)]',
+  running: `bg-mint shadow-glow-dot-mint ${SESSION_STATUS_DOT_MOTION_CLASS}`,
   failed: 'bg-destructive',
   idle: 'bg-muted',
 };
-const MOBILE_SESSION_PAGE_SIZE = 8;
 
 // One row in a ⋯ popover menu, on the design-system Button idiom (plain button to
 // match the desktop sidebar menus). `danger` tints destructive actions (archive).
@@ -58,7 +79,7 @@ const MenuItem: React.FC<{ icon: LucideIcon; onClick: () => void; danger?: boole
     onClick={onClick}
     className={clsx(
       'h-auto w-full justify-start gap-2 rounded px-2 py-2 text-left text-[13px] font-normal',
-      danger ? 'text-pink hover:bg-pink/[0.08] hover:text-pink' : 'text-foreground hover:bg-foreground/[0.04]',
+      danger ? 'text-pink-ink hover:bg-pink/[0.08] hover:text-pink-ink' : 'text-foreground hover:bg-foreground/[0.04]',
     )}
   >
     <Icon className={clsx('size-3.5 shrink-0', danger ? '' : 'text-muted')} />
@@ -76,10 +97,16 @@ const MobileProjectRow: React.FC<{
   open: boolean;
   state: ProjectSessionsState;
   onToggle: () => void;
-}> = ({ project, open, state, onToggle }) => {
+  onLeaveToChat: () => void;
+  dragHandle?: ProjectDragHandle;
+}> = ({ project, open, state, onToggle, onLeaveToChat, dragHandle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
+  const { capabilities } = useInstanceAuthorization();
+  const canManageProjects = capabilities.can_manage_projects;
+  const canArchive = canManageProjects;
+  const canEditAgentsMd = canManageProjects;
+  const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsActions();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
   const creatingSessionRef = useRef(false);
@@ -91,6 +118,7 @@ const MobileProjectRow: React.FC<{
   // Enter (or blur) commits, then the input unmounts and its blur fires again;
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
+  const canChat = capabilities.can_chat && project.capabilities.can_chat;
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -141,11 +169,12 @@ const MobileProjectRow: React.FC<{
     <>
       <div className="flex items-center pr-1.5">
         <button
+          {...dragHandle}
           type="button"
           onClick={onToggle}
-          className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
+          className="project-drag-header flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3.5 text-left"
         >
-          {open ? <FolderOpen className="size-4 shrink-0 text-cyan" /> : <Folder className="size-4 shrink-0 text-muted" />}
+          {open ? <FolderOpen className="project-drag-icon size-4 shrink-0 text-cyan-ink" /> : <Folder className="project-drag-icon size-4 shrink-0 text-muted" />}
           <span className="min-w-0 flex-1 truncate text-sm font-semibold">{project.display_name}</span>
           {state.sessions !== null && !state.error && (
             <Badge variant="secondary" className="font-mono text-[10px]">
@@ -153,9 +182,9 @@ const MobileProjectRow: React.FC<{
               {state.cursor ? '+' : ''}
             </Badge>
           )}
-          {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
+          {open ? <ChevronDown className="project-drag-icon size-4 shrink-0 text-muted" /> : <ChevronRight className="project-drag-icon size-4 shrink-0 text-muted" />}
         </button>
-        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        {(canChat || canManageProjects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -171,7 +200,7 @@ const MobileProjectRow: React.FC<{
             {/* New session — first item, mobile only. Desktop surfaces this as
                 the per-project "+" button in the sidebar, so it stays out of the
                 desktop project menu; here the "+" doesn't fit, so it lives here. */}
-            <MenuItem
+            {canChat && <MenuItem
               icon={Plus}
               onClick={async () => {
                 setMenuOpen(false);
@@ -179,14 +208,18 @@ const MobileProjectRow: React.FC<{
                 creatingSessionRef.current = true;
                 try {
                   const session = await createSessionForProject(project.id);
-                  if (session) navigate(`/chat/${encodeURIComponent(session.id)}`);
+                  if (session) {
+                    onLeaveToChat();
+                    navigate(`/chat/${encodeURIComponent(session.id)}`);
+                  }
                 } finally {
                   creatingSessionRef.current = false;
                 }
               }}
             >
               {t('newSession.title')}
-            </MenuItem>
+            </MenuItem>}
+            {canManageProjects && <>
             <MenuItem
               icon={Pencil}
               onClick={() => {
@@ -207,7 +240,7 @@ const MobileProjectRow: React.FC<{
             >
               {t('workbench.projectSettings')}
             </MenuItem>
-            {project.folder_path && (
+            {project.folder_path && canEditAgentsMd && (
               <MenuItem
                 icon={FileText}
                 onClick={() => {
@@ -218,7 +251,7 @@ const MobileProjectRow: React.FC<{
                 {t('workbench.projectEditAgents')}
               </MenuItem>
             )}
-            <MenuItem
+            {canArchive && <MenuItem
               icon={Archive}
               danger
               onClick={async () => {
@@ -229,12 +262,17 @@ const MobileProjectRow: React.FC<{
               }}
             >
               {t('workbench.projectArchive')}
-            </MenuItem>
+            </MenuItem>}
+            </>}
           </PopoverContent>
-        </Popover>
+        </Popover>}
       </div>
-      <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+      {canManageProjects && (
+        <>
+          <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+        </>
+      )}
     </>
   );
 };
@@ -246,10 +284,13 @@ const MobileSessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
+  canChat: boolean;
+  canManageMetadata: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, onOpen }) => {
+  onLeaveToChat: () => void;
+}> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen, onLeaveToChat }) => {
   const { t } = useTranslation();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -259,13 +300,18 @@ const MobileSessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
       handledRef.current = false;
       setRenaming(true);
     },
-    onOpenSession: (sessionId) => navigate(`/chat/${encodeURIComponent(sessionId)}`),
+    onOpenSession: (sessionId) => {
+      onLeaveToChat();
+      navigate(`/chat/${encodeURIComponent(sessionId)}`);
+    },
   });
 
   useEffect(() => {
@@ -323,7 +369,7 @@ const MobileSessionRow: React.FC<{
         </span>
         <SessionPinIndicator pinned={session.pinned} label={t('workbench.sessionPinned')} />
         {unread > 0 ? (
-          <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-background">
+          <span className="shrink-0 rounded-full bg-mint px-1.5 py-0.5 font-mono text-[10px] font-bold text-primary-foreground">
             {unread > 99 ? '99+' : unread}
           </span>
         ) : (
@@ -332,7 +378,7 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      {canManageMetadata && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <SessionActionsTrigger
             label={t('workbench.sessionActions')}
@@ -347,7 +393,7 @@ const MobileSessionRow: React.FC<{
           align="end"
           onClose={() => setMenuOpen(false)}
         />
-      </Popover>
+      </Popover>}
       {archiveDialog}
     </div>
   );
@@ -361,7 +407,12 @@ const MobileSessionRow: React.FC<{
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { unreadBySession } = useWorkbenchInbox();
+  const {
+    capabilities,
+  } = useInstanceAuthorization();
+  const canCreateProject = canCreateLocalProject(capabilities);
+  // Per-session dots only; the feed list itself lives in the sidebar / Inbox.
+  const { unreadBySession } = useWorkbenchInbox({ feed: false });
   const {
     projects,
     projectsError,
@@ -371,18 +422,60 @@ export const ProjectsPage: React.FC = () => {
     toggleExpanded,
     loadMore,
     reloadSessions,
-    upsertProjectToTop,
+    reorderProjects,
+    isReorderingProjects,
   } = useWorkbenchProjectsTree();
   const [showNewProject, setShowNewProject] = useState(false);
-  const [visibleSessionCounts, setVisibleSessionCounts] = useState<Record<string, number>>({});
+  const [visibleSessionCounts, setVisibleSessionCounts] = useState<MobileProjectsVisibleCounts>(
+    () => readMobileProjectsListSnapshot().visibleCounts,
+  );
+  useEffect(() => {
+    const top = readMobileProjectsListSnapshot().scrollTop;
+    const restore = () => writeAppShellScrollTop(appShellScrollElement(), top);
+    restore();
+    const frame = requestAnimationFrame(restore);
+    markMobileProjectsListRestored();
+    const scrollEl = appShellScrollElement();
+    const onScroll = () => rememberMobileProjectsListScroll(readAppShellScrollTop(scrollEl));
+    scrollEl?.addEventListener?.('scroll', onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      scrollEl?.removeEventListener?.('scroll', onScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    rememberMobileProjectsListCounts(visibleSessionCounts);
+    return () => {
+      rememberMobileProjectsListOnPageLeave({
+        visibleCounts: visibleSessionCounts,
+        scrollTop: readMobileProjectsListSnapshot().scrollTop,
+      });
+    };
+  }, [visibleSessionCounts]);
+
+  const captureListForChatReturn = () => {
+    holdMobileProjectsListForChatReturn({
+      visibleCounts: visibleSessionCounts,
+      scrollTop: readAppShellScrollTop(appShellScrollElement()),
+    });
+  };
 
   const openSession = (sessionId: string) => {
-    navigate(`/chat/${sessionId}`);
+    captureListForChatReturn();
+    navigate(`/chat/${encodeURIComponent(sessionId)}`);
+  };
+  const toggleProject = (projectId: string) => {
+    const willCollapse = isExpanded(projectId);
+    if (willCollapse) {
+      setVisibleSessionCounts((prev) => clearProjectVisibleCount(prev, projectId));
+    }
+    toggleExpanded(projectId);
   };
   const revealMoreSessions = (projectId: string, state: ProjectSessionsState, visibleCount: number, loadedCount: number) => {
     setVisibleSessionCounts((prev) => ({
       ...prev,
-      [projectId]: visibleCount + MOBILE_SESSION_PAGE_SIZE,
+      [projectId]: revealMoreVisibleCount(visibleCount),
     }));
     if (loadedCount <= visibleCount && state.cursor) {
       loadMore(projectId);
@@ -395,16 +488,16 @@ export const ProjectsPage: React.FC = () => {
     <div className="mx-auto flex max-w-xl flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">{t('projects.title')}</h1>
-        <Button
+        {canCreateProject && <Button
           type="button"
           variant="outline"
           size="icon"
           onClick={() => setShowNewProject(true)}
           aria-label={t('projects.newProject')}
-          className="border-mint/35 bg-mint/[0.08] text-mint hover:bg-mint/[0.14]"
+          className="border-mint/35 bg-mint/[0.08] text-mint-ink hover:bg-mint/[0.14]"
         >
           <FolderPlus className="size-4" />
-        </Button>
+        </Button>}
       </div>
 
       {/* The provider often has projects cached already (it's mounted app-wide),
@@ -431,17 +524,28 @@ export const ProjectsPage: React.FC = () => {
         </div>
       )}
 
-      {list.map((project) => {
+      <SortableProjectList projects={list} mobile
+        disabled={!capabilities.can_manage_projects || isReorderingProjects}
+        onReorder={reorderProjects}
+      >
+      {(project, dragHandle) => {
         const open = isExpanded(project.id);
         const state = sessionsOf(project.id);
         const allSessionRows = state.sessions ?? [];
-        const visibleSessionCount = visibleSessionCounts[project.id] ?? MOBILE_SESSION_PAGE_SIZE;
+        const visibleSessionCount = visibleSessionCountFor(visibleSessionCounts, project.id);
         const sessionRows = allSessionRows.slice(0, visibleSessionCount);
         const hasHiddenCachedSessions = allSessionRows.length > visibleSessionCount;
         const hasMoreSessions = hasHiddenCachedSessions || !!state.cursor;
         return (
           <div key={project.id} className="overflow-hidden rounded-xl border border-border bg-surface">
-            <MobileProjectRow project={project} open={open} state={state} onToggle={() => toggleExpanded(project.id)} />
+            <MobileProjectRow
+              dragHandle={dragHandle}
+              project={project}
+              open={open}
+              state={state}
+              onToggle={() => toggleProject(project.id)}
+              onLeaveToChat={captureListForChatReturn}
+            />
 
             {open && (
               <div className="flex flex-col gap-0.5 border-t border-border px-2 py-2">
@@ -470,7 +574,10 @@ export const ProjectsPage: React.FC = () => {
                     projectId={project.id}
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
+                    canChat={capabilities.can_chat && project.capabilities.can_chat}
+                    canManageMetadata={capabilities.can_manage_projects || project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
+                    onLeaveToChat={captureListForChatReturn}
                   />
                 ))}
                 {hasMoreSessions && (
@@ -478,7 +585,7 @@ export const ProjectsPage: React.FC = () => {
                     type="button"
                     onClick={() => revealMoreSessions(project.id, state, visibleSessionCount, allSessionRows.length)}
                     disabled={state.loadingMore}
-                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan transition hover:bg-cyan/[0.06] disabled:opacity-50"
+                    className="flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-[12px] font-medium text-cyan-ink transition hover:bg-cyan/[0.06] disabled:opacity-50"
                   >
                     {state.loadingMore ? <Loader2 className="size-3.5 animate-spin" /> : <ChevronDown className="size-3.5" />}
                     {t('projects.loadMore')}
@@ -488,15 +595,13 @@ export const ProjectsPage: React.FC = () => {
             )}
           </div>
         );
-      })}
+      }}
+      </SortableProjectList>
 
-      {showNewProject && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

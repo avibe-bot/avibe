@@ -37,7 +37,7 @@ export const selectApiErrorFields = (
  *  Every route that can answer ``409 session_archived`` puts the session id in the
  *  first segment after its collection: ``/api/sessions/<id>`` (PATCH), plus
  *  ``/messages`` and ``/fork`` under it, and ``/api/show-pages/<session_id>/…``
- *  (ensure / visibility / share-id / rotate-share / icon). One pattern therefore
+ *  (ensure / availability / access-settings / icon). One pattern therefore
  *  covers all of them, and a future session-scoped route inherits it.
  *
  *  Deliberately UNANCHORED: some callers pass a human LABEL rather than a bare

@@ -215,6 +215,34 @@ def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | Non
     return bool(result.rowcount)
 
 
+def disable_device_subscription(
+    conn: Connection,
+    *,
+    user_key: str,
+    device_id: str | None = None,
+    endpoint: str | None = None,
+) -> bool:
+    """Disable only the logging-out browser's selected Push subscription."""
+
+    device_id = device_id.strip() if isinstance(device_id, str) else ""
+    endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
+    if not device_id and not endpoint:
+        return False
+    stmt = (
+        web_push_subscriptions.update()
+        .where(web_push_subscriptions.c.user_key == user_key)
+        .where(web_push_subscriptions.c.enabled == 1)
+    )
+    if endpoint:
+        stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
+    else:
+        stmt = stmt.where(web_push_subscriptions.c.device_id == device_id)
+    result = conn.execute(
+        stmt.values(enabled=0, updated_at=_utc_now_iso())
+    )
+    return bool(result.rowcount)
+
+
 def count_enabled(conn: Connection, *, user_key: str | None = None) -> int:
     stmt = select(func.count()).select_from(web_push_subscriptions).where(web_push_subscriptions.c.enabled == 1)
     if user_key is not None:

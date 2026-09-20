@@ -1,0 +1,23 @@
+{
+  "source": "Review 4912951868: adjacent cases of the established stream and settlement authority rules",
+  "partial_terminals": [
+    { "protocol": "anthropic", "payload": { "type": "message_stop" } },
+    { "protocol": "openai_responses", "payload": { "type": "response.completed" } },
+    { "protocol": "openai_chat", "payload": "[DONE]" }
+  ],
+  "stream_errors": [
+    { "code": "rate_limit_error", "reason": "rate_limited", "cooldown_seconds": 60 },
+    { "code": "rate_limit_exceeded", "reason": "rate_limited", "cooldown_seconds": 60 },
+    { "code": "overloaded_error", "reason": "server_error", "cooldown_seconds": 30 },
+    { "code": "server_error", "reason": "server_error", "cooldown_seconds": 30 }
+  ],
+  "concurrent_cooldown": {
+    "first_seconds": 300,
+    "late_seconds": 30,
+    "expected_seconds": 300
+  },
+  "stopped_after_terminal": {
+    "terminal_reason": "protocol_error",
+    "expected_outcome": "failed_terminal"
+  }
+}

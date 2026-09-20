@@ -29,6 +29,9 @@ from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 NATIVE_PART_ID = "prt_1234567890abcdef1234567890abcdef"
 
+from tests.test_memory_delegated_reads import memory_owner_turn  # noqa: F401 -- durable owner fixture
+from tests.test_session_delivery_fsm import managers, _fsm_schema_template  # noqa: F401 -- fixture dependencies
+
 
 def _make_poll(*, platform: str, base_session_id: str, opencode_session_id: str) -> ActivePollInfo:
     return ActivePollInfo(
@@ -50,6 +53,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     removed: list[str] = []
     request_sessions: list[tuple[str, str, str, str]] = []
     prompt_calls: list[dict] = []
+    inactive_runs: list[str] = []
 
     class _Server:
         def __init__(self):
@@ -58,6 +62,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             self.status = {"type": "busy"}
             self.status_error = None
             self.mark_run_active_error = None
+            self.mark_run_inactive_error = None
 
         async def list_messages(self, session_id, directory):
             # One in-progress assistant message → the session is "still active",
@@ -72,6 +77,9 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return None
 
         async def mark_run_inactive(self, session_id):
+            if self.mark_run_inactive_error is not None:
+                raise self.mark_run_inactive_error
+            inactive_runs.append(session_id)
             return None
 
         async def get_session_status(self, session_id, directory):
@@ -84,7 +92,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _PollLoop:
         async def run_restored_poll_loop(self, poll_info):
-            return None
+            return True
 
         async def remove_restored_ack(self, poll_info):
             return None
@@ -109,13 +117,16 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
             return dict(active_polls)
 
         def remove_active_poll(self, session_id):
+            active_polls.pop(session_id, None)
             removed.append(session_id)
 
     class _Controller:
         def __init__(self):
+            from core.processing_indicator import ProcessingIndicatorService
             from core.session_turns import SessionTurnManager
 
             self.config = SimpleNamespace(language=language)
+            self.processing_indicator = ProcessingIndicatorService(self)
             # The restore path re-marks running via the turn owner, which delegates
             # to set_agent_status — wire a real manager so the full path is exercised.
             self.session_turns = SessionTurnManager(self)
@@ -129,6 +140,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._poll_loop = _PollLoop()
     agent._session_manager = _SessionManager()
     agent._active_requests = {}
+    agent._user_stopped_sessions = set()
     agent._steering_states = {}
     agent._restored_poll_servers = {}
 
@@ -142,8 +154,215 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._get_server = _get_server
     agent.controller.agent_service = SimpleNamespace(agents={"opencode": agent}, _turn_gates={})
     agent._test_prompt_calls = prompt_calls
+    agent._test_inactive_runs = inactive_runs
     agent._test_server = server
     return agent, status_writes, removed, request_sessions
+
+
+def _enable_memory_restoration(agent, managers):
+    from tests.test_memory_delegated_reads import _memory_controller
+    from tests.test_session_delivery_fsm import _context
+
+    controller = _memory_controller()
+    controller.processing_indicator = agent.controller.processing_indicator
+    controller.session_turns = agent.controller.session_turns
+    controller.session_turns.controller = controller
+    controller.session_turns._engine = managers[2]
+    controller.session_turns._build_context = _context
+    controller.set_agent_status = agent.controller.set_agent_status
+    controller.agent_service = agent.controller.agent_service
+    agent.controller = controller
+
+
+@pytest.mark.parametrize("later_owner", [False, True])
+def test_restore_rebinds_persisted_remote_caller_context(monkeypatch, memory_owner_turn, managers, later_owner) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    turn_id = memory_owner_turn(terminal=later_owner)
+    if later_owner:
+        memory_owner_turn(owner="remote:user-2", terminal=False)
+    poll.processing_indicator = {
+        "opencode_native_steering": {"target_session_id": "ses_wb", "logical_turn_id": turn_id},
+        "platform": "avibe",
+        "user_id": "remote:user-1",
+        "opencode_caller_context_env": {
+            "AVIBE_SESSION_ID": "ses_wb",
+            "AVIBE_CALLER_PLATFORM": "avibe",
+            "AVIBE_CALLER_USER_ID": "remote:user-1",
+            "AVIBE_CALLER_REMOTE": "1",
+            "AVIBE_CALLER_RESOURCE_CONTEXT": '{"sub":"user-1"}',
+            "IGNORED_ENV": "must-not-pass",
+            "AVIBE_CALLER_SESSION_PROOF": "stale-process-proof",
+        },
+        "opencode_managed_skill_project_base": "/tmp",
+        "opencode_managed_skill_builtin_snapshot": {
+            "id": "d" * 64,
+            "root": "/old-avibe-home/builtin-skills/" + "d" * 64,
+        },
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    _enable_memory_restoration(agent, managers)
+    binding_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+    agent._test_server.caller_context_binding_path = lambda: binding_path
+    bound: list[dict] = []
+    unbound: list[tuple[str, str, str]] = []
+
+    def bind(session_id, payload, **kwargs):
+        bound.append({"session_id": session_id, "payload": payload, **kwargs})
+        return True
+
+    def unbind(session_id, *, binding_token, path):
+        unbound.append((session_id, binding_token, path))
+        return True
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr("modules.agents.opencode.agent.unbind_caller_context_session", unbind)
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(bound) == 1
+    assert bound[0]["session_id"] == "oc-1"
+    assert bound[0]["payload"] is None
+    assert bound[0]["path"] == binding_path
+    assert bound[0]["extra_env"]["AVIBE_CALLER_RESOURCE_CONTEXT"] == '{"sub":"user-1"}'
+    assert bound[0]["extra_env"]["AVIBE_SKILL_PROJECT_BASE"] == str(Path("/tmp").resolve())
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID"] == "d" * 64
+    assert bound[0]["extra_env"]["AVIBE_BUILTIN_SKILLS_ROOT"] == (
+        "/old-avibe-home/builtin-skills/" + "d" * 64
+    )
+    assert "IGNORED_ENV" not in bound[0]["extra_env"]
+    from core.caller_context import verify_caller_session_proof
+
+    if later_owner:
+        assert "AVIBE_CALLER_SESSION_PROOF" not in bound[0]["extra_env"]
+        return
+    assert verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-1"})
+    assert not verify_caller_session_proof("ses_wb", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-2"})
+    assert unbound == [("oc-1", bound[0]["binding_token"], binding_path)]
+
+
+def test_restore_binding_failure_does_not_strand_durable_poll(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, removed, _ = _build_agent({"oc-1": poll})
+    attempts = 0
+
+    def fail_bind(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("temporary binding failure")
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        fail_bind,
+    )
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 3
+    assert removed == ["oc-1"]
+
+
+def test_restore_retries_binding_for_the_active_poll_lifetime(monkeypatch, memory_owner_turn, managers) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    turn_id = memory_owner_turn(terminal=False)
+    poll.processing_indicator = {
+        "opencode_native_steering": {"target_session_id": "ses_wb", "logical_turn_id": turn_id},
+        "opencode_caller_context_env": {"AVIBE_SESSION_ID": "ses_wb"},
+    }
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    _enable_memory_restoration(agent, managers)
+    attempts = 0
+    unbound: list[str] = []
+
+    def bind(*_args, **_kwargs):
+        nonlocal attempts
+        from core.caller_context import verify_caller_session_proof
+
+        assert verify_caller_session_proof("ses_wb", _kwargs["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "remote:user-1"})
+        assert "AVIBE_CALLER_SESSION_PROOF" not in poll.processing_indicator["opencode_caller_context_env"]
+
+        attempts += 1
+        if attempts < 4:
+            raise OSError("temporary binding failure")
+        return True
+
+    class _WaitForBindingPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if attempts >= 4:
+                    return True
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, **_kwargs: unbound.append(session_id) or True,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForBindingPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert attempts == 4
+    assert unbound == ["oc-1"]
+
+
+def test_restore_delayed_binding_does_not_replace_a_newer_turn(monkeypatch) -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    agent, _, _, _ = _build_agent({"oc-1": poll})
+    attempts: list[dict] = []
+
+    def bind(*_args, **kwargs):
+        attempts.append(kwargs)
+        if len(attempts) <= 3:
+            raise OSError("temporary binding failure")
+        return False
+
+    class _WaitForConditionalAttemptPollLoop:
+        async def run_restored_poll_loop(self, _poll_info):
+            for _ in range(100):
+                if len(attempts) >= 4:
+                    return True
+                await asyncio.sleep(0)
+            raise AssertionError("restored binding was not retried")
+
+        async def remove_restored_ack(self, _poll_info):
+            return None
+
+    monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", bind)
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS",
+        0,
+    )
+    agent._poll_loop = _WaitForConditionalAttemptPollLoop()
+
+    async def run() -> int:
+        restored = await agent.restore_active_polls()
+        await asyncio.gather(*agent._active_requests.values())
+        return restored
+
+    assert asyncio.run(run()) == 1
+    assert len(attempts) == 4
+    assert "replace_existing" not in attempts[2]
+    assert attempts[3]["replace_existing"] is False
 
 
 def test_restore_registration_failure_terminalizes_exact_owner_before_release() -> None:
@@ -235,10 +454,17 @@ def test_restore_im_registration_failure_retries_before_releasing_poll() -> None
 
 def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
-    poll.model_dict = {"providerID": "openai", "modelID": "gpt-5"}
+    poll.model_dict = {
+        "providerID": "avibe-model-hub-runtime",
+        "modelID": "openai/gpt-5",
+    }
     poll.reasoning_effort = "high"
     poll.processing_indicator = {
         "platform": "avibe",
+        "model_hub_display_model": {
+            "providerID": "openai",
+            "modelID": "gpt-5",
+        },
         "opencode_native_steering": {
             "target_session_id": "ses_wb",
             "logical_turn_id": "logical-restored",
@@ -272,6 +498,12 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             expected_logical_turn_id="logical-restored",
         )
         assert identity is not None
+        reconciliation_message = agent._steering_states[
+            "ses_wb"
+        ].idle_reconciliation_message
+        assert "openai" in reconciliation_message
+        assert "gpt-5" in reconciliation_message
+        assert "avibe-model-hub-runtime" not in reconciliation_message
         recovery_complete.set()
         await poll_started.wait()
         receipt = await steer_active_turn(
@@ -298,10 +530,13 @@ def test_restored_poll_exposes_the_persisted_guarded_steering_owner() -> None:
             "directory": "/tmp/work",
             "text": "补充：`keep exact`",
             "agent": "build",
-            "model": {"providerID": "openai", "modelID": "gpt-5"},
+            "model": {
+                "providerID": "avibe-model-hub-runtime",
+                "modelID": "openai/gpt-5",
+            },
             "reasoning_effort": "high",
             "system": "restored system prompt",
-            "tools": {"question": False},
+            "tools": {"question": False, "skill": False},
         }
     ]
 
@@ -461,6 +696,7 @@ def test_restore_reconciles_definitive_missing_start_attempt() -> None:
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert reconciled == [("logical-missing", ATTEMPT_ID, "opencode")]
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
 
 
 def test_restore_keeps_accepted_steer_with_post_assistant_user_evidence() -> None:
@@ -518,6 +754,58 @@ def test_restore_does_not_treat_initial_user_prompt_as_steer_evidence() -> None:
 
     assert asyncio.run(agent.restore_active_polls()) == 0
     assert removed == ["oc-1"]
+    assert agent._test_inactive_runs == ["oc-1"]
+
+
+def test_restore_continues_after_inactive_marker_cannot_be_persisted() -> None:
+    stale_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_stale",
+        opencode_session_id="oc-stale",
+    )
+    active_poll = _make_poll(
+        platform="avibe",
+        base_session_id="ses_active",
+        opencode_session_id="oc-active",
+    )
+    active_polls = {"oc-stale": stale_poll, "oc-active": active_poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+
+    async def _list_messages(session_id, directory):
+        del directory
+        if session_id == "oc-stale":
+            return []
+        return [{"info": {"role": "assistant", "time": {}}}]
+
+    async def _get_session_status(session_id, directory):
+        del directory
+        return {"type": "idle" if session_id == "oc-stale" else "busy"}
+
+    async def _mark_run_inactive(session_id):
+        if session_id == "oc-stale":
+            raise OSError("read-only pid file")
+
+    agent._test_server.list_messages = _list_messages
+    agent._test_server.get_session_status = _get_session_status
+    agent._test_server.mark_run_inactive = _mark_run_inactive
+
+    assert asyncio.run(agent.restore_active_polls()) == 1
+
+    assert removed == ["oc-active"]
+    assert active_polls == {"oc-stale": stale_poll}
+
+
+def test_terminal_poll_is_preserved_when_inactive_marker_cannot_be_persisted() -> None:
+    poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
+    active_polls = {"oc-1": poll}
+    agent, _, removed, _ = _build_agent(active_polls)
+    agent._test_server.mark_run_inactive_error = OSError("read-only pid file")
+
+    retired = asyncio.run(agent._retire_active_poll(agent._test_server, "oc-1"))
+
+    assert retired is False
+    assert removed == []
+    assert active_polls == {"oc-1": poll}
 
 
 def test_restore_excludes_baseline_assistant_from_steer_evidence() -> None:
@@ -620,12 +908,14 @@ def test_busy_restore_reconciles_inserted_user_that_later_becomes_idle() -> None
     class _ReconcilePollLoop:
         async def run_restored_poll_loop(self, poll_info):
             server = await agent._get_server()
-            reconciled_messages.extend(
-                await server.list_messages(
+            while True:
+                batch = await server.list_messages(
                     poll_info.opencode_session_id,
                     poll_info.working_path,
                 )
-            )
+                reconciled_messages.extend(batch)
+                if batch and batch[-1].get("info", {}).get("error"):
+                    return
 
         async def remove_restored_ack(self, poll_info):
             return None

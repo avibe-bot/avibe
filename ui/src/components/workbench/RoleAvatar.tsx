@@ -8,9 +8,9 @@ import clsx from 'clsx';
 // Lives in its own module rather than inside ChatPage so a row component can
 // reuse it without importing the whole page back.
 const TONE_AVATAR: Record<'mint' | 'cyan' | 'gold' | 'muted', string> = {
-  mint: 'border-mint/30 bg-mint/[0.13] text-mint',
-  cyan: 'border-cyan/30 bg-cyan/[0.13] text-cyan',
-  gold: 'border-gold/30 bg-gold/[0.13] text-gold',
+  mint: 'border-mint/30 bg-mint/[0.13] text-mint-ink',
+  cyan: 'border-cyan/30 bg-cyan/[0.13] text-cyan-ink',
+  gold: 'border-gold/30 bg-gold/[0.13] text-gold-ink',
   muted: 'border-border-strong bg-foreground/[0.06] text-muted',
 };
 

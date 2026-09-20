@@ -91,6 +91,7 @@ def _evt(
     text,
     event_type="tool_call",
     metadata=None,
+    turn_id=None,
 ):
     conn.execute(
         agent_events.insert().values(
@@ -104,6 +105,7 @@ def _evt(
             content_json=json.dumps({"kind": "tool_call", "text": text}),
             metadata_json=json.dumps(metadata or {}),
             source="agent",
+            turn_id=turn_id,
             created_at=created_at,
             updated_at=created_at,
         )
@@ -389,6 +391,45 @@ def test_migrated_terminal_uses_original_message_clock_for_same_second_order(
         ]
     assert groups[0]["status"] == "done"
     assert groups[0]["anchor_message_id"] == _clock_id("msg", base + 1_000)
+
+
+def test_detail_exposes_the_same_order_contract_consumed_by_ui(isolated_state):
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "ui/src/lib/agentActivity.order.fixture.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    wire_keys = ("id", "kind", "text", "created_at", "order_micros")
+    expected_rows = [{key: row[key] for key in wire_keys} for row in fixture["rows"]]
+    engine = create_sqlite_engine()
+    sid = "ses_activity_order_contract"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn, scope, sid, mid="fixture-prompt", mtype="user", author="user",
+            created_at="2026-09-04T23:59:59Z", source="user", text="start",
+        )
+        for row in fixture["rows"]:
+            if row["kind"] == "assistant":
+                _msg(
+                    conn, scope, sid, mid=row["id"], mtype="assistant", author="agent",
+                    created_at=row["created_at"], text=row["text"],
+                )
+            else:
+                assert row["kind"] == "tool_call"
+                metadata = {"legacy_message_id": row["legacy_message_id"]} if "legacy_message_id" in row else {}
+                _evt(
+                    conn, scope, sid, eid=row["id"], created_at=row["created_at"],
+                    text=row["text"], metadata=metadata,
+                )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        assert len(groups) == 1
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=groups[0]["id"])
+    assert detail is not None
+    assert detail["open"] is True
+    assert detail["rows"] == expected_rows
 
 
 def test_duration_measured_from_turn_opener(isolated_state):
@@ -711,6 +752,309 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
     assert groups[1]["anchor_message_id"] == "m_output"
     assert groups[1]["anchor_position"] == "after"
     assert groups[1]["open"] is False
+
+
+@pytest.mark.parametrize(
+    ("message_type", "metadata", "expected_status"),
+    [
+        ("result", {"detached": True}, "done"),
+        ("error", {"detached": True}, "failed"),
+        (
+            "notify",
+            {"detached": True, "event": "backend_failure"},
+            "failed",
+        ),
+    ],
+)
+def test_detached_completion_closes_only_activity_with_matching_turn_provenance(
+    isolated_state,
+    message_type,
+    metadata,
+    expected_status,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_detached_{message_type}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="primary",
+            source="user",
+            metadata={"turn_id": "turn-background"},
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_before",
+            created_at="2026-06-01T10:00:01Z",
+            text="background work",
+            turn_id="turn-background",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype=message_type,
+            author="agent",
+            created_at="2026-06-01T10:00:02Z",
+            text="background completed",
+            metadata={**metadata, "turn_id": "turn-background"},
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == [expected_status]
+    assert groups[0]["anchor_message_id"] == "m_detached"
+    assert groups[0]["anchor_position"] == "before"
+
+
+@pytest.mark.parametrize(
+    ("message_type", "metadata", "expected_status"),
+    [
+        ("result", {"detached": True}, "done"),
+        ("error", {"detached": True}, "failed"),
+        (
+            "notify",
+            {"detached": True, "event": "backend_failure"},
+            "failed",
+        ),
+    ],
+)
+def test_provenance_free_detached_completion_closes_unambiguous_activity(
+    isolated_state,
+    message_type,
+    metadata,
+    expected_status,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_detached_unowned_{message_type}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="legacy activity",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_before",
+            created_at="2026-06-01T10:00:01Z",
+            text="recovered background work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype=message_type,
+            author="agent",
+            created_at="2026-06-01T10:00:02Z",
+            text="background completed",
+            metadata=metadata,
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == [expected_status]
+    assert groups[0]["anchor_message_id"] == "m_detached"
+    assert groups[0]["anchor_position"] == "before"
+    assert groups[0]["open"] is False
+
+
+def test_provenance_free_detached_completion_does_not_guess_after_interleaving(
+    isolated_state,
+):
+    engine = create_sqlite_engine()
+    sid = "ses_detached_unowned_interleaved"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="background origin",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_background",
+            created_at="2026-06-01T10:00:01Z",
+            text="background work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u2",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:02Z",
+            text="new turn",
+            source="user",
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_current",
+            created_at="2026-06-01T10:00:03Z",
+            text="current work",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype="error",
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="background failed",
+            metadata={"detached": True},
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_current_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:05Z",
+            text="current completed",
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == ["interrupted", "done"]
+    assert groups[0]["anchor_message_id"] == "m_u1"
+    assert groups[1]["anchor_message_id"] == "m_current_result"
+
+
+@pytest.mark.parametrize(
+    ("message_type", "metadata", "expected_status"),
+    [
+        ("result", {"detached": True}, "done"),
+        ("error", {"detached": True}, "failed"),
+        (
+            "notify",
+            {"detached": True, "event": "backend_failure"},
+            "failed",
+        ),
+    ],
+)
+def test_detached_completion_repairs_its_origin_without_consuming_newer_activity(
+    isolated_state,
+    message_type,
+    metadata,
+    expected_status,
+):
+    engine = create_sqlite_engine()
+    sid = f"ses_detached_interleaved_{message_type}"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u1",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:00Z",
+            text="background origin",
+            source="user",
+            metadata={"turn_id": "turn-background"},
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_background",
+            created_at="2026-06-01T10:00:01Z",
+            text="background work",
+            turn_id="turn-background",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_u2",
+            mtype="user",
+            author="user",
+            created_at="2026-06-01T10:00:02Z",
+            text="new turn",
+            source="user",
+            metadata={"turn_id": "turn-current"},
+        )
+        _evt(
+            conn,
+            scope,
+            sid,
+            eid="e_current",
+            created_at="2026-06-01T10:00:03Z",
+            text="current work",
+            turn_id="turn-current",
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_detached",
+            mtype=message_type,
+            author="agent",
+            created_at="2026-06-01T10:00:04Z",
+            text="background completed",
+            metadata={**metadata, "turn_id": "turn-background"},
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_current_result",
+            mtype="result",
+            author="agent",
+            created_at="2026-06-01T10:00:05Z",
+            text="current completed",
+            metadata={"turn_id": "turn-current"},
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)[
+            "groups"
+        ]
+
+    assert [group["status"] for group in groups] == [expected_status, "done"]
+    assert groups[0]["anchor_message_id"] == "m_detached"
+    assert groups[1]["anchor_message_id"] == "m_current_result"
 
 
 def test_get_turn_group_unknown_id_returns_none(isolated_state):
@@ -1410,6 +1754,44 @@ def test_backend_failure_notify_is_failed(isolated_state):
     with engine.connect() as conn:
         groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
     assert [g["status"] for g in groups] == ["failed"]
+
+
+def test_replayed_failure_preserves_newer_activity_on_readback(isolated_state):
+    """MESSAGE-DELIVERY-030: a delayed recovery notice is not a new terminal."""
+    engine = create_sqlite_engine()
+    sid = "ses_replayed_failure"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="old-input", mtype="user", author="user",
+             created_at="2026-06-01T10:00:00Z", metadata={"turn_id": "old-turn"})
+        _msg(conn, scope, sid, mid="old-step", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:00:01Z", text="old work", metadata={"turn_id": "old-turn"})
+        _evt(conn, scope, sid, eid="old-terminal", created_at="2026-06-01T10:00:02Z",
+             event_type="silent_terminal", text="", turn_id="old-turn",
+             metadata={"terminal_outcome": "failed"})
+        _msg(conn, scope, sid, mid="new-input", mtype="user", author="user",
+             created_at="2026-06-01T10:01:00Z", metadata={"turn_id": "new-turn"})
+        _msg(conn, scope, sid, mid="new-step-1", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:01:01Z", text="new work before notice", metadata={"turn_id": "new-turn"})
+        _msg(conn, scope, sid, mid="old-notice", mtype="notify", author="agent",
+             created_at="2026-06-01T10:01:02Z", text="服务重启导致上一轮中断",
+             metadata={"event": "backend_failure", "replayed": True, "turn_id": "old-turn",
+                       "failure_id": "turn:old-turn", "detached": False})
+        _msg(conn, scope, sid, mid="new-step-2", mtype="assistant", author="agent",
+             created_at="2026-06-01T10:01:03Z", text="new work after notice", metadata={"turn_id": "new-turn"})
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        assert len(groups) == 2
+        assert groups[0]["status"] == "failed"
+        assert groups[0]["anchor_message_id"] == "old-input"
+        assert groups[0]["open"] is False
+        assert groups[1]["id"] == "new-step-1"
+        assert groups[1]["anchor_message_id"] == "new-input"
+        assert groups[1]["open"] is True
+        assert groups[1]["steps"] == 2
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=groups[1]["id"])
+        assert [row["text"] for row in detail["rows"]] == ["new work before notice", "new work after notice"]
 
 
 def test_stop_without_terminal_stays_interrupted(isolated_state):

@@ -1,0 +1,8 @@
+version: 1
+capability: memory_delete_data
+observations:
+  - id: MEMORY-DELETE-DATA-OBS-001
+    scenarios:
+      - MEMORY-DELETE-DATA-001
+      - MEMORY-DELETE-DATA-002
+    observation: Delete data is an explicit user intent with its own response, while sharing Repair's exact loss confirmation, exclusion, termination proof, and fixed confined deletion primitive.

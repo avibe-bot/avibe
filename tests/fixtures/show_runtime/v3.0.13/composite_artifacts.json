@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "release": {"manifest_name":"show-runtime-manifest.json","manifest_sha256":"500b10c76738214b1221f09fd98649b3d3aec9f45c95bd1795bd27510004c38f","runtime_version":"64e2e610e4107304bdc8ce2f2d387d76be6f0a0b","tag":"v3.0.13"},
+  "archives": {
+    "darwin-arm64": {
+      "provenance": {"member_count":8376,"name":"vibe-show-runtime-node-darwin-arm64.tgz","sha256":"5899da2bb7ff25ae16657fb6bae45298a0a140bc54757a36e398349959da5669","size":22310544},
+      "entrypoints": {"cli_path":[null,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[72,"packages/runtime/dist/cli.js"],"esbuild_bin":[8197,"node_modules/.bin/esbuild"],"esbuild_package":[1838,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[212,"node_modules/@esbuild/darwin-arm64/bin/esbuild"]},
+      "links": [
+        [1838,"hardlink","node_modules/esbuild/bin/esbuild","node_modules/@esbuild/darwin-arm64/bin/esbuild",212,212,"node_modules/@esbuild/darwin-arm64/bin/esbuild","file"],
+        [3811,"symlink","node_modules/@avibe/show-ui","../../packages/ui",3,3,"packages/ui","directory"],
+        [3812,"symlink","node_modules/@avibe/show-sdk","../../packages/sdk",5,5,"packages/sdk","directory"],
+        [3813,"symlink","node_modules/@avibe/show-runtime","../../packages/runtime",4,4,"packages/runtime","directory"],
+        [8185,"symlink","node_modules/.bin/jsesc","../jsesc/bin/jsesc",8278,8278,"node_modules/jsesc/bin/jsesc","file"],
+        [8186,"symlink","node_modules/.bin/browserslist","../browserslist/cli.js",8206,8206,"node_modules/browserslist/cli.js","file"],
+        [8187,"symlink","node_modules/.bin/jiti","../jiti/lib/jiti-cli.mjs",8148,8148,"node_modules/jiti/lib/jiti-cli.mjs","file"],
+        [8188,"symlink","node_modules/.bin/nanoid","../nanoid/bin/nanoid.cjs",7965,7965,"node_modules/nanoid/bin/nanoid.cjs","file"],
+        [8189,"symlink","node_modules/.bin/avibe-show-runtime","../@avibe/show-runtime/dist/cli.js",null,72,"packages/runtime/dist/cli.js","file"],
+        [8190,"symlink","node_modules/.bin/baseline-browser-mapping","../baseline-browser-mapping/dist/cli.cjs",7787,7787,"node_modules/baseline-browser-mapping/dist/cli.cjs","file"],
+        [8191,"symlink","node_modules/.bin/parser","../@babel/parser/bin/babel-parser.js",2559,2559,"node_modules/@babel/parser/bin/babel-parser.js","file"],
+        [8192,"symlink","node_modules/.bin/semver","../semver/bin/semver.js",3065,3065,"node_modules/semver/bin/semver.js","file"],
+        [8193,"symlink","node_modules/.bin/vite","../vite/bin/vite.js",3044,3044,"node_modules/vite/bin/vite.js","file"],
+        [8194,"symlink","node_modules/.bin/rollup","../rollup/dist/bin/rollup",1904,1904,"node_modules/rollup/dist/bin/rollup","file"],
+        [8195,"symlink","node_modules/.bin/json5","../json5/lib/cli.js",1866,1866,"node_modules/json5/lib/cli.js","file"],
+        [8196,"symlink","node_modules/.bin/update-browserslist-db","../update-browserslist-db/cli.js",1848,1848,"node_modules/update-browserslist-db/cli.js","file"],
+        [8197,"symlink","node_modules/.bin/esbuild","../esbuild/bin/esbuild",1838,1838,"node_modules/esbuild/bin/esbuild","hardlink"]
+      ]
+    },
+    "darwin-x64": {
+      "provenance": {"member_count":8376,"name":"vibe-show-runtime-node-darwin-x64.tgz","sha256":"15429f0aa181ddef692faeaa9589f680f8ecf44d0f0a543f3e80fe5ab0ae7b99","size":23215818},
+      "entrypoints": {"cli_path":[null,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[72,"packages/runtime/dist/cli.js"],"esbuild_bin":[8197,"node_modules/.bin/esbuild"],"esbuild_package":[1838,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[212,"node_modules/@esbuild/darwin-x64/bin/esbuild"]},
+      "links": [
+        [1838,"hardlink","node_modules/esbuild/bin/esbuild","node_modules/@esbuild/darwin-x64/bin/esbuild",212,212,"node_modules/@esbuild/darwin-x64/bin/esbuild","file"],
+        [3815,"symlink","node_modules/@avibe/show-ui","../../packages/ui",3,3,"packages/ui","directory"],
+        [3816,"symlink","node_modules/@avibe/show-sdk","../../packages/sdk",5,5,"packages/sdk","directory"],
+        [3817,"symlink","node_modules/@avibe/show-runtime","../../packages/runtime",4,4,"packages/runtime","directory"],
+        [8185,"symlink","node_modules/.bin/jsesc","../jsesc/bin/jsesc",8278,8278,"node_modules/jsesc/bin/jsesc","file"],
+        [8186,"symlink","node_modules/.bin/browserslist","../browserslist/cli.js",8206,8206,"node_modules/browserslist/cli.js","file"],
+        [8187,"symlink","node_modules/.bin/jiti","../jiti/lib/jiti-cli.mjs",8148,8148,"node_modules/jiti/lib/jiti-cli.mjs","file"],
+        [8188,"symlink","node_modules/.bin/nanoid","../nanoid/bin/nanoid.cjs",7969,7969,"node_modules/nanoid/bin/nanoid.cjs","file"],
+        [8189,"symlink","node_modules/.bin/avibe-show-runtime","../@avibe/show-runtime/dist/cli.js",null,72,"packages/runtime/dist/cli.js","file"],
+        [8190,"symlink","node_modules/.bin/baseline-browser-mapping","../baseline-browser-mapping/dist/cli.cjs",7791,7791,"node_modules/baseline-browser-mapping/dist/cli.cjs","file"],
+        [8191,"symlink","node_modules/.bin/parser","../@babel/parser/bin/babel-parser.js",2559,2559,"node_modules/@babel/parser/bin/babel-parser.js","file"],
+        [8192,"symlink","node_modules/.bin/semver","../semver/bin/semver.js",3069,3069,"node_modules/semver/bin/semver.js","file"],
+        [8193,"symlink","node_modules/.bin/vite","../vite/bin/vite.js",3044,3044,"node_modules/vite/bin/vite.js","file"],
+        [8194,"symlink","node_modules/.bin/rollup","../rollup/dist/bin/rollup",1904,1904,"node_modules/rollup/dist/bin/rollup","file"],
+        [8195,"symlink","node_modules/.bin/json5","../json5/lib/cli.js",1866,1866,"node_modules/json5/lib/cli.js","file"],
+        [8196,"symlink","node_modules/.bin/update-browserslist-db","../update-browserslist-db/cli.js",1848,1848,"node_modules/update-browserslist-db/cli.js","file"],
+        [8197,"symlink","node_modules/.bin/esbuild","../esbuild/bin/esbuild",1838,1838,"node_modules/esbuild/bin/esbuild","hardlink"]
+      ]
+    },
+    "linux-arm64": {
+      "provenance": {"member_count":8376,"name":"vibe-show-runtime-node-linux-arm64.tgz","sha256":"69026d325f84bee8a96ed41522d59f248b1ad5621377d88746b0aa1f80f89e6b","size":22308471},
+      "entrypoints": {"cli_path":[null,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[113,"packages/runtime/dist/cli.js"],"esbuild_bin":[7189,"node_modules/.bin/esbuild"],"esbuild_package":[6310,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[6390,"node_modules/@esbuild/linux-arm64/bin/esbuild"]},
+      "links": [
+        [6347,"symlink","node_modules/@avibe/show-ui","../../packages/ui",3,3,"packages/ui","directory"],
+        [6348,"symlink","node_modules/@avibe/show-sdk","../../packages/sdk",51,51,"packages/sdk","directory"],
+        [6349,"symlink","node_modules/@avibe/show-runtime","../../packages/runtime",70,70,"packages/runtime","directory"],
+        [6390,"hardlink","node_modules/@esbuild/linux-arm64/bin/esbuild","node_modules/esbuild/bin/esbuild",6310,6310,"node_modules/esbuild/bin/esbuild","file"],
+        [7186,"symlink","node_modules/.bin/jsesc","../jsesc/bin/jsesc",595,595,"node_modules/jsesc/bin/jsesc","file"],
+        [7187,"symlink","node_modules/.bin/baseline-browser-mapping","../baseline-browser-mapping/dist/cli.cjs",1603,1603,"node_modules/baseline-browser-mapping/dist/cli.cjs","file"],
+        [7188,"symlink","node_modules/.bin/json5","../json5/lib/cli.js",6023,6023,"node_modules/json5/lib/cli.js","file"],
+        [7189,"symlink","node_modules/.bin/esbuild","../esbuild/bin/esbuild",6310,6310,"node_modules/esbuild/bin/esbuild","file"],
+        [7190,"symlink","node_modules/.bin/avibe-show-runtime","../@avibe/show-runtime/dist/cli.js",null,113,"packages/runtime/dist/cli.js","file"],
+        [7191,"symlink","node_modules/.bin/browserslist","../browserslist/cli.js",6399,6399,"node_modules/browserslist/cli.js","file"],
+        [7192,"symlink","node_modules/.bin/rollup","../rollup/dist/bin/rollup",6460,6460,"node_modules/rollup/dist/bin/rollup","file"],
+        [7193,"symlink","node_modules/.bin/jiti","../jiti/lib/jiti-cli.mjs",6717,6717,"node_modules/jiti/lib/jiti-cli.mjs","file"],
+        [7194,"symlink","node_modules/.bin/nanoid","../nanoid/bin/nanoid.cjs",7095,7095,"node_modules/nanoid/bin/nanoid.cjs","file"],
+        [7195,"symlink","node_modules/.bin/update-browserslist-db","../update-browserslist-db/cli.js",7118,7118,"node_modules/update-browserslist-db/cli.js","file"],
+        [7196,"symlink","node_modules/.bin/parser","../@babel/parser/bin/babel-parser.js",7838,7838,"node_modules/@babel/parser/bin/babel-parser.js","file"],
+        [7197,"symlink","node_modules/.bin/semver","../semver/bin/semver.js",8151,8151,"node_modules/semver/bin/semver.js","file"],
+        [7198,"symlink","node_modules/.bin/vite","../vite/bin/vite.js",8298,8298,"node_modules/vite/bin/vite.js","file"]
+      ]
+    },
+    "linux-x64": {
+      "provenance": {"member_count":8376,"name":"vibe-show-runtime-node-linux-x64.tgz","sha256":"808d1fe357b9468e2445f023a35ca9e12652d1a6b239f870812d5dd4b905eda8","size":23256781},
+      "entrypoints": {"cli_path":[null,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[134,"packages/runtime/dist/cli.js"],"esbuild_bin":[8077,"node_modules/.bin/esbuild"],"esbuild_package":[338,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[7767,"node_modules/@esbuild/linux-x64/bin/esbuild"]},
+      "links": [
+        [3059,"symlink","node_modules/@avibe/show-sdk","../../packages/sdk",51,51,"packages/sdk","directory"],
+        [3060,"symlink","node_modules/@avibe/show-ui","../../packages/ui",3,3,"packages/ui","directory"],
+        [3061,"symlink","node_modules/@avibe/show-runtime","../../packages/runtime",70,70,"packages/runtime","directory"],
+        [7767,"hardlink","node_modules/@esbuild/linux-x64/bin/esbuild","node_modules/esbuild/bin/esbuild",338,338,"node_modules/esbuild/bin/esbuild","file"],
+        [8076,"symlink","node_modules/.bin/parser","../@babel/parser/bin/babel-parser.js",456,456,"node_modules/@babel/parser/bin/babel-parser.js","file"],
+        [8077,"symlink","node_modules/.bin/esbuild","../esbuild/bin/esbuild",338,338,"node_modules/esbuild/bin/esbuild","file"],
+        [8078,"symlink","node_modules/.bin/browserslist","../browserslist/cli.js",398,398,"node_modules/browserslist/cli.js","file"],
+        [8079,"symlink","node_modules/.bin/baseline-browser-mapping","../baseline-browser-mapping/dist/cli.cjs",426,426,"node_modules/baseline-browser-mapping/dist/cli.cjs","file"],
+        [8080,"symlink","node_modules/.bin/avibe-show-runtime","../@avibe/show-runtime/dist/cli.js",null,134,"packages/runtime/dist/cli.js","file"],
+        [8081,"symlink","node_modules/.bin/json5","../json5/lib/cli.js",3351,3351,"node_modules/json5/lib/cli.js","file"],
+        [8082,"symlink","node_modules/.bin/rollup","../rollup/dist/bin/rollup",3371,3371,"node_modules/rollup/dist/bin/rollup","file"],
+        [8083,"symlink","node_modules/.bin/vite","../vite/bin/vite.js",7822,7822,"node_modules/vite/bin/vite.js","file"],
+        [8084,"symlink","node_modules/.bin/update-browserslist-db","../update-browserslist-db/cli.js",7872,7872,"node_modules/update-browserslist-db/cli.js","file"],
+        [8085,"symlink","node_modules/.bin/nanoid","../nanoid/bin/nanoid.cjs",7889,7889,"node_modules/nanoid/bin/nanoid.cjs","file"],
+        [8086,"symlink","node_modules/.bin/jsesc","../jsesc/bin/jsesc",7908,7908,"node_modules/jsesc/bin/jsesc","file"],
+        [8087,"symlink","node_modules/.bin/jiti","../jiti/lib/jiti-cli.mjs",8342,8342,"node_modules/jiti/lib/jiti-cli.mjs","file"],
+        [8088,"symlink","node_modules/.bin/semver","../semver/bin/semver.js",8371,8371,"node_modules/semver/bin/semver.js","file"]
+      ]
+    },
+    "win32-arm64": {
+      "provenance": {"member_count":8530,"name":"vibe-show-runtime-node-win32-arm64.tgz","sha256":"56f4a7b38e84ebfa9a1f7398b6113edbc30464615c1c6539effc4d04b14ef8c3","size":22220122},
+      "entrypoints": {"cli_path":[8440,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[84,"packages/runtime/dist/cli.js"],"esbuild_bin":[8500,"node_modules/.bin/esbuild"],"esbuild_package":[5957,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[7467,"node_modules/@esbuild/win32-arm64/esbuild.exe"]},
+      "links": [
+      ]
+    },
+    "win32-x64": {
+      "provenance": {"member_count":8534,"name":"vibe-show-runtime-node-win32-x64.tgz","sha256":"c7be802e7ef0a06a36df101cbbaf451610ab121841d87aa444687718997ffa89","size":24138106},
+      "entrypoints": {"cli_path":[8444,"node_modules/@avibe/show-runtime/dist/cli.js"],"cli_source":[84,"packages/runtime/dist/cli.js"],"esbuild_bin":[8504,"node_modules/.bin/esbuild"],"esbuild_package":[5957,"node_modules/esbuild/bin/esbuild"],"esbuild_platform":[7471,"node_modules/@esbuild/win32-x64/esbuild.exe"]},
+      "links": [
+      ]
+    }
+  }
+}

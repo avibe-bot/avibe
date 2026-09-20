@@ -13,7 +13,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  RotateCw,
   TriangleAlert,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -24,28 +23,30 @@ import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { internalPwaLinkTarget, openLinkInNewContext } from '../lib/pwaNavigation';
-import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
+import { copyHref, displayLink } from '../lib/showPageLinks';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
 import { appTabHref, isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
 import { SHARED_ACTION_ZONE } from '../apps/rowLayout';
 import { ShowPageAvatarTile } from '../apps/showPageAvatarTile';
-import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
+import { ShowPageSharingSettings } from './workbench/ShowPageSharingSettings';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Input } from './ui/input';
-import { SegmentedRadio, type SegmentedTone } from './ui/segmented';
+import { SegmentedRadio } from './ui/segmented';
+import { Switch } from './ui/switch';
 
 const LABEL = 'font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted';
 
 // Visibility → badge variant, active segmented tone, and status dot. The row
 // tile is now a letter avatar (hashed by session), so visibility reads from the
 // badge rather than a per-state icon.
-const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; tone: SegmentedTone; dot: string }> = {
-  public: { badge: 'warning', tone: 'gold', dot: 'bg-gold' },
-  private: { badge: 'info', tone: 'cyan', dot: 'bg-cyan' },
-  offline: { badge: 'secondary', tone: 'muted', dot: 'bg-muted' },
+const STATUS: Record<Visibility, { badge: 'warning' | 'info' | 'secondary'; dot: string }> = {
+  public: { badge: 'warning', dot: 'bg-gold' },
+  limited: { badge: 'info', dot: 'bg-mint' },
+  private: { badge: 'info', dot: 'bg-cyan' },
+  offline: { badge: 'secondary', dot: 'bg-muted' },
 };
 
 interface RowProps {
@@ -61,10 +62,9 @@ interface RowProps {
   onToggleInstall: (next: boolean) => void;
   onRename: (title: string | null) => Promise<void>;
   onUploadIcon: (file: File) => Promise<void>;
-  onSetVisibility: (visibility: Visibility) => void;
-  onRotate: () => void;
+  onSetOffline: (offline: boolean) => void;
   onCopy: () => void;
-  onShareIdSaved: (payload: ShowPageLinkInfo) => void;
+  onReload: () => void;
 }
 
 function ShowPageRow({
@@ -79,10 +79,9 @@ function ShowPageRow({
   onToggleInstall,
   onRename,
   onUploadIcon,
-  onSetVisibility,
-  onRotate,
+  onSetOffline,
   onCopy,
-  onShareIdSaved,
+  onReload,
 }: RowProps) {
   const { t, i18n } = useTranslation();
   const status = STATUS[page.visibility];
@@ -149,7 +148,7 @@ function ShowPageRow({
               <span className="flex items-center gap-1.5">
                 <span
                   className={clsx(
-                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan',
+                    'truncate text-[13px] font-semibold text-foreground transition-colors group-hover:text-cyan-ink',
                     !page.title && 'font-mono',
                   )}
                 >
@@ -159,7 +158,7 @@ function ShowPageRow({
                 <ArrowUpRight
                   size={13}
                   aria-hidden
-                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan"
+                  className="shrink-0 text-muted/60 transition-colors group-hover:text-cyan-ink"
                 />
               </span>
               {sub ? <span className="block truncate text-[11px] text-muted">{sub}</span> : null}
@@ -214,23 +213,31 @@ function ShowPageRow({
                 <IconEditor page={page} disabled={busy} onUploadIcon={onUploadIcon} />
               </div>
 
-              <div className="flex flex-col gap-2">
-                <span className={LABEL}>{t('showPages.visibilityLabel')}</span>
-                <div className="max-w-[360px]">
-                  <SegmentedRadio<Visibility>
-                    value={page.visibility}
-                    tone={status.tone}
-                    disabled={busy}
-                    ariaLabel={t('showPages.visibilityLabel')}
-                    onChange={onSetVisibility}
-                    options={[
-                      { id: 'private', label: t('showPages.status.private') },
-                      { id: 'public', label: t('showPages.status.public') },
-                      { id: 'offline', label: t('showPages.visibilityOffline') },
-                    ]}
+              <div className="flex max-w-[420px] items-center justify-between gap-3">
+                <div>
+                  <span className={LABEL}>{t('chat.showPage.availability')}</span>
+                  <p className="mt-1 text-[11px] text-muted">
+                    {t(page.offline ? 'chat.showPage.availabilityOffline' : 'chat.showPage.availabilityOnline')}
+                  </p>
+                </div>
+                <Switch
+                  checked={!page.offline}
+                  disabled={busy || (page.offline ? !page.can_publish_public : !page.can_manage)}
+                  onCheckedChange={(online) => onSetOffline(!online)}
+                  label={t('chat.showPage.availability')}
+                />
+              </div>
+
+              {page.can_publish_public ? (
+                <div className="max-w-[420px] border-t border-border pt-4">
+                  <ShowPageSharingSettings
+                    active={expanded}
+                    canManage
+                    sessionId={page.session_id}
+                    onApplied={onReload}
                   />
                 </div>
-              </div>
+              ) : null}
 
               {page.visibility === 'offline' ? (
                 <p className="text-[12px] text-muted">{t('showPages.offlineNoLink')}</p>
@@ -239,7 +246,7 @@ function ShowPageRow({
                   <span className={LABEL}>{t('showPages.liveLink')}</span>
                   <div className="flex flex-wrap items-center gap-2">
                     <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-border bg-foreground/[0.03] px-3 py-2">
-                      <Link2 size={14} className={page.visibility === 'public' ? 'text-gold' : 'text-cyan'} />
+                      <Link2 size={14} className={page.visibility === 'public' ? 'text-gold-ink' : 'text-cyan-ink'} />
                       <span className="truncate font-mono text-[12px] text-foreground">{shown}</span>
                     </div>
                     <Button type="button" variant="secondary" size="sm" onClick={onCopy} disabled={!href}>
@@ -269,44 +276,19 @@ function ShowPageRow({
                   </div>
                   {page.visibility === 'public' && !page.url_available ? (
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                      <TriangleAlert size={13} className="text-gold" />
+                      <TriangleAlert size={13} className="text-gold-ink" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>
-                      <a href="/admin/remote-access" className="font-semibold text-gold hover:underline">
+                      <Link to="/settings/remote-access" className="font-semibold text-gold-ink hover:underline">
                         {t('showPages.connectCloud')} →
-                      </a>
+                      </Link>
                     </div>
                   ) : null}
                 </div>
               )}
 
-              {page.visibility === 'public' ? (
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-2">
-                    <span className={LABEL}>{t('showPages.shareId.label')}</span>
-                    <div className="max-w-[360px]">
-                      <ShowPageShareIdField
-                        sessionId={page.session_id}
-                        shareId={page.share_id}
-                        disabled={busy}
-                        onSaved={onShareIdSaved}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-2">
-                    <span className={LABEL}>{t('showPages.shareLink')}</span>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Button type="button" variant="secondary" size="sm" onClick={onRotate} disabled={busy}>
-                        <RotateCw size={14} />
-                        {t('showPages.rotate')}
-                      </Button>
-                      <span className="text-[11px] text-muted">{t('showPages.rotateHint')}</span>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
             </div>
 
-            <div className="flex flex-col gap-3 rounded-xl border border-border bg-foreground/[0.02] p-4">
+            <div className="flex flex-col gap-3 rounded-md border border-border bg-foreground/[0.02] p-4">
               <span className={LABEL}>{t('showPages.details')}</span>
               {([
                 { k: t('showPages.detail.session'), v: page.session_id, mono: true, to: `/chat/${page.session_id}` },
@@ -319,7 +301,7 @@ function ShowPageRow({
                   {row.to ? (
                     <Link
                       to={row.to}
-                      className={clsx('break-all text-[12px] text-cyan transition-colors hover:text-foreground hover:underline', row.mono && 'font-mono')}
+                      className={clsx('break-all text-[12px] text-cyan-ink transition-colors hover:text-foreground hover:underline', row.mono && 'font-mono')}
                     >
                       {row.v}
                     </Link>
@@ -489,11 +471,9 @@ const IconEditor: React.FC<{
 export function ShowPagesView({
   pages,
   busyId,
-  setVisibility,
-  rotate,
+  setOffline,
   rename,
   uploadIcon,
-  onShareIdSaved,
   reload,
   onOpenApp,
 }: ShowPagesController & {
@@ -553,7 +533,7 @@ export function ShowPagesView({
             variant="secondary"
             size="sm"
             onClick={reload}
-            title={t('common.refresh', { defaultValue: 'Refresh' })}
+            title={t('common.refresh')}
             className="px-2.5"
           >
             <RefreshCw size={14} />
@@ -566,6 +546,7 @@ export function ShowPagesView({
           options={[
             { id: 'all', label: t('showPages.filter.all') },
             { id: 'public', label: t('showPages.filter.public') },
+            { id: 'limited', label: t('showPages.filter.limited') },
             { id: 'private', label: t('showPages.filter.private') },
             { id: 'offline', label: t('showPages.filter.offline') },
           ]}
@@ -592,10 +573,9 @@ export function ShowPagesView({
               onToggleInstall={(next) => (next ? pin(page.session_id) : unpin(page.session_id))}
               onRename={(title) => rename(page, title)}
               onUploadIcon={(file) => uploadIcon(page, file)}
-              onSetVisibility={(visibility) => setVisibility(page, visibility)}
-              onRotate={() => rotate(page)}
+              onSetOffline={(offline) => setOffline(page, offline)}
               onCopy={() => copy(page)}
-              onShareIdSaved={onShareIdSaved}
+              onReload={reload}
             />
           ))
         )}

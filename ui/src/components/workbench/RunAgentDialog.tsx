@@ -34,9 +34,10 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
       .listProjects()
       .then((result) => {
         if (cancelled) return;
-        setProjects(result.projects);
-        if (result.projects.length > 0) {
-          const sorted = [...result.projects].sort((a, b) => {
+        const chatProjects = result.projects.filter((project) => project.capabilities.can_chat);
+        setProjects(chatProjects);
+        if (chatProjects.length > 0) {
+          const sorted = [...chatProjects].sort((a, b) => {
             const aTs = a.last_active_at || a.created_at;
             const bTs = b.last_active_at || b.created_at;
             return bTs.localeCompare(aTs);
@@ -87,7 +88,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
-          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint">
+          <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint-ink">
             <Play className="size-4" />
           </div>
           <div className="flex flex-1 flex-col gap-0.5">
@@ -127,7 +128,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
             >
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.display_name} · {p.folder_path}
+                  {p.display_name}
                 </option>
               ))}
             </Select>
@@ -135,7 +136,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
         </div>
 
         {error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}

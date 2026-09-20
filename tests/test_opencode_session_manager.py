@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from modules.agents.base import AgentRequest
-from modules.agents.opencode.session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
+from modules.agents.opencode.session import (
+    OpenCodeResumeUnavailableError,
+    OpenCodeSessionManager,
+    requires_message_order_repair,
+)
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
 
@@ -24,6 +28,129 @@ def _request() -> AgentRequest:
         composite_session_id="base-1:/repo",
         session_key="slack::channel::C1",
     )
+
+
+def _opencode_message(message_id: str, role: str, created: int) -> dict:
+    return {
+        "info": {
+            "id": message_id,
+            "role": role,
+            "time": {"created": created},
+        },
+        "parts": [],
+    }
+
+
+def _legacy_opencode_message_id(created: int, counter: int = 1) -> str:
+    clock = ((created << 12) + counter) % (1 << 48)
+    return f"msg_{clock:012x}AAAA"
+
+
+def test_opencode_message_order_repair_detects_completed_id_wrap() -> None:
+    messages = [
+        _opencode_message("msg_fff000000001AAAA", "user", 1),
+        _opencode_message("msg_fff000000002AAAA", "assistant", 2),
+        _opencode_message("msg_000100000001AAAA", "user", 3),
+        _opencode_message("msg_000100000002AAAA", "assistant", 4),
+    ]
+
+    assert requires_message_order_repair(messages, now_ms=0x10000) is True
+
+
+def test_opencode_message_order_repair_detects_wrap_before_first_new_message() -> None:
+    period_ms = 1 << 36
+    old_created = (2 * period_ms) - 0x10000
+    now_ms = (2 * period_ms) + 0x10000
+    messages = [
+        _opencode_message(_legacy_opencode_message_id(old_created), "user", old_created),
+        _opencode_message(
+            _legacy_opencode_message_id(old_created + 1),
+            "assistant",
+            old_created + 1,
+        ),
+    ]
+
+    assert requires_message_order_repair(messages, now_ms=now_ms) is True
+
+
+def test_opencode_message_order_repair_detects_prior_cycle_lower_half() -> None:
+    period_ms = 1 << 36
+    old_created = period_ms + 0x2000
+    now_ms = (2 * period_ms) + 0x1000
+    messages = [
+        _opencode_message(_legacy_opencode_message_id(old_created), "user", old_created),
+    ]
+
+    assert requires_message_order_repair(messages, now_ms=now_ms) is True
+
+
+def test_opencode_message_order_repair_ignores_monotonic_history() -> None:
+    messages = [
+        _opencode_message("msg_000000001001AAAA", "user", 1),
+        _opencode_message("msg_000000001002AAAA", "assistant", 2),
+        _opencode_message("msg_000000002001AAAA", "user", 3),
+        _opencode_message("msg_000000002002AAAA", "assistant", 4),
+    ]
+
+    assert requires_message_order_repair(messages, now_ms=0x10000) is False
+
+
+def test_opencode_message_order_repair_forks_and_rebinds_full_history() -> None:
+    sessions = SimpleNamespace(
+        replace_agent_session_native=Mock(return_value="sesk8m4q2p7x"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        get_version=AsyncMock(return_value="1.18.5"),
+        fork_session=AsyncMock(return_value={"id": "oc-reindexed"}),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "sesk8m4q2p7x",
+        "agent_session_target": {
+            "id": "sesk8m4q2p7x",
+            "native_session_id": "oc-wrapped",
+        },
+    }
+    messages = [
+        _opencode_message("msg_fff000000001AAAA", "user", 1),
+        _opencode_message("msg_000100000001AAAA", "user", 2),
+    ]
+
+    session_id = asyncio.run(manager.repair_message_order(request, server, "oc-wrapped", messages))
+
+    assert session_id == "oc-reindexed"
+    server.fork_session.assert_awaited_once_with(
+        "oc-wrapped",
+        directory="/repo",
+        message_id=None,
+    )
+    sessions.replace_agent_session_native.assert_called_once_with(
+        "sesk8m4q2p7x",
+        expected_native_session_id="oc-wrapped",
+        replacement_native_session_id="oc-reindexed",
+    )
+    assert request.context.platform_specific["agent_session_target"]["native_session_id"] == "oc-reindexed"
+
+
+def test_opencode_message_order_repair_skips_fixed_runtime() -> None:
+    sessions = SimpleNamespace(replace_agent_session_native=Mock())
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        get_version=AsyncMock(return_value="1.18.15"),
+        fork_session=AsyncMock(),
+    )
+    request = _request()
+    messages = [
+        _opencode_message("msg_fff000000001AAAA", "user", 1),
+        _opencode_message("msg_000100000001AAAA", "user", 2),
+    ]
+
+    session_id = asyncio.run(manager.repair_message_order(request, server, "oc-fixed", messages))
+
+    assert session_id == "oc-fixed"
+    server.fork_session.assert_not_awaited()
+    sessions.replace_agent_session_native.assert_not_called()
 
 
 def _seed_opencode_messages(tmp_path, native_session_id: str, roles: list[str]) -> None:

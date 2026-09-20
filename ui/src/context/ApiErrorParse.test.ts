@@ -86,12 +86,10 @@ describe('locating the session a session_archived response is about', () => {
     // ...and the nested writes under it.
     expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1/messages')).toBe('ses_1');
     expect(archivedConflictSessionId(ARCHIVED, '/api/sessions/ses_1/fork')).toBe('ses_1');
-    // Show Page mutations are session-keyed under their own collection: ensure,
-    // visibility, share-id, rotate-share, icon.
+    // Show Page mutations are session-keyed under their own collection.
     expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/ensure')).toBe('ses_1');
-    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/visibility')).toBe('ses_1');
-    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/share-id')).toBe('ses_1');
-    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/rotate-share')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/availability')).toBe('ses_1');
+    expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/access-settings/apply')).toBe('ses_1');
     expect(archivedConflictSessionId(ARCHIVED, '/api/show-pages/ses_1/icon')).toBe('ses_1');
   });
 
@@ -153,9 +151,7 @@ const ARCHIVED_CAPABLE_ROUTES: Array<[string, string, unknown]> = [
   ['api.updateSession', 'PATCH /api/sessions/ses_1', archivedBody('This session is archived and can no longer be changed.')],
   ['api.forkSession', '/api/sessions/ses_1/fork', archivedBody('agent session is archived: ses_1')],
   ['api.ensureShowPage', '/api/show-pages/ses_1/ensure', archivedBody("This session is archived, so its Show Page can't be changed.")],
-  ['api.setShowPageVisibility', '/api/show-pages/ses_1/visibility', archivedBody('This session is archived.')],
-  ['api.setShowPageShareId', '/api/show-pages/ses_1/share-id', archivedBody('This session is archived.')],
-  ['api.rotateShowPageShare', '/api/show-pages/ses_1/rotate-share', archivedBody('This session is archived.')],
+  ['api.setShowPageAvailability', '/api/show-pages/ses_1/availability', archivedBody('This session is archived.')],
   ['api.uploadShowPageIcon', '/api/show-pages/ses_1/icon', archivedBody("This session is archived, so its Show Page can't be changed.")],
   // The messages POST reads its own raw response in ChatPage, but api.sendSessionMessage
   // exists on the seam too — so its body has to survive the parser as well.

@@ -4,12 +4,14 @@ import hashlib
 import json
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from sqlalchemy import Select, and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
+from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
     FENCE_STATES,
@@ -27,8 +29,81 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
+FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
+WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
+LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
+LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
+LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS = (
+    LEGACY_MEMORY_USER_ID_METADATA,
+    LEGACY_MEMORY_ORDINARY_TEXT_METADATA,
+    LEGACY_MEMORY_CLI_ADMITTED_METADATA,
+)
+
+
+def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def legacy_admitted_user_id(metadata: object) -> str | None:
+    """Read the principal from a released pre-author_id Message row."""
+
+    memory_user_id = _legacy_memory_metadata(metadata).get(
+        LEGACY_MEMORY_USER_ID_METADATA
+    )
+    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
+        return None
+    return memory_user_id.strip()
+
+
+def legacy_is_ordinary_text(metadata: object) -> bool:
+    """Read the literal ordinary-text flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_ORDINARY_TEXT_METADATA)
+        is True
+    )
+
+
+def legacy_is_cli_admitted(metadata: object) -> bool:
+    """Read the literal CLI-admission flag from a released Message row."""
+
+    return (
+        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_CLI_ADMITTED_METADATA)
+        is True
+    )
+
+
+def legacy_memory_merge_identity(
+    metadata: object,
+) -> tuple[str | None, bool, bool]:
+    """Return the released Memory facts that one dispatch kept singular."""
+
+    return (
+        legacy_admitted_user_id(metadata),
+        legacy_is_ordinary_text(metadata),
+        legacy_is_cli_admitted(metadata),
+    )
+
+
+def legacy_message_kind(metadata: object) -> str:
+    """Translate released `_memory_*` rows into the core message vocabulary."""
+
+    metadata = _legacy_memory_metadata(metadata)
+    if metadata.get("quick_reply_for"):
+        return "quick_reply"
+    if any(
+        metadata.get(key)
+        for key in ("forwarded", "is_forwarded", "forward_origin", "forwarded_from")
+    ):
+        return "forwarded"
+    if metadata.get("edited"):
+        return "edited"
+    if metadata.get("is_system") or metadata.get("system"):
+        return "system"
+    return "original" if legacy_is_ordinary_text(metadata) else "unknown"
 
 
 def utc_now_iso() -> str:
@@ -120,6 +195,7 @@ def message_snapshot(
     author_name: str | None = None,
     native_message_id: str | None = None,
     parent_native_message_id: str | None = None,
+    message_kind: str | None = None,
     read_at: str | None = None,
 ) -> dict[str, Any]:
     """Build the immutable Message candidate held before native acceptance."""
@@ -131,6 +207,14 @@ def message_snapshot(
     if source == "harness" and author == "user" and resolved_type == "user":
         author = "harness"
         resolved_type = "harness"
+    if source == "user":
+        metadata = metadata_without_delegated_owner(metadata)
+        metadata.pop("scheduled_provenance", None)
+    filtered_metadata = {
+        key: value
+        for key, value in (metadata or {}).items()
+        if not str(key).startswith("_memory_")
+    }
     return {
         "scope_id": scope_id,
         "session_id": session_id,
@@ -142,9 +226,10 @@ def message_snapshot(
         "source": source,
         "native_message_id": native_message_id,
         "parent_native_message_id": parent_native_message_id,
+        "message_kind": normalize_message_kind(message_kind),
         "content_text": text if text is not None else body.get("text") or None,
         "content_json": _canonical_json(body),
-        "metadata_json": _canonical_json(metadata or {}),
+        "metadata_json": _canonical_json(filtered_metadata),
         "read_at": read_at,
     }
 
@@ -240,6 +325,92 @@ def delivery_admission_context(delivery: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
+    """Return whether a Delivery recorded an event of the requested kind."""
+
+    events = _history(delivery.get("delivery_history_json"))["events"]
+    return any(
+        isinstance(event, dict) and str(event.get("kind") or "") == kind
+        for event in events
+    )
+
+
+def failure_retry_binding(
+    delivery: dict[str, Any], *, unclaimed_only: bool = False
+) -> dict[str, Any] | None:
+    """Server-written action provenance, never caller Message metadata."""
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if unclaimed_only and event.get("kind") == "start" and event.get("outcome") in {"claimed", "opened"}:
+            return None
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            return event
+    return None
+
+
+def failure_retry_state(delivery: dict[str, Any]) -> str:
+    """An original queued input predates its retry; await this action's admission."""
+    state = str(delivery["state"])
+    if state == "queued":
+        for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+            if event.get("kind") in {"start", "queue"}:
+                break
+            if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+                return "reserved"
+    return state
+
+
+def explicit_start_retry_receipt(delivery: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the durable hold, never caller-supplied Message metadata."""
+    completed_no_write = False
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            return None
+        if event.get("kind") == "start":
+            receipt = event.get("receipt") or {}
+            if (
+                event.get("outcome") == "not_written"
+                and receipt.get("requires_explicit_retry") is True
+            ):
+                return dict(receipt)
+            if event.get("outcome") == "not_written":
+                # Send now grants one attempt, not permission to clear a hold.
+                # A different no-write failure must preserve that boundary too.
+                completed_no_write = True
+                continue
+            if completed_no_write and event.get("outcome") in {"claimed", "opened"}:
+                continue
+            return None
+    return None
+
+
+def requires_explicit_start_retry(delivery: dict[str, Any]) -> bool:
+    """An unwritten permanent failure stays queued until its owner retries it."""
+    return explicit_start_retry_receipt(delivery) is not None
+
+
+def consecutive_prewrite_start_failures(delivery: dict[str, Any]) -> int:
+    """Count startup failures since Retry, without charging concurrency refusal."""
+    count = 0
+    for event in reversed(_history(delivery.get("delivery_history_json"))["events"]):
+        if event.get("kind") == FAILURE_RETRY_HISTORY_KIND:
+            break
+        if event.get("kind") != "start":
+            continue
+        if event.get("outcome") in {"claimed", "opened"}:
+            continue
+        receipt = event.get("receipt") or {}
+        if receipt.get("reason") == "refused_concurrent_turn":
+            continue
+        if (
+            event.get("outcome") != "not_written"
+            or receipt.get("kind") != "definitive_prewrite_failure"
+            or receipt.get("reason") != "no_terminal_result"
+        ):
+            break
+        count += 1
+    return count
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,
@@ -319,10 +490,13 @@ def list_queued(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     return [delivery_payload(dict(row)) for row in rows]
 
 
-def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
-    snapshot = _json_object(row.get("snapshot_json"))
+def _delivery_payload_from_snapshot(
+    row: dict[str, Any],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
     content = _json_object(snapshot.get("content_json"))
     metadata = _json_object(snapshot.get("metadata_json"))
+    retry_receipt = explicit_start_retry_receipt(row) if row.get("state") == "queued" else None
     return {
         "id": row["id"],
         "delivery_id": row["id"],
@@ -340,18 +514,219 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
         "author_name": snapshot.get("author_name"),
         "native_message_id": snapshot.get("native_message_id"),
         "parent_native_message_id": snapshot.get("parent_native_message_id"),
+        "message_kind": (
+            normalize_message_kind(snapshot.get("message_kind"))
+            if "message_kind" in snapshot
+            else legacy_message_kind(metadata)
+        ),
         "text": snapshot.get("content_text") or content.get("text") or "",
         "content": content,
         "metadata": metadata,
         "dispatch_text": row.get("dispatch_text") or "",
         "priority": row.get("priority"),
         "state": row.get("state"),
+        "requires_explicit_retry": retry_receipt is not None,
+        "retry_reason": retry_receipt.get("reason") if retry_receipt is not None else None,
         "created_at": row.get("submitted_at"),
         "submitted_at": row.get("submitted_at"),
         "updated_at": row.get("updated_at"),
         "retired_at": row.get("retired_at"),
         "version": row.get("version"),
     }
+
+
+def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return _delivery_payload_from_snapshot(
+        row,
+        _json_object(row.get("snapshot_json")),
+    )
+
+
+def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
+    """Return whether an immutable Delivery snapshot records remote origin."""
+
+    metadata = delivery_payload(row).get("metadata")
+    return isinstance(metadata, dict) and isinstance(
+        metadata.get("resource_user_context"),
+        dict,
+    )
+
+
+def metadata_with_delegated_memory_owner(
+    metadata: dict[str, Any], *, session_id: str | None
+) -> dict[str, Any]:
+    """Stamp same-Session delegation from its current host-owned Delivery.
+
+    Caller identifiers locate the execution; caller-supplied owner values never
+    authorize it. A continuation carries its already stamped owner without an
+    ancestry lookup. Missing identity leaves ordinary Memory denial intact.
+    """
+    result = dict(metadata)
+    result.pop("delegated_memory_owner", None)
+    created_by = result.get("created_by")
+    caller = created_by.get("caller") if isinstance(created_by, dict) else None
+    if not session_id or not isinstance(caller, dict) or caller.get("session_id") != session_id:
+        return result
+    import asyncio
+    import os
+    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
+    from vibe.internal_client import delegated_memory_owner_sync, InternalServerUnavailable
+
+    proof = os.environ.get(AVIBE_CALLER_SESSION_PROOF_ENV, "")
+    if not proof:
+        return result
+    # Definition creation in a controller event loop must not synchronously
+    # call its own socket. Agent CLI creation runs outside that loop.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        return result
+    try:
+        owner = delegated_memory_owner_sync(session_id, proof)
+    except InternalServerUnavailable:
+        return result
+    if not owner:
+        return result
+    # Resource Owner is not itself a Memory identity. In particular a caller
+    # cannot borrow another remote user's admitted Delivery by naming its Session.
+    if owner.get("platform") == "avibe":
+        remote = result.get("resource_user_context")
+        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
+        if owner["user_id"] != expected:
+            return result
+    result["delegated_memory_owner"] = dict(owner)
+    return result
+
+
+def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None) -> dict[str, Any] | None:
+    """Host owner from an exact same-Session Turn, or the current candidate."""
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().connect() as conn:
+        turn = get_turn(conn, turn_id) if turn_id is not None else active_turn(conn, session_id)
+        if not turn or turn["session_id"] != session_id:
+            return None
+        delivery = delivery_for_turn(conn, turn["id"])
+        if delivery is None:
+            return None
+        payload = execution_delivery_payload(conn, delivery)
+    return memory_owner_from_payload(payload)
+
+
+def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
+    """Read this exact Delivery's immutable content, including after acceptance."""
+    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+
+
+def memory_owner_from_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One owner representation for authenticated humans and host continuations."""
+    source_metadata = payload.get("metadata") or {}
+    if payload.get("author") == "user" and payload.get("source") == "user":
+        user_id = payload.get("author_id")
+        if not user_id:
+            user_id = legacy_admitted_user_id(source_metadata) if legacy_is_cli_admitted(source_metadata) else None
+        owner = {
+            "platform": payload.get("platform"),
+            "user_id": user_id,
+            "is_dm": "::user::" in str(payload.get("scope_id") or ""),
+        }
+    elif payload.get("source") == "harness":
+        provenance = scheduled_delivery_provenance(payload)
+        spec = provenance["platform_specific"] if provenance else {}
+        trigger = spec.get("task_trigger_kind")
+        metadata = spec.get("message_metadata")
+        owner = (metadata.get("delegated_memory_owner")
+                 if isinstance(trigger, str) and trigger.strip() and isinstance(metadata, Mapping) else None)
+    else:
+        owner = None
+    return delegated_memory_owner(owner)
+
+
+def delegated_memory_owner(value: object) -> dict[str, Any] | None:
+    """Normalize the optional host owner fact; admission owns platform policy."""
+    if not isinstance(value, Mapping):
+        return None
+    platform, user_id = value.get("platform"), value.get("user_id")
+    if not all(isinstance(field, str) and field.strip() for field in (platform, user_id)):
+        return None
+    return {"platform": platform, "user_id": user_id, "is_dm": value.get("is_dm") is True}
+
+
+def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Only a host harness Delivery can restore scheduling authority."""
+    if payload.get("source") != "harness":
+        return None
+    metadata = payload.get("metadata")
+    provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    return provenance if isinstance(spec, Mapping) else None
+
+
+def memory_authority_for_payload(payload: Mapping[str, Any]) -> str:
+    """Compare human and delegated authority without credential-refresh noise."""
+    owner = memory_owner_from_payload(payload)
+    provenance = scheduled_delivery_provenance(payload)
+    metadata = provenance["platform_specific"].get("message_metadata") if provenance else payload.get("metadata")
+    resource = metadata.get("resource_user_context") if isinstance(metadata, Mapping) else None
+    if isinstance(resource, Mapping):
+        # Refreshing the same credential does not change its resource authority.
+        resource = {key: value for key, value in resource.items()
+                    if key not in {"claims_issued_at", "authorization_expires_at"}}
+    return _canonical_json([owner, resource])
+
+
+def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
+    """Project the two known owner locations without changing stored metadata."""
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.pop("delegated_memory_owner", None)
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        public_nested = dict(nested)
+        public_nested.pop("delegated_memory_owner", None)
+        result["scheduled_provenance"] = {
+            **provenance, "platform_specific": {**spec, "message_metadata": public_nested},
+        }
+    return result
+
+
+def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Hide execution identity in both queued and accepted public messages."""
+    def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: item for key, item in value.items()
+            if key != "resource_user_context"
+            and not str(key).startswith(("_web_push_", "_memory_"))
+        }
+
+    result = without_private_fields(metadata_without_delegated_owner(metadata))
+    provenance = result.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
+    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
+    if isinstance(nested, dict):
+        result["scheduled_provenance"] = {
+            **provenance,
+            "platform_specific": {**spec, "message_metadata": without_private_fields(nested)},
+        }
+    return result
+
+
+def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a Delivery payload without server-owned identity metadata."""
+
+    payload = (
+        dict(row)
+        if "content" in row and "metadata" in row
+        else delivery_payload(row)
+    )
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        payload["metadata"] = public_message_metadata(metadata)
+    return payload
 
 
 _MESSAGE_MERGE_IDENTITY_FIELDS = (
@@ -363,13 +738,40 @@ _MESSAGE_MERGE_IDENTITY_FIELDS = (
     "author_id",
     "author_name",
     "parent_native_message_id",
+    "message_kind",
 )
+
+
+def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
+    provenance = metadata.get("scheduled_provenance")
+    spec = provenance.get("platform_specific") if isinstance(provenance, Mapping) else None
+    nested = spec.get("message_metadata") if isinstance(spec, Mapping) else None
+    # Compare raw authority, including absent/malformed values, before batching.
+    # Execution IDs and unrelated metadata must not disable normal coalescing.
+    return _canonical_json([
+        {key: value.get(key) for key in ("delegated_memory_owner", "resource_user_context")}
+        if isinstance(value, Mapping) else None
+        for value in (metadata, nested)
+    ])
 
 
 def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     """Return the Message fields that must stay singular after batching."""
 
-    return tuple(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS)
+    metadata = value.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = _json_object(value.get("metadata_json"))
+    kind = (
+        normalize_message_kind(value.get("message_kind"))
+        if "message_kind" in value
+        else legacy_message_kind(metadata)
+    )
+    return (
+        *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
+        kind,
+        _delegated_authority_merge_identity(metadata),
+        legacy_memory_merge_identity(metadata),
+    )
 
 
 def has_substantive_input(
@@ -542,6 +944,7 @@ def enqueue_queued(
     author_id: str | None = None,
     author_name: str | None = None,
     native_message_id: str | None = None,
+    message_kind: str | None = None,
     metadata: dict[str, Any] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
@@ -566,6 +969,7 @@ def enqueue_queued(
             author_id=author_id,
             author_name=author_name,
             native_message_id=native_message_id,
+            message_kind=message_kind,
         ),
         dispatch_text=text if dispatch_text is None else dispatch_text,
         dedupe_key=native_dedupe_key(
@@ -1097,6 +1501,7 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
         merged_content["attachments"] = attachments
     metadata = _json_object(first.get("metadata_json"))
     web_push_user_keys: list[str] = []
+    authorization_contexts: dict[str, dict[str, Any]] = {}
     for snapshot in snapshots:
         snapshot_metadata = _json_object(snapshot.get("metadata_json"))
         values = [snapshot_metadata.get(WEB_PUSH_USER_KEY_METADATA)]
@@ -1107,12 +1512,29 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
             key = str(value or "").strip()
             if key and key not in web_push_user_keys:
                 web_push_user_keys.append(key)
+        raw_contexts = snapshot_metadata.get(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA)
+        if isinstance(raw_contexts, list):
+            for raw_context in raw_contexts:
+                if not isinstance(raw_context, dict):
+                    continue
+                user_key = str(raw_context.get("user_key") or "").strip()
+                if user_key:
+                    authorization_contexts[user_key] = raw_context
     metadata.pop(WEB_PUSH_USER_KEY_METADATA, None)
     metadata.pop(WEB_PUSH_USER_KEYS_METADATA, None)
     if len(web_push_user_keys) == 1:
         metadata[WEB_PUSH_USER_KEY_METADATA] = web_push_user_keys[0]
     elif web_push_user_keys:
         metadata[WEB_PUSH_USER_KEYS_METADATA] = web_push_user_keys
+    filtered_contexts = [
+        context
+        for user_key, context in authorization_contexts.items()
+        if user_key in web_push_user_keys
+    ]
+    if filtered_contexts:
+        metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = filtered_contexts
+    else:
+        metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
     if len(deliveries) > 1:
         metadata["merged_delivery_ids"] = [str(delivery["id"]) for delivery in deliveries]
         native_ids = [
@@ -1126,6 +1548,26 @@ def _merged_initial_snapshot(deliveries: list[dict[str, Any]]) -> dict[str, Any]
     first["content_json"] = _canonical_json(merged_content)
     first["metadata_json"] = _canonical_json(metadata)
     return first
+
+
+def claimed_workbench_message_payload(
+    conn: Connection,
+    turn_id: str,
+) -> dict[str, Any] | None:
+    """Project one claimed Web batch exactly as native acceptance will merge it."""
+
+    deliveries = initial_deliveries_for_turn(conn, turn_id)
+    if not deliveries or any(delivery["state"] != "claimed" for delivery in deliveries):
+        return None
+    snapshot = _merged_initial_snapshot(deliveries)
+    if not (
+        snapshot.get("platform") == "avibe"
+        and snapshot.get("author") == "user"
+        and snapshot.get("type") == "user"
+        and snapshot.get("source") == "user"
+    ):
+        return None
+    return _delivery_payload_from_snapshot(deliveries[0], snapshot)
 
 
 def materialize_start_acceptance(
@@ -1372,13 +1814,16 @@ def materialize_steer_acceptance(
     return accepted
 
 
-def mark_attempt_unknown(
+def mark_attempt_receipt(
     conn: Connection,
     delivery_id: str,
     *,
     expected_version: int,
+    outcome: Literal["accepted", "unknown"],
     receipt: dict[str, Any],
 ) -> dict[str, Any] | None:
+    if outcome not in {"accepted", "unknown"}:
+        raise ValueError(f"unsupported steer receipt outcome: {outcome}")
     delivery = get_delivery(conn, delivery_id)
     if delivery is None:
         return None
@@ -1392,17 +1837,72 @@ def mark_attempt_unknown(
         expected_states=("steering",),
         values={
             "state": "reconciling_steer",
-            "current_receipt_outcome": "unknown",
+            "current_receipt_outcome": outcome,
             "current_receipt_json": _canonical_json(receipt),
         },
         history_event={
             "kind": kind or "attempt",
             "attempt_id": delivery.get("current_attempt_id"),
             "turn_id": delivery.get("current_target_turn_id"),
-            "outcome": "unknown",
+            "outcome": outcome,
             "receipt": receipt,
         },
     )
+
+
+def mark_attempt_unknown(
+    conn: Connection,
+    delivery_id: str,
+    *,
+    expected_version: int,
+    receipt: dict[str, Any],
+) -> dict[str, Any] | None:
+    return mark_attempt_receipt(
+        conn,
+        delivery_id,
+        expected_version=expected_version,
+        outcome="unknown",
+        receipt=receipt,
+    )
+
+
+def mark_attempt_receipt_batch(
+    conn: Connection,
+    *,
+    leader_delivery_id: str,
+    outcome: Literal["accepted", "unknown"],
+    receipt: dict[str, Any],
+) -> list[dict[str, Any]]:
+    leader = get_delivery(conn, leader_delivery_id)
+    attempt_id = str((leader or {}).get("current_attempt_id") or "")
+    if not attempt_id:
+        return []
+    rows = attempt_deliveries(conn, attempt_id)
+    if not rows or any(
+        row["state"] not in {"steering", "reconciling_steer"}
+        or (
+            row["state"] == "reconciling_steer"
+            and row.get("current_receipt_outcome") != outcome
+        )
+        for row in rows
+    ):
+        return []
+    saved_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if row["state"] == "reconciling_steer":
+            saved_rows.append(row)
+            continue
+        saved = mark_attempt_receipt(
+            conn,
+            str(row["id"]),
+            expected_version=int(row["version"]),
+            outcome=outcome,
+            receipt=receipt,
+        )
+        if saved is None:
+            raise RuntimeError("steer Delivery batch receipt persistence CAS lost")
+        saved_rows.append(saved)
+    return saved_rows
 
 
 def record_definitive_attempt(
@@ -1710,6 +2210,118 @@ def accepted_agent_run_ids_for_turn(conn: Connection, turn_id: str) -> list[str]
     return run_ids
 
 
+def agent_run_exclusively_owns_turn(
+    conn: Connection,
+    *,
+    run_id: str,
+    turn_id: str,
+) -> tuple[bool, str]:
+    """Whether stopping ``run_id`` may safely interrupt the exact Turn.
+
+    A Run may own either the sole claimed input of a starting Turn or the sole
+    accepted input of an active Turn. Steers, claimed batch siblings, and live
+    replacement control are independent participants. The caller holds SQLite's
+    writer reservation while asking, so no participant can slip between this
+    proof and the P0 control-slot write.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_turn_id = str(turn_id or "").strip()
+    if not normalized_run_id or not normalized_turn_id:
+        return False, "missing_run_turn_identity"
+    turn = get_turn(conn, normalized_turn_id)
+    if turn is None or turn.get("state") not in TURN_OWNER_STATES:
+        return False, "turn_not_active"
+    row = conn.execute(
+        select(
+            agent_runs.c.status,
+            agent_runs.c.delivery_id,
+            message_deliveries.c.session_id,
+            message_deliveries.c.state,
+            message_deliveries.c.turn_id,
+        )
+        .select_from(
+            agent_runs.join(
+                message_deliveries,
+                message_deliveries.c.id == agent_runs.c.delivery_id,
+            )
+        )
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False, "run_delivery_missing"
+    if str(row["session_id"] or "") != str(turn["session_id"] or ""):
+        return False, "run_session_mismatch"
+    expected_delivery_state = "claimed" if turn["state"] == "starting" else "accepted"
+    if (
+        str(row["turn_id"] or "") != normalized_turn_id
+        or row["state"] != expected_delivery_state
+    ):
+        return False, "run_not_owned_by_turn"
+    if str(row["delivery_id"] or "") != str(turn["initial_delivery_id"] or ""):
+        return False, "run_is_steered_participant"
+    if str(row["status"] or "").strip().lower() not in {
+        "running",
+        "processing",
+    }:
+        return False, "run_not_running"
+    if agent_run_ids_for_delivery(conn, {"id": row["delivery_id"]}) != [
+        normalized_run_id
+    ]:
+        return False, "delivery_has_other_runs"
+    if turn.get("control_mode") == "replace" and turn.get("control_state") in {
+        "pending",
+        "interrupting",
+        "waiting_terminal",
+        "reconciling",
+    }:
+        successor_turn_id = str(turn.get("control_successor_turn_id") or "")
+        successor_delivery_id = str(
+            turn.get("control_successor_delivery_id") or ""
+        )
+        successor = get_turn(conn, successor_turn_id)
+        successor_delivery = get_delivery(conn, successor_delivery_id)
+        if (
+            successor is not None
+            and successor["state"] == "waiting"
+            and successor["session_id"] == turn["session_id"]
+            and successor["initial_delivery_id"] == successor_delivery_id
+            and successor_delivery is not None
+            and successor_delivery["state"] == "interrupt_waiting"
+            and successor_delivery["session_id"] == turn["session_id"]
+            and successor_delivery["turn_id"] == successor_turn_id
+            and successor_delivery["turn_role"] == "initial"
+        ):
+            return False, "turn_has_replacement_successor"
+        return False, "turn_replacement_unresolved"
+    participant_delivery_ids = [
+        str(value)
+        for value in conn.execute(
+            select(message_deliveries.c.id)
+            .where(
+                or_(
+                    and_(
+                        message_deliveries.c.turn_id == normalized_turn_id,
+                        message_deliveries.c.state.in_(("claimed", "accepted")),
+                    ),
+                    and_(
+                        message_deliveries.c.current_target_turn_id
+                        == normalized_turn_id,
+                        message_deliveries.c.state.in_(
+                            ("pending_steer", "steering", "reconciling_steer")
+                        ),
+                    ),
+                )
+            )
+            .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)
+        ).scalars()
+    ]
+    if participant_delivery_ids != [str(row["delivery_id"])]:
+        return False, "turn_has_other_participants"
+    return True, "exclusive_run_owner"
+
+
 def retire_queued_with_run(
     conn: Connection,
     session_id: str,
@@ -1859,12 +2471,88 @@ def retire_for_run_cancellation(
 ) -> bool:
     """Retire an exact Run input only when its state proves no native side effect."""
 
-    return retire_not_written(
+    if retire_not_written(
         conn,
         session_id,
         delivery_id,
         reason="agent_run_canceled_before_native_write",
+    ):
+        return True
+    delivery = get_delivery(conn, delivery_id)
+    if (
+        delivery is None
+        or delivery["session_id"] != session_id
+        or delivery["state"] != "interrupt_waiting"
+    ):
+        return False
+    successor_turn_id = str(delivery.get("turn_id") or "")
+    successor = get_turn(conn, successor_turn_id)
+    if (
+        successor is None
+        or successor["session_id"] != session_id
+        or successor["state"] != "terminal"
+        or successor["initial_delivery_id"] != delivery_id
+        or successor["terminal_outcome"] != "not_written"
+        or successor["settled_by"] != "agent_run_canceled"
+        or successor["terminal_evidence_kind"] != "replacement_run_canceled"
+    ):
+        return False
+    predecessor = _one(
+        conn,
+        select(session_turns)
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.control_successor_delivery_id == delivery_id)
+        .where(session_turns.c.control_successor_turn_id == successor_turn_id)
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1),
     )
+    retired = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("interrupt_waiting",),
+        values={
+            "state": "retired",
+            "retired_at": utc_now_iso(),
+            "turn_id": None,
+            "turn_role": None,
+            "turn_position": None,
+        },
+        history_event={
+            "kind": "retire",
+            "reason": "replacement_agent_run_canceled",
+        },
+    )
+    if retired is None:
+        raise RuntimeError("replacement Run cancellation lost its waiting successor")
+    if predecessor is not None:
+        predecessor_values: dict[str, Any] = {
+            "control_successor_delivery_id": None,
+            "control_successor_turn_id": None,
+        }
+        if predecessor["state"] == "terminal":
+            predecessor_values["control_mode"] = None
+        elif predecessor.get("control_state") == "pending":
+            predecessor_values.update(
+                control_state=None,
+                control_mode=None,
+                control_attempt_id=None,
+                control_expected_native_turn_id=None,
+                control_receipt_outcome=None,
+                control_receipt_json="{}",
+            )
+        else:
+            predecessor_values["control_mode"] = "stop_only"
+        unlinked = cas_turn(
+            conn,
+            str(predecessor["id"]),
+            expected_version=int(predecessor["version"]),
+            expected_states=(str(predecessor["state"]),),
+            values=predecessor_values,
+        )
+        if unlinked is None:
+            raise RuntimeError("replacement Run cancellation lost predecessor unlink")
+    return True
 
 
 def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
@@ -1911,29 +2599,39 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
 
 
 def set_draft(conn: Connection, session_id: str, text: str | None) -> bool:
-    now = utc_now_iso()
+    # A clear is a real draft revision too: retaining its timestamp prevents an
+    # offline client based on the previous revision from recreating text that a
+    # successful send already cleared. Microseconds keep rapid edits distinct.
+    now = turn_now_iso()
     result = conn.execute(
         update(agent_sessions)
         .where(agent_sessions.c.id == session_id)
         .values(
             composer_draft_text=text if text and text.strip() else None,
-            composer_draft_updated_at=now if text and text.strip() else None,
+            composer_draft_updated_at=now,
             updated_at=now,
         )
     )
     return result.rowcount == 1
 
 
-def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+def get_draft_state(conn: Connection, session_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         select(
             agent_sessions.c.composer_draft_text,
             agent_sessions.c.composer_draft_updated_at,
         ).where(agent_sessions.c.id == session_id)
     ).first()
-    if row is None or not row[0]:
+    if row is None:
         return None
-    return {"text": str(row[0]), "updated_at": row[1]}
+    return {"text": str(row[0] or ""), "updated_at": row[1]}
+
+
+def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    state = get_draft_state(conn, session_id)
+    if state is None or not state["text"]:
+        return None
+    return state
 
 
 def pending_control_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:

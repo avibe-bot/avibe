@@ -44,10 +44,12 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 from __future__ import annotations
 
 import ast
+import os
 import shutil
 import sqlite3
 import sys
 import warnings
+from contextlib import closing, contextmanager
 from functools import wraps
 from pathlib import Path
 
@@ -137,11 +139,91 @@ def _sqlite_state_template_factory(tmp_path_factory):
     return get_template
 
 
+@pytest.fixture
+def sqlite_db_factory(tmp_path, _sqlite_state_template_factory):
+    """Give behavioral tests independent, fully initialized state databases.
+
+    This is opt-in: migration/import tests still initialize their own empty DBs.
+    An explicit template must be closed and checkpointed by its owning fixture.
+    Only new paths inside this test's temporary directory may receive a copy.
+    """
+
+    def create(db_path: Path, *, template: Path | None = None) -> Path:
+        db_path = db_path.resolve()
+        db_path.relative_to(tmp_path.resolve())
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path = template if template is not None else _sqlite_state_template_factory()
+        with source_path.open("rb") as source, db_path.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        return db_path
+
+    return create
+
+
+@pytest.fixture(scope="session")
+def _sqlite_schema_template_factory(tmp_path_factory):
+    """Lazily build raw schema only, without running the JSON/data importer."""
+    template_path: Path | None = None
+
+    def get_template() -> Path:
+        nonlocal template_path
+        if template_path is None:
+            from storage.migrations import run_migrations
+
+            path = tmp_path_factory.mktemp("sqlite-schema-template") / "empty.sqlite"
+            run_migrations(path)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            template_path = path
+        return template_path
+
+    return get_template
+
+
+@pytest.fixture
+def sqlite_schema_db_factory(sqlite_db_factory, _sqlite_schema_template_factory):
+    """Opt ordinary setup into private raw schemas; constructors/imports stay real."""
+    def create(db_path: Path) -> Path:
+        return sqlite_db_factory(db_path, template=_sqlite_schema_template_factory())
+
+    return create
+
+
 @pytest.fixture(autouse=True)
 def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     if request.node.get_closest_marker("uses_real_paths"):
         return
     monkeypatch.delenv("AVIBE_HOME", raising=False)
+    # Agent-launched pytest processes inherit the active conversation's caller
+    # identity. Tests must opt in to that context explicitly or unrelated
+    # Harness/session assertions can bind themselves to the live Agent session.
+    for name in (
+        "AVIBE_SESSION_ID",
+        "AVIBE_CALLER_SESSION_PROOF",
+        "AVIBE_RUN_ID",
+        "AVIBE_NATIVE_SESSION_ID",
+        "AVIBE_CALLER_SOURCE",
+        "AVIBE_CALLER_BACKEND",
+        "AVIBE_CALLER_PLATFORM",
+        "AVIBE_CALLER_USER_ID",
+        "AVIBE_CALLER_CHANNEL_ID",
+        "AVIBE_CALLER_SESSION_KEY",
+        "AVIBE_CALLER_MESSAGE_ID",
+        "AVIBE_CALLER_WORKSPACE_ID",
+        "AVIBE_CALLER_REMOTE",
+        "AVIBE_CALLER_RESOURCE_CONTEXT",
+        "VIBE_INTERNAL_DISPATCH_SOCKET",
+        "AVIBE_SKILL_WORKING_DIR",
+        "AVIBE_SKILL_PROJECT_BASE",
+        "AVIBE_SKILL_HOME",
+        "AVIBE_SKILL_CODEX_HOME",
+        "AVIBE_SKILL_CLAUDE_HOME",
+        "AVIBE_SKILL_CLAUDE_CLI_PATH",
+        "AVIBE_SKILL_XDG_CONFIG_HOME",
+        "AVIBE_BUILTIN_SKILLS_ROOT",
+        "AVIBE_BUILTIN_SKILLS_SNAPSHOT_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
     isolated_home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: isolated_home)
     monkeypatch.setenv("HOME", str(isolated_home))
@@ -157,6 +239,22 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     # monkeypatch calls, which run after this fixture.
     monkeypatch.setenv("CODEX_HOME", str(isolated_home / ".codex"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(isolated_home / ".claude"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_latest_version_cache():
+    """Keep the process-lifetime version cache from crossing test boundaries.
+
+    Its file tier already lands in each test's isolated home, but the memory
+    tier is module state: one test's probe answer would otherwise satisfy the
+    next test's lookup, and which test that is depends on the shuffle order.
+    """
+
+    from core import latest_version_cache
+
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001
+    yield
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001
 
 
 @pytest.fixture(autouse=True)
@@ -222,28 +320,95 @@ def _seed_sqlite_state_template(
 
 @pytest.fixture(autouse=True)
 def _reset_cached_sqlite_engines():
-    """Keep process-local SQLite engine caches scoped to each isolated test."""
-    try:
-        from storage.db import dispose_cached_sqlite_engines
-    except Exception:
-        yield
-        return
-    dispose_cached_sqlite_engines()
+    """Keep process-local SQLite caches scoped to each isolated test.
+
+    Both caches key on the resolved database path, so a rebuilt home never
+    inherits a previous test's engine or its "already migrated" result.
+    """
+
+    def _reset() -> None:
+        # A module that has never been imported cannot own cached state. Re-read
+        # at teardown to include modules first imported by the test itself.
+        db = sys.modules.get("storage.db")
+        if db is not None:
+            db.dispose_cached_sqlite_engines()
+        importer = sys.modules.get("storage.importer")
+        if importer is not None:
+            importer.reset_ensured_sqlite_state()
+
+    _reset()
     yield
-    dispose_cached_sqlite_engines()
+    _reset()
+
+
+@pytest.fixture
+def hold_migration_lock_elsewhere():
+    """Hold a migration lock path from a thread that is genuinely not the caller.
+
+    Taking it in the calling thread is not a stand-in for a competing holder and
+    never was, it only used to look like one: `MigrationFileLock` is re-entrant
+    per path and thread, so code under test running in that same thread takes the
+    lock again and proceeds. A test written that way asserts nothing about
+    exclusion and keeps passing after the exclusion is gone.
+    """
+
+    import threading
+
+    from storage.lock import MigrationFileLock
+
+    @contextmanager
+    def _holder(lock_path: Path):
+        acquired = threading.Event()
+        release = threading.Event()
+        failures: list[BaseException] = []
+
+        def hold() -> None:
+            try:
+                with MigrationFileLock(lock_path, timeout_seconds=None):
+                    acquired.set()
+                    release.wait(30)
+            except BaseException as exc:  # surfaced to the test, never swallowed
+                failures.append(exc)
+                acquired.set()
+
+        holder = threading.Thread(target=hold, name="migration-lock-holder", daemon=True)
+        holder.start()
+        assert acquired.wait(30), f"lock holder never started for {lock_path}"
+        assert not failures, failures[0]
+        try:
+            yield
+        finally:
+            release.set()
+            holder.join(30)
+        assert not failures, failures[0]
+
+    return _holder
 
 
 @pytest.fixture(autouse=True)
 def _reset_memory_artifact_manager():
     """Keep the managed Memory runtime bound to the current test home."""
+    if os.environ.get("AVIBE_TEST_BLOCK_MEMORY_IMPORTS") == "1":
+        yield
+        return
     try:
-        from core.memory.artifact import set_memory_artifact_manager_for_tests
+        from avibe_memory.artifact import set_memory_artifact_manager_for_tests
     except Exception:
         yield
         return
     set_memory_artifact_manager_for_tests(None)
     yield
     set_memory_artifact_manager_for_tests(None)
+
+
+@pytest.fixture
+async def memory_runtime_factory():
+    """Own active Memory runtimes until their test has fully torn down."""
+
+    from tests.memory_runtime_factory import finalizing_memory_runtimes
+
+    async with finalizing_memory_runtimes() as factory:
+        yield factory
 
 
 @pytest.fixture(autouse=True)
@@ -255,17 +420,19 @@ def _reset_oauth_runtime_state():
     so without this they would leak across tests sharing a pytest process — e.g. the
     rate limiter accumulating across files and spuriously 429-ing an unrelated test.
     """
-    try:
-        from vibe import remote_access, ui_server
-    except Exception:
-        yield
-        return
-    caches = (remote_access._oauth_handshakes, ui_server._oauth_diag_log_state, ui_server._auth_ratelimit)
-    for cache in caches:
-        cache.clear()
+    def _reset() -> None:
+        remote_access = sys.modules.get("vibe.remote_access")
+        if remote_access is not None:
+            remote_access._clear_active_hostnames_cache()
+            remote_access._oauth_handshakes.clear()
+        ui_server = sys.modules.get("vibe.ui_server")
+        if ui_server is not None:
+            ui_server._oauth_diag_log_state.clear()
+            ui_server._auth_ratelimit.clear()
+
+    _reset()
     yield
-    for cache in caches:
-        cache.clear()
+    _reset()
 
 
 @pytest.fixture(autouse=True)

@@ -127,7 +127,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", thread_id="T1", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
         self.assertIsNotNone(processed)
@@ -152,7 +152,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
         self.assertIsNotNone(processed)
@@ -178,7 +178,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             attachments_dir = Path(tmpdir) / "C1"
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
             residual_files = list(attachments_dir.glob("*")) if attachments_dir.exists() else []
@@ -186,7 +186,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(processed)
         self.assertEqual(
             errors,
-            ["Attachment 'blocked.pdf' could not be downloaded: Download failed with HTTP 403"],
+            ["Attachment 'blocked.pdf' could not be downloaded."],
         )
         self.assertEqual(residual_files, [])
 
@@ -204,7 +204,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
         self.assertIsNotNone(processed)
@@ -227,7 +227,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
         self.assertIsNotNone(processed)
@@ -253,7 +253,7 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack", files=[attachment])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir)):
+            with patch("config.paths.get_attachments_dir", return_value=Path(tmpdir).resolve()):
                 processed, errors = await handler._process_file_attachments(context, "/tmp/work")
 
         self.assertIsNotNone(processed)
@@ -274,6 +274,20 @@ class MessageHandlerAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[Attachment Download Errors]", message)
         self.assertIn("Download failed with HTTP 403", message)
         self.assertNotIn("/.vibe_remote/attachments/", message)
+
+    def test_append_attachment_errors_localizes_the_entire_display_block(self):
+        controller = _StubController(_StubIMClient())
+        controller.config.language = "zh"
+        handler = MessageHandler(controller)
+
+        message = handler._append_attachment_errors(
+            "请检查附件",
+            ["无法下载附件“blocked.pdf”。"],
+        )
+
+        self.assertIn("[附件下载错误]", message)
+        self.assertIn("无法下载附件“blocked.pdf”。", message)
+        self.assertNotIn("Attachment Download Errors", message)
 
 if __name__ == "__main__":
     unittest.main()

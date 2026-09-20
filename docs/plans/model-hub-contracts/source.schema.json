@@ -19,6 +19,11 @@
   ],
   "additionalProperties": false,
   "properties": {
+    "verification_pending": {
+      "type": ["string", "null"],
+      "pattern": "^vp_[0-9a-f]{32}$",
+      "description": "Opaque, non-secret pending-verification identity, replaced whenever Hub credential material or endpoint is stored without an add-time observation that authenticated it, same-handle OAuth reauthentication included. Presence means nothing upstream has accepted this credential yet, independently of routing health. An invocation captures this marker before admission; any successful call with the same current credential and marker may clear it through a fresh cross-process config mutation. Later same-credential calls do not invalidate proof. Inventory never clears it. Null or omission retains legacy behavior without a retrospective verification claim."
+    },
     "id": {
       "type": "string",
       "pattern": "^src_[a-z0-9]{8,}$"
@@ -30,6 +35,11 @@
       ],
       "format": "date-time",
       "description": "When the Source was added, retained as ordinary audit/display metadata. Add-time placement and runtime routing do not read this field. Optional in the schema and nullable when the creation time is unknown."
+    },
+    "client_nonce": {
+      "type": "string",
+      "pattern": "^scn_[a-z0-9]{16,64}$",
+      "description": "Optional client-generated create correlation persisted unchanged only when SourceCreate commits. It is unique among live Sources and live-process Source-create reservations, and lets a client recognize a committed Source after the create response is lost. Process restart ends an in-flight reservation; Source deletion releases a committed nonce. It is not Source identity, a credential, or a routing input."
     },
     "last_discovered_at": {
       "type": [
@@ -48,6 +58,7 @@
     },
     "vendor": {
       "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
       "description": "Standard vendor id (anthropic|openai|zhipuai|kimi|xai|...) or 'custom'. Also the OpenCode provider prefix (see opencode-overlay.md)."
     },
     "display_name": {
@@ -115,7 +126,7 @@
           }
         },
         {
-          "$comment": "v2 (07-29, review round 4; vocabulary closed in round 5): `cooldown` is the ONLY status whose `retry_at` is non-null — spec §4.5 defines it as 'self-healing, `retry_at` known', and 「约 09:15 恢复」 is the whole copy of the state. A cooldown with a null stamp leaves the UI able to say only 暂不可用 with no recovery time, which is indistinguishable to the user from 需处理 — the one distinction this taxonomy exists to make. `detail_key` stays optional here (the recovery time is the load-bearing fact, the cause is a nicety) but its vocabulary is now a CLOSED ENUM rather than the `^models\\.source\\.cooldown\\..+` pattern round 4 used. The round-5 review named that bypass on probe-result's `error`, where the identical construction let `models.source.cooldown.network: <raw upstream body>` validate; the same prefix-plus-`.+` shape was here too and is the same hole, so it is closed in both files rather than only where it was spotted. `.+` after a trusted prefix is a naming convention, not a redaction boundary — the whole point of `detail_key` is that raw upstream text never reaches config or the UI. The five keys are the self-healing causes the adapter classifies; `needs_action` keys remain unwritable here, so a dead source still cannot be filed under a status that promises recovery.",
+          "$comment": "v2 (07-29, review round 4; vocabulary closed in round 5; network correction 2026-08-11): `cooldown` is the ONLY persisted Source status whose `retry_at` is non-null — spec §4.5 defines it as self-healing with a known retry time. `detail_key` stays optional here, but its vocabulary is a CLOSED ENUM rather than the earlier `^models\\.source\\.cooldown\\..+` pattern: a trusted prefix plus `.+` is a naming convention, not a redaction boundary. The retained quota, rate-limit, and server-error keys are shaped explicit upstream classifications. Unclassified connection failures use the separate live AgentChain backoff projection; the historical persistent network/timeout keys are not legal Source state. `needs_action` keys remain unwritable here, so a dead source still cannot be filed under a status that promises unattended recovery.",
           "if": {
             "properties": {
               "status": {
@@ -137,8 +148,6 @@
               "detail_key": {
                 "enum": [
                   null,
-                  "models.source.cooldown.network",
-                  "models.source.cooldown.timeout",
                   "models.source.cooldown.rate_limited",
                   "models.source.cooldown.quota_exhausted",
                   "models.source.cooldown.server_error"
@@ -216,7 +225,7 @@
             "error"
           ],
           "$comment": "Source-global health never implies process-local native CLI availability. Live process availability is resolved separately and takes precedence when deciding hop runnability.",
-          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability is a distinct live fact carried by Route-hop annotations, so a globally healthy Source may still have a native_cli_unavailable hop. Quota and upstream reachability share one Source-global state across backends."
+          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability and short connection backoff are distinct live facts carried by Route-hop annotations, so neither is persisted here. Only shaped explicit upstream classifications may change Source-global health; an unclassified transport failure never does."
         },
         "retry_at": {
           "type": [
@@ -232,10 +241,8 @@
             "string",
             "null"
           ],
-          "description": "Closed i18n key, never raw upstream error text. Healthy states require null. Cooldown may carry a self-healing cause; needs_action requires the cause/remedy key selected by its schema branch; error requires the generic unclassified key. The mirror registry checks this vocabulary against probe and resolution-event consumers.",
+          "description": "Closed i18n key, never raw upstream error text. Healthy states require null. Cooldown may carry a shaped self-healing quota, rate-limit, or server-error cause; unclassified connection failures use only the live AgentChain backoff projection. needs_action requires the cause/remedy key selected by its schema branch; error requires the generic unclassified key. The mirror registry checks this vocabulary against probe and resolution-event consumers.",
       "examples": [
-        "models.source.cooldown.network",
-        "models.source.cooldown.timeout",
         "models.source.cooldown.rate_limited",
         "models.source.cooldown.quota_exhausted",
         "models.source.cooldown.server_error",
@@ -291,7 +298,8 @@
         "required": [
           "id",
           "origin",
-          "reasoning_efforts"
+          "reasoning_efforts",
+          "reasoning_efforts_source"
         ],
         "additionalProperties": false,
         "allOf": [
@@ -311,6 +319,72 @@
               "properties": {
                 "discovered_at": {
                   "type": "null"
+                },
+                "retired": {
+                  "const": false
+                }
+              }
+            }
+          },
+          {
+            "$comment": "Only an upstream-discovered model can be retired. The flag is a persistent tombstone: refresh preserves the row and never clears the flag, even when the upstream advertises the model again.",
+            "if": {
+              "properties": {
+                "retired": {
+                  "const": true
+                }
+              },
+              "required": [
+                "retired"
+              ]
+            },
+            "then": {
+              "properties": {
+                "origin": {
+                  "const": "discovered"
+                }
+              }
+            }
+          },
+          {
+            "$comment": "A null tier source is the explicit no-declaration state and therefore carries no tiers.",
+            "if": {
+              "properties": {
+                "reasoning_efforts_source": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "reasoning_efforts_source"
+              ]
+            },
+            "then": {
+              "properties": {
+                "reasoning_efforts": {
+                  "maxItems": 0
+                }
+              }
+            }
+          },
+          {
+            "$comment": "Live upstream capability signals and user declarations always resolve to at least one tier. Catalog is intentionally absent from this condition because an exact catalog row may explicitly declare an empty list.",
+            "if": {
+              "properties": {
+                "reasoning_efforts_source": {
+                  "enum": [
+                    "upstream",
+                    "user"
+                  ]
+                }
+              },
+              "required": [
+                "reasoning_efforts_source"
+              ]
+            },
+            "then": {
+              "properties": {
+                "reasoning_efforts": {
+                  "minItems": 1
                 }
               }
             }
@@ -336,9 +410,27 @@
           },
           "reasoning_efforts": {
             "type": "array",
-            "description": "Declared reasoning-effort capability values for this exact upstream model. Editable for discovered and manual entries; may be empty and has no selected or default item.",
+            "description": "Declared reasoning-effort capability values for this exact upstream model. Upstream and catalog declarations are read-only; user declarations are editable. The list may be empty and has no selected or default item.",
             "items": { "type": "string", "minLength": 1 },
             "uniqueItems": true
+          },
+          "reasoning_efforts_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "upstream",
+              "catalog",
+              "user",
+              null
+            ],
+            "description": "First applicable provenance rung for reasoning_efforts. upstream is live supported_parameters metadata; catalog is the exact bundled model row; user is a typed declaration; null accompanies an empty undeclared list. Older persisted shapes without this field are interpreted by the config loader as user for a non-empty list and null for an empty list."
+          },
+          "retired": {
+            "type": "boolean",
+            "default": false,
+            "description": "Persistent retirement tombstone. Omission means false. Only a discovered entry may be true; a retired entry remains readable but supplies no route, match, or invocation and refresh never revives it."
           },
           "discovered_at": {
             "type": [
@@ -346,6 +438,25 @@
               "null"
             ],
             "format": "date-time"
+          }
+        }
+      }
+    },
+    "adopted_by": {
+      "type": "array",
+      "description": "Server-derived Source-card projection of effective Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains.",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["backend", "menu_model"],
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "enum": ["claude", "codex", "opencode"]
+          },
+          "menu_model": {
+            "type": "string",
+            "minLength": 1
           }
         }
       }
@@ -492,6 +603,7 @@
           "display_name": "Opus 4.6",
           "origin": "discovered",
           "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
           "discovered_at": "2026-07-23T03:00:00Z"
         }
       ],
@@ -512,7 +624,7 @@
       "state": {
         "status": "cooldown",
         "retry_at": "2026-07-23T04:00:00Z",
-        "detail_key": "models.source.cooldown.timeout"
+        "detail_key": "models.source.cooldown.server_error"
       },
       "usage": {
         "cycle_used_pct": null,
@@ -525,6 +637,7 @@
           "display_name": "GLM 5.2 Air",
           "origin": "manual",
           "reasoning_efforts": [],
+          "reasoning_efforts_source": null,
           "discovered_at": null
         }
       ],

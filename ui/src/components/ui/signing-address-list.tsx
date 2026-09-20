@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -7,7 +8,7 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Display order: ETH first, then BTC modern → legacy. Each entry maps a backend
 // signing_addresses key to a short label; missing entries are skipped.
-const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: string }> = [
+const ROWS: ReadonlyArray<{ key: keyof SigningAddresses; labelKey: TranslationKey }> = [
   { key: 'eth', labelKey: 'vaults.addresses.eth' },
   { key: 'btc_segwit', labelKey: 'vaults.addresses.btcSegwit' },
   { key: 'btc_taproot', labelKey: 'vaults.addresses.btcTaproot' },
@@ -37,7 +38,7 @@ const AddressRow: React.FC<{ label: string; value: string }> = ({ label, value }
         aria-label={t('vaults.addresses.copy', { label })}
         className="shrink-0 text-muted transition-colors hover:text-foreground"
       >
-        {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5" />}
+        {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
       </button>
     </div>
   );

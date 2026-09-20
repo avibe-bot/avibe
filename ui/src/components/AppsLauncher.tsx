@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronUp, LayoutGrid, Pin } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -7,6 +8,7 @@ import { Dock } from './apps/Dock';
 import { ContextMenu, ContextMenuItem } from './ui/context-menu';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { useShowPageDrag } from '../context/showPageDrag';
+import { useRouteSurfaceActive } from '../lib/routeSurfaceActivity';
 
 // The sidebar bottom-left "Apps" button that reveals the Dock.
 //   - hover        → the Dock floats up ABOVE the button (transient preview; the
@@ -18,20 +20,65 @@ import { useShowPageDrag } from '../context/showPageDrag';
 //                    and the empty-Dock hint), complementing §7.1c point 7. It
 //                    does NOT touch the hover/pin behavior.
 export const AppsLauncher: React.FC = () => {
+  const active = useRouteSurfaceActive();
+  const [pinned, setPinned] = useState(false);
+  // Pinning belongs to the launcher owner. Hover/menu/drag and Dock demand
+  // belong to the visible presentation and retire together on suspension.
+  return active ? <LauncherPresentation pinned={pinned} setPinned={setPinned} /> : null;
+};
+
+const LauncherPresentation = ({ pinned, setPinned }: {
+  pinned: boolean;
+  setPinned: (value: boolean) => void;
+}) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   const showPageDrag = useShowPageDrag();
-  const [pinned, setPinned] = useState(false);
   const [hovering, setHovering] = useState(false);
   const [dragHovering, setDragHovering] = useState(false);
   // Cursor-positioned right-click menu, on the shared ContextMenu primitive.
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const closeTimer = useRef<number | null>(null);
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const launcherRef = useRef<HTMLDivElement | null>(null);
+  const [placement, setPlacement] = useState({ left: 0, bottom: 0, width: 0, height: 0 });
   // Set on unpin so the lingering hover doesn't immediately re-open the panel;
   // cleared once the cursor actually leaves the trigger+panel.
   const suppressHover = useRef(false);
 
   const visible = pinned || hovering || (showPageDrag.active && dragHovering);
+
+  useLayoutEffect(() => {
+    const slot = slotRef.current;
+    const launcher = launcherRef.current;
+    if (!slot || !launcher) return;
+    const measure = () => {
+      const rect = slot.getBoundingClientRect();
+      const next = {
+        left: rect.left,
+        bottom: window.innerHeight - rect.bottom,
+        width: rect.width,
+        height: launcher.getBoundingClientRect().height,
+      };
+      setPlacement((current) =>
+        current.left === next.left && current.bottom === next.bottom
+          && current.width === next.width && current.height === next.height ? current : next,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    observer.observe(launcher);
+    // The optional hostname/version rows can move the slot without resizing it.
+    if (slot.parentElement?.parentElement) observer.observe(slot.parentElement.parentElement);
+    window.addEventListener('resize', measure);
+    window.addEventListener('scroll', measure, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', measure);
+      window.removeEventListener('scroll', measure, true);
+    };
+  }, []);
 
   useEffect(() => {
     const resetDragHover = () => setDragHovering(false);
@@ -55,12 +102,9 @@ export const AppsLauncher: React.FC = () => {
       closeTimer.current = null;
     }, 180);
   };
-  useEffect(
-    () => () => {
-      if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (closeTimer.current !== null) window.clearTimeout(closeTimer.current);
+  }, []);
 
   const onClick = () => {
     if (pinned) {
@@ -77,12 +121,11 @@ export const AppsLauncher: React.FC = () => {
     setMenu(null);
   };
 
-  return (
-    // The sidebar aside owns the stacking context (z-10, below the window layer z-20), so the Apps
-    // button is covered by a maximized window like the rest of the sidebar. `relative` is just the
-    // positioning context for the Dock popover below; the popover's z-50 is scoped to the sidebar.
+  const launcher = (
     <div
-      className="relative flex-1"
+      ref={launcherRef}
+      className="fixed z-40 hidden md:block"
+      style={{ left: placement.left, bottom: placement.bottom, width: placement.width }}
       data-show-page-dock-drop-target
       onMouseEnter={openHover}
       onMouseLeave={queueClose}
@@ -129,16 +172,19 @@ export const AppsLauncher: React.FC = () => {
         aria-expanded={visible}
         aria-pressed={pinned}
         className={clsx(
-          'group flex w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
+          // Keep the Apps control soft and mint scoped to this shell affordance.
+          // Its label stays ordinary foreground text; the fill and icon carry
+          // the brand without changing shared mint-soft tokens or adding glow.
+          'group flex w-full items-center gap-2.5 rounded-full border bg-mint/[0.16] px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
           visible
-            ? 'border-cyan shadow-[0_0_22px_-4px_rgba(63,224,229,0.7)]'
-            : 'border-cyan/45 shadow-[0_0_14px_-5px_rgba(63,224,229,0.55)] hover:border-cyan/70',
+            ? 'border-mint'
+            : 'border-mint/45 hover:border-mint/70',
         )}
       >
-        <LayoutGrid className="size-4 shrink-0 text-cyan" />
+        <LayoutGrid className="size-4 shrink-0 text-mint-ink" />
         <span className="flex-1 whitespace-nowrap text-left">{t('apps.title')}</span>
         {pinned ? (
-          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan" />
+          <Pin className="size-3.5 shrink-0 rotate-45 fill-mint text-mint-ink" />
         ) : (
           <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !visible && 'rotate-180')} />
         )}
@@ -159,12 +205,22 @@ export const AppsLauncher: React.FC = () => {
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={184} itemCount={1}>
           <ContextMenuItem
-            icon={<LayoutGrid className="size-[15px] text-cyan" />}
+            icon={<LayoutGrid className="size-[15px] text-mint-ink" />}
             label={t('apps.launcher.openLibrary')}
             onClick={openLibrary}
           />
         </ContextMenu>
       )}
     </div>
+  );
+
+  return (
+    <>
+      {/* Keep the sidebar's layout slot, but let this single launcher and its Dock escape the
+          sidebar stacking context. z-40 clears app windows (z-20) and route panels (z-30);
+          floating details and modal dialogs keep their own foreground layer (z-50). */}
+      <div ref={slotRef} className="flex-1" style={{ height: placement.height }} />
+      {createPortal(launcher, document.body)}
+    </>
   );
 };

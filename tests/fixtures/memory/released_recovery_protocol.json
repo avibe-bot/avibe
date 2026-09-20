@@ -1,0 +1,25 @@
+{
+  "mode": "self_host",
+  "version": "v2",
+  "slack": {"bot_token": ""},
+  "runtime": {"default_cwd": "."},
+  "agents": {},
+  "memory": {
+    "enabled": true,
+    "embedding_change_pending": true,
+    "recovery_intent": "rebuild",
+    "cloud": {"transition_rebuild_owned": true},
+    "processing": {
+      "llm": {
+        "base_url": "https://llm.example.test/v1",
+        "model": "chat-v1",
+        "api_key": "llm-secret"
+      },
+      "embedding": {
+        "base_url": "https://embedding.example.test/v1",
+        "model": "embedding-v1",
+        "api_key": "embedding-secret"
+      }
+    }
+  }
+}

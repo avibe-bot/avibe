@@ -71,22 +71,6 @@ _INPUT_TURN_MESSAGE_TYPES = tuple(
     dict.fromkeys(message_type for _, message_type in input_author_type_pairs())
 )
 
-SHOW_GIT_AGENT_CONTRACT = (
-    "History is saved automatically around each turn; do not manage versions yourself.",
-    "Read freely: `git -C <workspace> status / log / diff / show`.",
-    "Restore only via `git restore --source=<ref> -- <path>`; the turn-end checkpoint records it as a forward commit.",
-    "Never move HEAD, switch branches, rewrite history, or run gc; if you do, the platform self-heals with the worktree as truth.",
-    "Never add remotes, push, or publish the workspace anywhere unless the user explicitly asks.",
-)
-SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT = (
-    "Avibe's shadow history continues automatically in the background; you don't manage it.",
-    "`git -C <workspace>` addresses the **user's repo**, not Avibe history: never commit, push, or publish on their behalf, and never use it for Avibe restore.",
-    "Never locate or mutate Avibe's shadow gitdir on your own initiative. Only if the user explicitly asks to recover from Avibe history, use standard git with explicit `--git-dir` and `--work-tree` against the session's shadow gitdir for read or restore only; never commit to it.",
-)
-SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT = (
-    "Automatic Show Page history is unavailable because Git could not be resolved for this process. Continue editing normally, but do not use history or restore commands for this workspace.",
-)
-
 
 class ShowGitError(RuntimeError):
     """A platform Git operation failed."""
@@ -192,23 +176,15 @@ def _workspace_is_self_managed(session_id: str) -> bool:
     return not managed
 
 
-def format_agent_contract(
-    *,
-    numbered: bool = False,
-    checkpointing_available: bool | None = None,
-    session_id: str | None = None,
-) -> str:
-    if checkpointing_available is None:
-        checkpointing_available = show_git_checkpointing_active()
-    if not checkpointing_available:
-        lines = SHOW_GIT_UNAVAILABLE_AGENT_CONTRACT
-    elif session_id is not None and _workspace_is_self_managed(session_id):
-        lines = SHOW_GIT_SELF_MANAGED_AGENT_CONTRACT
-    else:
-        lines = SHOW_GIT_AGENT_CONTRACT
-    if numbered:
-        return "\n".join(f"{index}. {line}" for index, line in enumerate(lines, start=1))
-    return "\n".join(f"- {line}" for line in lines)
+def show_history_status(session_id: str) -> dict[str, Any]:
+    """Describe this page's history on demand without creating or changing it."""
+    if not _SESSION_ID_PATTERN.fullmatch(str(session_id or "")):
+        raise ValueError("Invalid Show Page session id")
+    return {
+        "mode": "self-managed" if _workspace_is_self_managed(session_id) else "managed",
+        "checkpointing_active": show_git_checkpointing_active(),
+        "git_dir": str(paths.get_show_git_dir(session_id)),
+    }
 
 
 def _single_line(value: Any) -> str:

@@ -301,6 +301,66 @@ def test_save_state_does_not_relabel_existing_anchor_row_to_different_backend(tm
         service.close()
 
 
+def test_runtime_marker_is_bound_to_exact_active_native_session(tmp_path: Path) -> None:
+    service = SQLiteSessionsService(tmp_path / "vibe.sqlite")
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn,
+                "avibe::project::proj_1",
+                now="2026-09-04T00:00:00Z",
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="ses-runtime",
+                native_session_id="thread-1",
+                workdir="/tmp",
+                metadata={"keep": "unchanged"},
+                require_workdir=False,
+            )
+
+        marker = {"thread_id": "thread-1", "sha256": "abc123"}
+        assert service.set_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+            value=marker,
+        )
+        assert (
+            service.get_agent_session_runtime_marker(
+                session_id,
+                backend="codex",
+                native_session_id="thread-1",
+                key="codex_fallback_prompt",
+            )
+            == marker
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert json.loads(row["metadata_json"])["keep"] == "unchanged"
+
+        assert not service.set_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-replaced",
+            key="codex_fallback_prompt",
+            value={"thread_id": "thread-replaced", "sha256": "new"},
+        )
+        assert service.get_agent_session_runtime_marker(
+            session_id,
+            backend="codex",
+            native_session_id="thread-1",
+            key="codex_fallback_prompt",
+        ) == marker
+    finally:
+        service.close()
+
+
 def test_save_state_skips_import_when_archived_row_owns_anchor(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -2937,6 +2997,73 @@ def test_native_session_id_is_write_once_by_anchor(tmp_path: Path) -> None:
         service.close()
 
 
+def test_replace_agent_session_native_supersedes_binding_without_changing_public_session(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="opencode",
+            session_anchor="slack_C123",
+            native_session_id="native-wrapped",
+        )
+        assert session_id is not None
+
+        replaced = service.replace_agent_session_native(
+            session_id=session_id,
+            expected_native_session_id="native-wrapped",
+            replacement_native_session_id="native-repaired",
+        )
+
+        assert replaced == session_id
+        active = service.get_agent_session_by_id(session_id)
+        assert active is not None
+        assert active["session_anchor"] == "slack_C123"
+        assert active["native_session_id"] == "native-repaired"
+        assert service.find_session_for_anchor(
+            scope_key="slack::channel::C123",
+            session_anchor="slack_C123",
+        )["id"] == session_id
+        with service.engine.connect() as conn:
+            snapshots = conn.execute(
+                select(agent_sessions)
+                .where(agent_sessions.c.id != session_id)
+                .where(agent_sessions.c.session_anchor.like("slack_C123:superseded:%"))
+            ).mappings().all()
+        assert len(snapshots) == 1
+        assert snapshots[0]["native_session_id"] == "native-wrapped"
+        assert snapshots[0]["status"] == "archived"
+        assert snapshots[0]["visibility"] == "background"
+    finally:
+        service.close()
+
+
+def test_replace_agent_session_native_refuses_stale_expected_binding(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.bind_agent_session(
+            scope_key="slack::channel::C123",
+            agent_name="opencode",
+            session_anchor="slack_C123",
+            native_session_id="native-current",
+        )
+        assert session_id is not None
+
+        assert service.replace_agent_session_native(
+            session_id=session_id,
+            expected_native_session_id="native-stale",
+            replacement_native_session_id="native-repaired",
+        ) is None
+        assert service.get_agent_session_by_id(session_id)["native_session_id"] == "native-current"
+        with service.engine.connect() as conn:
+            assert conn.execute(select(agent_sessions.c.id)).all() == [(session_id,)]
+    finally:
+        service.close()
+
+
 def test_sqlite_sessions_service_delete_agent_sessions_escapes_anchor_prefix(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -5197,7 +5324,7 @@ def test_native_bind_by_id_idempotent_rebind_cannot_resurrect_an_archived_sessio
 _UPDATE_SESSION_FAST_PATH_SELECT = (
     "SELECT agent_sessions.id, agent_sessions.scope_id, agent_sessions.agent_backend, "
     "agent_sessions.native_session_id, agent_sessions.agent_status, "
-    "agent_sessions.metadata_json, agent_sessions.status FROM agent_sessions "
+    "agent_sessions.workdir, agent_sessions.metadata_json, agent_sessions.status FROM agent_sessions "
     "WHERE agent_sessions.id = ?"
 )
 
@@ -5895,8 +6022,9 @@ def _bind_definition(
     conn,  # noqa: ANN001
     *,
     definition_id: str,
-    session_id: str,
+    session_id: str | None,
     metadata: dict | None = None,
+    enabled: int = 1,
 ) -> None:
     """A scheduled task pinned to ``session_id``, in the shape reclaim reads."""
     conn.execute(
@@ -5912,7 +6040,7 @@ def _bind_definition(
             prompt="run the nightly check",
             schedule_type="cron",
             cron="0 3 * * *",
-            enabled=1,
+            enabled=enabled,
             created_at="2026-07-28T00:00:00Z",
             updated_at="2026-07-28T00:00:00Z",
             metadata_json=json.dumps(metadata or {"origin": "cli"}),
@@ -5920,14 +6048,18 @@ def _bind_definition(
     )
 
 
-#: The decision read of ``reclaim_bound_definitions``: every live definition bound to
-#: the session going away. Everything the loop then writes -- pause / soft-delete, the
-#: settings snapshot, the summary counters and the teardown ledger -- is decided from
-#: this one row set.
+#: The decision read of ``reclaim_bound_definitions``: every live definition that
+#: either belongs to the session or targets it for execution. Everything the loop then
+#: writes -- pause / soft-delete, the settings snapshot, the summary counters and the
+#: teardown ledger -- is decided from this one row set.
 _RECLAIM_DECISION_SELECT = (
     "SELECT run_definitions.id, run_definitions.definition_type, run_definitions.enabled, "
-    "run_definitions.metadata_json FROM run_definitions WHERE run_definitions.session_id = ? "
-    "AND run_definitions.deleted_at IS NULL"
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions WHERE ("
+    "run_definitions.definition_type = ? AND run_definitions.session_id = ? OR "
+    "run_definitions.definition_type = ? AND (CASE WHEN (json_valid(run_definitions.metadata_json) = ?) "
+    "THEN CASE WHEN (json_type(run_definitions.metadata_json, ?) = ?) THEN "
+    "nullif(trim(json_extract(run_definitions.metadata_json, ?), ?), ?) END END = ? OR "
+    "run_definitions.session_id = ?)) AND run_definitions.deleted_at IS NULL"
 )
 
 
@@ -6543,6 +6675,16 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 workdir=str(tmp_path),
             )
             _bind_definition(conn, definition_id="def-pinned", session_id=superseded_id)
+            _bind_definition(
+                conn,
+                definition_id="def-owner-only",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": superseded_id}},
+                    "origin": "cli",
+                },
+            )
 
         def _winner_supersedes(other_conn) -> None:  # noqa: ANN001
             other_conn.execute(
@@ -6583,6 +6725,24 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 .mappings()
                 .first()
             )
+            owner_only = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == "def-owner-only"))
+                .mappings()
+                .one()
+            )
+        from storage.background import SQLiteBackgroundTaskStore, task_resume_block
+
+        metadata = json.loads(owner_only["metadata_json"])
+        assert task_resume_block(metadata, owner_only["session_id"]) is None
+        task_store = SQLiteBackgroundTaskStore(db_path)
+        try:
+            assert task_store.set_definition_enabled(
+                "def-owner-only",
+                True,
+                definition_type="scheduled",
+            )
+        finally:
+            task_store.close()
     finally:
         service.close()
 
@@ -6609,6 +6769,14 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
     assert [entry["definition_id"] for entry in ledger_entries] == ["def-pinned"], (
         f"the /new reply counts {ledger_entries!r}, which is not what the teardown did"
     )
+
+
+_DEFINITION_RESUME_SELECT = (
+    "SELECT run_definitions.definition_type, run_definitions.mode, "
+    "run_definitions.schedule_type, run_definitions.retired_at, run_definitions.enabled, "
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions "
+    "WHERE run_definitions.id = ? AND run_definitions.deleted_at IS NULL"
+)
 
 
 # --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---
@@ -6698,6 +6866,12 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         "save_state": (
             "legacy import: the detected site is the INSERT path, and the upsert's "
             "set_ excludes both pinnable columns (see the note on its backend relabel)"
+        ),
+        # Native repair snapshot: the INSERT copies the old binding's complete
+        # route and metadata marker unchanged into an inert superseded row. The
+        # active-row UPDATE changes only native_session_id and timestamps.
+        "replace_agent_session_native": (
+            "native repair snapshot: route and marker are copied together unchanged"
         ),
     },
 }
@@ -6973,6 +7147,72 @@ def _refuse_a_competing_writer_at(engine, db_path: Path, *, read: str, write) ->
             other.dispose()
 
     return state
+
+
+def test_direct_task_resume_reserves_write_lock_before_resumability_read(tmp_path: Path) -> None:
+    """A Harness resume cannot overtake an orphan marker from Session teardown."""
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            _bind_definition(
+                conn,
+                definition_id="def-resume-race",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": "ses-owner"}},
+                    "origin": "cli",
+                },
+            )
+    finally:
+        service.close()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        def _stamp_orphan_marker(other_conn) -> None:  # noqa: ANN001
+            other_conn.execute(
+                run_definitions.update()
+                .where(run_definitions.c.id == "def-resume-race")
+                .values(
+                    enabled=0,
+                    metadata_json=json.dumps(
+                        {
+                            "created_by": {"caller": {"session_id": "ses-owner"}},
+                            "origin": "cli",
+                            "orphaned_task_owner": {
+                                "reason_code": "task_owner_session_unavailable",
+                                "owner_session_id": "ses-owner",
+                            },
+                        }
+                    ),
+                    updated_at="2026-08-11T00:00:01Z",
+                )
+            )
+
+        race = _refuse_a_competing_writer_at(
+            store.engine,
+            db_path,
+            read=_DEFINITION_RESUME_SELECT,
+            write=_stamp_orphan_marker,
+        )
+
+        assert store.set_definition_enabled(
+            "def-resume-race",
+            True,
+            definition_type="scheduled",
+        )
+        saved = store.get_scheduled_task("def-resume-race")
+    finally:
+        store.close()
+
+    assert race["fired"] == 1, "the test did not observe the resumability decision read"
+    assert race["committed"] == 0, "Session teardown wrote inside the resume window"
+    assert race["refused"], "the resume path did not hold SQLite's writer slot"
+    assert saved is not None and saved["enabled"] is True
 
 
 def _record_statements(engine) -> list[str]:
@@ -7747,3 +7987,206 @@ def test_releasing_a_reservation_holds_the_write_lock_at_its_decision_read(
         "nothing adopted the reservation, so the release must still remove it: a fix that "
         "makes the cleanup stop working is not a fix"
     )
+
+
+def _activity_stamps(service: SQLiteSessionsService) -> dict[str, tuple[str, str]]:
+    """Every row's ranking-relevant timestamps, keyed by session id."""
+
+    with service.engine.connect() as conn:
+        return {
+            str(row["id"]): (str(row["last_active_at"]), str(row["updated_at"]))
+            for row in conn.execute(
+                select(
+                    agent_sessions.c.id,
+                    agent_sessions.c.last_active_at,
+                    agent_sessions.c.updated_at,
+                )
+            ).mappings()
+        }
+
+
+def test_save_state_does_not_move_last_active_at_of_any_existing_row(tmp_path: Path) -> None:
+    """``save_state`` imports legacy mappings; it is not session activity.
+
+    ``now`` is computed once per call, so a row it restamps is not merely wrong
+    by a few microseconds -- every row it touches ends up sharing one identical
+    value, which collapses the session list's ``last_active_at DESC`` ordering
+    onto its tiebreakers. The assertion is therefore that *no* pre-existing row
+    moved, seeded with one row of every shape this loop can reach rather than a
+    list of the shapes it is expected to skip.
+    """
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            adopted_scope = resolve_scope_from_legacy_key(conn, "slack::C_ADOPT", now="2026-07-01T00:00:00Z")
+            archived_scope = resolve_scope_from_legacy_key(conn, "slack::C_ARCHIVED", now="2026-07-01T00:00:00Z")
+            routed_scope = resolve_scope_from_legacy_key(conn, "slack::C_ROUTED", now="2026-07-01T00:00:00Z")
+
+            # Shape 1: the imported mapping matches this row and its backend.
+            adopted_id = create_agent_session_row(
+                conn,
+                scope_id=adopted_scope,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="slack_100.001",
+                native_session_id="codex-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ADOPT"},
+                now="2026-07-10T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 2: an archived row owns the anchor, so the import is skipped.
+            archived_id = create_agent_session_row(
+                conn,
+                scope_id=archived_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_200.002",
+                native_session_id="archived-native",
+                status="archived",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ARCHIVED"},
+                now="2026-07-11T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 3: a backend-owned route the import must not relabel.
+            routed_id = create_agent_session_row(
+                conn,
+                scope_id=routed_scope,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_300.003",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C_ROUTED"},
+                now="2026-07-12T00:00:00+00:00",
+                require_workdir=False,
+            )
+            # Shape 4: a Session with no Scope at all.
+            scopeless_id = create_agent_session_row(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="standalone_400.004",
+                native_session_id="scopeless-native",
+                workdir="/tmp",
+                metadata={},
+                now="2026-07-13T00:00:00+00:00",
+                require_workdir=False,
+            )
+
+        before = _activity_stamps(service)
+        assert set(before) == {adopted_id, archived_id, routed_id, scopeless_id}
+
+        service.save_state(
+            SessionState(
+                session_mappings={
+                    "slack::C_ADOPT": {"codex": {"slack_100.001": "codex-native"}},
+                    "slack::C_ARCHIVED": {"codex": {"slack_200.002": "codex-native"}},
+                    "slack::C_ROUTED": {"codex": {"slack_300.003": "codex-native"}},
+                    "": {"codex": {"standalone_400.004": "scopeless-native"}},
+                    # A mapping with no row yet: this one must still be stamped.
+                    "slack::C_NEW": {"codex": {"slack_500.005": "new-native"}},
+                }
+            )
+        )
+
+        after = _activity_stamps(service)
+        for session_id, stamps in before.items():
+            assert after[session_id][0] == stamps[0], (
+                f"save_state moved last_active_at of {session_id}: "
+                f"{stamps[0]} -> {after[session_id][0]}"
+            )
+
+        created = set(after) - set(before)
+        assert created, "save_state imported no new row, so the insert path proved nothing"
+        for session_id in created:
+            assert after[session_id][0], f"newly imported row {session_id} has no last_active_at"
+    finally:
+        service.close()
+
+
+def test_startup_mapping_migration_does_not_restamp_sessions_without_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Session with no Scope must not make every startup re-save the state.
+
+    ``_legacy_scope_key`` collapses a row with no Scope and no recorded legacy
+    scope key onto the empty key. Treating that as a legacy raw key made the
+    startup migration "migrate" it on every boot -- and each of those saves
+    rewrote the whole state, so the fix has to hold across restarts, not just
+    once.
+    """
+
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "slack::C123", now="2026-07-01T00:00:00Z")
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                metadata={"legacy_scope_key": "slack::C123"},
+                now="2026-07-20T00:00:00+00:00",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=None,
+                agent_backend="codex",
+                agent_variant="codex",
+                session_anchor="archived:seed",
+                native_session_id="codex-native",
+                status="archived",
+                workdir="/tmp",
+                metadata={},
+                now="2026-07-21T00:00:00+00:00",
+                require_workdir=False,
+            )
+        before = _activity_stamps(store._service)
+    finally:
+        store.close()
+
+    save_calls: list[object] = []
+    original_save_state = SQLiteSessionsService.save_state
+
+    def _spy(self: SQLiteSessionsService, state: SessionState) -> None:
+        save_calls.append(state)
+        return original_save_state(self, state)
+
+    monkeypatch.setattr(SQLiteSessionsService, "save_state", _spy)
+
+    for _ in range(2):
+        restarted = SessionsStore(sessions_path)
+        try:
+            assert "archived:seed" in restarted.state.session_mappings.get("", {}).get("codex", {}), (
+                "the scope-less row no longer loads under the empty key, so this test "
+                f"no longer reproduces the trigger: {restarted.state.session_mappings!r}"
+            )
+            restarted.migrate_session_mappings("slack")
+            assert "slack::" not in restarted.state.session_mappings, (
+                "the empty key was prefixed onto a platform it has no relation to"
+            )
+            assert "archived:seed" in restarted.state.session_mappings.get("", {}).get("codex", {}), (
+                "the migration dropped the scope-less Session's mapping"
+            )
+        finally:
+            restarted.close()
+
+    assert save_calls == [], (
+        f"the startup migration still re-saved the whole session state {len(save_calls)} time(s)"
+    )
+
+    verify = SQLiteSessionsService(sessions_path.with_name("vibe.sqlite"))
+    try:
+        assert _activity_stamps(verify) == before
+    finally:
+        verify.close()

@@ -466,6 +466,23 @@ async fn a_superseded_desktop_runtime_is_stopped_before_the_successor_starts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_unknown_predecessor_never_authorizes_initial_or_polling_handover() {
+    for mismatch_at in [1, 2] {
+        let probe = Arc::new(FakeProbe {
+            healthy_from: usize::MAX,
+            runtime_id: None,
+            identity_mismatch_at: Some(mismatch_at),
+            calls: AtomicUsize::new(0),
+        });
+        let launcher = FakeLauncher::managed(&"b".repeat(64));
+        let host = host(probe, launcher.clone(), fast_settings());
+        assert_eq!(host.bootstrap(&Recorder::default()).await.phase, BootstrapPhase::Failed);
+        assert_eq!(launcher.handovers.load(Ordering::SeqCst), 0);
+        assert_eq!(launcher.calls(), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_identity_mismatch_discovered_while_polling_hands_over_and_relaunches_immediately() {
     let expected = "b".repeat(64);
     let probe = FakeProbe::mismatch_after_launch_then_healthy(&expected);

@@ -144,7 +144,6 @@ Initial providers:
 - `manifest-cache`: default for packaged Vibe Remote releases
 - `local-bin`: explicit `VIBE_SHOW_RUNTIME_BIN` override for development
 - `archive-path`: explicit local archive override for testing and emergency use
-- `github-source`: development-only fallback for fast iteration
 - `npm`: future stable-channel provider, not the first default
 
 Resolution order:

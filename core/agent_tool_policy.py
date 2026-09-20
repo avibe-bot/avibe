@@ -34,14 +34,8 @@ directly and reused by any backend adapter.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
-
-# Set to a truthy value to let the agent use backend-native background tools
-# anyway. Intended for the narrow case where a user explicitly asks for
-# backend-native behavior and accepts that the result dies with the session.
-ALLOW_NATIVE_BACKGROUND_TOOLS_ENV = "AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS"
 
 _HARNESS_HINT = (
     "Avibe Harness records the run in `agent_runs` and delivers the result "
@@ -189,25 +183,15 @@ def session_only_background_tool_names() -> Tuple[str, ...]:
     return tuple(_SESSION_ONLY_BACKGROUND_TOOLS)
 
 
-def native_background_tools_allowed(env: Optional[Dict[str, str]] = None) -> bool:
-    """True when the operator has opted back into backend-native background work."""
-    source = os.environ if env is None else env
-    return bool(source.get(ALLOW_NATIVE_BACKGROUND_TOOLS_ENV, "").strip())
-
-
 def check_tool_call(
     tool_name: str,
     tool_input: Optional[Dict[str, Any]] = None,
-    *,
-    env: Optional[Dict[str, str]] = None,
 ) -> ToolPolicyDecision:
     """Decide whether one tool call may proceed.
 
     Unknown tools and every tool outside the session-only background family are
     allowed unconditionally; this policy only ever acts on a registered name.
     """
-    if native_background_tools_allowed(env):
-        return ALLOWED
     check = _SESSION_ONLY_BACKGROUND_TOOLS.get(tool_name)
     if check is None:
         return ALLOWED

@@ -221,7 +221,7 @@ export const TerminalTabs: React.FC<{
             >
               {editing && editing.key === tab.key ? (
                 <span className="flex items-center gap-1.5">
-                  <SquareTerminal className="size-3.5 shrink-0 text-mint" />
+                  <SquareTerminal className="size-3.5 shrink-0 text-mint-ink" />
                   <input
                     autoFocus
                     value={editing.value}
@@ -242,7 +242,7 @@ export const TerminalTabs: React.FC<{
                   title={t('apps.terminal.renameHint')}
                   className="flex items-center gap-1.5"
                 >
-                  <SquareTerminal className="size-3.5 text-mint" />
+                  <SquareTerminal className="size-3.5 text-mint-ink" />
                   {tab.title ?? t('apps.terminal.tabTitle', { n: i + 1 })}
                 </button>
               )}
@@ -250,7 +250,7 @@ export const TerminalTabs: React.FC<{
                 type="button"
                 onClick={() => closeTab(tab.key)}
                 aria-label={t('common.close')}
-                className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                className="grid size-4 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground md:opacity-0 md:group-hover/tab:opacity-100"
               >
                 <X className="size-3" strokeWidth={2.5} />
               </button>
@@ -284,7 +284,7 @@ export const TerminalTabs: React.FC<{
             <span
               className={clsx(
                 'flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium',
-                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint' : 'border-border bg-surface text-muted',
+                persistentReady ? 'border-mint/30 bg-mint/[0.08] text-mint-ink' : 'border-border bg-surface text-muted',
               )}
             >
               <span className={clsx('size-1.5 rounded-full', dotClass)} />

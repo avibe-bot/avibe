@@ -6,7 +6,7 @@ Shared by OpenCode, Claude, and Codex integrations for reasoning-effort option b
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _REASONING_FALLBACK_OPTIONS = [
@@ -59,6 +59,95 @@ def _opencode_model_entry_id(model_entry: Any) -> str:
         return ""
     model_id = model_entry.get("id") or model_entry.get("modelID") or model_entry.get("model_id") or ""
     return model_id if isinstance(model_id, str) else ""
+
+
+def opencode_model_is_hub_projected(model_info: object) -> bool:
+    if not isinstance(model_info, dict):
+        return False
+    metadata = model_info.get("vibe_remote")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("model_hub_projected") is True
+    )
+
+
+def opencode_model_picker_value(
+    provider_id: str,
+    model_id: str,
+    model_info: object,
+) -> str:
+    """Keep Model Hub's bare identity out of OpenCode transport addressing."""
+
+    if opencode_model_is_hub_projected(model_info):
+        return model_id
+    return f"{provider_id}/{model_id}" if provider_id else model_id
+
+
+def _opencode_model_hub_model_ids(provider: dict) -> set[str]:
+    """Return models projected from Model Hub for one public provider."""
+
+    projected: set[str] = set()
+    models = provider.get("models") if isinstance(provider, dict) else None
+    if isinstance(models, dict):
+        entries = models.items()
+    elif isinstance(models, list):
+        entries = ((_opencode_model_entry_id(entry), entry) for entry in models)
+    else:
+        return projected
+
+    for model_id, model_info in entries:
+        if not isinstance(model_id, str) or not isinstance(model_info, dict):
+            continue
+        if opencode_model_is_hub_projected(model_info):
+            projected.add(model_id)
+    return projected
+
+
+def filter_opencode_models_to_allowed_providers(
+    opencode_models: dict,
+    allowed_providers: Iterable[str],
+) -> dict:
+    """Keep allowed providers plus exact public models projected by Model Hub."""
+
+    if not isinstance(opencode_models, dict):
+        return opencode_models
+    allowed = {
+        provider_id
+        for provider_id in allowed_providers
+        if isinstance(provider_id, str) and provider_id
+    }
+    providers = []
+    for provider in opencode_models.get("providers", []) or []:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = get_opencode_provider_id(provider)
+        if not provider_id:
+            continue
+        projected_model_ids = _opencode_model_hub_model_ids(provider)
+        if provider_id in allowed:
+            providers.append(provider)
+            continue
+        if not projected_model_ids:
+            continue
+
+        raw_models = provider.get("models")
+        if isinstance(raw_models, dict):
+            models = {
+                model_id: model_info
+                for model_id, model_info in raw_models.items()
+                if model_id in projected_model_ids
+            }
+        elif isinstance(raw_models, list):
+            models = [
+                model_info
+                for model_info in raw_models
+                if _opencode_model_entry_id(model_info) in projected_model_ids
+            ]
+        else:
+            models = {}
+        providers.append({**provider, "models": models})
+
+    return {**opencode_models, "providers": providers, "default": {}}
 
 
 def find_opencode_model_info(
@@ -122,26 +211,6 @@ def resolve_opencode_model_id(
     return model_id
 
 
-def resolve_opencode_configured_default_model(
-    default_model: str | None,
-    *,
-    default_provider: str | None,
-    provider_id: str | None,
-) -> str | None:
-    """Return the configured agent model when it belongs to ``provider_id``."""
-
-    model = (default_model or "").strip()
-    provider = (provider_id or "").strip()
-    configured_provider = (default_provider or "").strip()
-    if not model or not provider:
-        return None
-
-    model_provider, model_id = _parse_model_key(model)
-    if model_provider:
-        return model_id if model_provider == provider and model_id else None
-    return model if configured_provider == provider else None
-
-
 def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
     if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
         return False
@@ -202,8 +271,28 @@ def resolve_opencode_reasoning_effort(
 
 
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:
+    if not isinstance(opencode_models, dict):
+        return {}
+    if isinstance(target_model, str) and target_model:
+        matches = []
+        for provider in opencode_models.get("providers", []) or []:
+            if not isinstance(provider, dict):
+                continue
+            model_info = find_opencode_model_info(
+                opencode_models,
+                get_opencode_provider_id(provider),
+                target_model,
+            )
+            if opencode_model_is_hub_projected(model_info):
+                matches.append(model_info)
+        if len(matches) == 1:
+            variants = matches[0].get("variants", {})
+            return variants if isinstance(variants, dict) else {}
+        if matches:
+            return {}
+
     target_provider, target_model_id = _parse_model_key(target_model)
-    if not target_provider or not target_model_id or not isinstance(opencode_models, dict):
+    if not target_provider or not target_model_id:
         return {}
     model_info = find_opencode_model_info(opencode_models, target_provider, target_model_id)
     if isinstance(model_info, dict):
@@ -249,39 +338,6 @@ def _extract_provider_ids_from_config(config: dict) -> List[str]:
     return providers
 
 
-def resolve_opencode_default_model(
-    opencode_default_config: dict,
-    opencode_agents: list,
-    selected_agent: Optional[str],
-) -> Optional[str]:
-    """Resolve default OpenCode model for an agent from config."""
-    agent_names: List[str] = []
-    for agent in opencode_agents or []:
-        if isinstance(agent, dict):
-            name = agent.get("name") or agent.get("id")
-        elif isinstance(agent, str):
-            name = agent
-        else:
-            name = None
-        if isinstance(name, str) and name:
-            agent_names.append(name)
-
-    agent_name = selected_agent or ("build" if "build" in agent_names else (agent_names[0] if agent_names else None))
-
-    if isinstance(opencode_default_config, dict):
-        agents_config = opencode_default_config.get("agent", {})
-        if isinstance(agents_config, dict) and agent_name:
-            agent_config = agents_config.get(agent_name, {})
-            if isinstance(agent_config, dict):
-                model = agent_config.get("model")
-                if isinstance(model, str) and model:
-                    return model
-        model = opencode_default_config.get("model")
-        if isinstance(model, str) and model:
-            return model
-    return None
-
-
 def resolve_opencode_provider_preferences(
     opencode_default_config: dict,
     current_model: Optional[str] = None,
@@ -292,13 +348,6 @@ def resolve_opencode_provider_preferences(
     _append_unique(providers, _parse_provider_id(current_model))
 
     if isinstance(opencode_default_config, dict):
-        _append_unique(providers, _parse_provider_id(opencode_default_config.get("model")))
-        agents_config = opencode_default_config.get("agent", {})
-        if isinstance(agents_config, dict):
-            for agent_config in agents_config.values():
-                if isinstance(agent_config, dict):
-                    _append_unique(providers, _parse_provider_id(agent_config.get("model")))
-
         for provider_id in _extract_provider_ids_from_config(opencode_default_config):
             _append_unique(providers, provider_id)
 
@@ -313,10 +362,6 @@ def resolve_opencode_allowed_providers(
     providers = _extract_provider_ids_from_config(opencode_default_config)
     if providers:
         return providers
-    if isinstance(opencode_models, dict):
-        defaults = opencode_models.get("default", {})
-        if isinstance(defaults, dict) and defaults:
-            return [key for key in defaults.keys() if isinstance(key, str) and key]
     return []
 
 
@@ -347,7 +392,6 @@ def build_opencode_model_option_items(
         return []
 
     providers_data = opencode_models.get("providers", [])
-    defaults = opencode_models.get("default", {})
 
     providers: List[Tuple[str, dict]] = []
     for provider in providers_data:
@@ -357,9 +401,16 @@ def build_opencode_model_option_items(
         providers.append((provider_id, provider))
 
     if allowed_providers:
-        allowed_set = {p for p in allowed_providers if isinstance(p, str) and p}
-        if allowed_set:
-            providers = [entry for entry in providers if entry[0] in allowed_set]
+        visible_models = filter_opencode_models_to_allowed_providers(
+            opencode_models,
+            allowed_providers,
+        )
+        providers_data = visible_models.get("providers", [])
+        providers = []
+        for provider in providers_data:
+            provider_id = get_opencode_provider_id(provider)
+            if provider_id:
+                providers.append((provider_id, provider))
 
     if preferred_providers:
         preferred_set = {p for p in preferred_providers if isinstance(p, str) and p}
@@ -405,12 +456,16 @@ def build_opencode_model_option_items(
             else:
                 model_name = model_id
 
-            full_model = f"{provider_id}/{model_id}" if provider_id else model_id
-            is_default = defaults.get(provider_id) == model_id if provider_id else False
-            display = f"{provider_name}: {model_name}" if provider_name else model_name
-            if is_default:
-                display += " (default)"
-
+            full_model = opencode_model_picker_value(
+                provider_id,
+                model_id,
+                model_info,
+            )
+            display = (
+                model_name
+                if opencode_model_is_hub_projected(model_info)
+                else f"{provider_name}: {model_name}" if provider_name else model_name
+            )
             options.append({"label": display, "value": full_model})
             provider_model_count += 1
 

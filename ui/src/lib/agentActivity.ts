@@ -1,5 +1,6 @@
 import type { WorkbenchMessage } from '../context/ApiContext';
 import { specFor } from './messageTypes';
+import { timestampOrderTimeMs } from './transcriptOrder';
 
 // One turn's activity, as rendered by the Chat Activity panel. Mirrors the
 // backend ``storage/agent_activity_service.py`` shape (see the /activity endpoint).
@@ -10,6 +11,19 @@ export type ActivityRow = {
   kind: 'assistant' | 'tool_call';
   text: string;
   created_at: string;
+  order_micros?: number; // authoritative durable key; absent on live SSE rows
+};
+
+// Storage owns persisted order, including clocks recovered from migration metadata.
+// Live rows without a durable key still carry their emission clock in the id.
+const activityRowTimeMs = (row: ActivityRow): number => {
+  if (row.order_micros !== undefined) return row.order_micros / 1000;
+  const clock = /^[^_]{3}_([0-9a-f]{15})/i.exec(row.id)?.[1];
+  if (clock) {
+    const micros = Number.parseInt(clock, 16);
+    if (Number.isSafeInteger(micros)) return micros / 1000;
+  }
+  return timestampOrderTimeMs(row.created_at);
 };
 
 // A group is positioned relative to a transcript message that is AT OR BEFORE the
@@ -34,6 +48,30 @@ export type ActivityGroup = {
   rows?: ActivityRow[];
 };
 
+export type ActivityForeground = 'idle' | 'running' | 'unknown';
+
+/** Interpret durable groups only after the controller's foreground state is known.
+ * An open group is not interrupted evidence by itself: while state is unknown it
+ * stays hidden, while running it becomes the live card, and only authoritative
+ * idle lets its stored interrupted status render as a settled chip. */
+export const activityGroupsForForeground = (
+  groups: ActivityGroup[],
+  foreground: ActivityForeground,
+): { settled: ActivityGroup[]; inflight: ActivityGroup | null } => {
+  if (foreground === 'idle') return { settled: groups, inflight: null };
+
+  let inflight: ActivityGroup | null = null;
+  if (foreground === 'running') {
+    for (let i = groups.length - 1; i >= 0; i -= 1) {
+      if (groups[i].open) {
+        inflight = groups[i];
+        break;
+      }
+    }
+  }
+  return { settled: groups.filter((group) => !group.open), inflight };
+};
+
 // Wire shape from GET /api/sessions/<id>/activity (summary group + optional rows).
 export type TurnActivityGroupWire = {
   id: string;
@@ -45,7 +83,7 @@ export type TurnActivityGroupWire = {
   duration_ms: number | null;
   started_at?: string | null;
   ended_at?: string | null;
-  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string }>;
+  rows?: Array<{ id: string; kind: 'assistant' | 'tool_call'; text: string; created_at: string; order_micros?: number }>;
 };
 
 export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
@@ -57,7 +95,9 @@ export const groupFromWire = (wire: TurnActivityGroupWire): ActivityGroup => ({
   steps: wire.steps,
   durationMs: wire.duration_ms ?? null,
   startedAt: wire.started_at ?? null,
-  rows: wire.rows?.map((r) => ({ id: r.id, kind: r.kind, text: r.text, created_at: r.created_at })),
+  rows: wire.rows?.map((r) => ({
+    id: r.id, kind: r.kind, text: r.text, created_at: r.created_at, order_micros: r.order_micros,
+  })),
 });
 
 // A live ``message.new`` of type assistant/tool_call → an activity row (the live
@@ -71,7 +111,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 
 // ===== Live running-card buffer: a pure state machine (state, not timing) =====
 // The live buffer drives ONLY the in-flight running card; all SETTLED groups come
-// from the durable endpoint. Each turn is tagged with a monotonic GENERATION so
+// from the durable endpoint. Each Activity phase is tagged with a monotonic GENERATION so
 // that a stale buffer is invisible by construction and a late settle-refresh is a
 // structural no-op for a newer turn:
 //   - the running card renders only while ``working`` AND ``rows`` are non-empty,
@@ -81,7 +121,7 @@ export const activityRowFromMessage = (msg: WorkbenchMessage): ActivityRow => ({
 //     resolution is dropped). This subsumes the "stale/late buffer" class without
 //     promise-cancellation or grace-timer bookkeeping.
 export type LiveActivityState = {
-  gen: number; // current turn generation (monotonic)
+  gen: number; // current Activity phase generation (monotonic)
   settled: boolean; // the current generation has settled (terminal / turn.end seen)
   rows: ActivityRow[]; // current-generation buffer (empty ⇒ nothing to show)
   startedAt: number | null; // elapsed-clock start for the running card
@@ -96,6 +136,7 @@ export const initialLiveActivity = (): LiveActivityState => ({
 
 export type LiveActivityEvent =
   | { type: 'turn_start' }
+  | { type: 'reset' }
   | { type: 'row'; row: ActivityRow; now: number }
   | { type: 'settle' }
   | { type: 'clear_for_gen'; gen: number }
@@ -122,7 +163,13 @@ export const liveActivityReducer = (
       // New turn → new generation with a fresh empty buffer (any stale rows from the
       // previous generation are dropped by construction).
       return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
+    case 'reset':
+      // Visibility changes, navigation and output phase boundaries invalidate
+      // every in-flight read from the previous visible group without settling work.
+      return { gen: state.gen + 1, settled: false, rows: [], startedAt: null };
     case 'row':
+      // Storage hydration can include a row before its SSE envelope arrives.
+      if (state.rows.some((row) => row.id === event.row.id)) return state;
       if (state.settled) {
         // First row after a settle with no turn.start = an agent-initiated new turn.
         return { gen: state.gen + 1, settled: false, rows: [event.row], startedAt: event.now };
@@ -140,11 +187,19 @@ export const liveActivityReducer = (
       // this resolution is a stale no-op and must not wipe the new turn's rows).
       return event.gen === state.gen ? { ...state, rows: [], startedAt: null } : state;
     case 'rehydrate_for_gen':
-      // In-flight re-hydrate from storage, only if still the current generation and
-      // the live stream hasn't already filled the buffer.
-      return event.gen === state.gen && state.rows.length === 0
-        ? { ...state, rows: event.rows, startedAt: event.startedAt }
-        : state;
+      if (event.gen !== state.gen || state.settled) return state;
+      // Match storage's (emission time, id) order even when its bounded window
+      // advances. Stable timestamp-only sorting would move retained tied rows last.
+      // Durable rows win overlap so SSE cannot erase storage-only ordering keys.
+      return {
+        ...state,
+        rows: [...new Map([...state.rows, ...event.rows].map((row) => [row.id, row])).values()]
+          .sort((a, b) => {
+            const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
+            return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+          }),
+        startedAt: Math.min(state.startedAt ?? event.startedAt, event.startedAt),
+      };
     default:
       return state;
   }
@@ -199,15 +254,21 @@ export const toolIconKind = (toolName: string): ToolIconKind => {
   return 'wrench';
 };
 
-// Duration as {minutes, seconds} (null when unavailable). The unit text is applied
-// by the component through i18n (AGENTS.md: no hardcoded user-facing units), so the
-// zh chip renders localized units rather than a hardcoded "1m 23s".
-export const activityDurationParts = (
-  ms: number | null | undefined,
-): { minutes: number; seconds: number } | null => {
-  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
-  const totalSeconds = Math.round(ms / 1000);
-  return { minutes: Math.floor(totalSeconds / 60), seconds: totalSeconds % 60 };
+// Shared duration clock for live and completed activity. Keep the compact MM:SS
+// shape below one hour, then expose hours and days instead of letting minutes
+// grow into an increasingly hard-to-read total.
+export const formatActivityElapsedClock = (ms: number, daySuffix: string): string => {
+  const totalSeconds = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => String(value).padStart(2, '0');
+
+  const clock = hours > 0 || days > 0
+    ? `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+  return days > 0 ? `${days}${daySuffix} ${clock}` : clock;
 };
 
 // ===== Tool-call summary v2 (A/D): 3-tier degrade, frontend-only parse =====
@@ -268,13 +329,30 @@ export type FileOp = 'create' | 'modify' | 'delete';
 
 // Tier-1 render intents (keyed on known tool-name prefix + expected arg presence).
 export type ToolRecipe =
-  | { kind: 'command'; command: string } // bash/shell → ``$ <command>``
+  | { kind: 'command'; command: string } // bash/shell → the command body
   | { kind: 'read'; dir: string; base: string } // read/list → dir muted + base bold
   | { kind: 'fileop'; dir: string; base: string; op: FileOp } // edit/write → base + op badge
   | { kind: 'query'; text: string } // web/search/fetch → quoted query / URL
   | { kind: 'text'; text: string }; // task/agent → description
 
 const asStr = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
+
+const summarizeShellCommand = (command: string): string => {
+  const wrapper = /^(?:\/(?:[\w.+-]+\/)*)?(?:bash|zsh|sh)[ \t]+-(?:lc|c)[ \t]+/.exec(command);
+  if (!wrapper) return command;
+
+  // Decode one literal shell argument, not a shell program. Any expansion,
+  // extra argument, or operator keeps the original invocation visible.
+  const argument = command.slice(wrapper[0].length).replace(/[ \t]+$/, '');
+  const parts = /'([^']*)'|"((?:[^"\\$`]|\\[^\r\n])*)"|\\([^\r\n])|([\w@%+=:,./-]+)/gy;
+  let summary = '';
+  while (parts.lastIndex < argument.length) {
+    const part = parts.exec(argument);
+    if (!part) return command;
+    summary += part[1] ?? part[2]?.replace(/\\([$`"\\])/g, '$1') ?? part[3] ?? part[4];
+  }
+  return summary.trim() ? summary : command;
+};
 
 const fileOpFrom = (name: string, args: Record<string, unknown>): FileOp => {
   const type = (asStr(args.type) || '').toLowerCase();
@@ -297,7 +375,7 @@ export const toolRecipe = (name: string, args: Record<string, unknown>): ToolRec
   const command = asStr(args.command) ?? asStr(args.cmd);
 
   if (starts(['bash', 'shell', 'exec', 'run', 'sh', 'zsh', 'terminal', 'command'])) {
-    return command != null ? { kind: 'command', command } : null;
+    return command != null ? { kind: 'command', command: summarizeShellCommand(command) } : null;
   }
   if (starts(['write', 'edit', 'create', 'update', 'apply', 'patch', 'notebook', 'multiedit', 'file_change', 'filechange'])) {
     return path != null ? { kind: 'fileop', ...splitPath(path), op: fileOpFrom(n, args) } : null;

@@ -146,7 +146,7 @@ def main():
     macos_session_diagnostics = None
     controller = None
     try:
-        from core.memory.ui_access import initialize_process_ui_read_secret
+        from vibe.memory_ui_access import initialize_process_ui_read_secret
 
         initialize_process_ui_read_secret()
         acquire_service_instance_lock()
@@ -158,6 +158,14 @@ def main():
         # Setup logging
         setup_logging(config.runtime.log_level)
         logger = logging.getLogger(__name__)
+
+        from core.managed_skills import BUILTIN_SKILLS_SNAPSHOT_ENV, prepare_builtin_skills
+
+        try:
+            prepare_builtin_skills()
+        except Exception:
+            os.environ[BUILTIN_SKILLS_SNAPSHOT_ENV] = ""
+            logger.warning("Avibe built-in Skills are unavailable", exc_info=True)
 
         apply_claude_sdk_patches()
         from vibe.sentry_integration import init_sentry
@@ -203,14 +211,19 @@ def main():
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
-            if _request_controller_loop_stop(controller):
-                return
-            _stop_macos_session_diagnostics(macos_session_diagnostics)
             controller.request_shutdown(f"signal {signum}")
 
         signal.signal(signal.SIGTERM, _handle_shutdown)
         signal.signal(signal.SIGINT, _handle_shutdown)
 
+        # Readiness is published from inside `controller.run()`, by the code that
+        # reaches it. Announcing it from here was announcing something this
+        # function has not observed: `run()` still has to build the event loop,
+        # start the checkpoint service, schedule the internal server and get the
+        # IM runtime onto its thread, and it catches its own failures and returns,
+        # so the process exits through the ordinary path. A watcher that saw
+        # `running` in that window read a release dying in its own startup as an
+        # upgrade that worked.
         try:
             controller.run()
         finally:

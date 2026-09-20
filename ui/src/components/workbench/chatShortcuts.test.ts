@@ -7,9 +7,10 @@ import {
   isArchiveSessionKeydown,
 } from './chatShortcuts';
 
-const chord = (over: Partial<Record<'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey', boolean>> & { code?: string }) => ({
+const chord = (over: Partial<Record<'altKey' | 'ctrlKey' | 'defaultPrevented' | 'metaKey' | 'shiftKey', boolean>> & { code?: string }) => ({
   altKey: false,
   ctrlKey: false,
+  defaultPrevented: false,
   metaKey: false,
   shiftKey: false,
   code: 'KeyD',
@@ -83,6 +84,10 @@ describe('isArchiveSessionKeydown', () => {
   it('yields the chord to a window or dialog stacked over the chat', () => {
     expect(isArchiveSessionKeydown(archiveChord, elWithClosest((s) => s.includes('[data-window-id]')))).toBe(false);
     expect(isArchiveSessionKeydown(archiveChord, elWithClosest((s) => s.includes('[role="dialog"]')))).toBe(false);
+  });
+
+  it('yields a chord already consumed by a closer surface', () => {
+    expect(isArchiveSessionKeydown({ ...archiveChord, defaultPrevented: true }, null)).toBe(false);
   });
 
   it('still ignores everything that is not the chord', () => {

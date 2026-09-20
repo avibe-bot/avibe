@@ -11,16 +11,38 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 import aiohttp
 
-from core.avibe_cloud import avibe_cloud_url_available
 from core.backend_failure import emit_backend_failure
+from core.caller_context import (
+    AVIBE_CALLER_PLATFORM_ENV,
+    AVIBE_CALLER_REMOTE_ENV,
+    AVIBE_CALLER_USER_ID_ENV,
+    AVIBE_SESSION_ID_ENV,
+    caller_env_for_platform_payload,
+    validated_caller_env_snapshot,
+    AVIBE_CALLER_SESSION_PROOF_ENV,
+    issue_caller_session_proof,
+)
 from core.message_output import stop_output_for, terminal_output_for
-from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.memory_cli_access import configure_memory_cli_access
+from core.managed_skills import (
+    BUILTIN_SKILLS_ROOT_ENV,
+    BUILTIN_SKILLS_SNAPSHOT_ENV,
+    managed_skill_claude_cli_path,
+    managed_skill_environment,
+    managed_skill_project_base,
+)
+from core.processing_indicator import STOPPED_REACTION_EMOJI
+from core.native_dispatch_phase import (
+    mark_backend_dispatch_attempted,
+    prewrite_user_stop_requested,
+)
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
@@ -39,7 +61,6 @@ from core.services.agent_steering import (
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
-    memory_cli_prompt_admitted,
 )
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.model_hub import (
@@ -48,29 +69,52 @@ from modules.agents.model_hub import (
     bind_launch,
     bind_turn_mode,
     opencode_model_for_overlay,
+    opencode_model_catalog_for_overlay,
+    opencode_requested_model_for_overlay,
     persisted_launch_identity,
     resolve_opencode_overlay_launch,
 )
 from vibe.i18n import t as i18n_t
 
-from .caller_context import bind_session as bind_caller_context_session
+from .caller_context import (
+    bind_session as bind_caller_context_session,
+    refresh_session as refresh_caller_context_session,
+    unbind_session as unbind_caller_context_session,
+)
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
-from .poll_loop import OpenCodePollLoop, restored_platform_from_poll_info, restored_session_key_from_poll_info
+from .poll_loop import (
+    OpenCodePollLoop,
+    restored_context_from_poll_info,
+    restored_platform_from_poll_info,
+    restored_session_key_from_poll_info,
+)
 from .server import (
+    OpenCodeManagedPolicyRefreshPendingError,
+    OpenCodeModelHubOverlayRequiredError,
     OpenCodePromptRejectedError,
+    OpenCodeRuntimeConfigInvalidError,
     OpenCodeServerManager,
     native_part_id_for_attempt,
 )
-from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
+from .session import (
+    OpenCodeResumeUnavailableError,
+    OpenCodeSessionManager,
+    requires_message_order_repair,
+)
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 _STEERING_SNAPSHOT_KEY = "opencode_native_steering"
+_MODEL_HUB_DISPLAY_MODEL_KEY = "model_hub_display_model"
+_CALLER_CONTEXT_ENV_SNAPSHOT_KEY = "opencode_caller_context_env"
+_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY = "opencode_managed_skill_project_base"
+_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY = "opencode_managed_skill_builtin_snapshot"
 _STATUS_RECONCILIATION_FAILURE_LIMIT = 3
-# OpenCode returns 204 after forking prompt work, before that worker necessarily
-# registers the session as busy.
-_ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS = 5.0
+# A successful prompt_async response transfers ownership to a forked worker,
+# but does not prove that worker will publish its first message. Keep this
+# handoff bounded independently of the optional whole-turn timeout.
+_ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS = 120.0
 # OpenCode can report idle just before the completed assistant message becomes
 # visible through the message-list endpoint.
 _ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS = 5.0
@@ -80,6 +124,23 @@ _ASYNC_PROMPT_RESULT_CONFIRMATION_TIMEOUT_SECONDS = 5.0
 _STEER_POST_WRITE_STATUS_SETTLE_SECONDS = 0.1
 _RESTORED_IM_REGISTRATION_RETRY_DELAY_SECONDS = 0.25
 _RESTORED_IM_PLATFORMS = {"slack", "discord", "telegram", "lark", "wechat"}
+_CALLER_CONTEXT_BINDING_REFRESH_SECONDS = 60 * 60
+_CALLER_CONTEXT_BINDING_RETRY_SECONDS = 1.0
+
+
+def _caller_context_path_for_server(server: object) -> str | None:
+    resolver = getattr(server, "caller_context_binding_path", None)
+    if not callable(resolver):
+        return None
+    try:
+        value = os.fspath(resolver())
+    except (TypeError, OSError):
+        return None
+    return value or None
+
+
+def _binding_path_kwargs(path: str | None) -> dict[str, str]:
+    return {"path": path} if path else {}
 
 
 def _task_is_stopping(task: asyncio.Task) -> bool:
@@ -100,11 +161,13 @@ class _OpenCodeSteerState:
     reasoning_effort: Optional[str]
     system: Optional[str]
     baseline_message_ids: set[str]
+    catalog_accepted: Any = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
     awaiting_after_message_ids: set[str] | None = None
     awaiting_user_text: str | None = None
-    awaiting_start_confirmation_deadline: float | None = None
+    awaiting_prompt_accepted: bool = False
+    awaiting_prompt_activity_deadline: float | None = None
     awaiting_active_status_observed: bool = False
     awaiting_result_confirmation_deadline: float | None = None
     idle_reconciliation_message: str = ""
@@ -129,6 +192,7 @@ class _SteeringAwareOpenCodeServer:
     ) -> None:
         self._server = server
         self._state = state
+        self.last_list_native_live: bool | None = None
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._server, name)
@@ -160,6 +224,35 @@ class _SteeringAwareOpenCodeServer:
             for part in (message.get("parts") or [])
             if part.get("type") == "text"
         )
+
+    @staticmethod
+    def _last_is_completed_error(messages: list[Dict[str, Any]]) -> bool:
+        if not messages:
+            return False
+        info = messages[-1].get("info", {}) or {}
+        return bool(
+            info.get("role") == "assistant"
+            and info.get("time", {}).get("completed")
+            and info.get("error")
+        )
+
+    @staticmethod
+    def _has_post_boundary_activity(
+        messages: list[Dict[str, Any]],
+        boundary_ids: set[str],
+        baseline_ids: set[str],
+    ) -> bool:
+        # Evidence means a message the restored poll loop would treat as new:
+        # outside the reconciliation boundary AND outside the pre-prompt
+        # baseline. The baseline term matters when the sampled boundary is
+        # empty (only baseline messages existed when it was sampled).
+        for message in messages:
+            message_id = (message.get("info", {}) or {}).get("id")
+            if not message_id:
+                continue
+            if message_id not in boundary_ids and message_id not in baseline_ids:
+                return True
+        return False
 
     @classmethod
     def _inserted_user_index(
@@ -203,6 +296,32 @@ class _SteeringAwareOpenCodeServer:
             and message.get("info", {}).get("time", {}).get("completed")
             and message.get("info", {}).get("finish") != "tool-calls"
             and not message.get("info", {}).get("error")
+            for index, message in enumerate(messages)
+        )
+
+    @classmethod
+    def _has_completed_error_after(
+        cls,
+        messages: list[Dict[str, Any]],
+        excluded_message_ids: set[str],
+        *,
+        inserted_user_text: str | None = None,
+    ) -> bool:
+        inserted_user_index = -1
+        if inserted_user_text is not None:
+            inserted_user_index = cls._inserted_user_index(
+                messages,
+                excluded_message_ids,
+                inserted_user_text,
+            )
+            if inserted_user_index < 0:
+                return False
+        return any(
+            index > inserted_user_index
+            and message.get("info", {}).get("role") == "assistant"
+            and message.get("info", {}).get("id") not in excluded_message_ids
+            and message.get("info", {}).get("time", {}).get("completed")
+            and message.get("info", {}).get("error")
             for index, message in enumerate(messages)
         )
 
@@ -250,7 +369,8 @@ class _SteeringAwareOpenCodeServer:
     def _clear_awaiting_reconciliation(self) -> None:
         self._state.awaiting_after_message_ids = None
         self._state.awaiting_user_text = None
-        self._state.awaiting_start_confirmation_deadline = None
+        self._state.awaiting_prompt_accepted = False
+        self._state.awaiting_prompt_activity_deadline = None
         self._state.awaiting_active_status_observed = False
         self._state.awaiting_result_confirmation_deadline = None
 
@@ -285,6 +405,7 @@ class _SteeringAwareOpenCodeServer:
         while True:
             wait_for_insert = False
             async with self._state.lock:
+                self.last_list_native_live = None
                 if self._state.terminal_status_failure_messages is not None:
                     return self._state.terminal_status_failure_messages
                 messages = await self._server.list_messages(session_id, directory)
@@ -299,6 +420,9 @@ class _SteeringAwareOpenCodeServer:
                 if reconcile_insert or final_snapshot or reconcile_initial_status:
                     try:
                         status = await self._server.get_session_status(session_id, directory)
+                        from modules.agents.opencode.poll_loop import _native_session_is_live
+
+                        self.last_list_native_live = _native_session_is_live(status)
                     except Exception as exc:
                         self._state.status_reconciliation_failures += 1
                         if (
@@ -342,22 +466,62 @@ class _SteeringAwareOpenCodeServer:
                     else:
                         self._state.status_reconciliation_failures = 0
                         if status is not None and status.get("type") in {"busy", "retry"}:
-                            if (
-                                reconcile_insert
-                                and inserted_user_text is not None
-                                and self._inserted_user_index(
+                            if reconcile_initial_status and awaiting is None:
+                                self._state.awaiting_after_message_ids = (
+                                    self._completed_assistant_boundary(messages)
+                                )
+                            if reconcile_insert and (
+                                inserted_user_text is None
+                                or self._inserted_user_index(
                                     messages,
                                     awaiting,
                                     inserted_user_text,
                                 )
                                 >= 0
                             ):
-                                self._state.awaiting_active_status_observed = True
-                                self._state.awaiting_result_confirmation_deadline = None
-                            if reconcile_initial_status and awaiting is None:
-                                self._state.awaiting_after_message_ids = (
-                                    self._completed_assistant_boundary(messages)
-                                )
+                                # Start confirmed: the inserted user message is
+                                # visible while the native session reports
+                                # activity (or a restored poll sampled its
+                                # boundary during activity). Hand the in-progress
+                                # snapshot back to the poll loop so live tool
+                                # activity keeps streaming; the result-confirmation
+                                # window still guards the idle boundary below.
+                                if inserted_user_text is not None:
+                                    self._state.awaiting_active_status_observed = True
+                                    self._state.awaiting_result_confirmation_deadline = None
+                                    if final_snapshot or self._has_final_assistant_after(
+                                        messages,
+                                        awaiting,
+                                        inserted_user_text=inserted_user_text,
+                                    ):
+                                        # The final assistant already exists even
+                                        # though the session still reports busy
+                                        # (status settles after the message lands):
+                                        # settle like the idle path does.
+                                        self._clear_awaiting_reconciliation()
+                                        self._state.closing = True
+                                if self._last_is_completed_error(messages):
+                                    # Keep terminal error snapshots gated while the
+                                    # native runtime has not settled: the poll loop
+                                    # would emit its own terminal failure (or a
+                                    # competing "continue") while OpenCode's native
+                                    # retry is still active.
+                                    wait_for_insert = True
+                                elif inserted_user_text is None and not self._has_post_boundary_activity(
+                                    messages,
+                                    awaiting,
+                                    self._state.baseline_message_ids,
+                                ):
+                                    # Restored boundary-sampled polls: a busy
+                                    # snapshot holding only boundary messages
+                                    # (ending in a pre-restore final answer) must
+                                    # not be handed back, or the restored poll
+                                    # loop would re-emit the old answer and drop
+                                    # the still-running poll. Wait for post-boundary
+                                    # or in-progress evidence.
+                                    wait_for_insert = True
+                                else:
+                                    return messages
                             wait_for_insert = True
                         else:
                             self._state.reconcile_initial_status = False
@@ -373,6 +537,8 @@ class _SteeringAwareOpenCodeServer:
                                         < 0
                                     )
                                 )
+                                if not inserted_user_missing:
+                                    self._state.awaiting_active_status_observed = True
                                 last_message_id = (
                                     messages[-1].get("info", {}).get("id")
                                     if messages
@@ -382,8 +548,7 @@ class _SteeringAwareOpenCodeServer:
                                     inserted_user_missing
                                     and final_snapshot
                                     and last_message_id in awaiting
-                                    and self._state.awaiting_start_confirmation_deadline
-                                    is None
+                                    and not self._state.awaiting_prompt_accepted
                                 ):
                                     self._clear_awaiting_reconciliation()
                                     self._state.closing = True
@@ -396,20 +561,17 @@ class _SteeringAwareOpenCodeServer:
                                         inserted_user_text=inserted_user_text,
                                     )
                                 )
-                                if has_final_insert_result:
-                                    self._clear_awaiting_reconciliation()
-                                    self._state.closing = True
-                                    return messages
-                                start_deadline = (
-                                    self._state.awaiting_start_confirmation_deadline
+                                has_post_boundary_error = self._has_completed_error_after(
+                                    messages,
+                                    awaiting,
+                                    inserted_user_text=inserted_user_text,
                                 )
-                                if (
-                                    start_deadline is not None
-                                    and not self._state.awaiting_active_status_observed
-                                    and time.monotonic() < start_deadline
-                                ):
-                                    wait_for_insert = True
-                                elif self._state.awaiting_active_status_observed:
+                                if has_final_insert_result or has_post_boundary_error:
+                                    self._clear_awaiting_reconciliation()
+                                    if has_final_insert_result:
+                                        self._state.closing = True
+                                    return messages
+                                if self._state.awaiting_active_status_observed:
                                     result_deadline = (
                                         self._state.awaiting_result_confirmation_deadline
                                     )
@@ -420,6 +582,31 @@ class _SteeringAwareOpenCodeServer:
                                         )
                                         wait_for_insert = True
                                     elif time.monotonic() < result_deadline:
+                                        wait_for_insert = True
+                                    else:
+                                        self._clear_awaiting_reconciliation()
+                                        return self._terminal_reconciliation_failure(
+                                            session_id,
+                                            messages,
+                                            name="NativeSessionEndedBeforeResult",
+                                            message=self._idle_reconciliation_error_text(),
+                                        )
+                                elif self._state.awaiting_prompt_accepted:
+                                    # A successful prompt_async response transfers
+                                    # ownership before OpenCode must publish a
+                                    # message or mark the session busy.
+                                    activity_deadline = (
+                                        self._state.awaiting_prompt_activity_deadline
+                                    )
+                                    if activity_deadline is None:
+                                        activity_deadline = (
+                                            time.monotonic()
+                                            + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                                        )
+                                        self._state.awaiting_prompt_activity_deadline = (
+                                            activity_deadline
+                                        )
+                                    if time.monotonic() < activity_deadline:
                                         wait_for_insert = True
                                     else:
                                         self._clear_awaiting_reconciliation()
@@ -481,7 +668,34 @@ class _SteeringAwareOpenCodeServer:
                     {**failure, "info": info},
                 ]
                 return
-            await self._server.prompt_async(*args, **kwargs)
+            kwargs_map = dict(kwargs)
+            prompt_text = str(kwargs_map.get("text") or "")
+            snapshot_ids = kwargs_map.pop("awaiting_after_ids", None)
+            if snapshot_ids is None:
+                session_id = str(kwargs_map.get("session_id") or "")
+                directory = str(kwargs_map.get("directory") or "")
+                if session_id and directory:
+                    try:
+                        current = await self._server.list_messages(session_id, directory)
+                    except Exception:
+                        current = []
+                    snapshot_ids = self._message_ids(current)
+            if snapshot_ids is not None:
+                self._state.awaiting_after_message_ids = set(snapshot_ids)
+                self._state.awaiting_user_text = prompt_text or None
+                self._state.awaiting_prompt_accepted = False
+                self._state.awaiting_prompt_activity_deadline = None
+                self._state.awaiting_active_status_observed = False
+                self._state.awaiting_result_confirmation_deadline = None
+            await self._server.prompt_async(*args, **{k: v for k, v in kwargs.items() if k != "awaiting_after_ids"})
+            if kwargs.get("system") == self._state.system and self._state.catalog_accepted:
+                self._state.catalog_accepted()
+            if snapshot_ids is not None:
+                self._state.awaiting_prompt_accepted = True
+                self._state.awaiting_prompt_activity_deadline = (
+                    time.monotonic()
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
+                )
 
     async def abort_session(self, *args, **kwargs) -> bool:
         async with self._state.lock:
@@ -528,11 +742,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
         self._client_manager = OpenCodeClientManager(opencode_config)
         self._client_manager.set_resource_governor(governor_from_controller(controller))
+        model_hub_runtime = getattr(controller, "model_hub_runtime", None)
+        prepare_overlay = getattr(
+            model_hub_runtime,
+            "prepare_opencode_overlay",
+            None,
+        )
+        if callable(prepare_overlay):
+            self._client_manager.set_model_hub_overlay_preparer(prepare_overlay)
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
 
         self._active_requests: Dict[str, asyncio.Task] = {}
+        # Sessions whose in-flight task is being cancelled BY THE USER. The
+        # cancellation lands in the request coroutine, which cannot otherwise
+        # tell a /stop from any other teardown; see ``handle_stop``.
+        self._user_stopped_sessions: set[str] = set()
         self._session_last_activity: Dict[str, float] = {}
         self._steering_states: Dict[str, _OpenCodeSteerState] = {}
         self._restored_poll_servers: Dict[asyncio.Task, _SteeringAwareOpenCodeServer] = {}
@@ -544,8 +770,104 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if restored_server is not None:
                 return restored_server
         server = await self._client_manager.get_server()
+        server.set_active_poll_session_ids_provider(
+            lambda: set(self.sessions.get_all_active_polls())
+        )
         self._attach_server_activation(server)
         return server
+
+    async def _maintain_caller_context_binding(
+        self,
+        session_id: str,
+        binding_token: str,
+        binding_path: str | None,
+        *,
+        payload: dict[str, Any] | None,
+        working_directory: str,
+        extra_env: dict[str, str],
+        initially_bound: bool,
+        message: Any = None,
+        fallback_platform: str | None = None,
+    ) -> None:
+        """Keep one Turn binding published and renewed for its full lifetime."""
+
+        bound = initially_bound
+        while True:
+            await asyncio.sleep(
+                _CALLER_CONTEXT_BINDING_REFRESH_SECONDS
+                if bound
+                else _CALLER_CONTEXT_BINDING_RETRY_SECONDS
+            )
+            if bound:
+                try:
+                    refreshed = bool(
+                        await asyncio.to_thread(
+                            refresh_caller_context_session,
+                            session_id,
+                            binding_token=binding_token,
+                            **_binding_path_kwargs(binding_path),
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to renew OpenCode caller context for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    bound = False
+                else:
+                    if not refreshed:
+                        return
+                    bound = True
+                    continue
+            try:
+                bound = bool(
+                    await asyncio.to_thread(
+                        bind_caller_context_session,
+                        session_id,
+                        payload,
+                        base_env=os.environ,
+                        working_dir=working_directory,
+                        extra_env=extra_env,
+                        binding_token=binding_token,
+                        replace_existing=False,
+                        **_binding_path_kwargs(binding_path),
+                        message=message,
+                        fallback_platform=fallback_platform,
+                    )
+                )
+                if not bound:
+                    return
+            except Exception:
+                logger.warning(
+                    "Failed to republish OpenCode caller context for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+                bound = False
+
+    @staticmethod
+    async def _stop_caller_context_binding_renewal(
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _active_poll_is_persisted(self, session_id: str) -> bool:
+        try:
+            return session_id in self.sessions.get_all_active_polls()
+        except Exception:
+            logger.warning(
+                "Could not verify OpenCode active poll retention for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return True
 
     @staticmethod
     def _server_activation_identity(
@@ -569,9 +891,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         set_retire = getattr(server, "set_runtime_activation_retire", None)
         if callable(set_retire):
             set_retire(
-                lambda force=False: self._retire_server_activation(
+                lambda force=False, native_turns_drained=False: self._retire_server_activation(
                     server,
                     force=force,
+                    native_turns_drained=native_turns_drained,
                 )
             )
         return identity
@@ -581,6 +904,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         server: OpenCodeServerManager,
         *,
         force: bool = False,
+        native_turns_drained: bool = False,
     ) -> bool:
         registry = getattr(getattr(self, "controller", None), "runtime_activation", None)
         identity = self._server_activation_identity(server)
@@ -595,7 +919,14 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             snapshots = self.runtime_ownership_snapshots()
             return bool(
                 snapshots is not None
-                and all(not snapshot.blocks_reclamation for snapshot in snapshots)
+                and all(
+                    not (
+                        snapshot.blocks_transport_replacement_after_turn_drain
+                        if native_turns_drained
+                        else snapshot.blocks_transport_replacement
+                    )
+                    for snapshot in snapshots
+                )
             )
 
         return bool(registry.retire_if_current(identity, final_predicate))
@@ -644,6 +975,22 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             model=(model or {}).get("modelID") or default_label,
             variant=reasoning_effort or default_label,
         )
+
+    def _server_start_error_display_text(self, error: BaseException) -> str:
+        localized_key = None
+        if isinstance(error, OpenCodeModelHubOverlayRequiredError):
+            localized_key = "error.opencodeModelHubOverlayRequired"
+        elif isinstance(error, OpenCodeManagedPolicyRefreshPendingError):
+            localized_key = "error.opencodePolicyRefreshPending"
+        elif isinstance(error, OpenCodeRuntimeConfigInvalidError):
+            localized_key = "error.opencodeRuntimeConfigInvalid"
+        if localized_key is not None:
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            return f"❌ {i18n_t(localized_key, language)}"
+        return f"Failed to start OpenCode server: {error}"
 
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
@@ -824,26 +1171,33 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         except asyncio.CancelledError:
             logger.debug(f"OpenCode task cancelled for {request.base_session_id}")
         finally:
-            if self._active_requests.get(request.base_session_id) is task:
-                self._active_requests.pop(request.base_session_id, None)
-                self._session_manager.pop_request_session(request.base_session_id)
-            # The poll loop ran to completion above (handle_message awaits the
-            # task), so the turn is fully settled here. Release any web-Chat
-            # stream waiter: a no-result failure (only a notify was emitted)
-            # ends the spinner now instead of waiting out the safety timeout.
-            # Token-guarded + no-op for IM/CLI; success already released via the
-            # result emit during the poll. Defensive: tolerate controllers
-            # without streaming completion support.
-            _mark = getattr(self.controller, "mark_turn_complete", None)
-            if callable(_mark):
-                _mark(request.context)
+            # Stop holds this same lock until the native abort has settled. Keep
+            # the old request's Turn/session ownership until then, so a queued
+            # successor cannot reuse the native session under an in-flight abort.
+            async with lock:
+                if self._active_requests.get(request.base_session_id) is task:
+                    self._active_requests.pop(request.base_session_id, None)
+                    self._session_manager.pop_request_session(request.base_session_id)
+                # The poll loop ran to completion above (handle_message awaits the
+                # task), so the turn is fully settled here. Release any web-Chat
+                # stream waiter: a no-result failure (only a notify was emitted)
+                # ends the spinner now instead of waiting out the safety timeout.
+                # Token-guarded + no-op for IM/CLI; success already released via the
+                # result emit during the poll. Defensive: tolerate controllers
+                # without streaming completion support.
+                _mark = getattr(self.controller, "mark_turn_complete", None)
+                if callable(_mark):
+                    _mark(request.context)
 
     async def _process_message(self, request: AgentRequest) -> None:
         run_registered = False
         steer_state: _OpenCodeSteerState | None = None
         poll_server: _SteeringAwareOpenCodeServer | None = None
         model_hub_overlay: OpenCodeOverlay | None = None
+        model_hub_turn_mode: str | None = None
         model_hub_launch: ModelHubLaunch | None = None
+        model_hub_overlay_reservation: object | None = None
+        server = None
         # Bind early: get_or_create_session_id (below) can raise BEFORE assigning
         # session_id (a transient server error now that get_session raises on
         # non-404), and the error-cleanup paths reference session_id — keep it
@@ -853,13 +1207,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         start_attempt_id = ""
         native_start_phase = "before_write"
         activation_identity: RuntimeActivationIdentity | None = None
+        caller_context_binding_session_id: str | None = None
+        caller_context_binding_token: str | None = None
+        caller_context_binding_path: str | None = None
+        caller_context_binding_renewal: asyncio.Task[None] | None = None
+        active_poll_persisted = False
+        active_poll_removal_pending = False
+
+        def remove_active_poll() -> None:
+            nonlocal active_poll_persisted, active_poll_removal_pending
+            if session_id:
+                active_poll_persisted = False
+                active_poll_removal_pending = True
         try:
             model_hub_runtime = getattr(self.controller, "model_hub_runtime", None)
             turn_mode = getattr(model_hub_runtime, "turn_mode", None)
             if callable(turn_mode):
+                model_hub_turn_mode = turn_mode("opencode")
                 bind_turn_mode(
                     request.context,
-                    turn_mode("opencode"),
+                    model_hub_turn_mode,
                 )
             prepare_overlay = getattr(model_hub_runtime, "prepare_opencode_overlay", None)
             if callable(prepare_overlay):
@@ -867,28 +1234,70 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             server = await self._get_server()
             configure_overlay = getattr(server, "configure_model_hub_overlay", None)
             if callable(configure_overlay):
-                await configure_overlay(model_hub_overlay)
+                model_hub_overlay_reservation = await configure_overlay(
+                    model_hub_overlay
+                )
             await server.ensure_running()
+            caller_context_binding_path = _caller_context_path_for_server(server)
             activation_identity = self._attach_server_activation(server)
+        except asyncio.CancelledError:
+            await self._finish_prestart_cancellation(
+                request,
+                server,
+                model_hub_overlay_reservation,
+            )
+            raise
         except Exception as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
                 self.controller,
                 request.context,
                 self.name,
                 str(e),
-                display_text=f"Failed to start OpenCode server: {e}",
+                display_text=self._server_start_error_display_text(e),
                 request=request,
             )
             await self._remove_ack_reaction(request)
             return
 
-        await self._delete_ack(request)
-        await self._session_manager.ensure_working_dir(request.working_path)
+        try:
+            await self._delete_ack(request)
+            await self._session_manager.ensure_working_dir(request.working_path)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            model_hub_overlay_reservation = None
+            raise
 
         try:
             session_id = await self._session_manager.get_or_create_session_id(request, server)
+        except asyncio.CancelledError:
+            await self._finish_prestart_cancellation(
+                request,
+                server,
+                model_hub_overlay_reservation,
+            )
+            raise
         except OpenCodeResumeUnavailableError as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
@@ -903,6 +1312,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         except Exception as e:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             # A transient/transport/auth failure while acquiring the session
             # (get_session now raises on non-404, Codex P2): surface it as a
             # terminal error result instead of letting it propagate unhandled or be
@@ -921,6 +1335,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
         if not session_id:
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+            model_hub_overlay_reservation = None
             await emit_backend_failure(
                 self.controller,
                 request.context,
@@ -932,18 +1351,32 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             await self._remove_ack_reaction(request)
             return
 
-        self._session_manager.set_request_session(
-            request.base_session_id,
-            session_id,
-            request.working_path,
-            request.session_key,
-        )
-        self._session_manager.set_agent_session_id(
-            request.base_session_id,
-            _target_agent_session_id(request),
-        )
-
-        self._session_manager.mark_initialized(session_id)
+        try:
+            self._session_manager.set_request_session(
+                request.base_session_id,
+                session_id,
+                request.working_path,
+                request.session_key,
+            )
+            self._session_manager.set_agent_session_id(
+                request.base_session_id,
+                _target_agent_session_id(request),
+            )
+            self._session_manager.mark_initialized(session_id)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                await self._finish_prestart_cancellation(
+                    request,
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            else:
+                await self._release_model_hub_overlay_reservation(
+                    server,
+                    model_hub_overlay_reservation,
+                )
+            model_hub_overlay_reservation = None
+            raise
 
         try:
             override_agent, override_model, override_reasoning = self.controller.get_opencode_overrides(request.context)
@@ -952,11 +1385,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             override_agent = request.subagent_name or override_agent
             if request.subagent_name:
-                override_model = request.subagent_model
+                override_model = request.subagent_model or override_model
                 override_reasoning = request.subagent_reasoning_effort
 
-            if request.subagent_name and not override_model:
-                override_model = server.get_agent_model_from_config(request.subagent_name)
             if request.subagent_name and not override_reasoning:
                 override_reasoning = server.get_agent_reasoning_effort_from_config(request.subagent_name)
 
@@ -965,24 +1396,43 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 agent_to_use = server.get_default_agent_from_config()
 
             model_dict = None
-            model_str = override_model
-            if not model_str:
-                model_str = server.get_agent_model_from_config(agent_to_use)
+            from core.agent_model_selection import require_agent_model
+
+            model_str = require_agent_model(
+                override_model, "opencode", getattr(self.controller.config, "language", "en")
+            )
             opencode_cfg = getattr(self.controller.config, "opencode", None)
-            model_str = opencode_model_for_overlay(model_str, model_hub_overlay)
-            if model_hub_runtime is not None and model_str:
+            requested_model_str = opencode_requested_model_for_overlay(
+                model_str,
+                model_hub_overlay,
+            )
+            if model_hub_runtime is not None and requested_model_str:
                 model_hub_launch = await resolve_opencode_overlay_launch(
                     self.controller,
-                    model_str,
+                    requested_model_str,
                     model_hub_overlay,
                 )
                 bind_launch(request.context, model_hub_launch)
-            # Bare model id (no ``provider/`` prefix): only inject ``providerID``
-            # when the user has explicitly chosen a default provider in Settings.
-            # Otherwise leave ``model_dict`` unset so OpenCode keeps using its own
-            # routing for legacy installs.
-            default_provider = getattr(opencode_cfg, "default_provider", None)
+            model_str = opencode_model_for_overlay(
+                requested_model_str,
+                model_hub_overlay,
+            )
+            # Direct mode needs an explicit provider as well as a model; Gateway
+            # mode resolves the provider from Avibe's model route.
+            default_provider = (
+                None
+                if model_hub_overlay is not None
+                else getattr(opencode_cfg, "default_provider", None)
+            )
             model_dict = resolve_opencode_model_dict(model_str, default_provider)
+            if model_dict is None:
+                raise ValueError(i18n_t(
+                    "errors.opencodeModelProviderRequired", getattr(self.controller.config, "language", "en")
+                ))
+            display_model_dict = resolve_opencode_model_dict(
+                requested_model_str,
+                default_provider,
+            )
 
             reasoning_effort = override_reasoning
             if not reasoning_effort:
@@ -991,7 +1441,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
             if model_dict:
                 try:
-                    model_catalog = await server.get_available_models(request.working_path)
+                    model_catalog = (
+                        opencode_model_catalog_for_overlay(model_hub_overlay)
+                        if model_hub_overlay is not None
+                        else await server.get_available_models(request.working_path)
+                    )
                     resolved_model_id = resolve_opencode_model_id(
                         model_catalog,
                         model_dict.get("providerID"),
@@ -1008,17 +1462,38 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     logger.debug("Failed to resolve OpenCode model variant support: %s", err)
 
             baseline_message_ids: set[str] = set()
+            baseline_messages = None
             try:
                 baseline_messages = await server.list_messages(
                     session_id=session_id,
                     directory=request.working_path,
                 )
+            except Exception as err:
+                logger.debug(f"Failed to snapshot OpenCode messages before prompt: {err}")
+
+            if baseline_messages is not None:
+                if requires_message_order_repair(baseline_messages):
+                    session_id = await self._session_manager.repair_message_order(
+                        request,
+                        server,
+                        session_id,
+                        baseline_messages,
+                    )
+                    self._session_manager.set_request_session(
+                        request.base_session_id,
+                        session_id,
+                        request.working_path,
+                        request.session_key,
+                    )
+                    self._session_manager.mark_initialized(session_id)
+                    baseline_messages = await server.list_messages(
+                        session_id=session_id,
+                        directory=request.working_path,
+                    )
                 for message in baseline_messages:
                     message_id = message.get("info", {}).get("id")
                     if message_id:
                         baseline_message_ids.add(message_id)
-            except Exception as err:
-                logger.debug(f"Failed to snapshot OpenCode messages before prompt: {err}")
 
             # Prepare message with file attachment info if present
             prompt_text = self._prepare_message_with_files(request)
@@ -1031,28 +1506,35 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # Resolve admission once: it associates or clears this turn's Memory
             # CLI session scope as a side effect, so a second call per turn would
             # repeat that write.
-            memory_cli_admitted = memory_cli_prompt_admitted(self.controller, request.context)
-
-            system_prompt_injection = build_system_prompt_injection(
-                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
-                and platform != "wechat",
-                include_show_pages=getattr(self.controller.config, "show_pages_prompt", True),
-                include_memory_cli=memory_cli_admitted,
-                avibe_cloud_connected=avibe_cloud_url_available(self.controller.config),
-                context=request.context,
+            configure_memory_cli_access(self.controller, request.context)
+            caller_context_env = caller_env_for_platform_payload(
+                request.context.platform_specific or {},
+                message=request.context,
                 fallback_platform=platform,
-                enabled_agents=get_enabled_agents_for_prompt(self.controller),
-                current_agent_backend="opencode",
             )
-            if request.vibe_agent_system_prompt:
-                system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
 
+            project_base = managed_skill_project_base(request.context)
+            managed_skills_env = managed_skill_environment(
+                request.working_path,
+                project_base=project_base,
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+            )
+            binding_extra_env = {**caller_context_env, **managed_skills_env}
+            binding_token = secrets.token_hex(16)
+            binding_payload = request.context.platform_specific or {}
+            binding_bound = False
             try:
-                bind_caller_context_session(
+                binding_bound = await asyncio.to_thread(
+                    bind_caller_context_session,
                     session_id,
-                    request.context.platform_specific or {},
+                    binding_payload,
                     base_env=os.environ,
                     working_dir=request.working_path,
+                    extra_env=binding_extra_env,
+                    binding_token=binding_token,
+                    **_binding_path_kwargs(caller_context_binding_path),
                     # The creation origin travels with the identity: an OpenCode shell
                     # command running ``vibe task add`` sources this binding, and it is
                     # the only place the conversation behind the definition is visible.
@@ -1060,8 +1542,49 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     fallback_platform=platform,
                 )
             except Exception:
-                logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
+                logger.warning(
+                    "Starting OpenCode turn without caller context for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            caller_context_binding_session_id = session_id
+            caller_context_binding_token = binding_token
+            caller_context_binding_renewal = asyncio.create_task(
+                self._maintain_caller_context_binding(
+                    session_id,
+                    binding_token,
+                    caller_context_binding_path,
+                    payload=binding_payload,
+                    working_directory=request.working_path,
+                    extra_env=binding_extra_env,
+                    initially_bound=bool(binding_bound),
+                    message=request.context,
+                    fallback_platform=platform,
+                )
+            )
 
+            skill_catalog_sink: list[dict] = []
+            system_prompt_injection = await asyncio.to_thread(
+                build_system_prompt_injection,
+                agent_instructions=request.vibe_agent_system_prompt or "",
+                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
+                and platform != "wechat",
+                memory_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
+                ),
+                profile_enabled=bool(
+                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
+                ),
+                context=request.context,
+                fallback_platform=platform,
+                enabled_agents=get_enabled_agents_for_prompt(self.controller),
+                skills_cwd=request.working_path if binding_bound else None,
+                skills_project_base=project_base,
+                skills_claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+                skill_catalog_sink=skill_catalog_sink,
+            )
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
             logical_turn_id = str(platform_payload.get("turn_token") or "").strip()
@@ -1071,6 +1594,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             processing_indicator = self.controller.processing_indicator.snapshot_request(
                 request
             )
+            if caller_context_env:
+                processing_indicator[_CALLER_CONTEXT_ENV_SNAPSHOT_KEY] = validated_caller_env_snapshot(caller_context_env)
+            if project_base:
+                processing_indicator[_MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY] = project_base
+            if BUILTIN_SKILLS_SNAPSHOT_ENV in managed_skills_env:
+                processing_indicator[_MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY] = {
+                    "id": managed_skills_env[BUILTIN_SKILLS_SNAPSHOT_ENV],
+                    "root": managed_skills_env[BUILTIN_SKILLS_ROOT_ENV],
+                }
             target_session_id = _target_agent_session_id(request)
             if target_session_id and logical_turn_id:
                 processing_indicator[_STEERING_SNAPSHOT_KEY] = {
@@ -1084,8 +1616,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             launch_identity = persisted_launch_identity(model_hub_launch)
             if launch_identity is not None:
                 processing_indicator["model_hub_launch"] = launch_identity
+            if display_model_dict is not None:
+                processing_indicator[_MODEL_HUB_DISPLAY_MODEL_KEY] = display_model_dict
 
-            await server.mark_run_active(session_id)
+            if model_hub_overlay_reservation is None:
+                await server.mark_run_active(session_id)
+            else:
+                await server.mark_run_active(
+                    session_id,
+                    overlay_reservation=model_hub_overlay_reservation,
+                )
+                model_hub_overlay_reservation = None
             run_registered = True
             # Persist the complete recovery address before the first native write.
             # A crash after OpenCode accepts the exact attempt part can now rebuild
@@ -1110,6 +1651,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 session_key=request.session_key,
             )
+            active_poll_persisted = True
+            prompt_text = self.render_input(prompt_text, getattr(request, "input_metadata", None))
             mark_backend_dispatch_attempted(request.context)
             native_start_phase = "may_have_written"
             await server.prompt_async(
@@ -1121,8 +1664,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model=model_dict,
                 reasoning_effort=reasoning_effort,
                 system=system_prompt_injection,
-                tools={"question": False},
+                tools={"question": False, "skill": False},
             )
+            from core.skill_observability import accept_catalog
+
+            accept_catalog(self.controller, request.context, skill_catalog_sink[0] if skill_catalog_sink else None, backend="opencode")
             try:
                 read_prompt_started_at = getattr(server, "get_last_prompt_started_at", None)
                 prompt_started_at = (
@@ -1164,14 +1710,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort=reasoning_effort,
                 system=system_prompt_injection,
                 baseline_message_ids=set(baseline_message_ids),
+                catalog_accepted=lambda: accept_catalog(
+                    self.controller, request.context, skill_catalog_sink[0] if skill_catalog_sink else None,
+                    backend="opencode",
+                ),
                 awaiting_after_message_ids=set(baseline_message_ids),
                 awaiting_user_text=prompt_text,
-                awaiting_start_confirmation_deadline=(
+                awaiting_prompt_accepted=True,
+                awaiting_prompt_activity_deadline=(
                     time.monotonic()
-                    + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
                 ),
                 idle_reconciliation_message=self._idle_reconciliation_message(
-                    model_dict,
+                    display_model_dict,
                     reasoning_effort,
                 ),
             )
@@ -1204,7 +1755,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
 
             if not should_emit:
-                self.sessions.remove_active_poll(session_id)
+                remove_active_poll()
                 await self._remove_ack_reaction(request)
                 return
 
@@ -1227,13 +1778,24 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 )
 
             self._maybe_backfill_session_title(request, session_id, retry_delay_seconds=3.0)
-            self.sessions.remove_active_poll(session_id)
+            remove_active_poll()
 
         except asyncio.CancelledError:
             logger.info(f"OpenCode request cancelled for {request.base_session_id}")
-            await self._remove_ack_reaction(request)
+            # A /stop is silent by design, so the ⏹️ replacing the 👀 is the only
+            # thing that tells the user this turn ended on their command. Every
+            # other cancellation (shutdown, clear_sessions, supersede) leaves the
+            # plain removal, because none of those are the user's doing.
+            await self._remove_ack_reaction(
+                request,
+                terminal_emoji=(
+                    STOPPED_REACTION_EMOJI
+                    if self._claim_user_stop_receipt(request)
+                    else None
+                ),
+            )
             if session_id:
-                self.sessions.remove_active_poll(session_id)
+                remove_active_poll()
             raise
         except OpenCodePromptRejectedError as e:
             error_text = f"{type(e).__name__}: {e}"
@@ -1280,7 +1842,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             await self._remove_ack_reaction(request)
             if session_id and poll_can_be_removed:
-                self.sessions.remove_active_poll(session_id)
+                remove_active_poll()
 
             await self.record_model_hub_native_failure(request.context, error_text)
             await emit_backend_failure(
@@ -1306,7 +1868,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
 
             await self._remove_ack_reaction(request)
             if session_id and native_start_phase != "may_have_written":
-                self.sessions.remove_active_poll(session_id)
+                remove_active_poll()
             elif session_id:
                 logger.warning(
                     "Preserving OpenCode active poll after ambiguous native start "
@@ -1325,13 +1887,101 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request=request,
             )
         finally:
+            await self._stop_caller_context_binding_renewal(
+                caller_context_binding_renewal
+            )
             if steer_state is not None:
                 async with steer_state.lock:
                     steer_state.closing = True
                 if self._steering_states.get(request.base_session_id) is steer_state:
                     self._steering_states.pop(request.base_session_id, None)
-            if run_registered:
-                await server.mark_run_inactive(session_id)
+            if active_poll_removal_pending and run_registered:
+                active_poll_persisted = not await self._retire_active_poll(
+                    server,
+                    session_id,
+                )
+            elif active_poll_removal_pending and session_id:
+                self.sessions.remove_active_poll(session_id)
+                active_poll_persisted = False
+            if (
+                caller_context_binding_session_id
+                and caller_context_binding_token
+                and not active_poll_persisted
+            ):
+                try:
+                    await asyncio.to_thread(
+                        unbind_caller_context_session,
+                        caller_context_binding_session_id,
+                        binding_token=caller_context_binding_token,
+                        **_binding_path_kwargs(caller_context_binding_path),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to unbind OpenCode caller context for session %s",
+                        caller_context_binding_session_id,
+                        exc_info=True,
+                    )
+            await self._release_model_hub_overlay_reservation(
+                server,
+                model_hub_overlay_reservation,
+            )
+
+    @staticmethod
+    async def _release_model_hub_overlay_reservation(
+        server: Any,
+        reservation: object | None,
+    ) -> None:
+        if server is None or reservation is None:
+            return
+        release = getattr(server, "release_model_hub_overlay_reservation", None)
+        if not callable(release):
+            return
+        try:
+            await release(reservation)
+        except Exception:
+            logger.warning(
+                "Failed to release OpenCode Model Hub overlay reservation",
+                exc_info=True,
+            )
+
+    async def _retire_active_poll(
+        self,
+        server: Any,
+        session_id: str,
+    ) -> bool:
+        try:
+            await server.mark_run_inactive(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to clear OpenCode run marker for session=%s; preserving its active poll",
+                session_id,
+            )
+            return False
+        self.sessions.remove_active_poll(session_id)
+        return True
+
+    async def _finish_prestart_cancellation(
+        self,
+        request: AgentRequest,
+        server: Any,
+        reservation: object | None,
+    ) -> None:
+        await self._release_model_hub_overlay_reservation(server, reservation)
+        await self._remove_ack_reaction(
+            request,
+            terminal_emoji=(
+                STOPPED_REACTION_EMOJI
+                if self._claim_user_stop_receipt(request)
+                else None
+            ),
+        )
+
+    def _claim_user_stop_receipt(self, request: AgentRequest) -> bool:
+        """Recognize adapter-local and shared prewrite Stop ownership."""
+
+        return self.consume_user_stop_intent(
+            request.base_session_id
+        ) or prewrite_user_stop_requested(request.context)
 
     def additional_steer_targets(self, session_id: str) -> list[ActiveSteerTarget]:
         """Expose restored poll owners that did not pass through AgentService."""
@@ -1427,16 +2077,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         backend=self.name,
                     )
                 before_insert = _SteeringAwareOpenCodeServer._message_ids(messages)
+                prompt_text = self.render_input(request.text, request.input_metadata)
                 try:
                     prompt_kwargs = {
                         "session_id": native_session_id,
                         "directory": directory,
-                        "text": request.text,
+                        "text": prompt_text,
                         "agent": state.agent,
                         "model": state.model,
                         "reasoning_effort": state.reasoning_effort,
                         "system": state.system,
-                        "tools": {"question": False},
+                        "tools": {"question": False, "skill": False},
                     }
                     if request.attempt_id:
                         prompt_kwargs["attempt_id"] = request.attempt_id
@@ -1447,15 +2098,19 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     raise
                 except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientConnectionError):
                     state.awaiting_after_message_ids = before_insert
-                    state.awaiting_user_text = request.text
-                    state.awaiting_start_confirmation_deadline = None
+                    state.awaiting_user_text = prompt_text
+                    state.awaiting_prompt_accepted = False
+                    state.awaiting_prompt_activity_deadline = None
                     state.awaiting_active_status_observed = False
                     raise
                 state.awaiting_after_message_ids = before_insert
-                state.awaiting_user_text = request.text
-                state.awaiting_start_confirmation_deadline = (
+                state.awaiting_user_text = prompt_text
+                state.awaiting_prompt_accepted = True
+                if state.catalog_accepted:
+                    state.catalog_accepted()
+                state.awaiting_prompt_activity_deadline = (
                     time.monotonic()
-                    + _ASYNC_PROMPT_START_CONFIRMATION_TIMEOUT_SECONDS
+                    + _ASYNC_PROMPT_ACCEPTED_ACTIVITY_TIMEOUT_SECONDS
                 )
                 state.awaiting_active_status_observed = False
                 await asyncio.sleep(_STEER_POST_WRITE_STATUS_SETTLE_SECONDS)
@@ -1618,46 +2273,88 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             backend=self.name,
         )
 
-    async def handle_stop(self, request: AgentRequest) -> bool:
-        task = self._active_requests.get(request.base_session_id)
-        if not task or task.done():
-            request.stop_failure_reason = "not_active"
+    def consume_user_stop_intent(self, base_session_id: str) -> bool:
+        """Let the cancelled request coroutine claim its /stop receipt once."""
+
+        if not base_session_id or base_session_id not in self._user_stopped_sessions:
             return False
-
-        req_info = self._session_manager.get_request_session(request.base_session_id)
-        opencode_session_id = None
-        if req_info:
-            opencode_session_id = req_info[0]
-        try:
-            await self._abort_active_request(request.base_session_id, task, req_info)
-        except Exception as e:
-            logger.warning(f"Failed to abort OpenCode session: {e}")
-
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        if opencode_session_id:
-            self.sessions.remove_active_poll(opencode_session_id)
-
-        # A user-initiated stop is terminal but intentional, so it carries NO
-        # user-facing message: a single SILENT result settles the dot to idle +
-        # releases the SSE waiter through the outbound chokepoint without a bubble
-        # (``level="silent"`` makes that explicit rather than faking it via empty text).
-        # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
-        # of the run's terminal state so the stop settles it ``canceled`` instead of
-        # ``succeeded`` — see its docstring.
-        await self.controller.emit_agent_message(
-            request.context,
-            "result",
-            "",
-            level="silent",
-            output=stop_output_for(request),
-        )
-        logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
+        self._user_stopped_sessions.discard(base_session_id)
         return True
+
+    async def handle_stop(self, request: AgentRequest) -> bool:
+        lock = self._session_manager.get_session_lock(request.base_session_id)
+        async with lock:
+            # Read the task only after claiming the same ownership boundary used
+            # to start and retire requests. A result that completed while Stop
+            # waited for the lock remains authoritative.
+            task = self._active_requests.get(request.base_session_id)
+            if not task or task.done():
+                request.stop_failure_reason = "not_active"
+                return False
+
+            req_info = self._session_manager.get_request_session(request.base_session_id)
+            opencode_session_id = None
+            if req_info:
+                opencode_session_id = req_info[0]
+            # Claimed BEFORE the abort: the request coroutine is what owns the 👀,
+            # and its cancellation handler is the only place that trades it for the
+            # ⏹️ receipt. The helper waits for any already-started steering write,
+            # then cancels under that same lock before awaiting the native abort.
+            self._user_stopped_sessions.add(request.base_session_id)
+            cancellation_claimed = False
+            try:
+                try:
+                    cancellation_claimed = await self._abort_active_request(
+                        request.base_session_id,
+                        task,
+                        req_info,
+                        cancel_before_abort=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to abort OpenCode session: {e}")
+                    cancellation_claimed = task.cancelling() > 0 or task.cancelled()
+
+                if not cancellation_claimed:
+                    # The runner completed while Stop was waiting for a steering
+                    # write. Its result/error is authoritative; do not append a
+                    # stopped receipt or a silent cancellation settlement.
+                    logger.info(
+                        "OpenCode session %s completed before /stop claimed it",
+                        request.base_session_id,
+                    )
+                    return True
+
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            finally:
+                # Only reached with the intent still set if something above raised
+                # past the handlers; a claimed intent is already gone.
+                self._user_stopped_sessions.discard(request.base_session_id)
+
+            if opencode_session_id and self._active_poll_is_persisted(
+                opencode_session_id
+            ):
+                server = await self._get_server()
+                await self._retire_active_poll(server, opencode_session_id)
+
+            # A user-initiated stop is terminal but intentional, so it carries NO
+            # user-facing message: a single SILENT result settles the dot to idle +
+            # releases the SSE waiter through the outbound chokepoint without a bubble
+            # (``level="silent"`` makes that explicit rather than faking it via empty text).
+            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
+            # of the run's terminal state so the stop settles it ``canceled`` instead of
+            # ``succeeded`` — see its docstring.
+            await self.controller.emit_agent_message(
+                request.context,
+                "result",
+                "",
+                level="silent",
+                output=stop_output_for(request),
+            )
+            logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
+            return True
 
     async def clear_sessions(self, session_key: str) -> int:
         self.sessions.clear_agent_sessions(session_key, self.name)
@@ -1677,7 +2374,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     except asyncio.CancelledError:
                         pass
                     terminated += 1
-                self.sessions.remove_active_poll(opencode_session_id)
+                if self._active_poll_is_persisted(opencode_session_id):
+                    server = await self._get_server()
+                    await self._retire_active_poll(server, opencode_session_id)
         return terminated
 
     async def _abort_active_request(
@@ -1685,18 +2384,29 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         base_session_id: str,
         task: asyncio.Task,
         request_session: tuple[str, str, str] | None,
-    ) -> None:
+        *,
+        cancel_before_abort: bool = False,
+    ) -> bool:
         state = self._steering_states.get(base_session_id)
         if state is not None and state.task is task:
             async with state.lock:
                 state.closing = True
+                if cancel_before_abort:
+                    if task.done():
+                        return False
+                    task.cancel()
                 if request_session:
                     server = await self._get_server()
                     await server.abort_session(request_session[0], request_session[1])
-            return
+            return True
+        if cancel_before_abort:
+            if task.done():
+                return False
+            task.cancel()
         if request_session:
             server = await self._get_server()
             await server.abort_session(request_session[0], request_session[1])
+        return True
 
     def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
         return {
@@ -1887,6 +2597,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         )
                         continue
                 logger.info(f"OpenCode session {session_id} has completed, removing from active polls")
+                try:
+                    await server.mark_run_inactive(poll_info.opencode_session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to clear OpenCode run marker for session=%s; "
+                        "preserving its active poll and continuing restoration",
+                        poll_info.opencode_session_id,
+                    )
+                    continue
                 await self._poll_loop.remove_restored_ack(poll_info)
                 stale_poll_ids.append(session_id)
                 continue
@@ -1895,6 +2614,104 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 f"Restoring poll loop for OpenCode session {session_id} "
                 f"(thread={poll_info.base_session_id}, cwd={poll_info.working_path})"
             )
+
+            restored_binding_token = secrets.token_hex(16)
+            restored_binding_path = _caller_context_path_for_server(server)
+            restored_caller_env = validated_caller_env_snapshot(
+                processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
+            )
+            restored_context = restored_context_from_poll_info(poll_info)
+            restored_session_id = str(
+                (steering_snapshot.get("target_session_id") if isinstance(steering_snapshot, dict) else None)
+                or poll_info.base_session_id or ""
+            )
+            if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
+                memory_context = self.controller.session_turns.restore_memory_context(restored_session_id, logical_turn_id)
+                admitted = memory_context is not None and configure_memory_cli_access(self.controller, memory_context)
+                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id) if admitted else None
+                if proof:
+                    restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
+            if (
+                poll_platform == "avibe"
+                and str(restored_context.user_id or "").startswith("remote:")
+            ):
+                # Legacy persisted polls do not carry the authorization snapshot.
+                # Keep them remote-but-unprivileged instead of silently treating an
+                # absent snapshot as a local caller.
+                restored_caller_env.setdefault(AVIBE_SESSION_ID_ENV, poll_info.base_session_id)
+                restored_caller_env.setdefault(AVIBE_CALLER_PLATFORM_ENV, "avibe")
+                restored_caller_env.setdefault(
+                    AVIBE_CALLER_USER_ID_ENV,
+                    str(restored_context.user_id),
+                )
+                restored_caller_env.setdefault(AVIBE_CALLER_REMOTE_ENV, "1")
+            restored_project_base = processing_snapshot.get(
+                _MANAGED_SKILL_PROJECT_BASE_SNAPSHOT_KEY
+            )
+            restored_project_base = (
+                restored_project_base
+                if isinstance(restored_project_base, str) and restored_project_base
+                else None
+            )
+            restored_snapshot_kwargs: dict[str, str] = {}
+            if _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY in processing_snapshot:
+                restored_snapshot = processing_snapshot.get(
+                    _MANAGED_SKILL_BUILTIN_SNAPSHOT_KEY
+                )
+                restored_snapshot_kwargs = {
+                    "builtin_snapshot_id": (
+                        restored_snapshot.get("id", "")
+                        if isinstance(restored_snapshot, dict)
+                        and isinstance(restored_snapshot.get("id"), str)
+                        else ""
+                    ),
+                    "builtin_snapshot_root": (
+                        restored_snapshot.get("root", "")
+                        if isinstance(restored_snapshot, dict)
+                        and isinstance(restored_snapshot.get("root"), str)
+                        else ""
+                    ),
+                }
+            restored_managed_skills_env = managed_skill_environment(
+                poll_info.working_path,
+                project_base=restored_project_base,
+                claude_cli_path=managed_skill_claude_cli_path(
+                    getattr(getattr(self, "controller", None), "config", None)
+                ),
+                **restored_snapshot_kwargs,
+            )
+            restored_bound = False
+            for attempt in range(3):
+                try:
+                    restored_bound = await asyncio.to_thread(
+                        bind_caller_context_session,
+                        poll_info.opencode_session_id,
+                        None,
+                        base_env=os.environ,
+                        working_dir=poll_info.working_path,
+                        extra_env={
+                            **restored_caller_env,
+                            **restored_managed_skills_env,
+                        },
+                        binding_token=restored_binding_token,
+                        **_binding_path_kwargs(restored_binding_path),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to restore OpenCode caller context for session=%s (attempt %s/3)",
+                        poll_info.opencode_session_id,
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                if restored_bound:
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(0)
+            if not restored_bound:
+                logger.error(
+                    "Restoring OpenCode poll without caller context for session=%s",
+                    poll_info.opencode_session_id,
+                )
 
             restoration_ready = asyncio.get_running_loop().create_future()
             restoration_published = asyncio.Event()
@@ -1905,6 +2722,15 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     reconcile_after_message_ids=reconcile_after_message_ids,
                     restoration_ready=restoration_ready,
                     restoration_published=restoration_published,
+                    caller_context_binding_token=(
+                        restored_binding_token
+                    ),
+                    caller_context_binding_path=restored_binding_path,
+                    caller_context_binding_extra_env={
+                        **restored_caller_env,
+                        **restored_managed_skills_env,
+                    },
+                    caller_context_binding_initially_bound=restored_bound,
                 )
             )
             restoration_results.append(
@@ -1963,11 +2789,31 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         reconcile_after_message_ids: set[str] | None = None,
         restoration_ready: asyncio.Future[bool] | None = None,
         restoration_published: asyncio.Event | None = None,
+        caller_context_binding_token: str | None = None,
+        caller_context_binding_path: str | None = None,
+        caller_context_binding_extra_env: dict[str, str] | None = None,
+        caller_context_binding_initially_bound: bool = False,
     ) -> None:
         current_task = asyncio.current_task()
         steer_state = None
         server = None
         restoration_registered = False
+        terminal_poll_cleanup = False
+        caller_context_binding_renewal = (
+            asyncio.create_task(
+                self._maintain_caller_context_binding(
+                    poll_info.opencode_session_id,
+                    caller_context_binding_token,
+                    caller_context_binding_path,
+                    payload=None,
+                    working_directory=poll_info.working_path,
+                    extra_env=caller_context_binding_extra_env or {},
+                    initially_bound=caller_context_binding_initially_bound,
+                )
+            )
+            if caller_context_binding_token
+            else None
+        )
         try:
             poll_platform = restored_platform_from_poll_info(poll_info)
             registration_attempts = 2 if poll_platform in _RESTORED_IM_PLATFORMS else 1
@@ -2001,6 +2847,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 else ""
             )
             has_steering_identity = bool(target_session_id and logical_turn_id)
+            display_model_dict = (
+                poll_info.processing_indicator.get(_MODEL_HUB_DISPLAY_MODEL_KEY)
+                if isinstance(poll_info.processing_indicator, dict)
+                else None
+            )
+            if not isinstance(display_model_dict, dict):
+                display_model_dict = poll_info.model_dict
             if current_task is not None and (
                 has_steering_identity
                 or reconcile_initial_status
@@ -2034,7 +2887,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         else None
                     ),
                     idle_reconciliation_message=self._idle_reconciliation_message(
-                        poll_info.model_dict,
+                        display_model_dict,
                         poll_info.reasoning_effort,
                     ),
                     restored=True,
@@ -2058,7 +2911,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             if delivery_recovery_complete is not None:
                 await delivery_recovery_complete.wait()
-            await self._poll_loop.run_restored_poll_loop(poll_info)
+            terminal_poll_cleanup = bool(
+                await self._poll_loop.run_restored_poll_loop(poll_info)
+            )
         except Exception as err:
             if restoration_registered:
                 raise
@@ -2089,13 +2944,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                             logical_turn_id,
                         )
                 if terminal_persisted:
-                    self.sessions.remove_active_poll(poll_info.opencode_session_id)
+                    terminal_poll_cleanup = True
                 logger.error(
                     "OpenCode poll registration failed for session=%s: %s",
                     poll_info.opencode_session_id,
                     err,
                 )
         finally:
+            await self._stop_caller_context_binding_renewal(
+                caller_context_binding_renewal
+            )
             if current_task is not None:
                 self._restored_poll_servers.pop(current_task, None)
             if steer_state is not None:
@@ -2103,13 +2961,26 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     steer_state.closing = True
                 if self._steering_states.get(poll_info.base_session_id) is steer_state:
                     self._steering_states.pop(poll_info.base_session_id, None)
-            if server is not None:
+            if terminal_poll_cleanup and server is not None:
+                await self._retire_active_poll(
+                    server,
+                    poll_info.opencode_session_id,
+                )
+            if caller_context_binding_token and not self._active_poll_is_persisted(
+                poll_info.opencode_session_id
+            ):
                 try:
-                    await server.mark_run_inactive(poll_info.opencode_session_id)
-                except Exception:
-                    logger.exception(
-                        "Failed to clear restored OpenCode run marker for session=%s",
+                    await asyncio.to_thread(
+                        unbind_caller_context_session,
                         poll_info.opencode_session_id,
+                        binding_token=caller_context_binding_token,
+                        **_binding_path_kwargs(caller_context_binding_path),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to clear restored OpenCode caller context for session %s",
+                        poll_info.opencode_session_id,
+                        exc_info=True,
                     )
             if self._active_requests.get(poll_info.base_session_id) is current_task:
                 self._active_requests.pop(poll_info.base_session_id, None)

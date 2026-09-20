@@ -136,6 +136,33 @@ def output_for_message(message_type: str, output: MessageOutput | None) -> Messa
     return MessageOutput(completes_turn=False, completes_run=False)
 
 
+def communication_type_for_output(
+    message_type: str,
+    output: MessageOutput,
+    *,
+    is_error: bool = False,
+) -> str:
+    """Classify a visible output by the lifecycle authority it actually owns.
+
+    Attached nonterminal output is persisted as ``output``. Detached completions
+    retain their ``result`` / ``error`` notification family while metadata records
+    their detached provenance without granting current-Turn timeline authority.
+    """
+
+    if message_type == "output":
+        return "output"
+    if message_type == "result":
+        # Detached completion keeps its notification semantics. Lifecycle consumers
+        # use its provenance without changing the visible type or current Turn.
+        if output.detached:
+            return "error" if is_error else "result"
+        if not output.completes_turn:
+            return "output"
+        if is_error:
+            return "error"
+    return message_type
+
+
 def terminal_turn_output() -> MessageOutput:
     """Explicitly grant one output authority to settle its Turn and Run."""
 

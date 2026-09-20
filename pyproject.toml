@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling", "hatch-vcs", "tomlkit>=0.11.1"]
 build-backend = "hatchling.build"
 
 [project]
@@ -49,6 +49,7 @@ dependencies = [
     "slack-sdk>=3.26.0",
     "discord.py>=2.4.0",
     "aiohttp>=3.8.0",
+    "ijson>=3.5.1",
     "markdown-it-py>=4.2.0",
     "markdown_to_mrkdwn>=0.2.0",
     "typing_extensions>=4.12.2",
@@ -65,7 +66,7 @@ dependencies = [
     "PyJWT[crypto]>=2.9.0",
     "SQLAlchemy>=2.0.0",
     "alembic>=1.13.0",
-    "psutil>=5.9.0",
+    "psutil>=7.1.0",
     "packaging>=23.0",
     "uvicorn[standard]>=0.27",
     "imagesize>=1.4.1",
@@ -76,6 +77,11 @@ dependencies = [
     "pycryptodome>=3.20",
     "prometheus-client>=0.20.0",
 ]
+
+[project.optional-dependencies]
+# Compatibility spelling only. Enabled Memory is reconciled from the matching
+# GitHub Release; it is not a separately indexed dependency.
+memory = []
 
 [project.urls]
 Homepage = "https://github.com/avibe-bot/avibe"
@@ -99,7 +105,6 @@ artifacts = [
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
-    "vibe/memory_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
 ]
 
@@ -107,10 +112,12 @@ artifacts = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["vibe", "config", "core", "modules", "storage"]
+exclude = ["vibe/memory_runtime_manifest.json"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "main.py" = "vibe/service_main.py"
 "ui/dist" = "vibe/ui/dist"
+"skills" = "vibe/builtin_skills_source"
 
 [tool.hatch.build.targets.sdist]
 # Include ui/dist for source distribution
@@ -120,19 +127,25 @@ include = [
     "core/**",
     "modules/**",
     "storage/**",
+    "skills/**",
     "hatch_build.py",
+    "hatch_exact_peer.py",
     "main.py",
     "scripts/prepare_local_show_runtime_manifest.py",
     "scripts/show_runtime_manifest_asset.py",
+    "scripts/release_package_version.py",
     "ui/dist/**",
     "vibe/show_runtime_manifest.json",
     "vibe/tmux_runtime_manifest.json",
     "vibe/git_runtime_manifest.json",
-    "vibe/memory_runtime_manifest.json",
     "vibe/model_hub_runtime/cliproxyapi_manifest.json",
     "README.md",
     "LICENSE",
 ]
+exclude = ["vibe/memory_runtime_manifest.json"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"skills" = "skills"
 
 [tool.ruff]
 line-length = 120
@@ -145,7 +158,8 @@ extend-ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
-    "integration: platform integration tests requiring Docker + platform tokens",
+    "e2e_model_hub: opt-in hermetic Model Hub HTTP and gateway scenarios",
+    "integration: tests excluded from the unit shards because they need external infrastructure (Docker + platform tokens) or minutes of real filesystem work",
     "uses_real_paths: opt out of the autouse home/config isolation so the test can exercise real path resolvers (must remain read-only)",
     "no_sqlite_template: opt out of the pre-migrated SQLite template for migration/bootstrap tests",
 ]

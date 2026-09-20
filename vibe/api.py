@@ -12,11 +12,13 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
 import uuid
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
@@ -27,7 +29,16 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.atomic_io import write_atomic
+from config.v2_config import (
+    CONFIG_LOCK,
+    MemoryConfig,
+    MemoryConfigStaleWrite,
+    V2Config,
+    atomic_update_memory,
+    config_file_lock,
+    memory_config_from_payload,
+)
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -42,6 +53,10 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
+from core import latest_version_cache
+from core.memory_loader import probe_memory_runtime_entrypoint
+from config.memory_operation_lock import MemoryOperationBusy, MemoryOperationLease
+from core.install_integrity import verify_python_environment
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -65,17 +80,35 @@ from vibe.cli_paths import (
     _is_executable_file,
     _npm_binary_candidates_for_prefix,
     _npm_global_binary_candidates,
+    _npm_global_prefixes,
     _npm_prefix_for,
     _windows_executable_candidates,
     resolve_cli_path as _resolve_cli_path,
 )
 from vibe.upgrade import (
+    AtomicActivation,
+    MEMORY_PACKAGE_NAME,
+    PACKAGE_NAME,
+    MemoryRequirementUnreadableError,
+    _candidate_python,
+    activation_block_reason,
+    activate_upgrade_candidate,
+    atomic_upgrade_lock,
     build_upgrade_plan,
+    configured_memory_enabled,
+    defer_upgrade_activation,
+    discard_atomic_uv_install_generation,
+    execute_upgrade_plan,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
     is_desktop_managed_runtime,
+    launcher_is_current_process,
+    release_asset_specs,
+    restart_is_pending,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
@@ -95,13 +128,16 @@ from core.vibe_agents import (
     AgentArchiveError,
     AgentNameValidationError,
     AgentReferenceRewriteError,
+    VibeAgentAccessError,
     VibeAgentStore,
     iter_global_agent_files,
     parse_agent_file,
+    resolve_resource_access_context,
     validate_agent_backend,
 )
 from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_bytes
+from storage.lock import MigrationFileLock, MigrationLockTimeout
 
 
 logger = logging.getLogger(__name__)
@@ -180,14 +216,79 @@ def _ensure_builtin_default_agents(config: Optional[V2Config] = None) -> None:
         store.close()
 
 
-def resolve_cli_path(binary: str) -> str | None:
-    # Keep the API-level seam injectable for existing dependency/install tests,
-    # while sharing the actual discovery contract with desktop runtime config.
+def resolve_cli_path(binary: str, *, include_npm_global: bool = True) -> str | None:
     return _resolve_cli_path(
         binary,
+        include_npm_global=include_npm_global,
         candidate_paths=_candidate_cli_paths,
         is_executable_file=_is_executable_file,
+        include_desktop=include_npm_global,
     )
+
+
+def resolve_cli_paths(
+    binaries: list[str],
+    *,
+    include_npm_global: bool = True,
+) -> dict[str, str | None]:
+    """Resolve a CLI batch while querying each npm installation only once."""
+
+    resolved: dict[str, str | None] = {}
+    for binary in binaries:
+        try:
+            resolved[binary] = resolve_cli_path(
+                binary,
+                include_npm_global=False,
+            )
+        except Exception:
+            logger.warning("CLI path probe failed for %s", binary, exc_info=True)
+            resolved[binary] = None
+    if not include_npm_global or all(path is not None for path in resolved.values()):
+        return resolved
+
+    try:
+        prefixes = _npm_global_prefixes()
+    except Exception:
+        logger.warning("npm global prefix probe failed", exc_info=True)
+        return resolved
+    for binary, path in resolved.items():
+        if path is not None or not binary:
+            continue
+        expanded = Path(os.path.expanduser(binary))
+        has_path_separator = os.sep in binary or (
+            os.altsep is not None and os.altsep in binary
+        )
+        lookup_name = (
+            expanded.name if expanded.is_absolute() or has_path_separator else binary
+        )
+        for prefix in prefixes:
+            npm_path = next(
+                (
+                    str(candidate)
+                    for candidate in _npm_binary_candidates_for_prefix(prefix, lookup_name)
+                    if _is_executable_file(candidate)
+                ),
+                None,
+            )
+            if npm_path is None:
+                continue
+            resolved[binary] = npm_path
+            if lookup_name != binary:
+                logger.info(
+                    "resolve_cli_paths: stored path %s missing; falling back to %s",
+                    binary,
+                    npm_path,
+                )
+            break
+    from vibe.desktop_backends import resolve_published_desktop_backend
+
+    for binary, path in resolved.items():
+        if path is None:
+            name = Path(os.path.expanduser(binary)).name
+            if name in {"claude", "codex", "opencode"}:
+                resolved[binary] = resolve_published_desktop_backend(name)
+    return resolved
+
 
 
 def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
@@ -472,17 +573,121 @@ def load_config() -> V2Config:
     return V2Config.load()
 
 
+def config_recovery_notice(config: V2Config) -> Optional[str]:
+    """Return the localized, non-diagnostic message for a recovered config."""
+
+    if not getattr(config, "load_warnings", ()):
+        return None
+    return backend_t(
+        "error.configRecovery.beforeAuth",
+        getattr(config, "language", "en") or "en",
+    )
+
+
+def _config_recovery_message() -> Optional[str]:
+    """Return a localized guard message before mutating backend-owned auth files."""
+
+    with CONFIG_LOCK:
+        try:
+            config = load_config()
+        except FileNotFoundError:
+            return None
+    return config_recovery_notice(config)
+
+
+_LIST_OPS_PAYLOAD_KEY = "__avibe_list_ops"
+
+
+_LIST_OPS_ALLOWED_PATHS = frozenset({"platforms.enabled"})
+
+
+def _apply_list_ops(base: dict, list_ops: dict) -> dict:
+    """Apply add/remove operations to list-valued config paths.
+
+    ``{"platforms.enabled": {"add": ["wechat"], "remove": ["discord"]}}``
+    mutates the lock-fresh base's list instead of replacing it wholesale,
+    so a stale browser snapshot of the list cannot drop entries another
+    process added (#1458 stage ③: lists are replace-on-merge otherwise).
+    Only whitelisted paths are accepted: resolving arbitrary dotted paths
+    would let a client mutate lists whose owners need service-mediated
+    synchronization (e.g. ``model_hub.sources`` must go through
+    ModelHubService) — anything outside the whitelist raises.
+    """
+    import copy as _copy
+
+    merged = _copy.deepcopy(base)
+
+    def _resolve(container: dict, dotted: str):
+        current = container
+        for part in dotted.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current
+
+    if not isinstance(list_ops, dict):
+        raise ValueError("Config list operations must be an object")
+
+    def _validated_operands(ops: dict, name: str) -> list[str]:
+        if name not in ops:
+            return []
+        values = ops[name]
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.strip() for value in values
+        ):
+            raise ValueError(
+                f"Config list operation '{name}' must be an array of non-empty strings"
+            )
+        return values
+
+    for dotted, ops in list_ops.items():
+        if not isinstance(dotted, str) or dotted not in _LIST_OPS_ALLOWED_PATHS:
+            raise ValueError(
+                f"Config list operation path '{dotted}' is not supported"
+            )
+        if not isinstance(ops, dict):
+            raise ValueError(f"Config list operation '{dotted}' must be an object")
+        unknown = set(ops) - {"add", "remove"}
+        if unknown:
+            names = ", ".join(sorted(str(name) for name in unknown))
+            raise ValueError(f"Config list operation '{dotted}' has unknown keys: {names}")
+        target = _resolve(merged, dotted)
+        if not isinstance(target, list):
+            raise ValueError(f"Config list operation target '{dotted}' is not a list")
+        additions = _validated_operands(ops, "add")
+        removals = _validated_operands(ops, "remove")
+        next_list = [item for item in target if item not in removals]
+        for item in additions:
+            if item not in next_list:
+                next_list.append(item)
+        # Write back through the dotted path.
+        parts = dotted.split(".")
+        node = merged
+        for part in parts[:-1]:
+            node = node[part]
+        node[parts[-1]] = next_list
+    return merged
+
+
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
+    list_ops = None
+    if isinstance(patch, dict):
+        raw_ops = patch.get(_LIST_OPS_PAYLOAD_KEY)
+        if isinstance(raw_ops, dict):
+            list_ops = raw_ops
+            patch = {k: v for k, v in patch.items() if k != _LIST_OPS_PAYLOAD_KEY}
     merged = dict(base)
     for key, value in patch.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
             merged[key] = _deep_merge_dicts(merged[key], value)
         else:
             merged[key] = value
+    if list_ops is not None:
+        merged = _apply_list_ops(merged, list_ops)
     return merged
 
 
-_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url")
+_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker")
 
 
 def _strip_agent_auth_fields(payload: dict) -> dict:
@@ -710,16 +915,23 @@ def _validate_remote_access_network_change(
 def save_config(
     payload: dict,
     *,
-    allow_memory: bool = False,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
+    user_context: Any = None,
 ) -> V2Config:
     """Save general settings while preserving Memory's dedicated settings block."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
+    from vibe.authorization import require_instance_role
 
-    if not allow_memory:
-        payload = {key: value for key, value in payload.items() if key != "memory"}
+    context = require_instance_role(user_context, "editor")
+    if not context.can_manage_instance:
+        payload = editor_config_write_payload(payload)
+
+    # This read-only projection is returned by GET /api/config so the browser
+    # can explain a recovered load; it must never become persisted config data.
+    payload = {key: value for key, value in payload.items() if key != "config_recovery"}
+    payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
     # bindings and credential lifecycle stay in sync with the persisted config.
     # Generic settings pages round-trip GET /api/config, so treat this section
@@ -729,22 +941,40 @@ def save_config(
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
+    # The list-operations verb is a merge instruction, never config
+    # state: pull it out before anything treats the payload as data —
+    # but remember whether it touched the enabled list: credential
+    # validation and runtime reconciliation gate on a ``platforms``
+    # marker in the payload, and a bare operation payload must not
+    # bypass them.
+    raw_list_ops = payload.pop(_LIST_OPS_PAYLOAD_KEY, None)
+    if raw_list_ops is not None and not isinstance(raw_list_ops, dict):
+        raise ValueError("Config list operations must be an object")
+    list_ops_touches_platforms = isinstance(raw_list_ops, dict) and any(
+        str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
+    )
 
-    with CONFIG_LOCK:
+    # Serialize the WHOLE read-merge-write cycle across processes
+    # (#1458 stage ③): the base load, merge, validation, and write all
+    # happen under the config file lock, so a controller commit between
+    # our load and our write can no longer be overwritten. The in-lock
+    # A lock-fresh base prevents overlapping read-modify-write cycles from
+    # losing one another. It cannot identify stale fields a client explicitly
+    # resubmits, so UI callers still declare field mutations instead of sending
+    # config snapshots.
+    with config_file_lock():
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
         try:
             base_config = load_config()
+            if base_config.load_warnings:
+                raise ValueError(
+                    "Config was loaded with recovery warnings; repair the backed-up "
+                    "config before saving changes"
+                )
             base_payload = config_to_payload(base_config, include_secrets=True, include_internal=True)
         except FileNotFoundError:
-            # Fresh install: no config file yet. Seed the same workbench-only
-            # default the read side (GET /api/config) serves, so a partial
-            # first-run save — e.g. the wizard's reused provider-config modal
-            # POSTing just ``{"agents": ...}`` — merges onto a valid base
-            # instead of feeding a partial payload straight into
-            # ``V2Config.from_payload`` (which requires ``mode``/``runtime`` and
-            # would raise). ``base_config`` stays ``None`` so the Discord-scope
-            # preservation below (which keys off a real prior config) is skipped.
+            # Fresh install: seed the same workbench-only default served by the read side.
             from core.services.settings import default_config
 
             base_payload = config_to_payload(default_config(), include_secrets=True, include_internal=True)
@@ -759,10 +989,27 @@ def save_config(
                 base_payload.pop("platforms", None)
                 base_payload.pop("platform", None)
 
-        merged_payload = _deep_merge_dicts(base_payload, payload) if base_payload else payload
+        if base_payload:
+            merged_payload = _deep_merge_dicts(base_payload, payload)
+            if isinstance(raw_list_ops, dict) and raw_list_ops:
+                merged_payload = _apply_list_ops(merged_payload, raw_list_ops)
+        else:
+            merged_payload = payload
+        if list_ops_touches_platforms and isinstance(merged_payload.get("platforms"), dict):
+            # Credential validation and runtime reconciliation gate on a
+            # ``platforms`` marker in the payload; surface the FINAL
+            # post-operation enabled list so a bare list-op payload is
+            # validated and reconciled exactly like an explicit list save.
+            final_platforms = dict(merged_payload["platforms"])
+            if "enabled" in final_platforms or "primary" in final_platforms:
+                payload["platforms"] = final_platforms
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if not context.can_manage_access_members:
+            from core.services.settings import default_config
+
+            _require_preserved_config_access(base_config or default_config(), config)
         connector_controls_changed = (
             base_config is not None
             and _remote_access_connector_control_signature(config)
@@ -789,45 +1036,106 @@ def save_config(
             )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
-            _save_discord_guild_scope_update(*guild_scope_update)
+            _save_discord_guild_scope_update(*guild_scope_update, user_context=context)
         elif base_config is not None:
             store = SettingsStore.get_instance()
             if not store.has_guild_scope_for_platform("discord"):
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
-                    _save_discord_guild_scope_update(*existing_update, store=store)
+                    _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
         config.save()
-        # The activity-streaming gate (ui.show_agent_activity) is cached in-process
-        # by the message mirror; a save that flips it must take effect immediately,
-        # not after the cache TTL. Reset it here (same process) — best-effort.
         try:
             from core.message_mirror import reset_activity_flag_cache
 
             reset_activity_flag_cache()
         except Exception:
             pass
-        _ensure_builtin_default_agents(config)
-        return config
+        persisted = load_config()
+        _ensure_builtin_default_agents(persisted)
+        model_service_pairing_changed = (
+            base_config.remote_access.vibe_cloud.runtime_credentials()
+            if base_config is not None
+            else None
+        ) != persisted.remote_access.vibe_cloud.runtime_credentials()
+
+    if model_service_pairing_changed:
+        try:
+            from vibe.model_service import request_model_service_refresh
+
+            request_model_service_refresh()
+        except Exception:
+            logger.warning(
+                "Cloud Model Service refresh could not be requested",
+                exc_info=True,
+            )
+    return persisted
+
+
+def _require_preserved_config_access(current: V2Config, candidate: V2Config) -> None:
+    """Generic manager saves cannot change admission or pairing, even via aliases."""
+    from vibe.authorization import InstanceAuthorizationError
+
+    def policy(config):
+        return (
+            config.remote_access,
+            config.ui.trusted_public_origins,
+            tuple(
+                bool(getattr(getattr(config, p), "require_bind", False))
+                for p in ("slack", "discord", "telegram", "lark", "wechat")
+            ),
+            getattr(config.telegram, "allowed_user_ids", None) or [],
+            getattr(config.telegram, "allowed_chat_ids", None) or [],
+        )
+
+    if policy(current) != policy(candidate):
+        raise InstanceAuthorizationError("owner")
 
 
 def save_memory_config(
     memory_payload: dict,
     *,
-    embedding_change_pending: bool = False,
+    expected: MemoryConfig | None = None,
 ) -> V2Config:
-    """Persist Memory settings only from the direct-loopback Memory route."""
+    """Persist Memory settings only from the direct-loopback Memory route.
+
+    When *expected* is provided, the write is a narrow cross-process transaction:
+    the on-disk Memory candidate must still match *expected* or the
+    save raises ``MemoryConfigStaleWrite`` without changing the file. Process-local
+    locks alone cannot protect UI saves from Controller settlement write-back.
+    """
 
     if not isinstance(memory_payload, dict):
         raise ValueError("Memory config payload must be an object")
-    if not isinstance(embedding_change_pending, bool):
-        raise ValueError("Memory embedding compatibility state must be a boolean")
-    payload = dict(memory_payload)
-    payload["embedding_change_pending"] = embedding_change_pending
-    return save_config({"memory": payload}, allow_memory=True)
+    candidate = memory_config_from_payload(dict(memory_payload))
+
+    def replace_memory(current: MemoryConfig) -> MemoryConfig:
+        if expected is not None and current != expected:
+            raise MemoryConfigStaleWrite("memory candidate changed")
+        return replace(
+            candidate,
+            legacy_needs_repair=(
+                current.legacy_needs_repair or candidate.legacy_needs_repair
+            ),
+        )
+
+    lease = MemoryOperationLease()
+    lease.acquire()
+    try:
+        return atomic_update_memory(replace_memory)
+    finally:
+        lease.release()
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
-    payload = config.remote_access.vibe_cloud.__dict__.copy()
+    vibe_cloud = config.remote_access.vibe_cloud
+    payload = vibe_cloud.__dict__.copy()
+    # Derived, never stored: whether cloud-backed features can actually run.
+    # Clients must not re-derive it from whichever identifiers survived
+    # redaction — the secret the runtime needs is stripped from every
+    # non-wizard response, so ``enabled`` plus ``instance_id`` reads as paired
+    # on an instance the runtime refuses to serve. ``from_payload`` filters
+    # unknown keys, so this cannot round-trip into the stored config.
+    payload["paired"] = vibe_cloud.is_runtime_paired()
     if not include_secrets:
         for key in ("tunnel_token", "instance_secret", "session_secret"):
             payload.pop(key, None)
@@ -945,6 +1253,7 @@ def config_to_payload(
         "runtime": {
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
+            "show_page_api_timeout_seconds": config.runtime.show_page_api_timeout_seconds,
             "resource_governance": config.runtime.resource_governance,
             # The config-only Harness knobs have no UI, but this payload IS the
             # deep-merge base every ``/api/config`` save builds on: a key omitted here
@@ -957,6 +1266,11 @@ def config_to_payload(
             "harness_run_orphan_grace_seconds": config.runtime.harness_run_orphan_grace_seconds,
             "harness_run_queued_ttl_seconds": config.runtime.harness_run_queued_ttl_seconds,
             "harness_run_hold_ttl_seconds": config.runtime.harness_run_hold_ttl_seconds,
+            # Same round-trip contract as the Harness knobs above: omitting these
+            # here would revert a user's retention opt-out on unrelated saves.
+            "agent_events_trace_retention_enabled": config.runtime.agent_events_trace_retention_enabled,
+            "agent_events_trace_retention_days": config.runtime.agent_events_trace_retention_days,
+            "skill_observability_enabled": config.runtime.skill_observability_enabled,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
@@ -1000,7 +1314,6 @@ def config_to_payload(
         "include_time_info": config.include_time_info,
         "include_user_info": config.include_user_info,
         "reply_enhancements": config.reply_enhancements,
-        "show_pages_prompt": config.show_pages_prompt,
         "agent_progress_style": config.agent_progress_style,
         "agent_status_heartbeat_ms": config.agent_status_heartbeat_ms,
         "agent_status_no_output_ms": config.agent_status_no_output_ms,
@@ -1015,11 +1328,10 @@ def client_config_payload(config: V2Config) -> dict:
     ``config_to_payload`` has to emit ``memory`` because the UI save path uses
     the same projection as its deep-merge base, and an omitted block resets the
     stored one (the ``agents.avault`` comment above records the same hazard).
-    A response is the opposite case: Memory settings — enablement, both
-    processing endpoint URLs and model names, and API-key-presence flags — are
-    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
-    so returning them from a generic endpoint would hand them to any
-    authenticated remote caller over the tunnel.
+    A response is the opposite case: Memory settings have their own
+    ``/api/memory/*`` routes and lifecycle, so returning them from the generic
+    config endpoint would duplicate that contract and mix independently loaded
+    state into every settings response.
 
     Every endpoint that returns the generic config must project through this
     function, so a new one inherits the exclusion instead of having to repeat
@@ -1028,9 +1340,215 @@ def client_config_payload(config: V2Config) -> dict:
 
     payload = config_to_payload(config)
     payload.pop("memory", None)
+    recovery_notice = config_recovery_notice(config)
+    recovery_warnings = [recovery_notice] if recovery_notice else []
+    payload["config_recovery"] = {
+        "required": bool(config.load_warnings),
+        "warnings": recovery_warnings,
+    }
     return payload
 
 
+_NON_OWNER_CONFIG_UI_FIELDS = (
+    "instance_name",
+    "default_instance_name",
+    "chat_message_font_size",
+    "show_agent_activity",
+    "show_tool_calls",
+)
+
+
+_NON_OWNER_AUDIO_ASR_FIELDS = (
+    "enabled",
+    "echo_transcript",
+    "enabled_configured",
+)
+
+_EDITOR_CONFIG_WRITE_FIELDS = frozenset(
+    {
+        "ack_mode",
+        "show_duration",
+        "include_time_info",
+        "include_user_info",
+        "reply_enhancements",
+        "agent_progress_style",
+        "audio_asr",
+        "ui",
+    }
+)
+
+_EDITOR_CONFIG_UI_WRITE_FIELDS = frozenset(
+    {
+        "chat_message_font_size",
+        "show_agent_activity",
+        "show_tool_calls",
+    }
+)
+_EDITOR_AUDIO_ASR_WRITE_FIELDS = frozenset(_NON_OWNER_AUDIO_ASR_FIELDS)
+
+# Read-only context the shared Settings pages need in order to render the
+# writable fields above the way an Owner sees them: platform capabilities
+# decide which acknowledgement modes are offered, and cloud pairing decides
+# whether the transcription control is live. Without them a non-owner client
+# falls back to guesses (``getEnabledPlatforms`` assumes Slack) and offers
+# settings the instance does not support.
+#
+# Together with ``_EDITOR_CONFIG_WRITE_FIELDS`` this is the complete set of
+# keys a non-owner may see; ``test_non_owner_config_projects_exactly_the_declared_surface``
+# holds the projection to it, so a field added to either half fails a test
+# rather than leaking or going missing.
+_NON_OWNER_CONFIG_CONTEXT_FIELDS = frozenset(
+    {
+        "mode",
+        "version",
+        "setup_state",
+        "language",
+        "platforms",
+        "platform_catalog",
+        "remote_access",
+    }
+)
+
+_EDITOR_CONFIG_WRITE_ERROR_CODES = frozenset(
+    {
+        "editor_config_write_forbidden",
+        "editor_config_write_invalid",
+    }
+)
+
+
+def _remote_access_pairing_projection(payload: dict) -> dict:
+    """Project cloud pairing for a non-owner as the readiness boolean alone.
+
+    Below the Owner role no pairing identifier or endpoint is exposed at all —
+    only whether cloud-backed controls can work, which ``_vibe_cloud_payload``
+    already decided from the stored config.
+    """
+    remote_access = payload.get("remote_access")
+    vibe_cloud = remote_access.get("vibe_cloud") if isinstance(remote_access, dict) else None
+    paired = bool(vibe_cloud.get("paired")) if isinstance(vibe_cloud, dict) else False
+    return {"vibe_cloud": {"paired": paired}}
+
+
+# ``strip_pairing_identity_from_config_write`` used to sit here: a non-owner
+# config write had ``remote_access`` removed and everything else was persisted.
+# It is gone rather than kept beside the allowlist, because a subtractive filter
+# and a closed allowlist cannot both be the non-owner write schema — the
+# subtractive one is only ever as complete as the last section somebody
+# remembered, and that is precisely how credential-bearing sections stayed
+# writable for a member. ``editor_config_write_payload`` is now the single
+# schema for every writer below Owner, and pairing identity is covered by it the
+# same way every other Owner-only section is: ``remote_access`` is not on the
+# allowlist, so the write is refused.
+
+
+def _audio_asr_preference_projection(payload: dict) -> dict:
+    audio_asr = payload.get("audio_asr")
+    if not isinstance(audio_asr, dict):
+        return {}
+    return {
+        key: audio_asr[key]
+        for key in _NON_OWNER_AUDIO_ASR_FIELDS
+        if key in audio_asr
+    }
+
+
+def editor_config_write_payload(payload: dict) -> dict:
+    """Keep only the messaging preferences an Editor may persist."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("editor_config_write_invalid")
+    unknown = set(payload) - _EDITOR_CONFIG_WRITE_FIELDS
+    if unknown:
+        raise ValueError("editor_config_write_forbidden")
+
+    projected: dict = {}
+    for key in payload:
+        if key == "audio_asr":
+            audio_asr = payload.get("audio_asr")
+            if not isinstance(audio_asr, dict):
+                raise ValueError("editor_config_write_invalid")
+            extra = set(audio_asr) - _EDITOR_AUDIO_ASR_WRITE_FIELDS
+            if extra:
+                raise ValueError("editor_config_write_forbidden")
+            projected["audio_asr"] = {
+                field: audio_asr[field]
+                for field in _EDITOR_AUDIO_ASR_WRITE_FIELDS
+                if field in audio_asr
+            }
+            continue
+        if key == "ui":
+            ui_payload = payload.get("ui")
+            if not isinstance(ui_payload, dict):
+                raise ValueError("editor_config_write_invalid")
+            extra = set(ui_payload) - _EDITOR_CONFIG_UI_WRITE_FIELDS
+            if extra:
+                raise ValueError("editor_config_write_forbidden")
+            projected["ui"] = {
+                field: ui_payload[field]
+                for field in _EDITOR_CONFIG_UI_WRITE_FIELDS
+                if field in ui_payload
+            }
+            continue
+        projected[key] = payload[key]
+    return projected
+
+
+def editor_config_write_error_code(exc: Exception) -> str:
+    """Return the stable client code for any failure on an Editor config write.
+
+    Stated as a property rather than as a list of recognised messages: every
+    validation failure reached while applying an Editor write is an Editor
+    write error, whichever layer raised it. Only the codes this module raises
+    survive; anything else — including value validation raised much later by
+    ``V2Config.from_payload`` — collapses to the generic invalid code, so a
+    non-English client never renders a raw English sentence.
+    """
+    message = str(exc)
+    if message in _EDITOR_CONFIG_WRITE_ERROR_CODES:
+        return message
+    return "editor_config_write_invalid"
+
+
+def non_owner_config_payload(config: V2Config) -> dict:
+    """Return the configuration projection available below the Owner role.
+
+    This projection is role-based rather than origin-based. It keeps sensitive
+    runtime and control-plane fields out of Viewer and Editor responses while
+    leaving ordinary messaging and UI preferences available to both local and
+    remote callers.
+
+    Its key set is exactly ``_EDITOR_CONFIG_WRITE_FIELDS`` (what an Editor may
+    change) plus ``_NON_OWNER_CONFIG_CONTEXT_FIELDS`` (the read-only context
+    needed to render those controls correctly). Keeping the two halves in step
+    is the invariant: a writable field that is not projected leaves the client
+    guessing, and an unprojected context field makes the shared Settings pages
+    fall back to defaults that do not match the instance.
+    """
+
+    payload = client_config_payload(config)
+    ui_payload = payload.get("ui")
+    return {
+        "mode": payload.get("mode"),
+        "version": payload.get("version"),
+        "setup_state": payload.get("setup_state"),
+        "language": payload.get("language"),
+        "ack_mode": payload.get("ack_mode"),
+        "show_duration": payload.get("show_duration"),
+        "include_time_info": payload.get("include_time_info"),
+        "include_user_info": payload.get("include_user_info"),
+        "reply_enhancements": payload.get("reply_enhancements"),
+        "agent_progress_style": payload.get("agent_progress_style"),
+        "audio_asr": _audio_asr_preference_projection(payload),
+        "remote_access": _remote_access_pairing_projection(payload),
+        "platforms": payload.get("platforms"),
+        "platform_catalog": payload.get("platform_catalog"),
+        "ui": {
+            key: ui_payload[key]
+            for key in _NON_OWNER_CONFIG_UI_FIELDS
+            if isinstance(ui_payload, dict) and key in ui_payload
+        },
+    }
 def _merge_legacy_discord_guild_scope_fields(
     merged_payload: dict,
     request_payload: dict,
@@ -1079,7 +1597,7 @@ def _apply_session_meta(payloads: list[dict]) -> list[dict]:
     return payloads
 
 
-def list_show_pages() -> dict:
+def list_show_pages(*, user_context: Any = None) -> dict:
     """All Show Pages, newest-first, each enriched with the session title.
 
     Reuses ``ShowPageStore.list_page`` (already ordered by ``updated_at`` desc)
@@ -1088,12 +1606,20 @@ def list_show_pages() -> dict:
     """
     from core.avibe_cloud import avibe_cloud_connect_guidance, avibe_cloud_url_available
     from core.show_pages import ShowPageStore, show_page_payload
+    from storage import resource_access_service
 
     config = V2Config.load()
+    context = resource_access_service.resolve_resource_access_context(user_context)
     store = ShowPageStore()
     try:
-        result = store.list_page(page_request=None)
+        result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
+        # §3.2: management and sharing control follow the Instance Editor role
+        # alone — show_page no longer has a Resource ACL row to consult.
+        can_manage = context.has_role("editor")
+        for payload in pages:
+            payload["can_manage"] = can_manage
+            payload["can_publish_public"] = can_manage
     finally:
         store.close()
     _apply_session_meta(pages)
@@ -1106,25 +1632,62 @@ def list_show_pages() -> dict:
     }
 
 
-def set_show_page_visibility(session_id: str, visibility: str) -> dict:
-    """Switch a Show Page between private / public / offline.
+def _show_page_mutation_response(
+    store,
+    page,
+    *,
+    config: V2Config,
+    additional_payload: dict | None = None,
+    user_context: Any = None,
+) -> dict:
+    """Return mutation details only when the caller can use the page."""
+    from storage import resource_access_service
 
-    Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
-    route layer maps to a 4xx response.
-    """
-    from core.show_pages import ShowPageStore, show_page_payload
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    can_use = context.has_role("viewer")
+    if not can_use:
+        # Access managers may take a page offline without page-use access. Do
+        # not return page paths, URLs, share IDs, audience, or session metadata.
+        return {"ok": True}
+    from core.show_pages import show_page_payload
+
+    payload = show_page_payload(page, config=config)
+    return {
+        "ok": True,
+        **(additional_payload or {}),
+        **_apply_session_meta([payload])[0],
+    }
+
+
+def set_show_page_availability(
+    session_id: str,
+    offline: bool,
+    *,
+    user_context: Any = None,
+) -> dict:
+    """Change Show Page availability without mutating its configured audience."""
+
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated = store.update_visibility(session_id, visibility)
-        payload = show_page_payload(updated, config=config)
+        updated = store.set_offline(
+            session_id,
+            offline,
+            user_context=user_context,
+        )
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            user_context=user_context,
+        )
     finally:
         store.close()
-    return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def ensure_show_page(session_id: str) -> dict:
+def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Create the session's Show Page if it doesn't exist yet; report which.
 
     ``existed`` tells the caller whether the page was already initialized, so the
@@ -1140,48 +1703,111 @@ def ensure_show_page(session_id: str) -> dict:
         # whether IT created the row (so the UI only prompts the agent on a real
         # first creation, not a concurrent ensure). Raises ShowPageError for an
         # archived session — the route maps it to a 4xx.
-        page, created = store.ensure_active(session_id)
+        page, created = store.ensure_active(session_id, user_context=user_context)
         payload = show_page_payload(page, config=config)
     finally:
         store.close()
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
-def rotate_show_page_share(session_id: str) -> dict:
-    """Revoke the current public link and issue a new one (public pages only)."""
-    from core.show_pages import ShowPageStore, show_page_payload
+def get_show_page(session_id: str, *, user_context: Any = None) -> dict:
+    """Read one session's Show Page without creating it.
 
-    config = V2Config.load()
-    store = ShowPageStore()
-    try:
-        updated, previous_share_id = store.rotate_share(session_id)
-        payload = show_page_payload(updated, config=config)
-    finally:
-        store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
-
-
-def set_show_page_share_id(session_id: str, share_id: str) -> dict:
-    """Set a custom public link suffix (public pages only).
-
-    Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
-    revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
-    taken suffix or a non-public page, which the route layer maps to a 4xx/409.
+    The read-only counterpart of ``ensure_show_page``: same payload and the same
+    access enforcement for a page that exists, and ``show_page_not_found`` where
+    ensure would have created one. A caller that only needs to DISPLAY the page
+    uses this, so ``ensure_show_page``'s one-shot ``existed`` edge stays with the
+    single caller that owns the "visualize this session" prompt. The response
+    deliberately carries no ``existed`` key: there is no creation fact to report,
+    and none to accidentally consume.
     """
     from core.show_pages import ShowPageStore, show_page_payload
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.set_share_id(session_id, share_id)
-        payload = show_page_payload(updated, config=config)
+        page = store.get_for_use(session_id, user_context=user_context)
+        payload = show_page_payload(page, config=config)
     finally:
         store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
+    return {"ok": True, **_apply_session_meta([payload])[0]}
+
+
+def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
+    """Return the applied authenticated audience and sharing authority.
+
+    §3.2 removed show_page from the Resource ACL, so there is no policy row:
+    the ownership fence drives ``mode``/``ownership_status`` and the Instance
+    role alone drives ``can_use``/``can_manage``/``can_publish_public``.
+    """
+
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        reconciliation = store.reconcile_resource_policy(page.session_id)
+        can_use = context.has_role("viewer")
+        can_manage = context.has_role("editor")
+        can_publish_public = context.has_role("editor")
+        if not (can_use or can_manage):
+            raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+    finally:
+        store.close()
+
+    ownership = reconciliation["ownership"]
+    organization_id = ownership.get("organization_id")
+    return {
+        "ok": True,
+        "mode": ownership["mode"],
+        "ownership_status": reconciliation["status"],
+        "instance_id": ownership.get("instance_id"),
+        "organization_id": organization_id,
+        "policy_organization_id": None,
+        "access_level": "private",
+        "group_ids": [],
+        "policy_revision": None,
+        "last_applied_control_plane_revision": None,
+        "can_use": can_use,
+        "can_manage": can_manage,
+        "can_publish_public": can_publish_public,
+    }
+
+
+def require_show_access_settings_control(
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        if not context.has_role("editor"):
+            raise ShowPageError(
+                "Show Page access is not permitted.",
+                code="resource_access_forbidden",
+            )
+    finally:
+        store.close()
 
 
 def upload_show_page_icon(
-    session_id: str, data: bytes, *, filename: str | None, content_type: str | None
+    session_id: str,
+    data: bytes,
+    *,
+    filename: str | None,
+    content_type: str | None,
+    user_context: Any = None,
 ) -> dict:
     """Write an uploaded image as the page's workspace-root favicon; return the
     refreshed page payload so the Web UI merges it like any other show-page mutation
@@ -1198,9 +1824,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.get(session_id)
-        if page is None:
-            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        page = store.require_management(session_id, user_context=user_context)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
@@ -1215,14 +1839,14 @@ def upload_show_page_icon(
     return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def get_dock() -> dict:
+def get_dock(*, user_context: Any = None) -> dict:
     """The workbench Dock document — resident-tile order + pinned Show Pages."""
     from core.dock_store import load_dock
 
-    return {"ok": True, "dock": load_dock()}
+    return {"ok": True, "dock": load_dock(user_context=user_context)}
 
 
-def pin_dock_show_page(session_id: str) -> dict:
+def pin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Pin a session's Show Page to the Dock (idempotent).
 
     Raises ``ShowPageError`` (malformed id → 400) or ``DockError`` (no Show Page
@@ -1230,24 +1854,29 @@ def pin_dock_show_page(session_id: str) -> dict:
     """
     from core.dock_store import pin_show_page
 
-    return {"ok": True, "dock": pin_show_page(session_id)}
+    return {"ok": True, "dock": pin_show_page(session_id, user_context=user_context)}
 
 
-def unpin_dock_show_page(session_id: str) -> dict:
+def unpin_dock_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Unpin a Show Page from the Dock (idempotent; leaves the page untouched)."""
     from core.dock_store import unpin_show_page
 
-    return {"ok": True, "dock": unpin_show_page(session_id)}
+    return {"ok": True, "dock": unpin_show_page(session_id, user_context=user_context)}
 
 
-def set_dock_order(order: list, known: list | None = None) -> dict:
+def set_dock_order(
+    order: list,
+    known: list | None = None,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Persist a new resident-tile (docked-subset) order. ``known`` is the
     client's optimistic-concurrency baseline id set; when it no longer matches the
     server's, the write is rejected as stale so a stale tab can't silently undock a
     newer pin. Raises ``DockError`` for an invalid/stale order, mapped to a 400."""
     from core.dock_store import set_dock_order as _set_dock_order
 
-    return {"ok": True, "dock": _set_dock_order(order, known=known)}
+    return {"ok": True, "dock": _set_dock_order(order, known=known, user_context=user_context)}
 
 
 def get_workbench_prefs() -> dict:
@@ -1275,10 +1904,10 @@ def set_workbench_prefs(*, background_work_banner_enabled: Optional[bool] = None
     }
 
 
-def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
+def _vibe_agent_payload(agent, *, brief: bool = False, remote_safe: bool = False) -> dict:
     payload = agent.to_dict()
-    if brief:
-        return {
+    if brief or remote_safe:
+        projected = {
             "id": payload["id"],
             "name": payload["name"],
             "display_name": payload["display_name"],
@@ -1292,6 +1921,15 @@ def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
             "source": payload["source"],
             "updated_at": payload["updated_at"],
         }
+        if remote_safe:
+            projected.update(
+                {
+                    "system_prompt": payload["system_prompt"],
+                    "metadata": {},
+                    "created_at": payload["created_at"],
+                }
+            )
+        return projected
     return payload
 
 
@@ -1309,18 +1947,26 @@ def get_vibe_agents(
     backend: Optional[str] = None,
     include_disabled: bool = False,
     include_archived: bool = False,
+    user_context: Any = None,
 ) -> dict:
     _ensure_builtin_default_agents()
+    user_context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
         agents = store.list_agents(
             include_disabled=include_disabled,
             include_archived=include_archived,
+            user_context=user_context,
         )
         if normalized_backend:
             agents = [agent for agent in agents if agent.backend == normalized_backend]
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
             "agents": [_vibe_agent_payload(agent, brief=True) for agent in agents],
@@ -1330,21 +1976,121 @@ def get_vibe_agents(
         store.close()
 
 
-def get_vibe_agent(name: str) -> dict:
+def _organization_resource_console_url(config: V2Config, organization_id: str) -> str:
+    backend_url = str(config.remote_access.vibe_cloud.backend_url or "https://avibe.bot").rstrip("/")
+    organization = urllib.parse.quote(organization_id, safe="")
+    return f"{backend_url}/app/organizations/{organization}/resources"
+
+
+def _agent_onboarding_resource_descriptors(
+    organization_id: str,
+    inventory: list[dict],
+) -> list[dict]:
+    """Enrich the full ACL snapshot with safe Agent names for first publication."""
+
+    from vibe import remote_access
+
+    display_names: dict[str, str] = {}
+    for agent in inventory:
+        resource_id = str(agent.get("id") or "")
+        try:
+            display_names[resource_id] = remote_access._safe_resource_acl_identifier(
+                agent.get("name"),
+                limit=240,
+            )
+        except ValueError:
+            display_names[resource_id] = resource_id
+
+    # A resource-index update is a full snapshot. Preserve non-Agent resources
+    # while enriching newly onboarded Agent rows with their safe names.
+    descriptors = remote_access._local_policy_resource_descriptors(organization_id)
+    for descriptor in descriptors:
+        if descriptor.get("resource_kind") != "agent":
+            continue
+        display_name = display_names.get(str(descriptor.get("resource_id") or ""))
+        if display_name:
+            descriptor["display_name"] = display_name
+    return descriptors
+
+
+def get_vibe_agent_onboarding(*, user_context: Any = None) -> dict:
+    """Return the safe owner inventory for Organization Agent onboarding."""
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
     store = VibeAgentStore()
     try:
-        agent = store.require(name)
+        result = store.organization_onboarding_inventory(
+            user_context=resolve_resource_access_context(user_context),
+        )
+    finally:
+        store.close()
+    result["ok"] = True
+    if result.get("available") and result.get("organization_id"):
+        result["console_url"] = _organization_resource_console_url(
+            config,
+            str(result["organization_id"]),
+        )
+    return result
+
+
+def onboard_vibe_agents(*, user_context: Any = None) -> dict:
+    """Register all existing Agents privately, then publish the safe index."""
+
+    from vibe import remote_access
+
+    config = V2Config.load()
+    _ensure_builtin_default_agents(config)
+    context = resolve_resource_access_context(user_context)
+    store = VibeAgentStore()
+    try:
+        result = store.onboard_organization_agents(user_context=context)
+    finally:
+        store.close()
+
+    organization_id = str(result["organization_id"])
+    resources = _agent_onboarding_resource_descriptors(
+        organization_id,
+        list(result.get("agents") or []),
+    )
+    result.update(
+        {
+            "ok": True,
+            "console_url": _organization_resource_console_url(config, organization_id),
+            "sync": remote_access.sync_resource_acl_once(
+                config,
+                organization_id=organization_id,
+                resources=resources,
+            ),
+        }
+    )
+    return result
+
+
+def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
+    user_context = resolve_resource_access_context(user_context)
+    store = VibeAgentStore()
+    try:
+        agent = store.require_accessible(name, user_context=user_context)
         default_agent = store.get_default_agent()
+        if default_agent is not None:
+            try:
+                default_agent = store.require_accessible(default_agent.name, user_context=user_context)
+            except VibeAgentAccessError:
+                default_agent = None
         return {
             "ok": True,
-            "agent": _vibe_agent_payload(agent),
+            "agent": _vibe_agent_payload(
+                agent,
+                remote_safe=False,
+            ),
             "default_agent_name": default_agent.name if default_agent else None,
         }
     finally:
         store.close()
 
 
-def create_vibe_agent(payload: dict) -> dict:
+def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     metadata = payload.get("metadata") or payload.get("metadata_json") or {}
@@ -1362,6 +2108,7 @@ def create_vibe_agent(payload: dict) -> dict:
                 system_prompt=payload.get("system_prompt"),
                 metadata=metadata,
                 enabled=_parse_agent_enabled_field(payload, default=True),
+                user_context=resolve_resource_access_context(user_context),
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
@@ -1370,7 +2117,7 @@ def create_vibe_agent(payload: dict) -> dict:
         store.close()
 
 
-def update_vibe_agent(name: str, payload: dict) -> dict:
+def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     if "backend" in payload:
@@ -1416,8 +2163,13 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
+        context = resolve_resource_access_context(user_context)
         try:
-            agent = store.rename(name, new_name) if renaming else store.update(name, **kwargs)
+            agent = (
+                store.rename(name, new_name, user_context=context)
+                if renaming
+                else store.update(name, user_context=context, **kwargs)
+            )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
         except AgentArchivedEditError as exc:
@@ -1471,11 +2223,13 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
-def remove_vibe_agent(name: str) -> dict:
+def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
+        context = resolve_resource_access_context(user_context)
+        store.require_manageable(name, user_context=context)
         try:
-            archived = store.archive(name)
+            archived = store.archive(name, user_context=context)
         except AgentArchiveError as exc:
             try:
                 lang = V2Config.load().language
@@ -1505,11 +2259,14 @@ def remove_vibe_agent(name: str) -> dict:
         store.close()
 
 
-def set_default_vibe_agent(name: str) -> dict:
+def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
-        store.set_default_agent_name(name)
-        agent = store.require(name)
+        context = resolve_resource_access_context(user_context)
+        agent = store.require_manageable(name, user_context=context)
+        if not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
+        store.set_default_agent_name(name, user_context=context)
         return {"ok": True, "default_agent_name": agent.name, "agent": _vibe_agent_payload(agent, brief=True)}
     finally:
         store.close()
@@ -1527,6 +2284,12 @@ class VaultApiError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+def _vault_secret_access_forbidden(exc: Exception) -> VaultApiError:
+    """Translate the storage-layer Vault ACL denial into the REST contract."""
+
+    return VaultApiError(str(exc), code="resource_access_forbidden", status=403)
 
 
 def _publish_vaults_updated(
@@ -2012,6 +2775,8 @@ def create_vault_agent_bindings_batch(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
@@ -2170,6 +2935,8 @@ def create_vault_agent_binding(payload: dict) -> dict:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -2291,6 +3058,8 @@ def create_vault_reveal_context(name: str, payload: dict | None = None) -> dict:
             signed_context = _signed_operation_context(context, key)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     return {"ok": True, "context": signed_context, "envelope": envelope_payload}
@@ -2514,6 +3283,10 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
     atomic_protected_establishment = establishing_vmk and protection == "protected"
+    try:
+        user_context = vault_service.require_secret_create_access()
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     engine = _vault_engine()
     try:
         # Establishment defers preflight to create_secret's write-serialized
@@ -2581,6 +3354,7 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
                 authz_factor_registration=authz_factor_registration if isinstance(authz_factor_registration, dict) else None,
                 authz_factor_origin=origin,
                 provision_request_id=provision_request_id,
+                user_context=user_context,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
@@ -2606,6 +3380,8 @@ def create_vault_secret(payload: dict, *, origin: str | None = None) -> dict:
         raise VaultApiError(str(exc), code="protected_authz_setup_required", status=409) from exc
     except vault_service.InvalidProtectedAuthzError as exc:
         raise VaultApiError(str(exc), code="invalid_protected_authz", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     _publish_vaults_updated(
@@ -2643,6 +3419,8 @@ def update_vault_secret(name: str, payload: dict) -> dict:
             meta = vault_service.update_secret_metadata(conn, secret_name, release_scopes=release_scopes, **kwargs)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{secret_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_metadata", status=409) from exc
     release_vault_agent_scopes(release_scopes, reason="update_vault_secret")
@@ -2662,6 +3440,8 @@ def delete_vault_secret(name: str) -> dict:
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
     _publish_vaults_updated(scope="secret", secret_name=name)
     return {"ok": True, "removed": True, "name": name}
@@ -2672,7 +3452,12 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
 
     engine = _vault_engine()
     with engine.connect() as conn:
-        events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
+        events = vault_service.list_audit(
+            conn,
+            secret_name=secret_name,
+            limit=limit,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "events": events}
 
 
@@ -2694,8 +3479,15 @@ def get_vault_provision_request_by_name(name: str) -> dict:
     if not vault_crypto.is_valid_secret_name(requested_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
+    try:
+        with engine.begin() as conn:
+            request, ambiguous = vault_service.resolve_pending_provision_request_by_name(
+                conn,
+                requested_name,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request, "ambiguous": ambiguous}
 
 
@@ -2706,8 +3498,15 @@ def get_vault_provision_request(request_id: str) -> dict:
     if not requested_id:
         raise VaultApiError("request_id is required", code="missing_request_id")
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request = vault_service.get_pending_provision_request(conn, requested_id)
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_pending_provision_request(
+                conn,
+                requested_id,
+                user_context=resolve_resource_access_context(),
+            )
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     return {"ok": True, "request": request}
 
 
@@ -2776,6 +3575,8 @@ def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -2864,6 +3665,8 @@ def request_vault_access(payload: dict) -> dict:
     except vault_service.SecretNotFoundError as exc:
         missing_name = name or str(exc)
         raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
@@ -2923,6 +3726,8 @@ def request_vault_sign(payload: dict) -> dict:
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
@@ -2956,6 +3761,8 @@ def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
             )
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     _publish_vaults_updated(
@@ -2972,7 +3779,12 @@ def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[s
 
     engine = _vault_engine()
     with engine.begin() as conn:
-        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
+        grants = vault_service.list_grants(
+            conn,
+            status=status,
+            session_id=session_id,
+            user_context=resolve_resource_access_context(),
+        )
     return {"ok": True, "grants": grants}
 
 
@@ -3376,6 +4188,7 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
         except (
             vault_service.SecretNotFoundError,
+            vault_service.VaultSecretAccessError,
             vault_service.RequestNotFoundError,
             vault_service.InvalidRequestError,
             vault_service.InvalidGrantError,
@@ -3384,6 +4197,8 @@ def create_vault_grant(payload: dict) -> dict:
             grantable_members = []
     if isinstance(preflight_error, vault_service.SecretNotFoundError):
         raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.VaultSecretAccessError):
+        raise _vault_secret_access_forbidden(preflight_error) from preflight_error
     if isinstance(preflight_error, vault_service.RequestNotFoundError):
         raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
     if isinstance(preflight_error, vault_service.InvalidRequestError):
@@ -3452,6 +4267,8 @@ def create_vault_grant(payload: dict) -> dict:
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -3885,12 +4702,18 @@ def revoke_vault_grant(grant_id: str) -> dict:
         with engine.begin() as conn:
             grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant_id)).mappings().first()
             grant_rows = [dict(grant_row)] if grant_row is not None else []
-            grant = vault_service.revoke_grant(conn, grant_id)
+            grant = vault_service.revoke_grant(
+                conn,
+                grant_id,
+                user_context=resolve_resource_access_context(),
+            )
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     release_vault_agent_scopes(release_scopes, reason=f"revoke_vault_grant:{grant_id}")
     _publish_vaults_updated(
         scope="grant",
@@ -4015,6 +4838,8 @@ def vault_sign(payload: dict) -> dict:
                     key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
     except vault_service.InvalidRequestError as exc:
@@ -4113,11 +4938,13 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
             meta = vault_service.store_pubkey_pin(conn, name, pin)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
     return {"ok": True, "secret": meta}
 
 
-def import_vibe_agents(payload: dict) -> dict:
+def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Import payload must be an object")
     candidates = []
@@ -4158,7 +4985,10 @@ def import_vibe_agents(payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(candidates)
+        result = store.import_candidates(
+            candidates,
+            user_context=resolve_resource_access_context(user_context),
+        )
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],
@@ -4168,13 +4998,16 @@ def import_vibe_agents(payload: dict) -> dict:
         store.close()
 
 
-def get_settings(platform: Optional[str] = None) -> dict:
+def get_settings(platform: Optional[str] = None, *, user_context: Any = None) -> dict:
     store = SettingsStore.get_instance()
     target_platform = platform or _current_platform()
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
+    payload["agent_catalog"] = get_vibe_agents(
+        include_archived=True,
+        user_context=user_context,
+    )
     return payload
 
 
@@ -4214,85 +5047,97 @@ def _normalize_show_message_types_for_platform(show_message_types: Optional[list
     return normalized
 
 
-def save_settings(payload: dict) -> dict:
-    store = SettingsStore.get_instance()
-    platform = payload.get("platform") or _current_platform()
+def save_settings(payload: dict, *, user_context: Any = None) -> dict:
+    from vibe.authorization import require_instance_role
 
-    if "channels" in payload:
-        channels = {}
-        for channel_id, channel_payload in (payload.get("channels") or {}).items():
-            channels[channel_id] = ChannelSettings(
-                enabled=channel_payload.get("enabled", True),
-                show_message_types=_normalize_show_message_types_for_platform(
-                    channel_payload.get("show_message_types"), platform
-                ),
-                custom_cwd=channel_payload.get("custom_cwd"),
-                routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
-                require_mention=channel_payload.get("require_mention"),
-                require_bind=channel_payload.get("require_bind"),
-                _agent_name_at_load=channel_payload.get(
-                    "expected_agent_name", _UNSET_AGENT_BINDING
-                ),
-            )
-        store.set_channels_for_platform(platform, channels)
-    if "guilds" in payload or "guild_allowlist" in payload:
-        guilds, default_enabled = _guild_scope_update_from_settings_payload(store, platform, payload)
-        store.set_guilds_for_platform(platform, guilds, default_enabled=default_enabled)
-    store.save()
-    return _settings_to_payload(store, platform=platform)
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = payload.get("platform") or _current_platform()
+
+        if "channels" in payload:
+            channels = {}
+            for channel_id, channel_payload in (payload.get("channels") or {}).items():
+                existing = store.find_channel(channel_id, platform=platform)
+                channels[channel_id] = ChannelSettings(
+                    enabled=channel_payload.get("enabled", True),
+                    show_message_types=_normalize_show_message_types_for_platform(
+                        channel_payload.get("show_message_types"), platform
+                    ),
+                    custom_cwd=channel_payload.get("custom_cwd"),
+                    routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
+                    require_mention=channel_payload.get("require_mention"),
+                    require_bind=channel_payload.get("require_bind", existing.require_bind if existing else None),
+                    _agent_name_at_load=channel_payload.get(
+                        "expected_agent_name", _UNSET_AGENT_BINDING
+                    ),
+                )
+            store.set_channels_for_platform(platform, channels)
+        if "guilds" in payload or "guild_allowlist" in payload:
+            guilds, default_enabled = _guild_scope_update_from_settings_payload(store, platform, payload)
+            store.set_guilds_for_platform(platform, guilds, default_enabled=default_enabled)
+        store.save(user_context=user_context)
+        return _settings_to_payload(store, platform=platform)
 
 
-def save_thread_settings(payload: dict) -> dict:
+def save_thread_settings(payload: dict, *, user_context: Any = None) -> dict:
     """Create or replace one child-thread settings override."""
-    store = SettingsStore.get_instance()
-    platform = str(payload.get("platform") or _current_platform())
-    channel_id = str(payload.get("channel_id") or "").strip()
-    thread_id = str(payload.get("thread_id") or "").strip()
-    settings_payload = payload.get("settings")
-    if platform != "telegram":
-        return {"ok": False, "error": "thread settings currently support Telegram only"}
-    if not channel_id or not thread_id or not isinstance(settings_payload, dict):
-        return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
+    from vibe.authorization import require_instance_role
 
-    existing = store.find_thread(channel_id, thread_id, platform=platform)
-    base = existing
-    if base is None:
-        base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
-    routing_payload = settings_payload.get("routing")
-    routing = (
-        _parse_routing(_normalize_backend_routing_payload(routing_payload))
-        if isinstance(routing_payload, dict)
-        else base.routing
-    )
-    require_mention = settings_payload.get("require_mention", base.require_mention)
-    if existing is None and require_mention is None:
-        platform_config = _stored_platform_config(platform)
-        require_mention = bool(getattr(platform_config, "require_mention", True))
-    settings = ChannelSettings(
-        enabled=bool(settings_payload.get("enabled", base.enabled)),
-        show_message_types=_normalize_show_message_types_for_platform(
-            settings_payload.get("show_message_types", base.show_message_types),
-            platform,
-        ),
-        custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
-        routing=routing,
-        require_mention=require_mention,
-        require_bind=settings_payload.get("require_bind", base.require_bind),
-        _agent_name_at_load=settings_payload.get(
-            "expected_agent_name", _UNSET_AGENT_BINDING
-        ),
-    )
-    store.update_thread(channel_id, thread_id, settings, platform=platform)
-    return {
-        "ok": True,
-        "channel_id": channel_id,
-        "thread_id": thread_id,
-        "settings": _scope_settings_payload(settings, platform),
-    }
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = str(payload.get("platform") or _current_platform())
+        channel_id = str(payload.get("channel_id") or "").strip()
+        thread_id = str(payload.get("thread_id") or "").strip()
+        settings_payload = payload.get("settings")
+        if platform != "telegram":
+            return {"ok": False, "error": "thread settings currently support Telegram only"}
+        if not channel_id or not thread_id or not isinstance(settings_payload, dict):
+            return {"ok": False, "error": "channel_id, thread_id, and settings are required"}
+
+        existing = store.find_thread(channel_id, thread_id, platform=platform)
+        base = existing
+        if base is None:
+            base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
+        routing_payload = settings_payload.get("routing")
+        routing = (
+            _parse_routing(_normalize_backend_routing_payload(routing_payload))
+            if isinstance(routing_payload, dict)
+            else base.routing
+        )
+        require_mention = settings_payload.get("require_mention", base.require_mention)
+        if existing is None and require_mention is None:
+            platform_config = _stored_platform_config(platform)
+            require_mention = bool(getattr(platform_config, "require_mention", True))
+        settings = ChannelSettings(
+            enabled=bool(settings_payload.get("enabled", base.enabled)),
+            show_message_types=_normalize_show_message_types_for_platform(
+                settings_payload.get("show_message_types", base.show_message_types),
+                platform,
+            ),
+            custom_cwd=settings_payload.get("custom_cwd", base.custom_cwd),
+            routing=routing,
+            require_mention=require_mention,
+            require_bind=settings_payload.get("require_bind", base.require_bind),
+            _agent_name_at_load=settings_payload.get(
+                "expected_agent_name", _UNSET_AGENT_BINDING
+            ),
+        )
+        store.update_thread(channel_id, thread_id, settings, platform=platform, user_context=user_context)
+        return {
+            "ok": True,
+            "channel_id": channel_id,
+            "thread_id": thread_id,
+            "settings": _scope_settings_payload(settings, platform),
+        }
 
 
-def delete_thread_settings(platform: str, channel_id: str, thread_id: str) -> dict:
+def delete_thread_settings(platform: str, channel_id: str, thread_id: str, *, user_context: Any = None) -> dict:
     """Remove one child-thread override so it inherits its parent channel again."""
+    from vibe.authorization import require_instance_role
+
+    require_instance_role(user_context, "member")
     platform = str(platform or "").strip()
     channel_id = str(channel_id or "").strip()
     thread_id = str(thread_id or "").strip()
@@ -4300,9 +5145,10 @@ def delete_thread_settings(platform: str, channel_id: str, thread_id: str) -> di
         return {"ok": False, "error": "thread settings currently support Telegram only"}
     if not channel_id or not thread_id:
         return {"ok": False, "error": "channel_id and thread_id are required"}
-    store = SettingsStore.get_instance()
-    removed = store.delete_thread(channel_id, thread_id, platform=platform)
-    return {"ok": True, "removed": removed, "channel_id": channel_id, "thread_id": thread_id}
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        removed = store.delete_thread(channel_id, thread_id, platform=platform, user_context=user_context)
+        return {"ok": True, "removed": removed, "channel_id": channel_id, "thread_id": thread_id}
 
 
 def _guild_scope_update_from_settings_payload(
@@ -4386,10 +5232,16 @@ def _save_discord_guild_scope_update(
     guilds: dict[str, GuildSettings],
     default_enabled: bool,
     store: Optional[SettingsStore] = None,
+    *,
+    user_context: Any = None,
 ) -> None:
-    target_store = store or SettingsStore.get_instance()
-    target_store.set_guilds_for_platform("discord", guilds, default_enabled=default_enabled)
-    target_store.save()
+    # Config writes and legacy migrations need the same private candidate as
+    # channel/DM writes; another Owner request must never commit this draft.
+    with contextlib.closing(SettingsStore(store.settings_path if store else None)) as candidate:
+        candidate.set_guilds_for_platform("discord", guilds, default_enabled=default_enabled)
+        candidate.save(user_context=user_context)
+    if store is not None:
+        store.maybe_reload()
 
 
 def _extract_settings_scopes_from_config_payload(
@@ -4600,7 +5452,9 @@ async def telegram_auth_test_async(bot_token: str, proxy_url: str | None = None)
         return {"ok": False, "error": str(exc)}
 
 
-def delete_channel_scope(platform: str, native_id: str, scope_type: str = "channel") -> dict:
+def delete_channel_scope(
+    platform: str, native_id: str, scope_type: str = "channel", *, user_context: Any = None,
+) -> dict:
     """Permanently remove a discovered channel/chat scope and its settings.
 
     Restricted to ``channel`` scopes: this endpoint exists only to clear stale
@@ -4609,6 +5463,7 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
     so any non-channel scope type is rejected.
     """
     from core import chat_discovery
+    from vibe.authorization import InstanceAuthorizationError
 
     platform = str(platform or "").strip()
     native_id = str(native_id or "").strip()
@@ -4618,7 +5473,9 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
     if scope_type != "channel":
         return {"ok": False, "error": "only channel scopes can be removed here"}
     try:
-        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel")
+        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel", user_context=user_context)
+    except InstanceAuthorizationError:
+        raise
     except Exception as exc:
         logger.warning("Failed to delete %s scope %s: %s", platform, native_id, exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
@@ -4900,7 +5757,11 @@ async def _telegram_get_me(bot_token: str, proxy_url: str | None = None) -> dict
     return result.get("result") or {}
 
 
-async def opencode_options_async(cwd: str) -> dict:
+async def opencode_options_async(
+    cwd: str,
+    *,
+    model_hub_models: dict[str, Any] | None = None,
+) -> dict:
     # Expand ~ to user home directory
     request_loop = asyncio.get_running_loop()
     expanded_cwd = os.path.expanduser(cwd)
@@ -4908,19 +5769,60 @@ async def opencode_options_async(cwd: str) -> dict:
     cache_data = cache_entry.get("data")
     updated_at = cache_entry.get("updated_at", 0.0)
     cache_age = time.monotonic() - updated_at
-    if cache_data and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS:
-        return {"ok": True, "data": cache_data, "cached": True}
-
+    model_hub_models_were_supplied = model_hub_models is not None
+    projection_key = ""
+    cache_projection_matches = False
+    cache_mode_matches = cache_entry.get("mode") == "direct"
+    model_hub_mode = None
     server = None
     try:
         from config.v2_compat import to_app_config
+        from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import load_opencode_public_models
         from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
             build_reasoning_effort_options,
+            project_opencode_model_hub_models,
         )
+        from modules.agents.opencode.utils import opencode_model_picker_value
 
         v2_config = V2Config.load()
+        if model_hub_models is None:
+            model_hub_config = getattr(v2_config, "model_hub", None)
+            model_hub_models = (
+                load_opencode_public_models(model_hub_config)
+                if model_hub_config is not None
+                else {}
+            )
+        projection_key = json.dumps(
+            model_hub_models,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cache_projection_matches = (
+            cache_entry.get("model_hub_projection") == projection_key
+        )
+        model_hub_agents = getattr(getattr(v2_config, "model_hub", None), "agents", {})
+        model_hub_agent = (
+            model_hub_agents.get("opencode")
+            if isinstance(model_hub_agents, dict)
+            else None
+        )
+        model_hub_mode = (
+            getattr(model_hub_agent, "mode", "direct")
+            if is_model_hub_enabled()
+            else "direct"
+        )
+        if (
+            model_hub_mode != "hub"
+            and cache_data
+            and cache_age < _OPENCODE_OPTIONS_TTL_SECONDS
+            and cache_projection_matches
+            and cache_mode_matches
+        ):
+            return {"ok": True, "data": cache_data, "cached": True}
         config = to_app_config(v2_config)
         if not config.opencode:
             return {"ok": False, "error": "opencode disabled"}
@@ -4936,18 +5838,45 @@ async def opencode_options_async(cwd: str) -> dict:
                 provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name")
                 if not provider_id:
                     continue
-                model_ids = []
+                model_items = []
                 provider_models = provider.get("models", {})
                 if isinstance(provider_models, dict):
-                    model_ids = list(provider_models.keys())
+                    model_items = list(provider_models.items())
                 elif isinstance(provider_models, list):
-                    model_ids = [
-                        model.get("id") for model in provider_models if isinstance(model, dict) and model.get("id")
+                    model_items = [
+                        (model.get("id"), model)
+                        for model in provider_models
+                        if isinstance(model, dict) and model.get("id")
                     ]
-                for model_id in model_ids:
-                    model_key = f"{provider_id}/{model_id}"
+                for model_id, model_info in model_items:
+                    model_key = opencode_model_picker_value(
+                        provider_id,
+                        model_id,
+                        model_info,
+                    )
                     options[model_key] = builder(models, model_key)
             return options
+
+        if model_hub_mode == "hub":
+            models = {
+                "providers": project_opencode_model_hub_models(
+                    [],
+                    model_hub_models or {},
+                ),
+                "default": {},
+            }
+            data = {
+                "agents": [],
+                "models": models,
+                "defaults": {},
+                "reasoning_options": _build_reasoning_options(
+                    models,
+                    build_reasoning_effort_options,
+                ),
+                "source": "model hub projection (persisted)",
+                "live": False,
+            }
+            return {"ok": True, "data": data}
 
         server = await OpenCodeServerManager.get_instance(
             binary=opencode_config.binary,
@@ -4957,46 +5886,55 @@ async def opencode_options_async(cwd: str) -> dict:
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
-        models = await asyncio.wait_for(server.get_available_models(expanded_cwd), timeout=timeout_seconds)
-        provider_catalog_available = True
-        try:
-            providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
-        except Exception as exc:
-            logger.debug("OpenCode provider auth filter skipped: provider list failed: %s", exc)
-            providers_raw = {}
-            provider_catalog_available = False
-        try:
-            from vibe.opencode_config import read_opencode_provider_auth_entries
-
-            auth_entries = await asyncio.to_thread(
-                read_opencode_provider_auth_entries, logger_instance=logger
+        model_request = (
+            server.get_available_models(expanded_cwd)
+            if not model_hub_models_were_supplied
+            else server.get_available_models(
+                expanded_cwd,
+                model_hub_models=model_hub_models,
             )
-        except Exception as exc:
-            logger.debug("OpenCode provider auth filter skipped: auth read failed: %s", exc)
-            auth_entries = {}
-        allowed_provider_ids: set[str] | None = None
-        if provider_catalog_available:
-            config_api_key_provider_ids = await _read_opencode_config_api_key_provider_ids()
-            custom_config_provider_ids = await _read_opencode_custom_provider_ids()
-            allowed_provider_ids = _configured_opencode_provider_ids(
-                providers_raw=providers_raw,
-                auth_entries=auth_entries,
-                config_api_key_provider_ids=config_api_key_provider_ids,
-                custom_config_provider_ids=custom_config_provider_ids,
-            )
-            models = _filter_opencode_models_to_configured_providers(
-                models,
-                providers_raw=providers_raw,
-                auth_entries=auth_entries,
-                config_api_key_provider_ids=config_api_key_provider_ids,
-                custom_config_provider_ids=custom_config_provider_ids,
-            )
-        user_model_index = await _read_opencode_user_model_index()
-        models = _merge_opencode_user_models(
-            models,
-            user_model_index,
-            allowed_provider_ids=allowed_provider_ids,
         )
+        models = await asyncio.wait_for(model_request, timeout=timeout_seconds)
+        if model_hub_mode != "hub":
+            provider_catalog_available = True
+            try:
+                providers_raw = await asyncio.wait_for(server.get_providers(), timeout=timeout_seconds)
+            except Exception as exc:
+                logger.debug("OpenCode provider auth filter skipped: provider list failed: %s", exc)
+                providers_raw = {}
+                provider_catalog_available = False
+            try:
+                from vibe.opencode_config import read_opencode_provider_auth_entries
+
+                auth_entries = await asyncio.to_thread(
+                    read_opencode_provider_auth_entries, logger_instance=logger
+                )
+            except Exception as exc:
+                logger.debug("OpenCode provider auth filter skipped: auth read failed: %s", exc)
+                auth_entries = {}
+            allowed_provider_ids: set[str] | None = None
+            if provider_catalog_available:
+                config_api_key_provider_ids = await _read_opencode_config_api_key_provider_ids()
+                custom_config_provider_ids = await _read_opencode_custom_provider_ids()
+                allowed_provider_ids = _configured_opencode_provider_ids(
+                    providers_raw=providers_raw,
+                    auth_entries=auth_entries,
+                    config_api_key_provider_ids=config_api_key_provider_ids,
+                    custom_config_provider_ids=custom_config_provider_ids,
+                )
+                models = _filter_opencode_models_to_configured_providers(
+                    models,
+                    providers_raw=providers_raw,
+                    auth_entries=auth_entries,
+                    config_api_key_provider_ids=config_api_key_provider_ids,
+                    custom_config_provider_ids=custom_config_provider_ids,
+                )
+            user_model_index = await _read_opencode_user_model_index()
+            models = _merge_opencode_user_models(
+                models,
+                user_model_index,
+                allowed_provider_ids=allowed_provider_ids,
+            )
         defaults = await asyncio.wait_for(server.get_default_config(expanded_cwd), timeout=timeout_seconds)
         reasoning_options = _build_reasoning_options(models, build_reasoning_effort_options)
         data = {
@@ -5004,15 +5942,24 @@ async def opencode_options_async(cwd: str) -> dict:
             "models": models,
             "defaults": defaults,
             "reasoning_options": reasoning_options,
+            "source": "opencode server (live) + user config overlay",
+            "live": True,
         }
         _OPENCODE_OPTIONS_CACHE[expanded_cwd] = {
             "data": data,
             "updated_at": time.monotonic(),
+            "model_hub_projection": projection_key,
+            "mode": "direct",
         }
         return {"ok": True, "data": data}
     except Exception as exc:
         logger.warning("OpenCode options fetch failed: %s", exc, exc_info=True)
-        if cache_data:
+        if (
+            model_hub_mode != "hub"
+            and cache_data
+            and cache_projection_matches
+            and cache_mode_matches
+        ):
             return {"ok": True, "data": cache_data, "cached": True, "warning": str(exc)}
         return {"ok": False, "error": str(exc)}
     finally:
@@ -5207,40 +6154,127 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         }
 
     current_vibe_path = get_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=get_version_info().get("latest"),
+        )
+    except MemoryRequirementUnreadableError:
+        return {
+            "ok": False,
+            "message": backend_t("update.memoryRequirementUnreadable"),
+            "output": None,
+            "reason": "memory_requirement_unreadable",
+            "restarting": False,
+        }
+    except ValueError as exc:
+        return {"ok": False, "message": "Upgrade failed.", "output": str(exc), "restarting": False}
+    if plan.preflight_error:
+        return {
+            "ok": False,
+            "message": "Upgrade cannot be activated safely",
+            "output": plan.preflight_error,
+            "restarting": False,
+        }
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid "Current directory does not exist"
     # errors.  The vibe service process cwd may be inside the uv tool venv
     # directory, which uv deletes and recreates during upgrade.
     safe_cwd = get_safe_cwd()
+    restarting = False
+    restart_failed = False
+    runtime_output = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(
-            plan.command,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=plan.env,
-            cwd=safe_cwd,
-        )
-        if result.returncode == 0:
-            restarting = False
-            restart_failed = False
-            runtime_output = None
-            if auto_restart and runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "Upgrade already has a restart in progress",
+                    "output": "Wait for the pending restart to finish before starting another upgrade.",
+                    "restarting": False,
+                }
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                return {
+                    "ok": False,
+                    "message": "Upgrade was superseded by another activation",
+                    "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
+                    "restarting": False,
+                }
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                # A wheel install copies the complete candidate environment before
+                # it can be activated.  The old 120s bound interrupted that copy
+                # in-place and left metadata claiming a package tree that no longer
+                # existed.  The candidate is isolated now; this is only a bound for
+                # a genuinely hung resolver/download.
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                cwd=safe_cwd,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            restart_required=auto_restart and runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    return {
+                        "ok": False,
+                        "message": "Upgrade candidate failed integrity verification",
+                        "output": str(exc),
+                        "restarting": False,
+                    }
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    return {
+                        "ok": False,
+                        "message": "Upgrade installed an incomplete Python environment",
+                        "output": integrity.detail,
+                        "restarting": False,
+                    }
+            if result.returncode == 0 and auto_restart and runtime_was_running and not deferred_activation:
                 try:
                     schedule_restart(
                         delay_seconds=2.0,
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                     restarting = True
                 except Exception as exc:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
-            else:
+        if result.returncode == 0:
+            if deferred_activation:
+                return {
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
+                    "output": _append_upgrade_output(result.stdout, None),
+                    "restarting": auto_restart and runtime_was_running,
+                }
+            if not restarting and not restart_failed:
                 runtime_output = _prepare_show_runtime_after_upgrade(current_vibe_path, safe_cwd)
             if restarting:
                 message = "Upgrade successful. Restarting..."
@@ -5263,6 +6297,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
             "ok": False,
             "message": "Upgrade timed out",
@@ -5270,6 +6306,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             "restarting": False,
         }
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {"ok": False, "message": str(e), "output": None, "restarting": False}
 
 
@@ -5706,7 +6744,6 @@ def _opencode_model_options(
     data = raw.get("data") or {}
     models_block = data.get("models") if isinstance(data.get("models"), dict) else {}
     reasoning_map = data.get("reasoning_options") or {}
-    default_block = models_block.get("default") if isinstance(models_block.get("default"), dict) else {}
     providers_raw = models_block.get("providers") if isinstance(models_block.get("providers"), list) else []
 
     try:
@@ -5718,7 +6755,13 @@ def _opencode_model_options(
         _oc_is_user_model = None
         custom_ids = set()
 
+    from modules.agents.opencode.utils import (
+        opencode_model_is_hub_projected,
+        opencode_model_picker_value,
+    )
+
     provider_filter = (provider or "").strip().lower() or None
+    matched_provider_filter = False
     providers_out: list[dict] = []
     models_out: list[dict] = []
     for prov in providers_raw:
@@ -5729,7 +6772,7 @@ def _opencode_model_options(
             continue
         if provider_filter and pid.lower() != provider_filter:
             continue
-        providers_out.append({"id": pid, "name": prov.get("name") or pid, "custom": pid in custom_ids})
+        matched_provider_filter = True
         prov_models = prov.get("models")
         if isinstance(prov_models, dict):
             model_items = list(prov_models.items())
@@ -5737,37 +6780,48 @@ def _opencode_model_options(
             model_items = [(m.get("id"), m) for m in prov_models if isinstance(m, dict) and m.get("id")]
         else:
             model_items = []
+        if not model_items or not all(
+            opencode_model_is_hub_projected(model_info)
+            for _model_id, model_info in model_items
+        ):
+            providers_out.append({"id": pid, "name": prov.get("name") or pid, "custom": pid in custom_ids})
         for model_id, model_info in model_items:
             if not isinstance(model_id, str) or not model_id:
                 continue
-            value = f"{pid}/{model_id}"
+            projected = opencode_model_is_hub_projected(model_info)
+            value = opencode_model_picker_value(pid, model_id, model_info)
             source = "catalog"
             if _oc_is_user_model is not None and isinstance(model_info, dict) and _oc_is_user_model(model_id, model_info):
                 source = "user"
-            models_out.append(
-                {
-                    "value": value,
-                    "provider": pid,
-                    "default": default_block.get(pid) == model_id,
-                    "source": source,
-                    "reasoning_efforts": _effort_values(reasoning_map.get(value)),
-                }
-            )
+            row = {
+                "value": value,
+                "source": source,
+                "reasoning_efforts": _effort_values(reasoning_map.get(value)),
+            }
+            if not projected:
+                row["provider"] = pid
+            models_out.append(row)
 
     opencode_cfg = getattr(getattr(config, "agents", None), "opencode", None) if config is not None else None
     default_provider = getattr(opencode_cfg, "default_provider", None) if opencode_cfg is not None else None
 
     notes: list[str] = []
-    if provider_filter and not providers_out:
+    if provider_filter and not matched_provider_filter:
         notes.append(f"no configured OpenCode provider matches '{provider}'")
+    catalog_source = data.get("source")
+    if not isinstance(catalog_source, str) or not catalog_source:
+        catalog_source = "opencode server (live) + user config overlay"
+    catalog_live = data.get("live")
+    if not isinstance(catalog_live, bool):
+        catalog_live = True
     return {
         "ok": True,
         "backend": "opencode",
         "default_provider": default_provider or None,
         "providers": providers_out,
         "models": models_out,
-        "source": "opencode server (live) + user config overlay",
-        "live": True,
+        "source": catalog_source,
+        "live": catalog_live,
         "notes": notes or None,
     }
 
@@ -5984,22 +7038,22 @@ def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = 
     """Persist one backend path and return its previous configured value."""
 
     try:
-        with CONFIG_LOCK:
-            config = load_config()
+        from config.v2_config import update_config_fields
+
+        if not paths.get_config_path().exists():
+            raise FileNotFoundError("Avibe config is not initialized")
+        previous: str | None = None
+
+        def persist(config) -> None:
+            nonlocal previous
             target = getattr(getattr(config, "agents", None), name, None)
             if target is None:
                 raise ValueError(f"Agent backend config is unavailable: {name}")
             previous = getattr(target, "cli_path", "") or name
-            if previous != installed_path:
-                target.cli_path = installed_path
-                config.save()
-                logger.info(
-                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                    name,
-                    previous or "<unset>",
-                    installed_path,
-                )
-            return previous
+            target.cli_path = installed_path
+
+        update_config_fields(persist)
+        return previous
     except FileNotFoundError:
         if required:
             raise
@@ -6271,7 +7325,13 @@ def _run_install_command(
             stdout, stderr = process.communicate(timeout=10)
             output = (stdout or "") + ("\n" + stderr if stderr else "")
             output = truncate_output(output.strip())
-            return {"ok": False, "message": f"{mode.capitalize()} timed out", "output": output or None}
+            return {
+                "ok": False,
+                "message": f"{mode.capitalize()} timed out",
+                "reason": f"{name}_{mode}_timeout",
+                "timeout_seconds": 300,
+                "output": output or None,
+            }
         result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
         output = truncate_output(output.strip())
@@ -6308,11 +7368,19 @@ def _run_install_command(
         return {
             "ok": False,
             "message": f"{mode.capitalize()} failed (exit code {result.returncode})",
+            "reason": f"{name}_{mode}_failed",
+            "exit_code": result.returncode,
             "output": output,
         }
     except Exception as e:
         logger.error("Agent %s %s error: %s", name, mode, e)
-        return {"ok": False, "message": str(e), "output": None}
+        return {
+            "ok": False,
+            "message": str(e),
+            "reason": f"{name}_{mode}_error",
+            "error": str(e),
+            "output": None,
+        }
 
 
 # =============================================================================
@@ -6434,9 +7502,14 @@ def install_askill() -> dict:
     # No npm fallback: askill is distributed via the askill.sh installer, not a
     # public npm package, so a curl/bash-less host (e.g. Windows) must install
     # it manually rather than hit a guaranteed-failing `npm i -g`.
+    import platform
+
     return {
         "ok": False,
         "message": "askill auto-install needs curl + bash (macOS/Linux). Install it manually from https://askill.sh.",
+        "reason": "askill_auto_install_unsupported",
+        "required_tools": ["curl", "bash"],
+        "platform": platform.system() or "unknown",
         "output": None,
     }
 
@@ -6468,6 +7541,8 @@ def ensure_askill_installed(force: bool = False) -> dict:
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
+            result["reason"] = "askill_install_path_missing"
+            result["expected_path"] = "askill"
             result["message"] = (
                 result.get("message") or "askill installed but was not found on PATH; restart the service or check PATH."
             )
@@ -6557,17 +7632,20 @@ def _persist_avault_cli_path(path: str) -> None:
             load_config()
         except FileNotFoundError:
             save_config({})
-        with CONFIG_LOCK:
-            cfg = load_config()
+        from config.v2_config import update_config_fields
+
+        def _apply_avault_cli_path(cfg) -> None:
+            # Read-decide-write INSIDE the transaction (#1458 stage ③).
             previous = getattr(cfg.agents.avault, "cli_path", "") or ""
             if previous != path:
                 cfg.agents.avault.cli_path = path
-                cfg.save()
                 logger.info(
                     "install_avault: updated V2Config cli_path: %s -> %s",
                     previous or "<unset>",
                     path,
                 )
+
+        update_config_fields(_apply_avault_cli_path)
     except Exception as exc:
         logger.warning("install_avault: failed to persist cli_path: %s", exc)
         raise
@@ -6652,6 +7730,8 @@ def install_avault(force: bool = False) -> dict:
         return {
             "ok": False,
             "message": backend_t("dependencies.avault.noBuild", platform=platform_label),
+            "reason": "avault_platform_unsupported",
+            "platform": platform_label,
             "output": None,
             "path": None,
         }
@@ -6674,6 +7754,11 @@ def install_avault(force: bool = False) -> dict:
             return {
                 "ok": False,
                 "message": backend_t("dependencies.avault.checksumMismatch"),
+                "reason": "avault_checksum_mismatch",
+                "expected_sha256": expected_sha256,
+                "actual_sha256": actual_sha256,
+                "platform": target,
+                "url": archive_url,
                 "output": f"expected {expected_sha256}, got {actual_sha256}",
                 "path": None,
             }
@@ -6705,6 +7790,9 @@ def install_avault(force: bool = False) -> dict:
         result = {
             "ok": False,
             "message": backend_t("dependencies.avault.installFailed", error=str(exc)),
+            "reason": "avault_install_failed",
+            "error": str(exc),
+            "platform": platform_label,
             "output": None,
             "path": None,
         }
@@ -6784,6 +7872,8 @@ def ensure_avault_installed(force: bool = False) -> dict:
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
+            result["reason"] = "avault_install_path_missing"
+            result["expected_path"] = "avault"
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
@@ -6812,6 +7902,35 @@ def _probe_avault_version(path: str | None) -> str | None:
     except Exception:  # noqa: BLE001
         return None
     return None
+
+
+def refresh_avault_if_stale() -> dict:
+    """Bring avault to the managed pin, installing only when that changes it.
+
+    Sibling of ``refresh_askill_if_stale`` for the version-pinned dependency, so
+    both managed local deps answer "am I current?" before paying for an install.
+    The wanted version is ``AVAULT_VERSION`` rather than an upstream latest, so
+    the staleness question is answered locally with no download at all.
+
+    ``force`` on ``ensure_avault_installed`` stays a repair verb — it reinstalls
+    an equal or older managed release on purpose — so callers that only want the
+    pin satisfied come here instead of charging every call a ~20s reinstall of
+    the release that is already on disk.
+
+    Skipping the install may never report a healthier state than forcing it
+    would. Being at the pin is not the whole of being current: when the
+    readiness floor is raised ahead of the published pin, a binary equal to
+    ``AVAULT_VERSION`` is still ``upgrade_required``, and only the forced path
+    surfaces that release gap. So the question is asked of the status as a
+    whole, not of the version alone.
+    """
+    status = avault_status()
+    current = (
+        bool(status.get("installed"))
+        and status.get("status") == "ready"
+        and _version_at_least(status.get("version"), AVAULT_VERSION)
+    )
+    return ensure_avault_installed(force=not current)
 
 
 def avault_status() -> dict:
@@ -7437,19 +8556,10 @@ def _fetch_latest_askill_version() -> str | None:
 
 
 def _cached_latest_askill() -> str | None:
-    # Share the backend lifecycle cache so every local tool latest probe obeys the
-    # same one-hour success TTL and short failure TTL.
-    key = "askill"
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(key)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    latest = _fetch_latest_askill_version()
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[key] = (time.time(), latest)
-    return latest
+    # Share the managed-dependency cache so every local tool latest probe obeys
+    # the same TTLs — and, more to the point here, so ``vibe runtime prepare``
+    # inherits the answer a previous process already paid GitHub for.
+    return latest_version_cache.cached_latest(_ASKILL_CACHE_KEY, _fetch_latest_askill_version)
 
 
 def askill_update_status(*, include_latest: bool = True) -> dict:
@@ -7464,9 +8574,80 @@ def askill_update_status(*, include_latest: bool = True) -> dict:
         "has_update": has_update,
         "auto_update": not _askill_auto_update_disabled(),
     }
-    if current.get("installed") and current_version is None:
+    if current.get("installed") and not _is_comparable_version(current_version):
+        # Not just a missing version: a version nobody can order (``dev``, a git
+        # sha) tells us as little as no version at all, and every consumer —
+        # the Dependencies page, prepare — must read the same fact from the same
+        # field rather than re-deriving it from the raw string.
         out["status"] = "unknown"
     return out
+
+
+def refresh_askill_if_stale() -> dict:
+    """Bring askill to the published version, installing only when that changes it.
+
+    The single owner of "is the managed askill current, and make it so". Every
+    caller that wants currency asks this instead of forcing an install, because
+    the askill.sh installer re-downloads the CLI on every run: answering the
+    question costs one cached version probe, answering it by reinstalling costs
+    ~30s of network even when the local binary is already the published version.
+    ``refresh_avault_if_stale`` is the same rule for the version-pinned sibling.
+
+    Callers own their own policy gate; this function only decides staleness. An
+    install attempt is reported by ``action``, so its absence means the
+    dependency was already current.
+
+    ``up_to_date`` is an affirmative verdict, never a fallthrough: it requires
+    two versions that could actually be ordered. Anything else is unknown, and
+    unknown is answered by the repair the forced path would have done.
+    """
+    status = askill_update_status()
+    if not status.get("installed"):
+        result = ensure_askill_installed(force=False)
+        result["action"] = "install"
+        return result
+
+    latest = status.get("latest_version")
+    if status.get("status") == "unknown":
+        # A binary whose version cannot be ordered is not current, it is broken —
+        # whether it reported nothing or reported ``dev``. The status field owns
+        # that judgement (see ``askill_update_status``) so this path and the
+        # Dependencies page cannot disagree. Deciding it before the
+        # ``latest_unavailable`` exit keeps the repair from being gated on
+        # network reachability: callers that used to force this install
+        # unconditionally would otherwise be told a broken askill is ready
+        # whenever the latest lookup failed too.
+        logger.info("askill local version is unknown; refreshing managed dependency")
+        result = ensure_askill_installed(force=True)
+        result["action"] = "refresh_unknown_version"
+        result["latest_version"] = latest
+        return result
+
+    if not _is_comparable_version(latest):
+        # No usable upstream version to compare against — missing, or a string
+        # that cannot be ordered. Either way staleness is undecided, which is a
+        # different fact from being current; each caller owns what to do with it
+        # (prepare installs, the update cadence skips).
+        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
+
+    if not status.get("has_update"):
+        # Two comparable versions, compared: this is the one state that may claim
+        # currency, and it is reached only by having established it.
+        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
+
+    logger.info("askill update available: %s -> %s", status.get("version"), latest)
+    result = ensure_askill_installed(force=True)
+    result["action"] = "update"
+    result["from_version"] = status.get("version")
+    result["latest_version"] = latest
+    # Deliberately no cache invalidation here, unlike the in-memory cache this
+    # replaced. The entry says which version askill *publishes*, and installing
+    # that version does not change the answer — it makes it the one a later
+    # ``askill_update_status`` needs, to compare a freshly measured local version
+    # against and conclude ``up_to_date``. Dropping it would send the next
+    # ``runtime prepare`` back to GitHub for a string we still hold, in the one
+    # window (right after an update) where prepare runs most often.
+    return result
 
 
 def reconcile_askill_auto_update() -> dict:
@@ -7480,48 +8661,36 @@ def reconcile_askill_auto_update() -> dict:
     """
     if _askill_auto_update_disabled():
         return {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
-
-    status = askill_update_status()
-    if not status.get("installed"):
-        result = ensure_askill_installed(force=False)
-        result["action"] = "install"
-        return result
-
-    latest = status.get("latest_version")
-    if latest is None:
-        return {"ok": True, "skipped": True, "reason": "latest_unavailable", "status": status}
-
-    if status.get("version") is None:
-        logger.info("askill local version is unknown; refreshing managed dependency")
-        result = ensure_askill_installed(force=True)
-        result["action"] = "refresh_unknown_version"
-        result["latest_version"] = latest
-        return result
-
-    if not status.get("has_update"):
-        return {"ok": True, "skipped": True, "reason": "up_to_date", "status": status}
-
-    logger.info("askill update available: %s -> %s", status.get("version"), latest)
-    result = ensure_askill_installed(force=True)
-    result["action"] = "update"
-    result["from_version"] = status.get("version")
-    result["latest_version"] = latest
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE.pop("askill", None)
-    return result
+    return refresh_askill_if_stale()
 
 
 # =============================================================================
-# Dependencies aggregate + manual install jobs (askill / show runtime)
+# Dependencies aggregate + explicit manual install jobs
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime", "memory-runtime", "tmux"}
+_ALLOWED_DEP_INSTALLS = {
+    "askill",
+    "avault",
+    "model-hub-engine",
+    "show-runtime",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _STARTUP_DEPENDENCY_STATE_LOCK = threading.Lock()
 _STARTUP_DEPENDENCY_RECONCILING: set[str] = set()
 _STARTUP_DEPENDENCY_RECONCILE_GENERATION = 0
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
+_MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS = 3
+_MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION = 1
+_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS = 0.25
+_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS = 60.0
+_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS = 0.05
+_MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON = (
+    "model_hub_engine_platform_unsupported"
+)
 
 
 def _startup_dependency_state_snapshot() -> tuple[int, set[str]]:
@@ -7537,23 +8706,665 @@ def _set_startup_dependency_reconciling(dependency: str, active: bool) -> None:
             _STARTUP_DEPENDENCY_RECONCILING.discard(dependency)
 
 
-def dependencies_status(*, offline: bool = False) -> dict:
-    """Status of the required local runtime dependencies for the Dependencies
-    settings page: askill, local managed runtimes, and the shared Node.js
-    prerequisite. (Agent backend CLIs are managed on the Backends tab.)
+@dataclass(frozen=True)
+class _MemoryRequirementProjection:
+    required: bool | None
+    state: str
+    warnings: tuple[str, ...] = ()
 
-    Returns stable ids + machine-readable status only — display copy (label /
-    detail) is localized in the React page, not sent from here.
+
+@dataclass(frozen=True)
+class _MemoryPackageMetadata:
+    provider_count: int | None
+    version: str | None
+
+    @property
+    def installed(self) -> bool | None:
+        if self.provider_count is None:
+            return None
+        return self.provider_count > 0
+
+
+def _load_memory_requirement() -> _MemoryRequirementProjection:
+    """Read the persisted requirement before any optional implementation import."""
+
+    try:
+        config = V2Config.load()
+    except FileNotFoundError:
+        return _MemoryRequirementProjection(False, "not_required")
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the persisted Memory requirement", exc_info=True)
+        return _MemoryRequirementProjection(None, "memory_requirement_unreadable")
+
+    required = config.memory_required
+    if required is None:
+        return _MemoryRequirementProjection(
+            None,
+            "memory_requirement_unreadable",
+            tuple(config.load_warnings),
+        )
+    memory_recovered = any(
+        section == "memory" or section.startswith("memory.")
+        for section in config.recovered_sections
+    )
+    return _MemoryRequirementProjection(
+        required,
+        "required" if required else "not_required",
+        tuple(config.load_warnings) if memory_recovered else (),
+    )
+
+
+def _inspect_memory_package_metadata() -> _MemoryPackageMetadata:
+    """Inspect canonical distribution providers without importing implementation code."""
+
+    from importlib.metadata import distributions
+    from packaging.version import Version
+
+    try:
+        providers = tuple(distributions(name=MEMORY_PACKAGE_NAME))
+    except Exception:  # noqa: BLE001
+        return _MemoryPackageMetadata(None, None)
+    if len(providers) != 1:
+        return _MemoryPackageMetadata(len(providers), None)
+    try:
+        raw_version = str(providers[0].version).strip()
+        version = str(Version(raw_version))
+    except Exception:  # noqa: BLE001
+        version = None
+    return _MemoryPackageMetadata(1, version)
+
+
+def _published_running_version() -> str | None:
+    from packaging.version import InvalidVersion, Version
+    from vibe import __version__
+
+    try:
+        version = Version(__version__)
+    except InvalidVersion:
+        return None
+    if version.local is not None:
+        return None
+    # Official index releases include dev versions. Source deployment is
+    # rejected independently by readiness; a dev suffix is not provenance.
+    return str(version)
+
+
+def _memory_versions_match(left: str, right: str) -> bool:
+    from packaging.version import Version
+
+    return Version(left) == Version(right)
+
+
+def _memory_artifact_status(*, offline: bool) -> tuple[bool, dict]:
+    """Import the artifact contract, then inspect EverOS without changing package readiness."""
+
+    failed = {
+        "installed": False,
+        "status": "missing",
+        "manifest": None,
+        "reason": "memory_runtime_install_failed",
+    }
+    try:
+        from avibe_memory.artifact import (
+            MemoryArtifactManager,
+            get_memory_artifact_manager,
+        )
+    except Exception:  # noqa: BLE001
+        return False, failed
+    try:
+        manager = (
+            MemoryArtifactManager(offline=True)
+            if offline
+            else get_memory_artifact_manager()
+        )
+        status = manager.status()
+        if not isinstance(status, dict):
+            raise TypeError("Memory artifact status must be a mapping")
+        return True, status
+    except Exception:  # noqa: BLE001
+        return True, failed
+
+
+def _memory_package_row(
+    requirement: _MemoryRequirementProjection,
+    metadata: _MemoryPackageMetadata,
+    *,
+    status: str,
+    readiness: str,
+    reason: str | None,
+    action_class: str,
+    current_version: str | None = None,
+) -> dict:
+    return {
+        "id": "memory-package",
+        "kind": "runtime",
+        "required": requirement.required,
+        "installed": metadata.installed,
+        "provider_count": metadata.provider_count,
+        "version": metadata.version,
+        "latest_version": current_version,
+        "has_update": bool(
+            metadata.version
+            and current_version
+            and not _memory_versions_match(metadata.version, current_version)
+        ),
+        "status": status,
+        "readiness": readiness,
+        "reason": reason,
+        "action_class": action_class,
+        "warnings": list(requirement.warnings),
+    }
+
+
+def _memory_runtime_row(
+    requirement: _MemoryRequirementProjection,
+    runtime: dict | None,
+    *,
+    reason: str | None = None,
+    action_class: str = "none",
+) -> dict:
+    runtime = runtime or {}
+    manifest = runtime.get("manifest") if isinstance(runtime.get("manifest"), dict) else {}
+    release_state = manifest.get("release_state")
+    if requirement.state == "not_required":
+        status = "not_required"
+    elif reason is not None:
+        status = "error"
+    else:
+        status = _memory_runtime_dependency_status(runtime)
+    return {
+        "id": "memory-runtime",
+        "kind": "runtime",
+        "required": requirement.required,
+        "installed": (
+            None if requirement.state != "required" and not runtime else bool(runtime.get("installed"))
+        ),
+        "version": runtime.get("version"),
+        "latest_version": runtime.get("selected_version"),
+        "has_update": bool(
+            runtime.get("installed") and runtime.get("matches_manifest") is False
+        ),
+        "status": status,
+        "reason": reason if reason is not None else runtime.get("reason"),
+        "action_class": action_class,
+        "release_state": release_state if release_state in {"published", "unavailable"} else None,
+        "download_error": runtime.get("download_error"),
+    }
+
+
+def _memory_runtime_action_class(runtime: dict) -> str:
+    if not runtime.get("installed") or runtime.get("matches_manifest") is False:
+        return "repairable"
+    return "none"
+
+
+def _memory_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
+    requirement = _load_memory_requirement()
+    unknown_metadata = _MemoryPackageMetadata(None, None)
+    if requirement.state == "memory_requirement_unreadable":
+        reason = "memory_requirement_unreadable"
+        return (
+            _memory_package_row(
+                requirement,
+                unknown_metadata,
+                status="error",
+                readiness=reason,
+                reason=reason,
+                action_class="operator_only",
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    metadata = _inspect_memory_package_metadata()
+    if requirement.state == "not_required":
+        current_version = _published_running_version()
+        published_install = (
+            get_build_identity().kind != "source" and current_version is not None
+        )
+        if published_install:
+            if metadata.provider_count == 0:
+                status = "missing"
+                reason = "memory_package_missing"
+                action_class = "repairable"
+            elif metadata.provider_count is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif metadata.provider_count > 1:
+                status = "error"
+                reason = "memory_package_metadata_ambiguous"
+                action_class = "operator_only"
+            elif metadata.version is None:
+                status = "error"
+                reason = "memory_package_metadata_unreadable"
+                action_class = "operator_only"
+            elif not _memory_versions_match(metadata.version, current_version):
+                status = "error"
+                reason = "memory_package_version_mismatch"
+                action_class = "repairable"
+            else:
+                status = "not_required"
+                reason = None
+                # Disabled means no automatic install, not no recovery path. An
+                # exact package can still have a broken import/entry point.
+                action_class = "repairable"
+            return (
+                _memory_package_row(
+                    requirement,
+                    metadata,
+                    status=status,
+                    readiness="not_required",
+                    reason=reason,
+                    action_class=action_class,
+                    current_version=current_version,
+                ),
+                _memory_runtime_row(requirement, None),
+            )
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="not_required",
+                readiness="not_required",
+                reason=None,
+                action_class="none",
+            ),
+            _memory_runtime_row(requirement, None),
+        )
+
+    current_version = _published_running_version()
+    build_is_source = get_build_identity().kind == "source"
+    if build_is_source or current_version is None:
+        reason = (
+            "memory_package_source_build"
+            if build_is_source
+            else "memory_package_unpublished_build"
+        )
+        package = _memory_package_row(
+            requirement,
+            metadata,
+            status="error",
+            readiness="not_ready",
+            reason=reason,
+            action_class="operator_only",
+        )
+        try:
+            probe_memory_runtime_entrypoint()
+        except Exception:  # noqa: BLE001
+            return package, _memory_runtime_row(
+                requirement,
+                None,
+                reason="memory_package_runtime_unavailable",
+            )
+        artifact_imported, runtime = _memory_artifact_status(offline=offline)
+        if not artifact_imported:
+            return package, _memory_runtime_row(
+                requirement,
+                None,
+                reason="memory_package_artifact_unavailable",
+            )
+        return package, _memory_runtime_row(
+            requirement,
+            runtime,
+            action_class=_memory_runtime_action_class(runtime),
+        )
+
+    if metadata.provider_count == 0:
+        reason = "memory_package_missing"
+        action_class = "repairable"
+        status = "missing"
+    elif metadata.provider_count is None:
+        reason = "memory_package_metadata_unreadable"
+        action_class = "operator_only"
+        status = "error"
+    elif metadata.provider_count > 1:
+        reason = "memory_package_metadata_ambiguous"
+        action_class = "operator_only"
+        status = "error"
+    elif metadata.version is None:
+        reason = "memory_package_metadata_unreadable"
+        action_class = "operator_only"
+        status = "error"
+    elif not _memory_versions_match(metadata.version, current_version):
+        reason = "memory_package_version_mismatch"
+        action_class = "repairable"
+        status = "error"
+    else:
+        reason = None
+        action_class = "none"
+        status = "ready"
+    if reason is not None:
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status=status,
+                readiness="not_ready",
+                reason=reason,
+                action_class=action_class,
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    if _memory_package_restart_retry_required(current_version):
+        reason = "memory_package_restart_failed"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+
+    try:
+        probe_memory_runtime_entrypoint()
+    except Exception:  # noqa: BLE001
+        reason = "memory_package_runtime_unavailable"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+    artifact_imported, runtime = _memory_artifact_status(offline=offline)
+    if not artifact_imported:
+        reason = "memory_package_artifact_unavailable"
+        return (
+            _memory_package_row(
+                requirement,
+                metadata,
+                status="error",
+                readiness="not_ready",
+                reason=reason,
+                action_class="repairable",
+                current_version=current_version,
+            ),
+            _memory_runtime_row(requirement, None, reason=reason),
+        )
+    return (
+        _memory_package_row(
+            requirement,
+            metadata,
+            status="ready",
+            readiness="ready",
+            reason=None,
+            action_class="none",
+            current_version=current_version,
+        ),
+        _memory_runtime_row(
+            requirement,
+            runtime,
+            action_class=_memory_runtime_action_class(runtime),
+        ),
+    )
+
+
+def _model_hub_engine_dependency_status() -> dict:
+    """Project the pinned CPA runtime into the shared dependency contract."""
+
+    try:
+        from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+        manager = EngineRuntimeManager(offline=True)
+        managed = manager.status()
+        platform_supported = manager.supports_host_platform()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inspect the Model Hub engine dependency", exc_info=True)
+        return {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": None,
+            "version": None,
+            "latest_version": None,
+            "has_update": False,
+            "status": "error",
+            "action_class": "operator_only",
+            "reason": "model_hub_engine_install_inspection_failed",
+            "inspection_error": {"kind": type(exc).__name__, "message": str(exc)},
+        }
+
+    installed = bool(managed.get("installed"))
+    selected_version = managed.get("selected_version")
+    matches_manifest = managed.get("matches_manifest")
+    reason = managed.get("reason")
+    if not platform_supported:
+        status = "unsupported"
+        action_class = "none"
+    elif not selected_version:
+        status = "error"
+        action_class = "operator_only"
+    elif managed.get("status") == "error":
+        status = "error"
+        action_class = "repairable"
+    elif installed and matches_manifest is True:
+        status = "ready"
+        action_class = "none"
+    elif installed:
+        status = "upgrade_required"
+        action_class = "repairable"
+    else:
+        status = "missing"
+        action_class = "repairable"
+    return {
+        "id": "model-hub-engine",
+        "kind": "runtime",
+        "required": platform_supported,
+        "installed": installed,
+        "version": managed.get("version"),
+        "latest_version": selected_version,
+        "has_update": bool(installed and matches_manifest is False),
+        "status": status,
+        "action_class": action_class,
+        "reason": reason,
+        "download_error": managed.get("download_error"),
+    }
+
+
+def _model_hub_controller_owns_engine(socket_path: Path | None) -> bool:
+    """Wait out controller startup before deciding direct-install ownership.
+
+    A missing dispatch socket means only that the endpoint is not ready. The
+    service pid reservation and instance lock identify the controller owner
+    before durable recovery completes and the socket is bound. If that owner
+    remains alive through the startup deadline, it retains ownership even when
+    the endpoint never becomes ready; returning true prevents a competing
+    direct install from mutating the runtime under it.
     """
-    # Probes below can outlive a short reconciliation, so preserve either edge of
-    # the lock window instead of reporting a stale idle snapshot.
+
+    from vibe import runtime
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    if owner_pid is None:
+        return False
+
+    deadline = time.monotonic() + runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS
+    from vibe.internal_client import health_sync
+
+    while True:
+        owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+        if owner_pid is None:
+            return False
+        remaining = deadline - time.monotonic()
+        if health_sync(
+            socket_path,
+            timeout=min(1.0, max(0.05, remaining)),
+        ):
+            return True
+        if remaining <= 0:
+            return True
+        time.sleep(min(_MODEL_HUB_CONTROLLER_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _model_hub_engine_ensure_result(result: dict) -> dict:
+    """Project an unsupported host as a successful non-applicable ensure."""
+
+    if result.get("reason") != _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON:
+        return result
+    return {
+        **result,
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "status": "unsupported",
+    }
+
+
+def ensure_model_hub_engine_installed(
+    *,
+    force: bool = False,
+    offline: bool | None = None,
+) -> dict:
+    """Converge CPA to this Avibe release's pin without changing run intent."""
+
+    from core.handlers.model_hub import ModelHubError
+    from vibe.internal_client import default_socket_path
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def ensure_directly() -> dict:
+        return _model_hub_engine_ensure_result(
+            EngineRuntimeManager(offline=offline).ensure(force=force)
+        )
+
+    socket_path = None if os.name == "nt" else default_socket_path().expanduser().resolve()
+    if not _model_hub_controller_owns_engine(socket_path):
+        return ensure_directly()
+
+    try:
+        from vibe.model_hub_client import ModelHubRemoteService
+
+        runtime = ModelHubRemoteService().ensure_runtime_dependency(
+            force=force,
+            offline=offline is True,
+        )
+    except ModelHubError as exc:
+        if exc.code == "runtime_platform_unsupported":
+            return _model_hub_engine_ensure_result(
+                {
+                    "ok": False,
+                    "installed": False,
+                    "changed": False,
+                    "reason": _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON,
+                    "message": exc.detail,
+                }
+            )
+        dependency_reason = exc.data.get("reason")
+        return {
+            "ok": False,
+            "reason": dependency_reason or exc.code,
+            "message": exc.detail,
+        }
+
+    status = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
+    installed = bool(status.get("verified"))
+    return {
+        "ok": installed,
+        "installed": installed,
+        "changed": bool(runtime.get("changed")),
+        "version": status.get("installed_version"),
+        "status": status,
+        "reason": None if installed else status.get("error_key") or "model_hub_engine_install_failed",
+    }
+
+
+def _show_runtime_dependencies_status(*, offline: bool) -> tuple[dict, dict]:
+    """Show Runtime and Node share one inspection and its failure evidence."""
+    from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
+
+    srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
+    srt = srt_manager.status()
+    manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
+    install = srt.get("install") if isinstance(srt.get("install"), dict) else {}
+    install_state = install.get("state")
+    srt_installed = True if install_state == "installed" else False if install_state == "absent" else None
+    installed_matches_manifest = install.get("matches_manifest")
+    recovery_action = install.get("recovery_action")
+    srt_status = "ready" if srt_installed is True else "missing" if srt_installed is False else "error"
+    action_class = (
+        "repairable"
+        if srt_status in {"ready", "missing"} or recovery_action == "repair"
+        else "operator_only"
+    )
+    runtime = {
+        "id": "show-runtime",
+        "kind": "runtime",
+        "required": True,
+        "installed": srt_installed,
+        "version": install.get("runtime_version"),
+        "latest_version": manifest.get("runtime_version"),
+        "has_update": bool(srt_installed is True and installed_matches_manifest is False),
+        "status": srt_status,
+        "action_class": action_class,
+        "reason": srt.get("reason"),
+        "download_error": srt.get("download_error"),
+        "inspection_error": srt.get("inspection_error"),
+    }
+
+    # Node present but below the Show Runtime minimum (node_supported is False)
+    # is not actually usable — don't show it green while runtime repair fails.
+    node_inspection_failed = (
+        install_state == "failed"
+        and srt.get("reason") == "runtime_install_inspection_failed"
+    )
+    node_ok = (
+        None
+        if node_inspection_failed
+        else bool(srt.get("node_available")) and srt.get("node_supported") is not False
+    )
+    node = {
+        "id": "node",
+        "kind": "node",
+        "required": True,
+        "installed": node_ok,
+        "version": srt.get("node_version"),
+        "status": "error" if node_ok is None else "ready" if node_ok else "missing",
+    }
+    return runtime, node
+
+
+DEPENDENCY_IDS = (
+    "askill",
+    "avault",
+    "show-runtime",
+    "model-hub-engine",
+    "memory-package",
+    "memory-runtime",
+    "tmux",
+    "node",
+)
+
+
+def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | None = None) -> dict:
+    """Inspect only the requested dependencies, preserving the full status contract.
+
+    Omitting ids keeps the synchronous, complete inspection used by Doctor.
+    Web consumers can request independent checks without waiting for unrelated
+    CLI probes. Coupled rows share their existing inspection; no health result
+    is cached or inferred from a different dependency.
+    """
     generation_before, active_before = _startup_dependency_state_snapshot()
     reconciling_before = _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked()
-    deps: list[dict] = []
-
-    a = askill_update_status(include_latest=False)
-    deps.append(
-        {
+    requested = set(DEPENDENCY_IDS if dependency_ids is None else dependency_ids)
+    unknown = requested.difference(DEPENDENCY_IDS)
+    if unknown:
+        raise ValueError(f"Unknown dependencies: {', '.join(sorted(unknown))}")
+    deps: dict[str, dict] = {}
+    if "askill" in requested:
+        a = askill_update_status(include_latest=False)
+        deps["askill"] = {
             "id": "askill",
             "kind": "tool",
             "required": True,
@@ -7563,11 +9374,9 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "has_update": a.get("has_update", False),
             "status": a["status"],
         }
-    )
-
-    av = avault_status()
-    deps.append(
-        {
+    if "avault" in requested:
+        av = avault_status()
+        deps["avault"] = {
             "id": "avault",
             "kind": "tool",
             "required": True,
@@ -7577,70 +9386,20 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "has_update": False,
             "status": av["status"],
         }
-    )
+    if requested.intersection({"show-runtime", "node"}):
+        deps["show-runtime"], deps["node"] = _show_runtime_dependencies_status(offline=offline)
+    if "model-hub-engine" in requested:
+        deps["model-hub-engine"] = _model_hub_engine_dependency_status()
+    if requested.intersection({"memory-package", "memory-runtime"}):
+        deps["memory-package"], deps["memory-runtime"] = _memory_dependencies_status(offline=offline)
+    if "tmux" in requested:
+        try:
+            from core.tmux_runtime import TmuxRuntimeManager, tmux_status
 
-    try:
-        from core.show_runtime import ShowRuntimeManager, get_show_runtime_manager
-
-        srt_manager = ShowRuntimeManager(offline=True) if offline else get_show_runtime_manager()
-        srt = srt_manager.status()
-    except Exception as exc:  # noqa: BLE001
-        srt = {"installed": False, "node_available": None, "node_version": None, "reason": str(exc)}
-    manifest = srt.get("manifest") if isinstance(srt.get("manifest"), dict) else {}
-    srt_installed = bool(srt.get("installed"))
-    deps.append(
-        {
-            "id": "show-runtime",
-            "kind": "runtime",
-            "required": True,
-            "installed": srt_installed,
-            "version": manifest.get("runtime_version"),
-            "status": "ready" if srt_installed else "missing",
-            "reason": srt.get("reason"),
-            "download_error": srt.get("download_error"),
-        }
-    )
-
-    try:
-        from core.memory.artifact import MemoryArtifactManager, get_memory_artifact_manager
-
-        memory_manager = MemoryArtifactManager(offline=True) if offline else get_memory_artifact_manager()
-        memory_runtime = memory_manager.status()
-    except Exception:  # noqa: BLE001
-        memory_runtime = {
-            "installed": False,
-            "status": "missing",
-            "manifest": None,
-            "reason": "memory_runtime_install_failed",
-        }
-    memory_manifest = memory_runtime.get("manifest") if isinstance(memory_runtime.get("manifest"), dict) else {}
-    release_state = memory_manifest.get("release_state")
-    try:
-        memory_required = bool(V2Config.load().memory.enabled)
-    except Exception:  # noqa: BLE001
-        memory_required = False
-    deps.append(
-        {
-            "id": "memory-runtime",
-            "kind": "runtime",
-            "required": memory_required,
-            "installed": bool(memory_runtime.get("installed")),
-            "version": memory_manifest.get("everos_version"),
-            "status": _memory_runtime_dependency_status(memory_runtime),
-            "reason": memory_runtime.get("reason"),
-            "release_state": release_state if release_state in {"published", "unavailable"} else None,
-            "download_error": memory_runtime.get("download_error"),
-        }
-    )
-
-    try:
-        from core.tmux_runtime import TmuxRuntimeManager, tmux_status
-
-        tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
-    except Exception as exc:  # noqa: BLE001
-        tmux = {"installed": False, "version": None, "status": "missing", "reason": str(exc)}
-    deps.append(
-        {
+            tmux = TmuxRuntimeManager(offline=True).status() if offline else tmux_status()
+        except Exception as exc:  # noqa: BLE001
+            tmux = {"installed": False, "version": None, "status": "missing", "reason": str(exc)}
+        deps["tmux"] = {
             "id": "tmux",
             "kind": "tool",
             "required": False,
@@ -7650,26 +9409,11 @@ def dependencies_status(*, offline: bool = False) -> dict:
             "reason": tmux.get("reason"),
             "download_error": tmux.get("download_error"),
         }
-    )
-
-    # Node present but below the Show Runtime minimum (node_supported is False)
-    # is not actually usable — don't show it green while runtime repair fails.
-    node_ok = bool(srt.get("node_available")) and srt.get("node_supported") is not False
-    deps.append(
-        {
-            "id": "node",
-            "kind": "node",
-            "required": True,
-            "installed": node_ok,
-            "version": srt.get("node_version"),
-            "status": "ready" if node_ok else "missing",
-        }
-    )
 
     generation_after, active_after = _startup_dependency_state_snapshot()
     return {
         "ok": True,
-        "deps": deps,
+        "deps": [deps[dep] for dep in DEPENDENCY_IDS if dep in requested],
         "reconciling": (
             reconciling_before
             or _STARTUP_DEPENDENCY_RECONCILE_LOCK.locked()
@@ -7705,18 +9449,32 @@ def _memory_runtime_dependency_status(memory_runtime: dict) -> str:
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
+        from vibe.i18n import t as i18n_t
 
-        payload = get_show_runtime_manager().prepare(force=True)
+        payload = get_show_runtime_manager().repair()
         ok = bool(payload.get("ok"))
+        reason = payload.get("reason")
+        healthy = payload.get("outcome") == "healthy"
         result = {
             "ok": ok,
-            "message": "Show Runtime ready." if ok else (payload.get("reason") or "Show Runtime prepare failed"),
+            "message": (
+                i18n_t("doctor.repair.showRuntimeHealthy")
+                if healthy
+                else i18n_t("runtime.prepare.prepared")
+                if ok
+                else i18n_t("runtime.prepare.failed", reason=reason or "unknown")
+            ),
             "output": None,
+            "outcome": payload.get("outcome"),
+            "changed": payload.get("outcome") == "repaired",
         }
         if not ok:
-            status = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-            download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
-            result["reason"] = payload.get("reason")
+            download_error = (
+                payload.get("download_error")
+                if isinstance(payload.get("download_error"), dict)
+                else None
+            )
+            result["reason"] = reason
             result["download_error"] = download_error
             if download_error:
                 result["message"] = dependency_error_message(download_error, label="Show Runtime download")
@@ -7760,6 +9518,440 @@ def _prepare_memory_runtime_job() -> dict:
         "reason": None if ok else (reason or "memory_runtime_install_failed"),
         "download_error": payload.get("download_error"),
     }
+
+
+def _memory_package_repair_rejection(*, allow_optional: bool = False) -> dict | None:
+    """Recheck the status-owned package repair contract before mutation."""
+
+    try:
+        package, _runtime = _memory_dependencies_status(offline=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("Memory package repair admission could not project readiness", exc_info=True)
+        reason = "memory_package_admission_unavailable"
+        return {
+            "ok": False,
+            "status": "rejected",
+            "message": reason,
+            "output": None,
+            "reason": reason,
+            "action_class": "operator_only",
+        }
+
+    provider_count = package.get("provider_count")
+    version = package.get("version")
+    metadata_readable = provider_count == 0 or (
+        provider_count == 1 and isinstance(version, str) and bool(version)
+    )
+    if (
+        (
+            package.get("required") is True
+            or (allow_optional and package.get("required") is False)
+        )
+        and package.get("action_class") == "repairable"
+        and metadata_readable
+    ):
+        return None
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("required") is not True:
+            reason = "memory_requirement_unreadable"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_not_repairable"
+        else:
+            reason = "memory_package_admission_unavailable"
+    return {
+        "ok": False,
+        "status": "rejected",
+        "message": reason,
+        "output": None,
+        "reason": reason,
+        "action_class": "operator_only",
+    }
+
+
+def _memory_package_auto_repair_state_path() -> Path:
+    return paths.get_state_dir() / "memory-package-auto-repair.json"
+
+
+def _memory_package_restart_retry_required(version: str) -> bool:
+    """Whether package install succeeded but activation restart did not."""
+
+    try:
+        payload = json.loads(
+            _memory_package_auto_repair_state_path().read_text(encoding="utf-8")
+        )
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("state_version") == _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        and payload.get("core_version") == version
+        and payload.get("result") == "failed"
+        and payload.get("reason") == "memory_package_restart_failed"
+    )
+
+
+def _reserve_memory_package_auto_repair_attempt(version: str) -> dict:
+    """Persist one automatic attempt before any package mutation begins."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    with MigrationFileLock(lock_path, timeout_seconds=5.0):
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            payload = {}
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            logger.warning("Memory package auto-repair state is unreadable: %s", exc)
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+
+        if not isinstance(payload, dict) or (
+            payload and payload.get("state_version") != _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION
+        ):
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        attempts = payload.get("attempts", 0) if payload.get("core_version") == version else 0
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+            return {
+                "allowed": False,
+                "attempts": _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS,
+                "reason": "memory_package_auto_repair_state_unreadable",
+            }
+        if attempts >= _MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS:
+            return {
+                "allowed": False,
+                "attempts": attempts,
+                "reason": "memory_package_auto_repair_exhausted",
+            }
+
+        token = uuid.uuid4().hex
+        attempt = {
+            "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+            "core_version": version,
+            "attempts": attempts + 1,
+            "result": "running",
+            "attempt_token": token,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        write_atomic(state_path, json.dumps(attempt, sort_keys=True) + "\n")
+        return {
+            "allowed": True,
+            "attempts": attempts + 1,
+            "token": token,
+        }
+
+
+def _finish_memory_package_auto_repair_attempt(
+    version: str,
+    token: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Settle only the exact attempt this process reserved."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                return
+            if payload.get("core_version") != version or payload.get("attempt_token") != token:
+                return
+            payload["result"] = result
+            payload["reason"] = reason
+            payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+            write_atomic(state_path, json.dumps(payload, sort_keys=True) + "\n")
+    except (OSError, UnicodeError, json.JSONDecodeError, MigrationLockTimeout):
+        logger.warning("Memory package auto-repair result could not be persisted", exc_info=True)
+
+
+def _record_memory_package_repair_result(
+    version: str,
+    *,
+    result: str,
+    reason: str | None,
+) -> None:
+    """Persist manual activation state without consuming the automatic budget."""
+
+    state_path = _memory_package_auto_repair_state_path()
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with MigrationFileLock(lock_path, timeout_seconds=5.0):
+            try:
+                payload = json.loads(state_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+                payload = {}
+            attempts = (
+                payload.get("attempts", 0)
+                if isinstance(payload, dict) and payload.get("core_version") == version
+                else 0
+            )
+            if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+                attempts = 0
+            write_atomic(
+                state_path,
+                json.dumps(
+                    {
+                        "state_version": _MEMORY_PACKAGE_AUTO_REPAIR_STATE_VERSION,
+                        "core_version": version,
+                        "attempts": attempts,
+                        "result": result,
+                        "reason": reason,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+    except (OSError, MigrationLockTimeout):
+        logger.warning("Memory package repair result could not be persisted", exc_info=True)
+
+
+def _prepare_memory_package_job(*, automatic: bool = False) -> dict:
+    """Install the matching optional package through the existing dependency job."""
+
+    reservation: dict | None = None
+    current_version: str | None = None
+    plan = None
+    activated = False
+    restart_python = None
+    try:
+        with atomic_upgrade_lock():
+            rejection = _memory_package_repair_rejection(
+                allow_optional=not automatic,
+            )
+            if rejection is not None:
+                return rejection
+
+            current_version = _published_running_version()
+            if current_version is None:
+                reason = "memory_package_unpublished_build"
+                return {
+                    "ok": False,
+                    "message": reason,
+                    "output": None,
+                    "reason": reason,
+                    "action_class": "operator_only",
+                }
+            current_vibe_path = get_running_vibe_path()
+            restart_only = _memory_package_restart_retry_required(current_version)
+            if restart_is_pending():
+                return {
+                    "ok": False,
+                    "message": "memory_package_upgrade_busy",
+                    "output": None,
+                    "reason": "memory_package_upgrade_busy",
+                }
+            if automatic:
+                reservation = _reserve_memory_package_auto_repair_attempt(current_version)
+                if not reservation.get("allowed"):
+                    return {
+                        "ok": False,
+                        "skipped": True,
+                        "message": reservation.get("reason"),
+                        "output": None,
+                        "reason": reservation.get("reason"),
+                        "action_class": "repairable",
+                        "attempts": reservation.get("attempts"),
+                    }
+
+            output = ""
+            if restart_only:
+                result = {"ok": True}
+            else:
+                # Preserve an exact GitHub core origin (including previews).
+                # Otherwise core keeps its index pin and the planner selects
+                # Memory from that version's official GitHub Release.
+                asset_specs = release_asset_specs(current_version)
+                plan = build_upgrade_plan(
+                    version=current_version,
+                    package_name=PACKAGE_NAME,
+                    memory_package=True,
+                    memory_version=current_version,
+                    vibe_path=current_vibe_path,
+                    core_spec=asset_specs[0] if asset_specs else None,
+                    memory_spec=asset_specs[1] if asset_specs else None,
+                )
+                if plan.preflight_error:
+                    return {
+                        "ok": False,
+                        "message": "memory_package_install_unsafe",
+                        "output": plan.preflight_error,
+                        "reason": "memory_package_install_unsafe",
+                    }
+                install = execute_upgrade_plan(
+                    plan,
+                    run=subprocess.run,
+                    capture_output=True,
+                    text=True,
+                    timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+                    cwd=get_safe_cwd(),
+                )
+                output = _truncate_install_output(
+                    ((install.stdout or "") + (f"\n{install.stderr}" if install.stderr else "")).strip()
+                )
+                if install.returncode != 0:
+                    result = {
+                        "ok": False,
+                        "message": "memory_package_install_failed",
+                        "output": output or None,
+                        "reason": "memory_package_install_failed",
+                    }
+                elif plan.activation is not None:
+                    restart_python = _candidate_python(plan.activation.candidate_launcher)
+                    activate_upgrade_candidate(plan.activation)
+                    activated = True
+                    result = {"ok": True}
+                else:
+                    integrity = verify_python_environment(sys.executable)
+                    result = (
+                        {"ok": True}
+                        if integrity.ok
+                        else {
+                            "ok": False,
+                            "message": "memory_package_install_failed",
+                            "output": integrity.detail,
+                            "reason": "memory_package_install_failed",
+                        }
+                    )
+            if result.get("ok"):
+                try:
+                    restart = schedule_restart(
+                        delay_seconds=2.0,
+                        vibe_path=current_vibe_path,
+                        trigger="memory-package-repair",
+                        # The old UI must release its Python environment too.
+                        # Restart-only retries resolve the now-active launcher.
+                        scope="all",
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Memory package repair could not schedule activation restart", exc_info=True)
+                    result = {
+                        "ok": False,
+                        "message": "memory_package_restart_failed",
+                        "output": output or str(exc),
+                        "reason": "memory_package_restart_failed",
+                        "restarting": False,
+                    }
+                else:
+                    result = {
+                        "ok": True,
+                        "message": "memory_package_ready",
+                        "output": output or None,
+                        "reason": None,
+                        "restarting": True,
+                        "restart": restart,
+                    }
+    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError, MigrationLockTimeout) as exc:
+        logger.warning("Memory package repair failed before completion: %s", exc)
+        result = {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "output": str(exc),
+            "reason": "memory_package_install_failed",
+        }
+    finally:
+        if plan is not None and plan.activation is not None and not activated:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+    if reservation is not None and current_version is not None:
+        _finish_memory_package_auto_repair_attempt(
+            current_version,
+            str(reservation["token"]),
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
+        )
+    elif current_version is not None and (
+        result.get("restarting") or result.get("reason") == "memory_package_restart_failed"
+    ):
+        _record_memory_package_repair_result(
+            current_version,
+            result="restart_scheduled" if result.get("restarting") else "failed",
+            reason=result.get("reason") if isinstance(result.get("reason"), str) else None,
+        )
+    return result
+
+
+def reconcile_memory_package_on_startup() -> dict:
+    """Converge an enabled published install onto its exact Memory companion.
+
+    The first upgrade from a bundled-Memory release is executed by the old
+    upgrader, which can only request ``avibe-os``.  Once the new core starts,
+    the persisted enabled state is the durable fact that requires the optional
+    companion.  Reuse the explicit repair path so package identity, mutation,
+    and restart behavior have one implementation.
+    """
+
+    package, _runtime = _memory_dependencies_status(offline=True)
+    if package.get("required") is True and package.get("action_class") == "repairable":
+        return _prepare_memory_package_job(automatic=True)
+
+    reason = package.get("reason")
+    if not isinstance(reason, str) or not reason:
+        if package.get("required") is False:
+            reason = "memory_not_required"
+        elif package.get("action_class") == "none":
+            reason = "memory_package_ready"
+        else:
+            reason = "memory_package_not_repairable"
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": reason,
+    }
+
+
+def _reconcile_startup_memory_package_guarded() -> dict:
+    try:
+        return reconcile_memory_package_on_startup()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Startup dependency reconcile failed to repair Memory package: %s",
+            exc,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "reason": "memory_package_install_failed",
+        }
+
+
+def _retry_startup_memory_package_after_restart(result: dict) -> dict:
+    """Retry one busy startup repair after restart admission clears."""
+
+    if result.get("reason") != "memory_package_upgrade_busy":
+        return result
+
+    logger.info(
+        "Startup Memory package repair is waiting for the active restart to finish"
+    )
+    deadline = time.monotonic() + _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS
+    while restart_is_pending():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Startup Memory package repair remained blocked by an active restart for %.1fs",
+                _STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS,
+            )
+            return result
+        time.sleep(min(_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS, remaining))
+
+    return _reconcile_startup_memory_package_guarded()
 
 
 def _prepare_tmux_job() -> dict:
@@ -7810,13 +10002,20 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     if resolved_limit <= 0:
         return {"ok": True, "limit": resolved_limit, "pages": []}
 
-    from core.show_pages import ShowPageStore, VISIBILITY_PRIVATE, VISIBILITY_PUBLIC
+    from core.show_pages import (
+        ShowPageStore,
+        VISIBILITY_LIMITED,
+        VISIBILITY_PRIVATE,
+        VISIBILITY_PUBLIC,
+    )
+    from core.show_runtime import ShowRuntimeContext
     from storage.pagination import PageRequest
 
     store = ShowPageStore()
     try:
         candidates = [
             *store.list_page(visibility=VISIBILITY_PRIVATE, page_request=PageRequest(limit=resolved_limit)).items,
+            *store.list_page(visibility=VISIBILITY_LIMITED, page_request=PageRequest(limit=resolved_limit)).items,
             *store.list_page(visibility=VISIBILITY_PUBLIC, page_request=PageRequest(limit=resolved_limit)).items,
         ]
     finally:
@@ -7825,13 +10024,13 @@ def startup_show_page_prewarm_targets(limit: int | None = None) -> dict:
     candidates.sort(key=lambda page: (page.updated_at, page.session_id), reverse=True)
     pages = []
     for page in candidates[:resolved_limit]:
-        base_path = f"/p/{page.share_id}/" if page.visibility == VISIBILITY_PUBLIC and page.share_id else None
+        context = ShowRuntimeContext.SHARED if page.visibility == VISIBILITY_PUBLIC else ShowRuntimeContext.PRIVATE
         pages.append(
             {
                 "session_id": page.session_id,
                 "visibility": page.visibility,
                 "updated_at": page.updated_at,
-                "base_path": base_path,
+                "context": context.value,
             }
         )
     return {"ok": True, "limit": resolved_limit, "pages": pages}
@@ -7859,13 +10058,18 @@ def reconcile_startup_dependencies() -> dict:
     started_at = time.monotonic()
     result: dict[str, Any] = {
         "ok": True,
+        "memory_package": {"ok": False, "status": "unknown"},
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
         "avault": {"ok": False, "status": "unknown"},
+        "model_hub_engine": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
         "tmux": {"ok": False, "status": "unknown"},
     }
     try:
+        memory_package = _reconcile_startup_memory_package_guarded()
+        result["memory_package"] = memory_package
+
         _set_startup_dependency_reconciling("askill", True)
         try:
             askill = ensure_askill_installed(force=False)
@@ -7887,10 +10091,21 @@ def reconcile_startup_dependencies() -> dict:
         result["avault"] = avault
 
         try:
-            from core.show_runtime import get_show_runtime_manager
+            model_hub_engine = ensure_model_hub_engine_installed(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Startup dependency reconcile failed to ensure the Model Hub engine: %s",
+                exc,
+                exc_info=True,
+            )
+            model_hub_engine = {"ok": False, "message": str(exc)}
+        result["model_hub_engine"] = model_hub_engine
+
+        try:
+            from core.show_runtime import ShowRuntimeAvailability, get_show_runtime_manager
 
             manager = get_show_runtime_manager()
-            status = manager.status()
+            status = manager.status(offline=True)
             node_available = bool(status.get("node_available"))
             node_supported = status.get("node_supported") is not False
             node_ok = node_available and node_supported
@@ -7902,34 +10117,30 @@ def reconcile_startup_dependencies() -> dict:
                 "status": node_status,
                 "version": status.get("node_version"),
             }
-
             if node_ok:
-                if status.get("installed"):
-                    # Status verification already found a usable runtime. Do not
-                    # re-enter a provider installer on every service startup.
-                    prepared = {"ok": True, "reason": None}
-                elif not getattr(manager, "auto_install", True):
-                    # Respect the documented opt-out. The explicit install action
-                    # remains available from the Dependencies page.
-                    prepared = {"ok": False, "reason": "runtime_auto_install_disabled"}
-                else:
-                    _set_startup_dependency_reconciling("show-runtime", True)
-                    try:
-                        prepared = manager.prepare(force=False, startup=True)
-                    finally:
-                        _set_startup_dependency_reconciling("show-runtime", False)
-                runtime_ok = bool(prepared.get("ok"))
-                result["show_runtime"] = {
-                    "ok": runtime_ok,
-                    "status": "ready" if runtime_ok else "failed",
-                    "reason": prepared.get("reason"),
-                }
+                _set_startup_dependency_reconciling("show-runtime", True)
+                try:
+                    prepared = manager.prepare(force=False, automatic=True)
+                finally:
+                    _set_startup_dependency_reconciling("show-runtime", False)
+                status = prepared.get("status") if isinstance(prepared.get("status"), dict) else status
             else:
-                result["show_runtime"] = {
-                    "ok": False,
-                    "status": "skipped",
-                    "reason": "runtime_node_unsupported" if node_available else "runtime_node_missing",
-                }
+                reason = "runtime_node_unsupported" if node_available else "runtime_node_missing"
+                prepared = ShowRuntimeAvailability.from_install(install_reason=reason).as_payload()
+                prepared["status"] = status
+
+            policy = prepared.get("policy") if isinstance(prepared.get("policy"), dict) else {}
+            install = prepared.get("install") if isinstance(prepared.get("install"), dict) else {}
+            policy_state = policy.get("state")
+            install_state = install.get("state")
+            dependency_ok = install_state == "installed" or policy_state == "skipped"
+            prepared["ok"] = dependency_ok
+            prepared["status"] = (
+                "pending_prewarm"
+                if policy_state == "allowed" and install_state == "installed"
+                else ("skipped" if policy_state == "skipped" else "failed")
+            )
+            result["show_runtime"] = prepared
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to prepare Show Runtime: %s", exc, exc_info=True)
             result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
@@ -7951,10 +10162,15 @@ def reconcile_startup_dependencies() -> dict:
             finally:
                 _set_startup_dependency_reconciling("tmux", False)
 
+        result["memory_package"] = _retry_startup_memory_package_after_restart(
+            result["memory_package"]
+        )
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
-            bool(result["askill"].get("ok"))
+            bool(result["memory_package"].get("ok"))
+            and bool(result["askill"].get("ok"))
             and bool(result["avault"].get("ok"))
+            and bool(result["model_hub_engine"].get("ok"))
             and bool(result["show_runtime"].get("ok"))
         )
         return result
@@ -7975,6 +10191,10 @@ def start_dependency_install_job(dep: str) -> dict:
     """
     if dep not in _ALLOWED_DEP_INSTALLS:
         return {"ok": False, "message": f"Unknown dependency: {dep}"}
+    if dep == "memory-package":
+        rejection = _memory_package_repair_rejection(allow_optional=True)
+        if rejection is not None:
+            return rejection
 
     job_id = uuid.uuid4().hex
     now = time.time()
@@ -8004,8 +10224,12 @@ def start_dependency_install_job(dep: str) -> dict:
                 result = ensure_askill_installed(force=True)
             elif dep == "avault":
                 result = ensure_avault_installed(force=True)
+            elif dep == "model-hub-engine":
+                result = ensure_model_hub_engine_installed(force=True)
             elif dep == "show-runtime":
                 result = _prepare_show_runtime_job()
+            elif dep == "memory-package":
+                result = _prepare_memory_package_job()
             elif dep == "memory-runtime":
                 result = _prepare_memory_runtime_job()
             elif dep == "tmux":
@@ -8037,9 +10261,14 @@ def start_dependency_install_job(dep: str) -> dict:
 # Backend lifecycle (version probe, latest check, restart)
 # =============================================================================
 
-# In-memory caches keyed by (backend, cli_path) so version answers stay tied
-# to the binary they came from. Trade freshness for fewer probes during rapid
-# popover opens. Tuned for human pacing (seconds), not bots.
+# The *locally installed* version, keyed by (backend, cli_path) so answers stay
+# tied to the binary they came from. Trade freshness for fewer probes during
+# rapid popover opens. Tuned for human pacing (seconds), not bots.
+#
+# In memory only, deliberately: this answers "what did the binary at this path
+# just print", which a new process can re-measure in milliseconds and which a
+# stale file could get wrong after an install. The *published* version is the
+# expensive one, and :mod:`core.latest_version_cache` persists that instead.
 #
 # The UI server handles requests on multiple threads, so reads, writes, and
 # invalidation can race. A single lock serializes mutation — fast in practice
@@ -8048,14 +10277,12 @@ def start_dependency_install_job(dep: str) -> dict:
 # scan in ``_invalidate_version_cache``.
 _BACKEND_CACHE_LOCK = __import__("threading").Lock()
 _BACKEND_VERSION_CACHE: dict[tuple[str, str], tuple[float, str | None]] = {}
-_BACKEND_LATEST_CACHE: dict[str, tuple[float, str | None]] = {}
 _BACKEND_VERSION_TTL_SECONDS = 30.0
-_BACKEND_LATEST_TTL_SECONDS = 3600.0
-# Failed lookups (network down, registry hiccup) re-probe sooner so a
-# transient outage doesn't pin "—" for the full hour.
-_BACKEND_LATEST_FAILURE_TTL_SECONDS = 120.0
 _BACKEND_RUNTIME_USER_AGENT = "avibe/backend-runtime"
 _ASKILL_RELEASE_REPOSITORY = "avibe-bot/askill"
+#: askill is a managed dependency, not an agent backend, so it needs a name of
+#: its own in the shared latest-version cache.
+_ASKILL_CACHE_KEY = "askill"
 _ASKILL_AUTO_UPDATE_ENV = "VIBE_ASKILL_AUTO_UPDATE"
 _ASKILL_SKIP_ENV = "VIBE_INSTALL_SKIP_ASKILL"
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -8175,17 +10402,39 @@ def _invalidate_version_cache(name: str) -> None:
 
 
 def _cached_latest(name: str) -> str | None:
-    with _BACKEND_CACHE_LOCK:
-        cached = _BACKEND_LATEST_CACHE.get(name)
-    if cached:
-        ttl = _BACKEND_LATEST_TTL_SECONDS if cached[1] else _BACKEND_LATEST_FAILURE_TTL_SECONDS
-        if time.time() - cached[0] < ttl:
-            return cached[1]
-    # Network fetch outside the lock — same reasoning as ``_cached_version``.
-    latest = _fetch_latest_version(name)
-    with _BACKEND_CACHE_LOCK:
-        _BACKEND_LATEST_CACHE[name] = (time.time(), latest)
-    return latest
+    return latest_version_cache.cached_latest(name, lambda: _fetch_latest_version(name))
+
+
+def _is_comparable_version(value: str | None) -> bool:
+    """Whether *value* can be ordered against another version at all.
+
+    The single owner of "do we actually have a version?", because a nonempty
+    string is not the same fact: ``askill --version`` answers ``askill dev`` on a
+    development build, and the last token of that is stored as the version. Both
+    comparison helpers deliberately return False for anything they cannot parse,
+    so every caller that asks a comparison instead of asking this reads "cannot
+    tell" as "no update available" — which is how a broken binary comes to look
+    current. Ask this first; a False answer means unknown, not healthy.
+    """
+    if not value:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            Version(value)
+            return True
+        except InvalidVersion:
+            pass
+    except Exception:  # pragma: no cover - packaging is a transitive dep
+        pass
+
+    core = value.split("+", 1)[0].split("-", 1)[0]
+    try:
+        tuple(int(part) for part in core.split("."))
+    except ValueError:
+        return False
+    return True
 
 
 def _compare_versions(current: str | None, latest: str | None) -> bool:
@@ -8194,9 +10443,10 @@ def _compare_versions(current: str | None, latest: str | None) -> bool:
     Honors PEP 440 / semver pre-release ordering when possible (e.g. ``0.77.1``
     is greater than ``0.77.1-beta.0``). Falls back to a conservative numeric
     tuple comparison; returns False on any parsing failure so we never nag the
-    user with a phantom update.
+    user with a phantom update. That conservatism is why "no update" is not a
+    statement about health: use ``_is_comparable_version`` to tell the two apart.
     """
-    if not current or not latest or current == latest:
+    if not _is_comparable_version(current) or not _is_comparable_version(latest) or current == latest:
         return False
 
     try:
@@ -8365,6 +10615,79 @@ def _codex_process_status(resolved_binary: str | None) -> str:
     return "running" if _codex_processes(resolved_binary) else "stopped"
 
 
+async def get_backend_connection(name: str) -> dict:
+    """Observe native launch auth and controller application, without a model call."""
+    from vibe import internal_client, runtime
+
+    if not is_agent_backend(name):
+        return {"ok": False, "error": "unsupported_backend"}
+    config = await asyncio.to_thread(load_config)
+    backend_config = getattr(config.agents, name)
+    enabled = bool(backend_config.enabled)
+    installed = await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
+    result = {
+        "ok": True, "backend": name, "installed": installed, "enabled": enabled,
+        "auth": "unknown", "application": "unknown", "ready": False,
+        "entry_eligible": False,
+    }
+    body = {}
+    try:
+        application = await internal_client.backend_application(name)
+        body = application.get("body") or {}
+        if application.get("status_code") == 200 and body.get("ok"):
+            result["application"] = body.get("state") if body.get("state") in {"applied", "draining", "failed"} else "unknown"
+            if enabled and body.get("disabled") is True and result["application"] == "applied":
+                result["application"] = "unknown"
+            if body.get("error"):
+                result["message"] = body["error"]
+    except internal_client.InternalServerUnavailable:
+        if not await asyncio.to_thread(runtime.service_process_running):
+            result["application"] = "stopped"
+    with _backend_apply_receipts_lock:
+        receipt = _backend_apply_receipts.get(name)
+        # A confirmed new controller has applied persisted startup config.
+        # Browser refresh or a recovered socket to the same owner cannot clear
+        # an undelivered request. PID is existing runtime identity, not an epoch.
+        if (receipt and receipt.get("controller_pid") and body.get("controller_pid")
+                and receipt["controller_pid"] != body["controller_pid"]
+                and result["application"] == "applied"):
+            _backend_apply_receipts.pop(name, None)
+            receipt = None
+    if receipt and not receipt.get("ok") and result["application"] != "stopped":
+        result["application"] = "failed"
+        result["message"] = receipt.get("message") or receipt.get("error")
+    if not installed:
+        return result
+    try:
+        if name == "opencode":
+            if not enabled:
+                return result
+            # Read the same persisted launch sources as the provider catalog.
+            # Readiness must not start an OpenCode daemon just to inspect auth.
+            from vibe.opencode_config import read_opencode_provider_auth_entries
+
+            key_ids = await _read_opencode_config_api_key_provider_ids()
+            entries = await asyncio.to_thread(read_opencode_provider_auth_entries, logger_instance=logger)
+            modes = {pid: entry.get("type") for pid, entry in entries.items() if isinstance(entry, dict)}
+            modes.update({pid: "api" for pid in key_ids})
+            effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
+            result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
+            permission = await asyncio.to_thread(opencode_permission_status)
+            result["permission_required"] = bool(permission.get("ok")) and not permission.get("permission_allowed", False)
+        else:
+            auth = await asyncio.to_thread(get_claude_auth if name == "claude" else get_codex_auth)
+            if not auth.get("ok") or auth.get("auth_mode_uncertain"):
+                return result
+            result["auth"] = {"oauth": "subscription", "api_key": "api_key", "none": "none"}.get(auth.get("active_auth_mode"), "unknown")
+    except Exception as exc:
+        result["message"] = str(exc)
+        return result
+    credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
+    result["ready"] = credential_ready and result["application"] == "applied"
+    result["entry_eligible"] = credential_ready and result["application"] in {"applied", "stopped"}
+    return result
+
+
 def get_backend_runtime(name: str) -> dict:
     """Return live lifecycle info for one backend.
 
@@ -8445,7 +10768,7 @@ def _wait_for_controller_ack(marker: Path, timeout: float) -> tuple[bool, str | 
       the handler raised; the controller wrote the message to a companion
       ``<marker>.err`` file before deleting the request marker.
     - ``handled=False, error=None`` — timed out; the controller never
-      consumed the marker. Caller should fall back to a direct kill.
+      consumed the marker. Caller must preserve the failed application.
 
     The companion ``.err`` file is consumed (unlinked) before returning so
     later requests start clean.
@@ -8482,9 +10805,9 @@ def _request_controller_restart(
     state. Killing those processes from the UI server would leave that cache
     stale, so the cleanest path is to ask the controller to call its existing
     ``_refresh_backend_runtime(backend)`` for us. We drop a marker file and
-    wait briefly for the controller to delete it; the caller falls back to a
-    direct process kill when the controller is unreachable (e.g. running
-    detached, not yet started).
+    wait briefly for the controller to delete it. An unreachable running
+    controller remains an unconfirmed apply; no child-process kill can prove
+    that its in-memory state accepted the saved configuration.
 
     Each request gets its own marker filename (``restart-<backend>.<reqid>.cmd``)
     so we can correlate failures back to *this* request. Without the reqid,
@@ -8531,21 +10854,55 @@ def _request_controller_restart(
     return False, None
 
 
+# Bounded to the supported backends; survives modal/HTTP lifetimes. This records
+# undelivered apply requests which the controller cannot itself observe.
+_backend_apply_receipts: dict[str, dict] = {}
+_backend_apply_receipts_lock = threading.Lock()
+
+
+def record_backend_apply_receipt(backend: str, result: dict) -> None:
+    if not is_agent_backend(backend):
+        return
+    from vibe import runtime
+
+    receipt = dict(result)
+    receipt["controller_pid"] = runtime.resolve_service_owner_pid(include_starting=False)
+    with _backend_apply_receipts_lock:
+        _backend_apply_receipts[backend] = receipt
+
+
 def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> dict:
+    try:
+        result = _restart_backend(name, metadata=metadata)
+    except Exception as exc:
+        result = {"ok": False, "message": str(exc)}
+    record_backend_apply_receipt(name, result)
+    return result
+
+
+def _restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> dict:
     """Refresh the backend so the next request picks up new config/env.
 
     Preferred path: drop a runtime-command marker that the controller
     observes and reacts to via ``_refresh_backend_runtime``. This keeps the
-    controller's in-memory transport/session state consistent. If the
-    controller isn't running (e.g. service not yet started), backends with a
-    separate runtime can fall back to killing their OS process directly — the
-    controller's recovery logic will rebuild state when it next starts.
+    controller's in-memory transport/session state consistent. A confirmed
+    stopped controller applies persisted configuration on its next explicit
+    start; a running controller with unavailable IPC remains a failed apply.
 
     Claude has no separate daemon, but the controller keeps SDK sessions
     and a loaded compat config; the marker path refreshes those in memory.
     """
     if not supports_runtime_refresh(name):
         return {"ok": False, "message": f"Restart is not supported for backend: {name}"}
+
+    from vibe import runtime
+
+    try:
+        language = load_config().language
+    except FileNotFoundError:
+        language = "en"
+    if not runtime.service_process_running():
+        return {"ok": True, "apply_on_next_start": True, "message": backend_t("backendConnection.applyOnStart", lang=language)}
 
     controller_handled, controller_error = _request_controller_restart(name, metadata=metadata)
     _invalidate_version_cache(name)
@@ -8562,59 +10919,9 @@ def restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) -> 
             }
         return {"ok": True, "message": runtime_refresh_success_message(name)}
 
-    if name == "opencode":
-        from vibe import runtime
-        from vibe.cli import _stop_opencode_server
-
-        stopped = _stop_opencode_server()
-        if stopped:
-            return {"ok": True, "message": "OpenCode server stopped; it will respawn on next request."}
-        pid = _opencode_server_pid()
-        if not pid or not runtime.pid_alive(pid):
-            return {"ok": True, "message": "OpenCode server is not running; next request will start a fresh one."}
-        return {"ok": False, "message": "Failed to stop OpenCode server."}
-
-    if name == "claude":
-        return {
-            "ok": False,
-            "message": "Claude runtime refresh was not acknowledged by the controller; retry after the service is running.",
-        }
-
-    # codex fallback: kill app-server processes; controller recovery rebuilds.
-    try:
-        import psutil
-    except ImportError:
-        return {"ok": False, "message": "psutil unavailable; cannot manage Codex processes."}
-
-    try:
-        config = V2Config.load()
-        backend_cfg = getattr(getattr(config, "agents", None), "codex", None)
-        configured = getattr(backend_cfg, "cli_path", "") or "codex"
-    except Exception:
-        configured = "codex"
-    resolved = resolve_cli_path(configured)
-
-    pids = _codex_processes(resolved)
-    if not pids:
-        return {"ok": True, "message": "Codex app-server is not running; next request will start a fresh one."}
-
-    failed: list[int] = []
-    for pid in pids:
-        try:
-            proc = psutil.Process(pid)
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except psutil.TimeoutExpired:
-                proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-            logger.debug("Codex restart skip pid=%s: %s", pid, exc)
-        except Exception as exc:
-            logger.warning("Failed to stop codex pid=%s: %s", pid, exc)
-            failed.append(pid)
-    if failed:
-        return {"ok": False, "message": f"Failed to stop Codex process(es): {failed}"}
-    return {"ok": True, "message": f"Stopped {len(pids)} Codex process(es); they will respawn on next request."}
+    # A running service with broken IPC is not a stopped backend. Killing its
+    # child process here would hide stale controller state and split ownership.
+    return {"ok": False, "message": backend_t("backendConnection.applyUnacknowledged", lang=language)}
 
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
@@ -8793,19 +11100,12 @@ def _start_oauth_event_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thre
 
 
 def _on_web_auth_success(backend: str) -> None:
-    """Tell the live controller to refresh its agent after web OAuth success."""
-    try:
-        handled, err = _request_controller_restart(
-            backend,
-            timeout=4.0,
-            metadata={"reason": "web_auth_success", "source": "oauth_callback"},
-        )
-        if handled and err:
-            logger.warning("Controller refresh after web auth reported error: %s", err)
-        elif not handled:
-            logger.info("Controller did not pick up web-auth refresh marker for %s", backend)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to notify controller after web auth: %s", exc)
+    """Surface persistence/application separately from successful consent."""
+    result = restart_backend(
+        backend, metadata={"reason": "web_auth_success", "source": "oauth_callback"},
+    )
+    if not result.get("ok"):
+        raise RuntimeError(result.get("message") or "backend_apply_failed")
 
 
 def _get_oauth_service() -> Any:
@@ -8866,6 +11166,11 @@ async def start_oauth_web_async(
         return {"ok": False, "error": "unsupported_backend"}
     if backend == "opencode" and not (isinstance(provider_id, str) and provider_id.strip()):
         return {"ok": False, "error": "opencode_provider_id_required"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
+    from core.agent_auth_service import BackendLoginInProgressError
+
     service = _get_oauth_service()
     try:
         flow = await service.start_web_setup(
@@ -8873,6 +11178,21 @@ async def start_oauth_web_async(
             force_reset=force_reset,
             provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
         )
+    except BackendLoginInProgressError as exc:
+        try:
+            lang = load_config().language
+        except Exception:  # noqa: BLE001
+            lang = "en"
+        return {
+            "ok": False,
+            "error": exc.code,
+            "detail": backend_t(
+                "command.setup.loginInProgress",
+                lang,
+                vendor=exc.vendor,
+                backend=backend,
+            ),
+        }
     except Exception as exc:  # noqa: BLE001
         logger.error("Web OAuth start failed for %s: %s", backend, exc, exc_info=True)
         return {"ok": False, "error": "start_failed", "detail": str(exc)}
@@ -8891,6 +11211,7 @@ async def start_oauth_web_async(
         "url": flow.url,
         "device_code": flow.device_code,
         "awaiting_code": flow.awaiting_code,
+        "callback_kind": flow.callback_kind,
         "provider": flow.provider,
     }
 
@@ -8911,6 +11232,9 @@ async def submit_oauth_web_code_async(flow_id: str, code: str) -> dict:
     flow_id = (flow_id or "").strip()
     if not flow_id:
         return {"ok": False, "error": "missing_flow_id"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.submit_web_code(flow_id, code or "")
@@ -8928,6 +11252,9 @@ async def remove_backend_auth_async(backend: str) -> dict:
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):
         return {"ok": False, "error": "unsupported_backend"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.remove_web_auth(backend)
@@ -8938,6 +11265,9 @@ async def remove_backend_auth_async(backend: str) -> dict:
 
 async def remove_claude_oauth_credentials_async() -> dict:
     """Clear only Claude Code OAuth credentials, preserving API-key auth."""
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.clear_claude_oauth_credentials_only()
@@ -8981,6 +11311,9 @@ def remove_backend_api_key(backend: str) -> dict:
     backend = (backend or "").strip().lower()
     if backend not in {"claude", "codex"}:
         return {"ok": False, "error": "unsupported_backend"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
     notices: list = []
     if backend == "codex":
@@ -9006,32 +11339,52 @@ def remove_backend_api_key(backend: str) -> dict:
 
     # Clear V2Config api_key for both backends.
     try:
-        with CONFIG_LOCK:
-            try:
-                config = load_config()
-            except FileNotFoundError:
-                config = V2Config()
-            target = getattr(getattr(config, "agents", None), backend, None)
-            if target is not None:
-                target.auth_mode = "oauth"
-                target.api_key = None
-                # Drop base_url for both backends, not just Codex: a
-                # stale Claude relay URL stored in V2Config gets
-                # injected into the subprocess as ``ANTHROPIC_BASE_URL``
-                # on every launch via ``build_claude_subprocess_env``.
-                # After removing an API key (intent: fall back to
-                # OAuth), the OAuth credentials would still be routed
-                # to the api-key-only relay and silently 401.
-                target.base_url = None
-                # User explicitly chose OAuth by clicking Remove key —
-                # mark the flag so legacy env-var fallback in
-                # ``build_claude_subprocess_env`` is bypassed and the
-                # inherited ``ANTHROPIC_*`` env actually gets stripped.
-                if backend == "claude":
-                    target.auth_mode_set = True
-                config.save()
+        from config.v2_config import update_config_fields
+
+        def _clear_auth_fields(cfg: V2Config) -> None:
+            target = getattr(getattr(cfg, "agents", None), backend, None)
+            if target is None:
+                return
+            target.auth_mode = "oauth"
+            target.api_key = None
+            # Drop base_url for both backends, not just Codex: a
+            # stale Claude relay URL stored in V2Config gets
+            # injected into the subprocess as ``ANTHROPIC_BASE_URL``
+            # on every launch via ``build_claude_subprocess_env``.
+            # After removing an API key (intent: fall back to
+            # OAuth), the OAuth credentials would still be routed
+            # to the api-key-only relay and silently 401.
+            target.base_url = None
+            # Remove key is an explicit OAuth choice — the relay
+            # marker goes with it, or a later refresh would
+            # repopulate the abandoned relay and reroute a freshly
+            # entered official key to it (Codex-only field).
+            if backend == "codex":
+                target.oauth_relay_marker = None
+            # User explicitly chose OAuth by clicking Remove key —
+            # mark the flag so legacy env-var fallback in
+            # ``build_claude_subprocess_env`` is bypassed and the
+            # inherited ``ANTHROPIC_*`` env actually gets stripped.
+            if backend == "claude":
+                target.auth_mode_set = True
+
+        update_config_fields(_clear_auth_fields)
     except Exception as exc:  # noqa: BLE001
         logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
+        # The disk key is already gone (the user-visible truth — report
+        # success), but the persisted V2Config copy (cached key/base_url/
+        # relay marker) may still hold stale auth state (#1451). Surface
+        # it as a notice so the UI can say "removed, but saved settings
+        # may be stale" instead of silently claiming a clean wipe.
+        # Append: an earlier ``cleared_custom_relay_pointer`` notice from
+        # ``apply_codex_auth`` is still true and must survive.
+        notices = notices + [
+            {
+                "code": "v2_clear_failed",
+                "backend": backend,
+                "detail": str(exc),
+            }
+        ]
 
     # Both backends keep runtime state in the controller. Codex owns a
     # persistent app-server; Claude owns cached SDK sessions and a loaded
@@ -9138,8 +11491,41 @@ def get_codex_auth() -> dict:
         config = load_config()
         cfg = getattr(getattr(config, "agents", None), "codex", None)
         configured_mode = getattr(cfg, "auth_mode", None)
+        raw_relay_marker = getattr(cfg, "oauth_relay_marker", None)
     except Exception:
         configured_mode = None
+        raw_relay_marker = None
+    from vibe.codex_config import read_codex_relay_marker
+
+    # Disk-first with the explicit OAuth-transition marker as fallback.
+    # The disk chain (active provider → managed → legacy) is what a live
+    # Codex launch would use. The marker (captured by
+    # ``AgentAuthService._persist_backend_auth_mode`` before the OAuth
+    # cleanup destroys the on-disk evidence) is the only recovery
+    # source: it is consumed verbatim, with no ambient-state inference —
+    # dormant sections and stale caches surface nothing. The marker is
+    # only consulted while the disk shows live OAuth credentials AND the
+    # credential store actually exposes the live state to us: once an
+    # API key exists in ``auth.json`` (e.g. the user ran ``codex login
+    # --with-api-key`` outside Avibe) the live disk configuration is
+    # authoritative; when ``cli_auth_credentials_store`` is
+    # ``auto``/``keyring`` the key may live in the OS keychain instead
+    # (file-only ``has_api_key`` can't see it); and when the tokens are
+    # gone too (e.g. ``codex logout`` during the OAuth window) the user
+    # has signed out of the relay entirely (#1453) — in all three cases
+    # the leftover marker must not surface or reroute a pasted key to
+    # the relay it remembers.
+    relay_marker = None
+    if (
+        not disk_state.get("has_api_key")
+        and disk_state.get("file_store_active")
+        and disk_state.get("has_chatgpt_tokens")
+    ):
+        relay_marker = read_codex_relay_marker(raw_relay_marker)
+    if relay_marker:
+        effective_base_url: str | None = disk_state.get("base_url") or relay_marker["base_url"]
+    else:
+        effective_base_url = disk_state.get("base_url")
 
     # Disk wins when it carries unambiguous evidence of API-key auth: an
     # ``OPENAI_API_KEY`` in ``~/.codex/auth.json`` is a concrete artefact
@@ -9177,7 +11563,7 @@ def get_codex_auth() -> dict:
         "has_api_key": has_api_key_live,
         "api_key_length": int(disk_state.get("api_key_length") or 0),
         "api_key_masked": _mask_api_key(disk_state.get("api_key_raw")),
-        "base_url": disk_state.get("base_url"),
+        "base_url": effective_base_url,
         "has_chatgpt_tokens": has_chatgpt_live,
         "chatgpt_account": disk_state.get("chatgpt_account"),
         # Forward the live Codex credentials-store status so the UI can
@@ -9191,13 +11577,8 @@ def get_codex_auth() -> dict:
         # Surface "we can't read your key — it may live in the OS
         # keychain" so the UI doesn't claim "no key configured" when
         # Codex is in keyring-preferred mode and we have no disk
-        # evidence. We suppress the flag when V2Config has a stored
-        # ``auth_mode`` (the user already saved through our flow), since
-        # we then know the mode and the next save will pin file storage.
-        "auth_mode_uncertain": (
-            bool(disk_state.get("auth_mode_uncertain"))
-            and configured_mode not in _VALID_AUTH_MODES
-        ),
+        # evidence. Saved intent cannot resolve an unreadable native store.
+        "auth_mode_uncertain": bool(disk_state.get("auth_mode_uncertain")),
     }
 
 
@@ -9239,6 +11620,10 @@ def save_codex_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
+
     if auth_mode == "api_key" and not api_key:
         # Allow callers to PATCH base_url alone by reusing the stored key.
         # ``auth.json`` is the live source Codex reads at launch, and it
@@ -9266,24 +11651,126 @@ def save_codex_auth(payload: dict) -> dict:
             return {"ok": False, "message": "api_key is required when auth_mode='api_key'"}
 
     # Resolve the effective base_url: explicit payload wins, otherwise
-    # preserve whatever V2Config currently has.
+    # prefer the value Codex actually reads on disk, falling back to the
+    # V2Config cache. Disk-first mirrors the api-key resolution above:
+    # the live ``config.toml`` is what Codex reads at launch, so a relay
+    # ``base_url`` hand-edited there (or left behind by an oauth pass
+    # that cleared our managed section) must outrank a possibly-stale
+    # cache. Trusting the cache alone either reverts hand edits or, when
+    # the cache is empty, drops the relay entirely — sending a relay API
+    # key to ``api.openai.com`` and surfacing as a confusing 401 after
+    # an auth-mode switch.
+    # Explicit OAuth-transition marker: the relay identity recorded when
+    # the OAuth cleanup destroyed the on-disk evidence. Consumed
+    # verbatim — a plain cached ``base_url`` is NOT a recovery source
+    # (it is only the user's last saved preference and may be stale).
+    # Gated on live OAuth credentials being observable: an API key in
+    # ``auth.json`` (e.g. ``codex login --with-api-key`` outside Avibe)
+    # means the live disk configuration already won; a non-file
+    # credential store hides the key in the OS keychain; and cleared
+    # tokens (``codex logout`` in the OAuth window) mean the user signed
+    # out of the relay (#1453). In all three cases the leftover marker
+    # must not reroute a pasted key to the relay it remembers.
+    #
+    # ``#1449``: an ``auth_mode="oauth"`` save through this endpoint is
+    # itself an OAuth transition for non-React clients — capture the
+    # live relay identity before ``apply_codex_auth`` destroys it, with
+    # the same retention semantics as the controller path.
+    marker = None
+    captured_oauth_relay: Optional[dict] = None
+    observed_api_key_auth = False
+    codex_disk_state: dict = {}
+    try:
+        from vibe.codex_config import read_codex_auth_state, read_codex_relay_marker
+
+        codex_disk_state = read_codex_auth_state()
+        with CONFIG_LOCK:
+            try:
+                marker_cfg = load_config()
+                marker_codex = getattr(getattr(marker_cfg, "agents", None), "codex", None)
+                raw_marker = getattr(marker_codex, "oauth_relay_marker", None)
+            except Exception:
+                raw_marker = None
+        if (
+            not codex_disk_state.get("has_api_key")
+            and codex_disk_state.get("file_store_active")
+            and codex_disk_state.get("has_chatgpt_tokens")
+        ):
+            marker = read_codex_relay_marker(raw_marker)
+        if auth_mode == "oauth":
+            live_base_url = codex_disk_state.get("base_url")
+            if isinstance(live_base_url, str) and live_base_url.strip():
+                live_provider_id = codex_disk_state.get("active_provider_id")
+                captured_oauth_relay = {
+                    "base_url": live_base_url.strip(),
+                    "provider_id": live_provider_id
+                    if isinstance(live_provider_id, str) and live_provider_id.strip()
+                    else "",
+                }
+            else:
+                observed_api_key_auth = bool(codex_disk_state.get("has_api_key"))
+    except Exception:
+        logger.debug("Codex relay marker read failed", exc_info=True)
+        marker = None
+
+    # Durability (#1450): a fresh capture — or the official-key
+    # transition's clear — is persisted BEFORE ``apply_codex_auth(oauth)``
+    # destroys the on-disk relay evidence, so a later V2Config failure
+    # cannot lose the transition state. A failed pre-persist only costs
+    # switch-back recovery, never the save.
+    if auth_mode == "oauth" and (captured_oauth_relay is not None or observed_api_key_auth):
+        try:
+            from vibe.codex_config import persist_codex_relay_marker
+
+            # ``None`` here is deliberate for the official-key case: the
+            # pre-persist records the transition's marker-clear.
+            if not persist_codex_relay_marker(captured_oauth_relay):
+                logger.warning(
+                    "Codex relay marker pre-persist failed; switch-back recovery may be lost"
+                )
+        except Exception:
+            logger.warning("Codex relay marker pre-persist raised", exc_info=True)
+
     if base_url_present:
         effective_base_url = base_url_change
     else:
-        with CONFIG_LOCK:
-            try:
-                existing_cfg = load_config()
-                stored_codex = getattr(getattr(existing_cfg, "agents", None), "codex", None)
-                effective_base_url = getattr(stored_codex, "base_url", None) or None
-            except Exception:
-                effective_base_url = None
+        effective_base_url = None
+        try:
+            from vibe.codex_config import read_codex_auth_state
+
+            disk_base_url = read_codex_auth_state().get("base_url")
+            if isinstance(disk_base_url, str) and disk_base_url.strip():
+                effective_base_url = disk_base_url.strip()
+        except Exception:
+            logger.debug("Codex disk base_url read failed", exc_info=True)
+        if not effective_base_url and marker:
+            effective_base_url = marker["base_url"]
+
+    # Provider-identity restore hint: only when the marker actually
+    # SUPPLIED the resolved URL — the omitted-``base_url`` fallback, or
+    # an explicit form value pre-populated from the marker-backed state
+    # while the disk chain itself carries no URL. When the disk chain
+    # resolved the same URL (the user activated a different provider
+    # section with an identical relay during the OAuth window), the
+    # live pointer wins and must not be re-pointed at the marker's
+    # provider.
+    restore_provider_id: Optional[str] = None
+    if (
+        marker is not None
+        and effective_base_url == marker["base_url"]
+        and codex_disk_state.get("base_url") != effective_base_url
+    ):
+        restore_provider_id = marker["provider_id"]
 
     from vibe.codex_config import apply_codex_auth
 
     notices: list = []
     try:
         result = apply_codex_auth(
-            auth_mode=auth_mode, api_key=api_key, base_url=effective_base_url
+            auth_mode=auth_mode,
+            api_key=api_key,
+            base_url=effective_base_url,
+            restore_provider_id=restore_provider_id,
         )
         if isinstance(result, dict):
             raw_notices = result.get("notices")
@@ -9295,15 +11782,38 @@ def save_codex_auth(payload: dict) -> dict:
         logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.codex.auth_mode = auth_mode
-        config.agents.codex.api_key = api_key if auth_mode == "api_key" else None
-        config.agents.codex.base_url = effective_base_url
-        config.save()
+    from config.v2_config import update_config_fields
+
+    def _apply_codex_auth(cfg: V2Config) -> None:
+        cfg.agents.codex.auth_mode = auth_mode
+        cfg.agents.codex.api_key = api_key if auth_mode == "api_key" else None
+        cfg.agents.codex.base_url = effective_base_url
+        # Marker lifecycle on save: an explicit API-key save consumes
+        # the OAuth-transition marker (the user just chose their
+        # endpoint — restored, typed fresh, or official-only); an OAuth
+        # save applies the same retention semantics as the controller
+        # path (#1449): fresh capture overwrites, the official-key
+        # transition clears, a repeated pure-OAuth save retains.
+        if auth_mode == "api_key":
+            cfg.agents.codex.oauth_relay_marker = None
+        elif captured_oauth_relay is not None:
+            cfg.agents.codex.oauth_relay_marker = captured_oauth_relay
+        elif observed_api_key_auth:
+            cfg.agents.codex.oauth_relay_marker = None
+
+    try:
+        update_config_fields(_apply_codex_auth)
+    except Exception:
+        # The on-disk codex files are authoritative and the durable
+        # marker state was pre-persisted, but the V2Config mirror
+        # (auth_mode / base_url intent the controller reloads via
+        # ``_load_backend_runtime_config``) did NOT land — surface a
+        # partial-failure notice instead of silently reporting
+        # success while runtime reconciliation sees stale config.
+        logger.warning("V2Config mirror write failed during codex auth save", exc_info=True)
+        notices = notices + [
+            {"code": "v2_mirror_save_failed", "detail": "saved to codex files but not to Avibe config"}
+        ]
 
     restart_result = restart_backend(
         "codex",
@@ -9508,6 +12018,10 @@ def save_claude_auth(payload: dict) -> dict:
         if base_url_change == "":
             base_url_change = None
 
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
+
     settings_env: dict[str, str] = {}
     existing_credential_type: str | None = None
     existing_credential: str | None = None
@@ -9582,23 +12096,22 @@ def save_claude_auth(payload: dict) -> dict:
         logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.claude.auth_mode = auth_mode
+    from config.v2_config import update_config_fields
+
+    def _apply_claude_auth(cfg: V2Config) -> None:
+        cfg.agents.claude.auth_mode = auth_mode
         # Flip the explicit marker so ``build_claude_subprocess_env``
         # honors ``auth_mode`` strictly (strip inherited env in OAuth
         # mode) for this and subsequent launches. Legacy installs that
         # have never been through this save path keep the flag at its
         # ``False`` default and continue to inherit shell env vars.
-        config.agents.claude.auth_mode_set = True
+        cfg.agents.claude.auth_mode_set = True
         # Secrets and endpoint overrides live in Claude's own settings.json.
         # Clear legacy cache fields so future reads do not have two writers.
-        config.agents.claude.api_key = None
-        config.agents.claude.base_url = None
-        config.save()
+        cfg.agents.claude.api_key = None
+        cfg.agents.claude.base_url = None
+
+    update_config_fields(_apply_claude_auth)
 
     oauth_cleanup_result: dict | None = None
     if auth_mode == "api_key":
@@ -9656,17 +12169,20 @@ def save_claude_auth(payload: dict) -> dict:
 
 
 async def _opencode_get_server():
-    """Spin up a transient OpenCodeServerManager instance for HTTP calls.
+    """Get the OpenCode server manager for UI-process HTTP calls.
 
     Mirrors the pattern used by ``opencode_options_async``: pull the
-    OpenCode config from V2Config, request a manager instance, ensure
-    the daemon is reachable, and let the caller drive its HTTP methods.
-    Returns ``None`` if OpenCode is disabled — callers translate that
-    into a UI-friendly error.
+    OpenCode config from V2Config and ensure the daemon is reachable.
+    In Hub mode only the controller may launch the daemon; this caller
+    can adopt an already-running overlaid server. Returns ``None`` if
+    OpenCode is disabled or the controller-owned Hub overlay is not ready.
     """
     from config.v2_compat import to_app_config
     from core.resource_governance import AgentResourceGovernor, config_from_runtime
-    from modules.agents.opencode import OpenCodeServerManager
+    from modules.agents.opencode import (
+        OpenCodeModelHubOverlayRequiredError,
+        OpenCodeServerManager,
+    )
 
     v2_config = V2Config.load()
     config = to_app_config(v2_config)
@@ -9679,7 +12195,10 @@ async def _opencode_get_server():
         request_timeout_seconds=opencode_config.request_timeout_seconds,
         resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
     )
-    await server.ensure_running()
+    try:
+        await server.ensure_running()
+    except OpenCodeModelHubOverlayRequiredError:
+        return None
     return server
 
 
@@ -9765,36 +12284,32 @@ def _filter_opencode_models_to_configured_providers(
 
     if not isinstance(models, dict):
         return models
+    from modules.agents.opencode.utils import (
+        filter_opencode_models_to_allowed_providers,
+    )
+
     allowed = _configured_opencode_provider_ids(
         providers_raw=providers_raw,
         auth_entries=auth_entries,
         config_api_key_provider_ids=config_api_key_provider_ids,
         custom_config_provider_ids=custom_config_provider_ids,
     )
-    if not allowed:
-        return {**models, "providers": [], "default": {}}
-
-    providers = []
+    filtered = filter_opencode_models_to_allowed_providers(models, allowed)
+    providers = list(filtered.get("providers", []) or [])
     seen: set[str] = set()
-    for provider in models.get("providers", []) or []:
+    for provider in providers:
         if not isinstance(provider, dict):
             continue
         pid = _opencode_provider_id(provider)
-        if isinstance(pid, str) and pid in allowed:
+        if isinstance(pid, str):
             seen.add(pid)
-            providers.append(provider)
 
     for pid in allowed:
         if pid in seen:
             continue
         providers.append({"id": pid, "models": {}})
 
-    defaults = models.get("default")
-    if isinstance(defaults, dict):
-        defaults = {pid: model_id for pid, model_id in defaults.items() if pid in allowed}
-    else:
-        defaults = {}
-    return {**models, "providers": providers, "default": defaults}
+    return {**filtered, "providers": providers}
 
 
 def _merge_opencode_user_models(
@@ -9811,37 +12326,19 @@ def _merge_opencode_user_models(
     if not isinstance(providers_raw, list):
         return models
     if allowed_provider_ids is not None:
-        filtered_providers = []
-        for provider in providers_raw:
-            if not isinstance(provider, dict):
-                continue
-            pid = _opencode_provider_id(provider)
-            if isinstance(pid, str) and pid in allowed_provider_ids:
-                filtered_providers.append(provider)
-        raw_defaults = models.get("default")
-        filtered_defaults = {}
-        if isinstance(raw_defaults, dict):
-            filtered_defaults = {
-                pid: model_id
-                for pid, model_id in raw_defaults.items()
-                if pid in allowed_provider_ids
-            }
-        models = {
-            **models,
-            "providers": filtered_providers,
-            "default": filtered_defaults,
-        }
+        from modules.agents.opencode.utils import (
+            filter_opencode_models_to_allowed_providers,
+        )
+
+        models = filter_opencode_models_to_allowed_providers(
+            models,
+            allowed_provider_ids,
+        )
         providers_raw = models.get("providers", [])
     if not user_model_index:
         return models
 
     providers = []
-    defaults = dict(models.get("default")) if isinstance(models.get("default"), dict) else {}
-
-    def _seed_default(pid: str, user_models: dict[str, dict]) -> None:
-        if pid not in defaults and user_models:
-            defaults[pid] = sorted(user_models.keys())[0]
-
     seen: set[str] = set()
     for provider in providers_raw:
         if not isinstance(provider, dict):
@@ -9857,7 +12354,6 @@ def _merge_opencode_user_models(
         seen.add(pid)
         provider_models = provider.get("models")
         user_models = user_model_index.get(pid) or {}
-        _seed_default(pid, user_models)
         if isinstance(provider_models, dict):
             merged_models = {**provider_models, **user_models}
         elif isinstance(provider_models, list):
@@ -9876,10 +12372,9 @@ def _merge_opencode_user_models(
             continue
         if allowed_provider_ids is not None and pid not in allowed_provider_ids:
             continue
-        _seed_default(pid, user_models)
         providers.append({"id": pid, "models": dict(user_models)})
 
-    return {**models, "providers": providers, "default": defaults}
+    return {**models, "providers": providers, "default": {}}
 
 
 def _opencode_provider_id(entry: dict) -> str | None:
@@ -10046,7 +12541,7 @@ async def _get_opencode_providers_async() -> dict:
         providers_raw, auth_raw, config_raw = await asyncio.gather(
             server.get_providers(),
             server.get_provider_auth(),
-            server.get_available_models(os.path.expanduser("~")),
+            server.get_native_available_models(os.path.expanduser("~")),
             return_exceptions=False,
         )
     finally:
@@ -10065,12 +12560,6 @@ async def _get_opencode_providers_async() -> dict:
                 model_index[pid] = entry
 
     auth_index = auth_raw if isinstance(auth_raw, dict) else {}
-
-    try:
-        default_agent = server.get_default_agent_from_config()
-        runtime_agent_model = server.get_agent_model_from_config(default_agent)
-    except Exception:  # noqa: BLE001
-        runtime_agent_model = None
 
     # Resolve the user-configured default provider. ``None`` means
     # the user has not picked one — the UI surfaces that as "no
@@ -10178,11 +12667,6 @@ async def _get_opencode_providers_async() -> dict:
         api_key_mask_index[pid_key] = masked
         active_auth_type_index[pid_key] = "api"
 
-    from modules.agents.opencode.utils import (
-        resolve_opencode_configured_default_model,
-        resolve_opencode_model_id,
-    )
-
     out_providers = []
     for pid, entry in all_providers.items():
         if not isinstance(entry, dict):
@@ -10252,25 +12736,6 @@ async def _get_opencode_providers_async() -> dict:
                     "reasoning_efforts": reasoning_efforts,
                 }
             )
-        default_model = None
-        defaults_block = config_raw.get("default") if isinstance(config_raw, dict) else None
-        if isinstance(defaults_block, dict):
-            raw_default = defaults_block.get(pid)
-            if isinstance(raw_default, str):
-                default_model = raw_default
-        preferred_model = resolve_opencode_configured_default_model(
-            runtime_agent_model,
-            default_provider=default_provider,
-            provider_id=pid,
-        )
-        if preferred_model:
-            preferred_model = resolve_opencode_model_id(
-                config_raw,
-                pid,
-                preferred_model,
-            )
-            default_model = preferred_model
-
         out_providers.append(
             {
                 "id": pid,
@@ -10284,7 +12749,6 @@ async def _get_opencode_providers_async() -> dict:
                 "adapter": adapter if isinstance(adapter, str) else None,
                 "models": model_ids,
                 "model_entries": model_entries,
-                "default_model": default_model,
                 "base_url": base_url_index.get(pid),
                 "api_key_masked": api_key_mask_index.get(pid),
                 # ``api`` / ``oauth`` / null — the type the daemon will
@@ -10427,6 +12891,9 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
         provider_id, name, adapter, base_url, api_key = _normalize_custom_provider_payload(payload)
     except ValueError as exc:
         return {"ok": False, "message": str(exc)}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
     try:
         from vibe.opencode_config import is_reserved_opencode_provider_id
@@ -10526,6 +12993,14 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
     pid = provider_id.strip().lower()
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {
+            "ok": False,
+            "error": "config_recovery",
+            "provider_id": pid,
+            "message": recovery_message,
+        }
     try:
         from vibe.opencode_config import (
             is_opencode_custom_provider,
@@ -10620,7 +13095,7 @@ async def save_opencode_provider_model_async(provider_id: str, payload: dict) ->
     try:
         if server is not None:
             try:
-                config_raw = await server.get_available_models(os.path.expanduser("~"))
+                config_raw = await server.get_native_available_models(os.path.expanduser("~"))
             except Exception as exc:
                 logger.warning(
                     "OpenCode provider model catalog fetch failed for %s/%s: %s",
@@ -10848,7 +13323,7 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
     ``base_url`` override is also persisted into ``opencode.json``.
 
     ``base_url`` field semantics in the payload:
-      * absent              → leave the stored value untouched
+      * absent              → resolve from disk first, then the stored value
       * empty / whitespace  → clear the stored value
       * non-empty string    → upsert (must start with http:// or https://)
     """
@@ -10856,6 +13331,9 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
         return {"ok": False, "message": "provider_id is required"}
     if not isinstance(payload, dict):
         return {"ok": False, "message": "Payload must be an object"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     raw_key = payload.get("api_key")
     # ``api_key`` is optional when the provider is already configured: the
     # UI's "Replace" flow hides the plaintext and only sends ``base_url``
@@ -10967,20 +13445,26 @@ async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
 def _clear_opencode_default_provider_if(provider_id: str) -> None:
     """Clear the saved OpenCode default if it points at ``provider_id``."""
 
-    with CONFIG_LOCK:
-        try:
-            cfg = load_config()
-        except FileNotFoundError:
-            return
+    from config import paths as _paths
+    from config.v2_config import update_config_fields
+
+    if not _paths.get_config_path().exists():
+        return
+
+    def _clear_if_matching(cfg) -> None:
+        # Compare-and-clear INSIDE the transaction on the lock-fresh
+        # config (#1458 stage ③): a concurrent default switch to another
+        # provider must not be cleared by a stale comparison.
         opencode_cfg = getattr(getattr(cfg, "agents", None), "opencode", None)
         current_default = getattr(opencode_cfg, "default_provider", None)
         if isinstance(current_default, str) and current_default.strip() == provider_id:
             opencode_cfg.default_provider = None
-            cfg.save()
             logger.info(
                 "clear_opencode_default_provider: cleared default_provider after removing %s",
                 provider_id,
             )
+
+    update_config_fields(_clear_if_matching)
 
 
 def delete_opencode_provider_auth(provider_id: str) -> dict:
@@ -11007,6 +13491,9 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     """
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     pid = provider_id.strip()
     try:
         from vibe.opencode_config import (
@@ -11073,13 +13560,12 @@ def set_opencode_default_provider(payload: dict) -> dict:
         return {"ok": False, "message": "provider_id is required"}
     provider_id = raw.strip()
 
-    with CONFIG_LOCK:
-        try:
-            config = load_config()
-        except FileNotFoundError:
-            config = V2Config()
-        config.agents.opencode.default_provider = provider_id
-        config.save()
+    from config.v2_config import update_config_fields
+
+    def _apply(cfg: V2Config) -> None:
+        cfg.agents.opencode.default_provider = provider_id
+
+    update_config_fields(_apply)
     return {"ok": True, "default_provider": provider_id}
 
 
@@ -11370,38 +13856,42 @@ def get_users(platform: Optional[str] = None) -> dict:
     return {"ok": True, "users": users}
 
 
-def save_users(payload: dict) -> dict:
+def save_users(payload: dict, *, user_context: Any = None) -> dict:
     """Save user settings (bulk update from UI)."""
-    store = SettingsStore.get_instance()
-    platform = payload.get("platform") or _current_platform()
+    from vibe.authorization import require_instance_role
 
-    users = {}
-    for user_id, up in (payload.get("users") or {}).items():
-        if not isinstance(up, dict):
-            continue
-        # Preserve dm_chat_id from existing user (not editable via UI)
-        existing = store.get_user(user_id, platform=platform)
-        users[user_id] = UserSettings(
-            display_name=up.get("display_name", ""),
-            is_admin=up.get("is_admin", False),
-            bound_at=up.get("bound_at", ""),
-            enabled=up.get("enabled", True),
-            show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
-            custom_cwd=up.get("custom_cwd"),
-            routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
-            dm_chat_id=existing.dm_chat_id if existing else "",
-            pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
-            _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
-        )
+    require_instance_role(user_context, "member")
+    # Keep unvalidated request candidates out of the process-wide cache.
+    with contextlib.closing(SettingsStore()) as store:
+        platform = payload.get("platform") or _current_platform()
 
-    # Merge instead of replace: update existing users and add new ones,
-    # but preserve users not included in the payload (e.g. concurrently bound)
-    current_users = store.get_users_for_platform(platform)
-    for uid, user_settings in users.items():
-        current_users[uid] = user_settings
-    store.set_users_for_platform(platform, current_users)
-    store.save()
-    return get_users(platform)
+        users = {}
+        for user_id, up in (payload.get("users") or {}).items():
+            if not isinstance(up, dict):
+                continue
+            # Preserve dm_chat_id from existing user (not editable via UI)
+            existing = store.get_user(user_id, platform=platform)
+            users[user_id] = UserSettings(
+                display_name=up.get("display_name", ""),
+                is_admin=up.get("is_admin", existing.is_admin if existing else False),
+                bound_at=up.get("bound_at", existing.bound_at if existing else ""),
+                enabled=up.get("enabled", existing.enabled if existing else True),
+                show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
+                custom_cwd=up.get("custom_cwd"),
+                routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
+                dm_chat_id=existing.dm_chat_id if existing else "",
+                pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
+                _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),
+            )
+
+        # Merge instead of replace: update existing users and add new ones,
+        # but preserve users not included in the payload (e.g. concurrently bound)
+        current_users = store.get_users_for_platform(platform)
+        for uid, user_settings in users.items():
+            current_users[uid] = user_settings
+        store.set_users_for_platform(platform, current_users)
+        store.save(user_context=user_context)
+        return get_users(platform)
 
 
 def toggle_admin(user_id: str, is_admin: bool, platform: Optional[str] = None) -> dict:
@@ -11630,7 +14120,21 @@ def _stop_temp_ws_internal():
 # service so core/ never imports vibe/. See docs/plans/workbench-skills-page.md.
 
 
-async def _skills_guarded(call):
+def _skills_error_message(exc, context, project_id):
+    if exc.code != "project_dir_missing" or not project_id or context is None:
+        return exc.message
+    from storage import project_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        role = project_access_service.get_effective_project_role(connection, context, project_id)
+    if project_access_service.role_allows(role, "editor"):
+        return exc.message
+    return "The configured project folder is unavailable."
+
+
+async def _skills_guarded(call, *, user_context=None, project_id=None):
     askill = resolve_cli_path("askill")
     if not askill:
         return {"ok": False, "error": {"code": "askill_not_found", "message": "askill CLI not found on PATH"}}
@@ -11639,21 +14143,54 @@ async def _skills_guarded(call):
     try:
         return await call(askill, skills_service)
     except skills_service.SkillsError as exc:
-        return {"ok": False, "error": {"code": exc.code, "message": exc.message, "details": exc.details}}
+        message = _skills_error_message(exc, user_context, project_id)
+        return {"ok": False, "error": {"code": exc.code, "message": message, "details": exc.details}}
     except LookupError:
         return {"ok": False, "error": {"code": "askill_not_found", "message": "askill CLI not found on PATH"}}
 
 
 async def list_skills(
-    *, scope: str = "all", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    *,
+    scope: str = "all",
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.list_skills(askill, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.list_skills(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            backends=backends,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
-async def preview_skill_source(source: str, *, project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.preview_source(askill, source, project_dir=project_dir))
+async def preview_skill_source(
+    source: str,
+    *,
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.preview_source(
+            askill,
+            source,
+            project_dir=project_dir,
+            project_id=project_id,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
+    )
 
 
 async def add_skill(
@@ -11661,46 +14198,115 @@ async def add_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[List[str]] = None,
     all_skills: bool = False,
     skill: Optional[str] = None,
     copy: bool = False,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
         lambda askill, svc: svc.add_skill(
             askill,
             source,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends,
             all_skills=all_skills,
             skill=skill,
             copy=copy,
-        )
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
 async def remove_skill(
-    name: str, *, scope: str = "project", project_dir: Optional[str] = None, backends: Optional[List[str]] = None
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    backends: Optional[List[str]] = None,
+    user_context: Any = None,
 ) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
     return await _skills_guarded(
-        lambda askill, svc: svc.remove_skill(askill, name, scope=scope, project_dir=project_dir, backends=backends)
+        lambda askill, svc: svc.remove_skill(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            backends=backends,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
     )
 
 
-async def find_skills(query: str = "") -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.find_skills(askill, query))
+async def find_skills(query: str = "", *, user_context: Any = None) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.find_skills(askill, query, user_context=context)
+    )
 
 
-async def check_skills(*, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.check(askill, scope=scope, project_dir=project_dir))
+async def check_skills(
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.check(
+            askill,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
+    )
 
 
-async def update_skill(name: str, *, scope: str = "project", project_dir: Optional[str] = None) -> dict:
-    return await _skills_guarded(lambda askill, svc: svc.update(askill, name, scope=scope, project_dir=project_dir))
+async def update_skill(
+    name: str,
+    *,
+    scope: str = "project",
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
+    context = resolve_resource_access_context() if user_context is None else user_context
+    return await _skills_guarded(
+        lambda askill, svc: svc.update(
+            askill,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
+    )
 
 
-async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) -> dict:
+async def upload_skill_zip(
+    payload: dict,
+    *,
+    project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
+    user_context: Any = None,
+) -> dict:
     """Decode a base64 .zip, unpack it to a temp dir, and preview its skills.
 
     The UI then calls add_skill with ``source`` = the returned ``dir``. The
@@ -11714,6 +14320,18 @@ async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) 
     import tempfile
     import time
     import zipfile
+
+    from vibe.authorization import require_instance_role
+    from core.services import skills as skills_service
+
+    context = resolve_resource_access_context() if user_context is None else user_context
+    try:
+        if project_id:
+            skills_service.require_project_editor_access(context, project_id)
+        else:
+            require_instance_role(context, "editor")
+    except skills_service.SkillsError as exc:
+        return {"ok": False, "error": {"code": exc.code, "message": exc.message}}
 
     max_b64 = 24 * 1024 * 1024  # ~18 MB archive — skills are tiny; cap the body.
     max_uncompressed = 64 * 1024 * 1024
@@ -11775,7 +14393,17 @@ async def upload_skill_zip(payload: dict, *, project_dir: Optional[str] = None) 
         shutil.rmtree(workdir, ignore_errors=True)
         return {"ok": False, "error": {"code": "bad_zip", "message": f"could not extract archive: {exc}"}}
 
-    preview = await _skills_guarded(lambda askill, svc: svc.preview_source(askill, unpack, project_dir=project_dir))
+    preview = await _skills_guarded(
+        lambda askill, svc: svc.preview_source(
+            askill,
+            unpack,
+            project_dir=project_dir,
+            project_id=project_id,
+            user_context=context,
+        ),
+        user_context=context,
+        project_id=project_id,
+    )
     if preview.get("ok"):
         preview["dir"] = unpack
     else:

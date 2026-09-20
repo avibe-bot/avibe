@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
@@ -33,11 +34,11 @@ from tzlocal import get_localzone_name
 from sqlalchemy import select
 
 from config import SettingsStore, paths
+from config.atomic_io import write_atomic
 from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -47,9 +48,14 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
-from core.caller_context import caller_context_from_env
+from core.caller_context import (
+    caller_context_from_env,
+    caller_resource_user_context,
+    env_declares_remote_caller,
+)
 from core.command_runner import command_line_preview
-from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.install_integrity import verify_python_environment, verify_site_packages
+from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
@@ -65,18 +71,41 @@ from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
+    MemoryRequirementUnreadableError,
     PACKAGE_NAME,
+    AtomicActivation,
+    DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
+    RestartState,
+    activate_installer_candidate,
+    activate_upgrade_candidate,
+    activation_block_reason,
+    atomic_uv_install_root,
+    atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
+    configured_memory_enabled,
+    execute_upgrade_plan,
+    defer_upgrade_activation,
     get_latest_version_info,
     get_safe_cwd,
     is_desktop_managed_runtime,
+    _launcher_generation,
+    _candidate_python,
+    launcher_is_current_process,
+    restart_is_pending,
+    restart_record_is_pending,
+    discard_atomic_uv_install_generation,
     should_skip_show_runtime_prepare,
+    UPGRADE_INSTALL_TIMEOUT_SECONDS,
+    verify_upgrade_candidate,
 )
 from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
+    TaskResumeBlocked,
+    TaskScheduleRetired,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -105,22 +134,121 @@ DOCTOR_REPAIR_TARGETS = (
     "stale-restart-state",
     "askill",
     "avault",
+    "model-hub-engine",
     "git-runtime",
+    "memory-runtime",
     "show-runtime",
     "tmux",
 )
 DOCTOR_DEFAULT_REPAIR_TARGETS = DOCTOR_REPAIR_TARGETS[:4]
 DOCTOR_DEPENDENCY_REPAIR_TARGETS = frozenset(DOCTOR_REPAIR_TARGETS[4:])
-DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
-    "home-migration": "Would migrate ~/.vibe_remote to ~/.avibe when safe, or recreate the legacy compatibility symlink.",
-    "stale-install-runtime": "Would stop a running legacy vibe-remote service and start the current Avibe service.",
-    "duplicate-service-processes": "Would stop extra Avibe service processes outside the service lock.",
-    "stale-restart-state": "Would remove stale restart metadata and refresh runtime status.",
-    "askill": "Would install or refresh askill with the official installer.",
-    "avault": "Would install or refresh the manifest-pinned avault release.",
-    "git-runtime": "Would install or refresh the manifest-pinned Git Runtime.",
-    "show-runtime": "Would prepare the manifest-pinned Show Runtime archive when it is missing or invalid.",
-    "tmux": "Would install or refresh the manifest-pinned tmux runtime.",
+
+
+def _doctor_repair_target(value: str) -> str:
+    """Validate one repair target without argparse's empty-list choices bug."""
+
+    if value not in DOCTOR_REPAIR_TARGETS:
+        choices = ", ".join(repr(target) for target in DOCTOR_REPAIR_TARGETS)
+        raise argparse.ArgumentTypeError(f"invalid choice: {value!r} (choose from {choices})")
+    return value
+
+
+DOCTOR_REPAIR_DRY_RUN_I18N_KEYS = {
+    "home-migration": "doctor.repair.dryHomeMigration",
+    "stale-install-runtime": "doctor.repair.dryStaleInstall",
+    "duplicate-service-processes": "doctor.repair.dryDuplicateProcesses",
+    "stale-restart-state": "doctor.repair.dryStaleRestart",
+    "askill": "doctor.repair.dryAskill",
+    "avault": "doctor.repair.dryAvault",
+    "model-hub-engine": "doctor.repair.dryModelHubEngine",
+    "git-runtime": "doctor.repair.dryGitRuntime",
+    "memory-runtime": "doctor.repair.dryMemoryRuntime",
+    "show-runtime": "doctor.repair.dryShowRuntime",
+    "tmux": "doctor.repair.dryTmux",
+}
+
+DOCTOR_DISPLAY_PROJECTIONS = {
+    "tunnel_state": {
+        "healthy": "doctor.value.tunnelStateHealthy",
+        "degraded": "doctor.value.tunnelStateDegraded",
+        "recovering": "doctor.value.tunnelStateRecovering",
+        "unknown": "doctor.value.tunnelStateUnknown",
+    },
+    "tunnel_grade": {
+        "good": "doctor.value.tunnelGradeGood",
+        "fair": "doctor.value.tunnelGradeFair",
+        "poor": "doctor.value.tunnelGradePoor",
+        "critical": "doctor.value.tunnelGradeCritical",
+        "unknown": "doctor.value.tunnelGradeUnknown",
+    },
+    "tunnel_protocol": {
+        "quic": "doctor.value.tunnelProtocolQuic",
+        "http2": "doctor.value.tunnelProtocolHttp2",
+        "unknown": "doctor.value.tunnelProtocolUnknown",
+    },
+    "download_kind": {
+        "http": "doctor.repair.dependencyDownloadHttp",
+        "dns": "doctor.repair.dependencyDownloadDns",
+        "tls": "doctor.repair.dependencyDownloadTls",
+        "timeout": "doctor.repair.dependencyDownloadTimeout",
+        "network": "doctor.repair.dependencyDownloadNetwork",
+        "permission": "doctor.repair.dependencyDownloadPermission",
+        "disk": "doctor.repair.dependencyDownloadDisk",
+        "io": "doctor.repair.dependencyDownloadIo",
+    },
+    "repair_reason": {
+        "askill_auto_install_unsupported": "doctor.repair.askillAutoInstallUnsupported",
+        "askill_install_path_missing": "doctor.repair.askillInstallPathMissing",
+        "askill_install_timeout": "doctor.repair.installTimeout",
+        "askill_install_failed": "doctor.repair.installCommandFailed",
+        "askill_install_error": "doctor.repair.installError",
+        "avault_platform_unsupported": "doctor.repair.avaultPlatformUnsupported",
+        "avault_checksum_mismatch": "doctor.repair.avaultChecksumMismatch",
+        "avault_install_path_missing": "doctor.repair.avaultInstallPathMissing",
+        "avault_install_failed": "doctor.repair.avaultInstallFailed",
+        "avault_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
+        "avault_p2_release_unavailable": "doctor.repair.avaultReleaseUnavailable",
+        "git_runtime_unpublished": "doctor.repair.dependencyManifestUnavailable",
+    },
+    "repair_suffix": {
+        "install_already_running": "doctor.repair.dependencyAlreadyRunning",
+        "platform_unsupported": "doctor.repair.dependencyPlatformUnsupported",
+        "manifest_missing": "doctor.repair.dependencyManifestMissing",
+        "manifest_invalid": "doctor.repair.dependencyManifestInvalid",
+        "manifest_unavailable": "doctor.repair.dependencyManifestUnavailable",
+        "manifest_unavailable_offline": "doctor.repair.dependencyManifestUnavailable",
+        "manifest_download_failed": "doctor.repair.dependencyManifestDownloadFailed",
+        "manifest_url_unsupported": "doctor.repair.dependencyManifestUnavailable",
+        "archive_unavailable": "doctor.repair.dependencyArchiveUnavailable",
+        "archive_unavailable_offline": "doctor.repair.dependencyArchiveUnavailable",
+        "archive_url_unsupported": "doctor.repair.dependencyArchiveUnavailable",
+        "archive_download_failed": "doctor.repair.dependencyArchiveDownloadFailed",
+        "archive_checksum_mismatch": "doctor.repair.dependencyArchiveVerificationFailed",
+        "archive_size_mismatch": "doctor.repair.dependencyArchiveVerificationFailed",
+        "binary_checksum_mismatch": "doctor.repair.dependencyBinaryVerificationFailed",
+        "binary_not_runnable": "doctor.repair.dependencyBinaryNotRunnable",
+        "binary_prepare_failed": "doctor.repair.dependencyBinaryPrepareFailed",
+        "candidate_validation_failed": "doctor.repair.dependencyCandidateValidationFailed",
+        "install_missing_binary": "doctor.repair.dependencyInstallMissingBinary",
+        "install_failed": "doctor.repair.installError",
+        "install_lock_failed": "doctor.repair.dependencyInstallLockFailed",
+        "install_claim_failed": "doctor.repair.dependencyInstallClaimFailed",
+        "install_target_changed": "doctor.repair.dependencyInstallTargetChanged",
+        "pointer_write_failed": "doctor.repair.dependencyPointerWriteFailed",
+        "codesign_missing": "doctor.repair.dependencyCodeSignMissing",
+        "codesign_failed": "doctor.repair.dependencyCodeSignFailed",
+        "codesign_verify_failed": "doctor.repair.dependencyCodeSignFailed",
+        "xattr_failed": "doctor.repair.dependencyMetadataFailed",
+    },
+    "restart_state": {
+        state.value: f"doctor.value.restartState{state.name.title()}" for state in RestartState
+    },
+    "show_runtime_provider": {
+        "manifest-cache": "doctor.value.showRuntimeProviderManifest",
+        "archive": "doctor.value.showRuntimeProviderArchive",
+        "npm": "doctor.value.showRuntimeProviderNpm",
+        "unknown": "doctor.value.showRuntimeProviderUnknown",
+    },
 }
 
 DEFAULT_VAULT_APPROVAL_WAIT_SECONDS = 9 * 60
@@ -264,6 +392,54 @@ def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliErro
     )
 
 
+def _retyped_placement_refusal(
+    exc: Exception, *, help_command: str | None
+) -> Exception:
+    """Give a refused Session placement the same first-class code the preflight gives it.
+
+    A command that names an EXISTING target is admitted by
+    ``_require_cli_turn_authority``, which already reports each refusal under its
+    own code. A command that CREATES its target is admitted by the reservation
+    writer instead, one layer below the CLI, and its refusals arrived here as bare
+    ``PermissionError``s -- so the same user, refused for the same reason, got
+    ``task_command_failed`` and a prose string with nothing to branch on. Re-typed
+    at the printer for the same reason the reserved-target case above is: every
+    creating command inherits it, including ones added later.
+    """
+
+    from core.vibe_agents import VibeAgentAccessError
+    from storage.workbench_sessions_service import ProjectAccessDeniedError
+    from vibe.authorization import InstanceAuthorizationError
+
+    if isinstance(exc, TaskCliError):
+        return exc
+    if isinstance(exc, InstanceAuthorizationError):
+        return TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command=help_command,
+            details={"minimum_role": exc.minimum_role},
+        )
+    if isinstance(exc, ProjectAccessDeniedError):
+        # Covers both shapes the placement check refuses: a Project the caller
+        # cannot chat in, and a destination that is no Project at all -- work with
+        # no Scope creates unplaced Sessions, which is runtime management.
+        return TaskCliError(
+            "You cannot place new work here",
+            code=exc.code,
+            hint="Pass --scope-id for a Project you can chat in, or ask for access to this one.",
+            help_command=help_command,
+        )
+    if isinstance(exc, VibeAgentAccessError):
+        return TaskCliError(
+            str(exc),
+            code="agent_access_forbidden",
+            hint="The Agent this work would run on is not one you can use.",
+            help_command=help_command,
+        )
+    return exc
+
+
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
     # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
     # own ``except``, because this is the one printer every CLI admission door funnels its
@@ -275,6 +451,26 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
+    from storage.resource_access_service import (
+        HARNESS_ACCESS_FORBIDDEN_CODE,
+        ResourceAccessError,
+    )
+
+    exc = _retyped_placement_refusal(exc, help_command=help_command)
+    if (
+        isinstance(exc, ResourceAccessError)
+        and exc.code == HARNESS_ACCESS_FORBIDDEN_CODE
+    ):
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        exc = TaskCliError(
+            str(exc),
+            code=exc.code,
+            hint=i18n_t("harness.notice.remoteExecutionDisabled", lang),
+            help_command=help_command,
+        )
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,
@@ -339,7 +535,28 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _memory_cli_language() -> str:
+def _configured_trace_retention_days(language: str) -> int:
+    """Read the persisted window for help text without loading/migrating config."""
+    from storage import agent_events_retention as _retention
+
+    try:
+        config_path = paths.get_config_path()
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        runtime = payload.get("runtime") if isinstance(payload, dict) else None
+        value = runtime.get("agent_events_trace_retention_days") if isinstance(runtime, dict) else None
+        from vibe.trace_retention_policy import validate_retention_days
+
+        try:
+            return validate_retention_days(value)
+        except ValueError:
+            pass
+    except Exception:
+        pass
+    del language
+    return _retention.DEFAULT_RETENTION_DAYS
+
+
+def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
     try:
@@ -349,6 +566,83 @@ def _memory_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
+
+
+def _memory_cli_language() -> str:
+    return _configured_cli_language()
+
+
+_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS = {
+    "disabled": "memory.cli.runtimeState.disabled",
+    "starting": "memory.cli.runtimeState.starting",
+    "running": "memory.cli.runtimeState.running",
+    "degraded": "memory.cli.runtimeState.degraded",
+    "needs_repair": "memory.cli.runtimeState.needsRepair",
+}
+_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
+    "ok": "memory.cli.providerState.ok",
+}
+_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS = {
+    "ready": "memory.cli.attachmentCaptureState.ready",
+    "not_configured": "memory.cli.attachmentCaptureState.notConfigured",
+    "unavailable": "memory.cli.attachmentCaptureState.unavailable",
+}
+_MEMORY_CLI_REASON_I18N_KEYS = {
+    "memory_disabled": "memory.cli.reason.memoryDisabled",
+    "memory_invalid_input": "memory.cli.reason.invalidInput",
+    "memory_access_denied": "memory.cli.reason.accessDenied",
+    "memory_input_too_large": "memory.cli.reason.inputTooLarge",
+    "memory_queue_full": "memory.cli.reason.queueFull",
+    "memory_low_disk_space": "memory.cli.reason.lowDiskSpace",
+    "memory_store_unavailable": "memory.cli.reason.storeUnavailable",
+    "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
+    "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
+    "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
+    "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
+    "memory_wake_failed": "memory.cli.reason.wakeFailed",
+    "memory_runtime_busy": "memory.cli.reason.runtimeBusy",
+    "memory_permission_denied": "memory.cli.reason.permissionDenied",
+    "memory_disk_unavailable": "memory.cli.reason.diskUnavailable",
+    "memory_local_data_unusable": "memory.cli.reason.localDataUnusable",
+    "memory_legacy_recovery_required": "memory.cli.reason.legacyRecoveryRequired",
+    "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
+    "memory_provider_timeout": "memory.cli.reason.providerTimeout",
+    "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
+    "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
+    "memory_processing_failed": "memory.cli.reason.processingFailed",
+    "memory_loss_confirmation_required": "memory.cli.reason.lossConfirmationRequired",
+    "memory_embedding_unavailable": "memory.cli.reason.embeddingUnavailable",
+    "memory_llm_unavailable": "memory.cli.reason.llmUnavailable",
+    "memory_rerank_unavailable": "memory.cli.reason.rerankUnavailable",
+    "memory_multimodal_unavailable": "memory.cli.reason.multimodalUnavailable",
+    "memory_repair_failed": "memory.cli.reason.repairFailed",
+    "memory_repair_not_required": "memory.cli.reason.repairNotRequired",
+    "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
+    "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
+    "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
+    "memory_implementation_unavailable": "memory.cli.reason.implementationUnavailable",
+    "memory_implementation_incompatible": "memory.cli.reason.implementationIncompatible",
+}
+_DOCTOR_MEMORY_REASON_I18N_KEYS = {
+    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
+    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
+    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
+    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
+    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
+    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
+    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
+}
+
+
+def _memory_cli_label(
+    value: object,
+    *,
+    keys: dict[str, str],
+    fallback_key: str,
+    language: str,
+) -> str:
+    token = value.strip() if isinstance(value, str) else ""
+    return i18n_t(keys.get(token, fallback_key), language)
 
 
 def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
@@ -362,14 +656,23 @@ def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, languag
     if as_json:
         print(json.dumps(payload, indent=2))
     else:
-        print(i18n_t("memory.cli.error", language, operation=operation, code=code), file=sys.stderr)
+        display_code = _memory_cli_label(
+            code,
+            keys=_MEMORY_CLI_REASON_I18N_KEYS,
+            fallback_key="memory.cli.reason.unknown",
+            language=language,
+        )
+        print(
+            i18n_t("memory.cli.error", language, operation=operation, code=display_code),
+            file=sys.stderr,
+        )
     return 1
 
 
 def _memory_cli_body(response: object, *, fallback: str) -> tuple[dict | None, str | None]:
     """Validate the closed controller response shape used by ``vibe memory``."""
 
-    from core.memory.types import is_memory_error_code
+    from vibe.memory_contract import is_memory_error_code
 
     if not isinstance(response, dict):
         return None, "memory_provider_response_invalid"
@@ -387,32 +690,101 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         print(i18n_t("memory.cli.remembered", language))
         return
     if operation == "status":
-        from core.memory.presentation import memory_status_buckets
-
-        buckets = memory_status_buckets(result)
-        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
+        runtime_state_label = _memory_cli_label(
+            result.get("state"),
+            keys=_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
+            fallback_key="memory.cli.runtimeState.unknown",
+            language=language,
+        )
         print(
             i18n_t(
-                "memory.cli.counts",
+                "memory.cli.status",
                 language,
-                syncing=buckets.syncing,
-                succeeded=buckets.succeeded,
-                unknown=buckets.unknown,
-                failed=buckets.failed,
-                dead=buckets.dead,
-                missed=buckets.missed,
+                state=runtime_state_label,
             )
         )
-        fault_kind = result.get("processing_fault_kind")
-        if fault_kind in {"credential", "engine"}:
-            print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
-        # Status is principal-less, so it no longer carries profile_warning.
-        # ``vibe memory profile`` reports an empty profile from its own result.
+        health = result.get("health")
+        if isinstance(health, dict):
+            version = health.get("version")
+            provider_state = health.get("status")
+            provider_state_label = _memory_cli_label(
+                provider_state,
+                keys=_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
+                fallback_key="memory.cli.providerState.unknown",
+                language=language,
+            )
+            print(
+                i18n_t(
+                    "memory.cli.provider",
+                    language,
+                    version=(
+                        version
+                        if isinstance(version, str) and version
+                        else i18n_t("memory.cli.unknownVersion", language)
+                    ),
+                    state=provider_state_label,
+                )
+            )
+        attachment_capture = result.get("attachment_capture")
+        if isinstance(attachment_capture, dict):
+            attachment_state_label = _memory_cli_label(
+                attachment_capture.get("status"),
+                keys=_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
+                fallback_key="memory.cli.attachmentCaptureState.unknown",
+                language=language,
+            )
+            print(
+                i18n_t(
+                    "memory.cli.attachmentCapture",
+                    language,
+                    state=attachment_state_label,
+                )
+            )
+        reason = result.get("reason")
+        if isinstance(reason, str) and reason:
+            reason_label = _memory_cli_label(
+                reason,
+                keys=_MEMORY_CLI_REASON_I18N_KEYS,
+                fallback_key="memory.cli.reason.unknown",
+                language=language,
+            )
+            print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
         return
+
+    warnings = result.get("warnings")
+    if operation == "list":
+        if isinstance(warnings, list) and "memory_list_truncated" in warnings:
+            print(i18n_t("memory.cli.listWarning.truncated", language), file=sys.stderr)
+    elif (
+        operation in {"search", "profile"}
+        and isinstance(warnings, list)
+        and "memory_search_partial" in warnings
+    ):
+        print(i18n_t("memory.cli.readWarning.partial", language), file=sys.stderr)
 
     items = result.get("items")
     if not isinstance(items, list) or not items:
         print(i18n_t("memory.cli.empty", language))
+        return
+    if operation == "list":
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            timestamp = item.get("timestamp")
+            subject = item.get("subject")
+            summary = item.get("summary")
+            body = item.get("body")
+            lines = [
+                value
+                for value in (subject, summary, body)
+                if isinstance(value, str) and value
+            ]
+            if not lines:
+                continue
+            prefix = f"{timestamp} " if isinstance(timestamp, str) and timestamp else ""
+            print(f"{prefix}{lines[0]}")
+            for line in lines[1:]:
+                print(line)
         return
     for item in items:
         if not isinstance(item, dict):
@@ -421,7 +793,16 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         if not isinstance(text, str):
             continue
         date = item.get("date")
-        prefix = f"{date} " if isinstance(date, str) and date else ""
+        origin = item.get("origin")
+        origin_prefix = ""
+        if operation in {"search", "profile"} and origin in {"user", "agent", "both"}:
+            origin_prefix = i18n_t(
+                "memory.cli.originPrefix",
+                language,
+                origin=i18n_t(f"memory.cli.origin.{origin}", language),
+            )
+        date_prefix = f"{date} " if isinstance(date, str) and date else ""
+        prefix = f"{origin_prefix}{date_prefix}"
         print(f"{prefix}{text}")
 
 
@@ -430,26 +811,38 @@ def cmd_memory(args) -> int:
 
     from vibe import internal_client
     from core.caller_context import caller_context_from_env
+    from vibe.memory_contract import (
+        MAX_MEMORY_LIST_PAGE_SIZE,
+        MAX_MEMORY_SEARCH_RESULTS,
+    )
 
     operation = args.memory_command
     as_json = bool(getattr(args, "json", False))
     language = _memory_cli_language()
     query = ""
-    if operation not in {"status", "profile", "search", "remember"}:
+    if operation not in {"status", "profile", "list", "search", "remember"}:
         return _print_memory_cli_error("invalid", "memory_invalid_input", as_json=as_json, language=language)
     if operation == "search":
         query = args.query.strip() if isinstance(args.query, str) else ""
         if (
             not query
-            or len(query.encode("utf-8")) > 8 * 1024
             or not isinstance(args.limit, int)
             or isinstance(args.limit, bool)
-            or not 1 <= args.limit <= 20
+            or not 1 <= args.limit <= MAX_MEMORY_SEARCH_RESULTS
         ):
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
+    if operation == "list" and (
+        not isinstance(args.page, int)
+        or isinstance(args.page, bool)
+        or args.page < 1
+        or not isinstance(args.limit, int)
+        or isinstance(args.limit, bool)
+        or not 1 <= args.limit <= MAX_MEMORY_LIST_PAGE_SIZE
+    ):
+        return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     if operation == "remember":
         query = args.text if isinstance(args.text, str) else ""
-        if not query.strip() or len(query) > 4_000:
+        if not query.strip():
             return _print_memory_cli_error(operation, "memory_invalid_input", as_json=as_json, language=language)
     try:
         caller = caller_context_from_env()
@@ -462,10 +855,27 @@ def cmd_memory(args) -> int:
             response = internal_client.memory_status_sync(**access)
         elif operation == "profile":
             response = internal_client.memory_profile_sync(**access)
+        elif operation == "list":
+            response = internal_client.memory_list_sync(
+                page=args.page,
+                limit=args.limit,
+                project=getattr(args, "project", None),
+                **access,
+            )
         elif operation == "search":
-            response = internal_client.memory_search_sync(query, args.limit, **access)
+            response = internal_client.memory_search_sync(
+                query,
+                args.limit,
+                mode=args.mode,
+                project=getattr(args, "project", None),
+                **access,
+            )
         else:
-            response = internal_client.memory_remember_sync(query, **access)
+            response = internal_client.memory_remember_sync(
+                query,
+                project=getattr(args, "project", None),
+                **access,
+            )
     except internal_client.InternalServerUnavailable:
         return _print_memory_cli_error(operation, "memory_sidecar_unavailable", as_json=as_json, language=language)
 
@@ -492,6 +902,115 @@ def cmd_memory(args) -> int:
         )
     else:
         _print_memory_cli_human(operation, result, language=language)
+    return 0
+
+
+def cmd_skill(args) -> int:
+    """List or load Skills through Avibe's live resolver."""
+
+    from core.managed_skills import (
+        load_skill,
+        render_skill_content,
+        render_skill_list,
+        resolve_skills,
+    )
+    from core.skill_observability import finish_cli_catalog, finish_cli_load
+
+    language = _configured_cli_language()
+
+    if args.skill_command == "list":
+        resolved = []
+        observation_error = "internal_error"
+        try:
+            resolved = resolve_skills()
+            output = render_skill_list(
+                resolved,
+                page=args.page,
+                more_notice=i18n_t(
+                    "skill.cli.more",
+                    language,
+                    page=args.page + 1,
+                ),
+            )
+            if output:
+                print(output, flush=True)
+            observation_error = None
+            return 0
+        except ValueError:
+            observation_error = "invalid_page"
+            print(i18n_t("skill.cli.error.invalidPage", language), file=sys.stderr)
+            return 1
+        except BrokenPipeError:
+            observation_error = "output_interrupted"
+            raise
+        finally:
+            finish_cli_catalog(resolved, args.page, observation_error)
+
+    if args.skill_command == "load":
+        started_at = time.monotonic()
+        skill = None
+        observation_error = "internal_error"
+        try:
+            allowed = resolve_skills()
+            skill = next((entry for entry in allowed if entry.name == args.name), None)
+            if skill is None:
+                observation_error = "not_found"
+                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+                return 1
+            loaded = load_skill(args.name, resolved_skills=allowed)
+            if loaded is None:
+                observation_error = "unreadable_or_invalid"
+                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
+                return 1
+            skill = loaded
+            print(render_skill_content(skill), flush=True)
+            observation_error = None
+            return 0
+        except BrokenPipeError:
+            observation_error = "output_interrupted"
+            raise
+        finally:
+            finish_cli_load(args.name, skill, started_at, observation_error)
+
+    return 1
+
+
+def cmd_debug_prompt(args) -> int:
+    """Export all authored sources, optionally with the production rendering."""
+
+    if args.debug_command != "prompt" or args.prompt_debug_command != "export":
+        return 1
+    from core.prompt_studio_catalog import PromptRenderInputError, export_prompt_studio_catalog
+
+    context_file = getattr(args, "context_file", None)
+    context = None
+    try:
+        if context_file:
+            try:
+                raw = Path(context_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PromptRenderInputError("unreadableContext") from exc
+            except UnicodeError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            try:
+                context = json.loads(raw)
+            except ValueError as exc:
+                raise PromptRenderInputError("invalidJson") from exc
+            if not isinstance(context, dict):
+                raise PromptRenderInputError("invalidContext")
+        payload = export_prompt_studio_catalog(render_context=context)
+    except PromptRenderInputError as exc:
+        language = _configured_cli_language()
+        error = i18n_t(f"debug.cli.error.{exc.key}", language, field=exc.field)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError):
+        logger.debug("Prompt export failed", exc_info=True)
+        language = _configured_cli_language()
+        error = i18n_t("debug.cli.error.renderFailed", language)
+        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -784,47 +1303,48 @@ def _architecture_token(text: str | None) -> str | None:
 
 def _runtime_architecture_items() -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
+    language = _configured_cli_language()
+    unknown_value = i18n_t("doctor.value.unknown", language)
     is_apple_silicon = _is_apple_silicon_host()
-    host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or "unknown"
-    python_arch = platform.machine() or "unknown"
+    host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or unknown_value
+    python_arch = platform.machine() or unknown_value
     python_status = "warn" if is_apple_silicon and _architecture_token(python_arch) == "x86_64" else "pass"
 
-    python_item = {
-        "status": python_status,
-        "message": f"Python runtime architecture: {python_arch} ({sys.executable})",
-    }
+    _add_doctor_item(
+        items,
+        python_status,
+        i18n_t("doctor.item.pythonArchitecture", language, architecture=python_arch, executable=sys.executable),
+    )
     if python_status == "warn":
-        python_item["action"] = "Reinstall Avibe with native arm64 uv/Python"
-    items.append(python_item)
+        items[-1]["action"] = i18n_t("doctor.action.nativeArmPython", language)
 
     uv_path = shutil.which("uv")
     if uv_path:
         uv_arch_output = _binary_architecture(uv_path)
         uv_arch = _architecture_token(uv_arch_output) or "unknown"
+        uv_display_arch = unknown_value if uv_arch == "unknown" else uv_arch
         uv_status = "warn" if is_apple_silicon and uv_arch in {"x86_64", "unknown"} else "pass"
-        uv_item = {
-            "status": uv_status,
-            "message": f"uv architecture: {uv_arch} ({uv_path})",
-        }
+        _add_doctor_item(
+            items,
+            uv_status,
+            i18n_t("doctor.item.uvArchitecture", language, architecture=uv_display_arch, path=uv_path),
+        )
         if is_apple_silicon and uv_arch == "x86_64":
-            uv_item["action"] = "Install native arm64 uv, then reinstall Avibe"
+            items[-1]["action"] = i18n_t("doctor.action.nativeArmUv", language)
         elif is_apple_silicon and uv_arch == "unknown":
-            uv_item["action"] = "Check whether this uv wrapper launches native arm64 uv"
-        items.append(uv_item)
+            items[-1]["action"] = i18n_t("doctor.action.nativeUvWrapper", language)
     else:
-        items.append(
-            {
-                "status": "warn",
-                "message": "uv command not found on PATH",
-                "action": "Install uv or add its bin directory to PATH",
-            }
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("doctor.item.uvMissing", language),
+            i18n_t("doctor.action.uvMissing", language),
         )
 
-    items.append(
-        {
-            "status": "pass",
-            "message": f"Host architecture: {host_arch}",
-        }
+    _add_doctor_item(
+        items,
+        "pass",
+        i18n_t("doctor.item.hostArchitecture", language, architecture=host_arch),
     )
     return items
 
@@ -844,12 +1364,17 @@ def _path_points_to(path: Path, target: Path) -> bool:
 
 def _home_migration_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     explicit_home = os.environ.get(paths.AVIBE_HOME_ENV)
     if explicit_home:
         _add_doctor_item(
             items,
             "pass",
-            f"AVIBE_HOME is set explicitly: {Path(explicit_home).expanduser()}",
+            i18n_t(
+                "doctor.item.explicitHome",
+                language,
+                path=Path(explicit_home).expanduser(),
+            ),
             code="runtime.explicit_home",
         )
         return items
@@ -863,7 +1388,7 @@ def _home_migration_items() -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            f"Default runtime home is ready to initialize at {avibe_home}",
+            i18n_t("doctor.item.homeReady", language, path=avibe_home),
             code="runtime.home_ready",
         )
         return items
@@ -873,15 +1398,20 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "pass",
-                f"Legacy home compatibility symlink is healthy: {legacy_home} -> {avibe_home}",
+                i18n_t(
+                    "doctor.item.legacyHomeLinkHealthy",
+                    language,
+                    legacy_path=legacy_home,
+                    active_path=avibe_home,
+                ),
                 code="runtime.legacy_home_link_ok",
             )
         elif not legacy_present:
             _add_doctor_item(
                 items,
                 "warn",
-                f"Legacy home compatibility path is missing: {legacy_home}",
-                "Run `vibe doctor repair home-migration` to create the compatibility symlink.",
+                i18n_t("doctor.item.legacyHomeLinkMissing", language, path=legacy_home),
+                i18n_t("doctor.action.homeMigrationCreateLink", language),
                 code="runtime.legacy_home_link_missing",
                 repair_target="home-migration",
                 repair_risk="low",
@@ -890,8 +1420,8 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "warn",
-                f"Legacy home symlink does not point to the active home: {legacy_home}",
-                "Run `vibe doctor repair home-migration` to recreate the compatibility symlink.",
+                i18n_t("doctor.item.legacyHomeLinkWrong", language, path=legacy_home),
+                i18n_t("doctor.action.homeMigrationRecreateLink", language),
                 code="runtime.legacy_home_link_wrong",
                 repair_target="home-migration",
                 repair_risk="low",
@@ -900,8 +1430,13 @@ def _home_migration_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Both {avibe_home} and {legacy_home} are real directories",
-                "Back up and merge the two homes manually before running repair.",
+                i18n_t(
+                    "doctor.item.homeConflict",
+                    language,
+                    active_path=avibe_home,
+                    legacy_path=legacy_home,
+                ),
+                i18n_t("doctor.action.homeConflict", language),
                 code="runtime.home_conflict",
             )
         return items
@@ -910,8 +1445,8 @@ def _home_migration_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            f"Legacy home symlink exists but canonical {avibe_home} is missing",
-            "Inspect the symlink target before repair; Avibe will not guess which state to keep.",
+            i18n_t("doctor.item.legacyHomeWithoutCanonical", language, active_path=avibe_home),
+            i18n_t("doctor.action.legacyHomeWithoutCanonical", language),
             code="runtime.legacy_home_symlink_without_canonical",
         )
         return items
@@ -919,8 +1454,8 @@ def _home_migration_items() -> list[dict]:
     _add_doctor_item(
         items,
         "warn",
-        f"Runtime home still uses the legacy path: {legacy_home}",
-        "Run `vibe doctor repair home-migration` to move it to ~/.avibe and keep a back-symlink.",
+        i18n_t("doctor.item.legacyHomeUnmigrated", language, path=legacy_home),
+        i18n_t("doctor.action.homeMigration", language),
         code="runtime.legacy_home_unmigrated",
         repair_target="home-migration",
         repair_risk="low",
@@ -965,6 +1500,7 @@ def _current_cli_install_family() -> str | None:
 
 def _service_install_family_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     service_pids = [pid for pid in [owner_pid] if pid]
@@ -982,38 +1518,43 @@ def _service_install_family_items(*, detect_extra_processes: bool = True) -> lis
         _add_doctor_item(
             items,
             "warn",
-            "Running service process still comes from the legacy vibe-remote installation: "
-            f"pids={','.join(map(str, stale_pids))}",
-            "Run `vibe doctor repair stale-install-runtime` to stop the stale service and start the current Avibe install.",
+            i18n_t(
+                "doctor.item.staleInstallProcess",
+                language,
+                pids=",".join(map(str, stale_pids)),
+            ),
+            i18n_t("doctor.action.staleInstallRuntime", language),
             code="runtime.stale_install_process",
             repair_target="stale-install-runtime",
             repair_risk="medium",
         )
     elif owner_pid and current_family:
-        _add_doctor_item(items, "pass", f"No legacy install mismatch detected for running service: pid={owner_pid}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.installMismatchNone", language, pid=owner_pid),
+        )
     elif owner_pid:
-        _add_doctor_item(items, "pass", f"Current CLI install family is not a uv tool install; skipped install mismatch check: pid={owner_pid}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.installMismatchSkipped", language, pid=owner_pid),
+        )
     else:
-        _add_doctor_item(items, "pass", "No running service install mismatch detected")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.installMismatchAbsent", language))
     return items
 
 
 def _restart_status_is_stale(payload: dict, path: Path) -> bool:
-    state = payload.get("state")
-    if state in {"scheduled", "running"}:
-        supervisor_pid = payload.get("supervisor_pid")
-        if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
-            started_at = payload.get("supervisor_started_at")
-            if started_at is not None:
-                current_started_at = runtime.process_create_time(supervisor_pid)
-                return current_started_at is not None and current_started_at != started_at
-        try:
-            age = time.time() - path.stat().st_mtime
-        except OSError:
-            return False
-        return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
+    try:
+        state = RestartState(payload.get("state"))
+    except (TypeError, ValueError):
+        return False
 
-    if state in {"succeeded", "failed", "error", "cancelled"}:
+    if state.retention == "seed":
+        return not restart_record_is_pending(payload, path, grace_seconds=DOCTOR_RESTART_SEED_GRACE_SECONDS)
+
+    if state.retention == "result":
         try:
             age = time.time() - path.stat().st_mtime
         except OSError:
@@ -1022,12 +1563,115 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
     return False
 
 
+def _restart_failure_summary(payload: dict, language: str) -> str:
+    """Describe a recorded restart failure on the single line doctor prints.
+
+    Why it failed is the entire value of the item, so the recorded error is
+    carried through rather than summarized away, with its whitespace collapsed
+    because the report prints one line per item.
+    """
+
+    raw_state = payload.get("state") or RestartState.UNKNOWN.value
+    pairs = (
+        (
+            "doctor.value.restartSummaryState",
+            _doctor_display_value(raw_state, "restart_state", language),
+        ),
+        (
+            "doctor.value.restartSummaryError",
+            " ".join(str(payload.get("error") or "").split()),
+        ),
+        ("doctor.value.restartSummaryTrigger", payload.get("trigger")),
+        ("doctor.value.restartSummaryJobId", payload.get("job_id")),
+        ("doctor.value.restartSummaryLog", payload.get("log_path")),
+    )
+    return " ".join(i18n_t(key, language, value=value) for key, value in pairs if value)
+
+
 def _restart_state_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
-        _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.restartStateAbsent", language),
+            code="runtime.restart_state_absent",
+        )
+        return items
+
+    # Both clauses are read now, from what is on disk and what is running now.
+    # Nothing here asks what was true at some earlier moment, which is the whole
+    # design: an earlier version of this decided downtime from a liveness snapshot
+    # the supervisor had stamped into the record, and every interleaving between
+    # taking that snapshot and acting on it was a way to get the answer wrong. A
+    # rule with no remembered observation in it has no such window.
+    #
+    # The cost is bounded and in the safe direction. A restart that failed without
+    # stopping the old service -- the spawn path never stops anything -- leaves a
+    # record that outlives its relevance, so after that service is later stopped on
+    # purpose this reports a failure that is history. Both halves of the sentence
+    # are still true, and `vibe start` ends it. Suppressing it instead would mean
+    # trusting a remembered snapshot to stay true, and for a diagnostic the
+    # asymmetry decides it: a stale `fail` is a true statement with a self-clearing
+    # next step, while a wrong `pass` is the eight-day silent outage in #1567
+    # sitting behind a green health check.
+    #
+    # Note what the action must not say, which is the original defect: never offer
+    # the marker-deleting repair here. The reader may be genuinely down, and that
+    # command both destroys the only record of why and makes doctor pass again --
+    # an operator following it would silence their own health check.
+    #
+    # This has to be read before the staleness branch below, because terminal
+    # metadata goes stale after DOCTOR_RESTART_RESULT_RETENTION_SECONDS, and that
+    # branch offers a repair that deletes the marker -- on a still-down instance,
+    # the reason it is down.
+    #
+    # Liveness asks `verified_service_running`, never the broader
+    # `service_process_running`. The broad one reports whatever occupies this data
+    # dir, which is the right question for refusing a second start and the wrong
+    # one here: a pid reserved by a process that never acquired the lock is the
+    # wreckage of a failed start, not a recovery, and reading it as one would
+    # suppress the very failure it came from. Nor does holding the lock make a
+    # process a service, because the lock is taken before the database is
+    # migrated -- the generation that hung mid-migration in #1567 held it for
+    # eight days -- so the owner also requires the holder's own published start.
+    #
+    # What that leaves the reader is a process `start_service` refuses to start
+    # past, because it asks the broad question -- so the action has to cover it,
+    # and `_service_lifecycle_items` cannot be the one to do that here: its
+    # extra-process item is behind `--deep` and the default run is exactly where a
+    # reader of this lands.
+    #
+    # Which is the whole discipline for the text below. Every sentence of procedure
+    # is a claim about control flow this item does not own, and each one is
+    # separately falsifiable: earlier revisions deferred to an item that is not
+    # rendered by default, and then told the reader to start again after a repair
+    # that starts the service itself. So it names each command once, in order, and
+    # says the one thing the reader cannot see -- that the repair brings the
+    # service up -- because that is what stops them from running start twice and
+    # reading `ServiceAlreadyRunningError` as a failed recovery.
+    #
+    # The occupier decides which command, and only one of them can be prescribed
+    # blind: `duplicate-service-processes` stops what the scan sees beside the lock
+    # owner, so it reaches a holder whose record answers no pid and skips one that
+    # answers its own -- and a holder stuck mid-startup is exactly the second kind.
+    # `vibe stop` is what covers that one. Anything beyond naming both is a
+    # prediction, and the commands report their own outcomes.
+    if payload.get("ok") is False and not runtime.verified_service_running():
+        _add_doctor_item(
+            items,
+            "fail",
+            i18n_t(
+                "doctor.item.restartFailed",
+                language,
+                summary=_restart_failure_summary(payload, language),
+            ),
+            i18n_t("doctor.action.restartFailed", language),
+            code="runtime.restart_failed",
+        )
         return items
 
     if _restart_status_is_stale(payload, restart_path):
@@ -1035,20 +1679,36 @@ def _restart_state_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            f"Stale restart metadata is present: state={state}",
-            "Run `vibe doctor repair stale-restart-state` to clear the stale restart marker and refresh status.",
+            i18n_t(
+                "doctor.item.staleRestartState",
+                language,
+                state=_doctor_display_value(state, "restart_state", language),
+            ),
+            i18n_t("doctor.action.staleRestartState", language),
             code="runtime.stale_restart_state",
             repair_target="stale-restart-state",
             repair_risk="low",
+            restart_state=state,
         )
     else:
         state = payload.get("state") or "unknown"
-        _add_doctor_item(items, "pass", f"Restart metadata is current: state={state}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t(
+                "doctor.item.restartStateCurrent",
+                language,
+                state=_doctor_display_value(state, "restart_state", language),
+            ),
+            restart_state=state,
+        )
     return items
 
 
 def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
+    missing_value = i18n_t("doctor.value.missing", language)
     pid_path = paths.get_runtime_pid_path()
     recorded_pid: int | None = None
     try:
@@ -1062,43 +1722,63 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
     status_pid = status.get("service_pid")
 
     if owner_pid:
-        _add_doctor_item(items, "pass", f"Service lock owner: pid={owner_pid}", code="runtime.service_lock_owner")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.serviceLockOwner", language, pid=owner_pid),
+            code="runtime.service_lock_owner",
+        )
     elif lock_holder_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Service lock is held by pid={lock_holder_pid}, but the owner could not be verified",
-            "Run `vibe status` and inspect service logs before starting another service.",
+            i18n_t("doctor.item.serviceLockUnverified", language, pid=lock_holder_pid),
+            i18n_t("doctor.action.serviceLockUnverified", language),
             code="runtime.unverified_service_lock",
         )
     else:
-        _add_doctor_item(items, "pass", "Service lock is free", code="runtime.service_lock_free")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.serviceLockFree", language),
+            code="runtime.service_lock_free",
+        )
 
     if owner_pid and recorded_pid != owner_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Service pid file does not match the lock owner: pidfile={recorded_pid or 'missing'} lock_owner={owner_pid}",
-            "Run `vibe restart` once the current work is idle so Avibe can rewrite runtime ownership files.",
+            i18n_t(
+                "doctor.item.servicePidfileMismatch",
+                language,
+                pidfile=recorded_pid or missing_value,
+                owner=owner_pid,
+            ),
+            i18n_t("doctor.action.servicePidfileMismatch", language),
             code="runtime.service_pidfile_mismatch",
         )
     elif recorded_pid:
-        _add_doctor_item(items, "pass", f"Service pid file points to pid={recorded_pid}")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.servicePidfile", language, pid=recorded_pid))
     else:
-        _add_doctor_item(items, "pass", "Service pid file is absent")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.servicePidfileAbsent", language))
 
     if owner_pid and status_pid != owner_pid:
         _add_doctor_item(
             items,
             "warn",
-            f"Runtime status service_pid does not match the lock owner: status={status_pid or 'missing'} lock_owner={owner_pid}",
-            "Refresh status; if it remains stale, restart Avibe when safe.",
+            i18n_t(
+                "doctor.item.statusPidMismatch",
+                language,
+                status=status_pid or missing_value,
+                owner=owner_pid,
+            ),
+            i18n_t("doctor.action.statusPidMismatch", language),
             code="runtime.status_pid_mismatch",
         )
     elif status_pid:
-        _add_doctor_item(items, "pass", f"Runtime status service_pid: {status_pid}")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.statusPid", language, pid=status_pid))
     else:
-        _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.statusPidAbsent", language))
 
     if detect_extra_processes:
         extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
@@ -1111,8 +1791,12 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             _add_doctor_item(
                 items,
                 "warn",
-                f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
-                "Run `vibe doctor repair duplicate-service-processes` to stop extra service processes.",
+                i18n_t(
+                    "doctor.item.extraServiceProcess",
+                    language,
+                    pids=",".join(map(str, extra_service_pids)),
+                ),
+                i18n_t("doctor.action.duplicateServiceProcesses", language),
                 code="runtime.extra_service_process",
                 repair_target="duplicate-service-processes",
                 repair_risk="medium",
@@ -1121,18 +1805,22 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
             _add_doctor_item(
                 items,
                 "warn",
-                f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
-                "Inspect the process environment before starting another service.",
+                i18n_t(
+                    "doctor.item.unverifiedServiceProcess",
+                    language,
+                    pids=",".join(map(str, unverified_service_pids)),
+                ),
+                i18n_t("doctor.action.unverifiedServiceProcess", language),
                 code="runtime.unverified_service_process",
             )
         else:
-            _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+            _add_doctor_item(items, "pass", i18n_t("doctor.item.noExtraServiceProcess", language))
     else:
         _add_doctor_item(
             items,
             "pass",
-            "Deep service process scan skipped in fast diagnostics",
-            "Run deep diagnostics to check duplicate service processes.",
+            i18n_t("doctor.item.deepScanSkipped", language),
+            i18n_t("doctor.action.deepScanSkipped", language),
             code="runtime.deep_service_process_scan_skipped",
         )
 
@@ -1156,7 +1844,7 @@ def _show_git_checkpoint_items() -> list[dict]:
     return [
         {
             "status": "warn",
-            "message": "Show Page checkpointing is degraded because Git is unavailable",
+            "message": i18n_t("doctor.item.showGitUnavailable", _configured_cli_language()),
             "code": "runtime.show_git_unavailable",
         }
     ]
@@ -1195,10 +1883,14 @@ def _remote_pair_examples_text() -> str:
 
 
 def _show_examples_text() -> str:
+    markdown_help = i18n_t("show.markdown.help", _configured_cli_language())
     return dedent(
         """\
         A Show Page is one session-scoped visual page that Avibe serves through the Web UI / Avibe Cloud tunnel.
         One Agent Session has exactly one Show Page.
+
+        Agent-readable representation:
+          __MARKDOWN_HELP__
 
         Commands:
           list     List existing Show Pages across sessions.
@@ -1243,7 +1935,7 @@ def _show_examples_text() -> str:
           vibe show event --help
           vibe show annotate --help
         """
-    )
+    ).replace("__MARKDOWN_HELP__", markdown_help)
 
 
 def _show_path_examples_text() -> str:
@@ -1269,6 +1961,8 @@ def _show_status_examples_text() -> str:
 
         Fields include:
           path, visibility, active_url, private_url, public_url, share_id, offline, created_at, updated_at.
+          JSON includes history.mode (managed or self-managed), history.checkpointing_active,
+          and history.git_dir (Avibe's history directory, not the user's repository).
 
         Use --json when another program or agent will consume the result.
         """
@@ -1361,14 +2055,17 @@ def _watch_add_examples_text() -> str:
           Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
-          In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
-          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          In either mode, an allowed `--retry-exit-code` keeps waiting. A once Watch stops after its first event.
+          A forever Watch waits for each event's Agent Run to finish before re-arming, then applies a five-second safety delay.
+          Exit 0 must mean one new reportable event, not a condition that merely remains true. Repeated rapid successes automatically pause the Watch and send the Agent a repair message.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and is terminal unless explicitly allowed for retry;
           64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
-          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          so a once Watch ends and a forever Watch re-arms WITHOUT an Agent turn. A once waiter that is still waiting must use a retry exit code.
+          Any other non-zero is a failure.
           The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
           Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
-          --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
+          --timeout applies to each cycle. --lifetime-timeout applies to the whole Watch lifetime across retries and re-arms.
 
         Examples:
           vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
@@ -1385,7 +2082,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1757,7 +2454,6 @@ def _validate_watch_timing(
     timeout_seconds: float,
     retry_delay_seconds: float,
     lifetime_timeout_seconds: float,
-    mode: str,
     help_command: str,
 ) -> None:
     if timeout_seconds < 0:
@@ -1784,13 +2480,6 @@ def _validate_watch_timing(
             help_command=help_command,
             details={"lifetime_timeout": lifetime_timeout_seconds},
         )
-    if lifetime_timeout_seconds and mode != "forever":
-        raise TaskCliError(
-            "--lifetime-timeout requires --forever",
-            code="invalid_watch_lifetime_timeout",
-            hint="Use --lifetime-timeout only on forever watches.",
-            help_command=help_command,
-    )
 
 
 def _task_message_preview(message: str, *, max_chars: int = 72) -> str:
@@ -1843,12 +2532,12 @@ def _task_display_name(task) -> str:
 
 
 def _task_state(task) -> str:
-    if task.enabled:
-        return "active"
     if _is_failed_one_shot(task):
         return "failed"
     if _is_completed_one_shot(task):
         return "completed"
+    if task.enabled:
+        return "active"
     return "paused"
 
 
@@ -1945,6 +2634,9 @@ def _task_payload(task, *, brief: bool = False):
             "enabled": task.enabled,
         }
     payload = task.to_dict()
+    from storage.message_deliveries import public_message_metadata
+
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -1952,6 +2644,7 @@ def _task_payload(task, *, brief: bool = False):
 _CANONICAL_DEFINITION_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -1987,6 +2680,7 @@ _DEFINITION_FAILURE_FIELDS = (
     "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -1997,7 +2691,14 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
-        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+        lifecycle_detail = task.get("lifecycle_detail")
+        if lifecycle_detail == "canceled":
+            return "canceled"
+        if lifecycle_detail in {"timeout", "error", "missed"}:
+            return "failed"
+        if lifecycle_detail == "normal":
+            return "completed"
+        return "unknown"
     if lifecycle_state == "paused":
         return "paused"
     return "unknown"
@@ -2062,7 +2763,7 @@ def _task_store() -> ScheduledTaskStore:
 def _definition_read_store():
     """Own the canonical read projection store used by CLI read commands."""
 
-    store = SQLiteBackgroundTaskStore()
+    store = SQLiteBackgroundTaskStore(include_private_metadata=False)
     try:
         yield store
     finally:
@@ -2160,18 +2861,21 @@ def _supported_task_platforms() -> set[str]:
 def _is_completed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
+        and bool(task.retired_at)
         and bool(task.last_run_at)
         and not task.last_error
+        and task.retirement_reason != TASK_RETIREMENT_SCHEDULE_MISSED
     )
 
 
 def _is_failed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
-        and bool(task.last_run_at)
-        and bool(task.last_error)
+        and bool(task.retired_at)
+        and (
+            task.retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
+            or (bool(task.last_run_at) and bool(task.last_error))
+        )
     )
 
 
@@ -2281,6 +2985,196 @@ def _resolve_session_target_args(
             help_command=help_command,
         )
     return session_id or None, session_key
+
+
+class _CommandTarget(NamedTuple):
+    """Where the work a command is about to write will actually speak.
+
+    At most one field is set. ``session_id`` is a Session that exists now, so the
+    caller is admitted to it directly. ``placement_scope_key`` is a target that
+    names a Scope whose Session does not exist yet — the deprecated IM key for a
+    thread nobody has opened — so the work describes a Session that will be
+    created later, and the question is the reservation writer's: may this caller
+    put work in that Scope, with that Agent. Neither set means the target names
+    nothing to admit anyone to.
+    """
+
+    session_id: Optional[str] = None
+    placement_scope_key: Optional[str] = None
+
+
+def _resolve_command_target(session_id: Optional[str], session_key: str) -> _CommandTarget:
+    """Read a command's named target, without creating anything it describes.
+
+    A target is named one of two ways: an Agent Session ID — typed, or defaulted
+    from the caller environment — or the legacy scope key the IM surfaces still
+    accept. Both are resolved read-only, through the primitives their own dispatch
+    uses, so asking who may drive a Session never creates the row the question is
+    about.
+
+    An empty target is not an authorization answer. A blank argument, an ID that
+    does not parse and a malformed key are shape and lifecycle questions owned by
+    the validator, the creation policy or the repair path that already reports
+    them; a binding whose row is gone stays editable by the person who has to fix
+    it. What must NOT be empty is a well-formed key whose Session has simply not
+    been opened yet: that target is where future work lands, so it is returned as
+    a placement rather than silently admitted.
+    """
+
+    if session_id:
+        try:
+            resolve_session_id_target(session_id)
+        except ValueError:
+            return _CommandTarget()
+        return _CommandTarget(session_id=session_id)
+    if not (session_key or "").strip():
+        return _CommandTarget()
+    try:
+        target = parse_session_key(session_key)
+    except ValueError:
+        # Shape is the caller's own validator's question, reported in its
+        # vocabulary. Nothing exists to admit anyone to.
+        return _CommandTarget()
+
+    from storage.sessions_service import SQLiteSessionsService
+
+    _ensure_cli_sqlite_state()
+    service = SQLiteSessionsService(paths.get_sqlite_state_path())
+    try:
+        row = service.find_session_for_anchor(
+            scope_key=target.session_scope,
+            session_anchor=session_anchor_for_target(target),
+        )
+    finally:
+        service.close()
+    existing = str((row or {}).get("id") or "") or None
+    if existing:
+        return _CommandTarget(session_id=existing)
+    return _CommandTarget(placement_scope_key=target.session_scope)
+
+
+def _require_cli_turn_authority(
+    session_id: Optional[str],
+    *,
+    session_key: str = "",
+    help_command: str,
+) -> _CommandTarget:
+    """Admit this invocation to the Session the work it is about to write runs in.
+
+    A Run row, a callback route and a stored Task/Watch definition are all
+    rebuilt later under the authority recorded when the row was written, so the
+    question has to be answered before the row exists. Deciding only at dispatch
+    lets a caller who may not chat in that Project — or may not use the Agent
+    that Session selected — occupy the target anyway, and leaves the refusal
+    somewhere nobody is waiting for it.
+
+    It asks ``core.services.sessions`` the same pair a Workbench turn already
+    answers, under this invocation's own authority: a local invocation keeps
+    standalone Owner semantics, and a remote one is the caller the host signed.
+    Saved automation CONTROL is deliberately not here — running, pausing or
+    removing a stored definition stays Editor admission over the authority the
+    definition already carries, and must not restamp itself to whoever asked.
+
+    Returns the target it read, because half the question can only be asked later:
+    a target whose Session does not exist yet is admitted by Scope and Agent, and
+    which Agent was selected is not known until the caller resolves it. Callers
+    that can name such a target finish with ``_require_cli_target_placement``.
+    """
+
+    target = _resolve_command_target(session_id, session_key)
+    target_session_id = target.session_id
+    if not target_session_id:
+        return target
+
+    from core.services import sessions as sessions_service
+    from core.vibe_agents import VibeAgentAccessError
+    from vibe.authorization import InstanceAuthorizationError
+
+    _ensure_cli_sqlite_state()
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.connect() as conn:
+            sessions_service.require_session_turn_authority(conn, target_session_id)
+    except LookupError as exc:
+        # Same meaning ``vibe session get`` gives it: a Session the caller may
+        # not reach is not a Session they get to learn about.
+        raise TaskCliError(
+            str(exc),
+            code="session_not_found",
+            hint="Target a Session you can continue, or create a new one for this work.",
+            help_command=help_command,
+            details={"session_id": target_session_id},
+        ) from exc
+    except InstanceAuthorizationError as exc:
+        raise TaskCliError(
+            str(exc),
+            code=exc.code,
+            help_command=help_command,
+            details={"session_id": target_session_id, "minimum_role": exc.minimum_role},
+        ) from exc
+    except VibeAgentAccessError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="agent_access_forbidden",
+            hint="The Agent this Session runs on is not one you can use.",
+            help_command=help_command,
+            details={"session_id": target_session_id},
+        ) from exc
+    finally:
+        engine.dispose()
+    return target
+
+
+def _require_cli_placement_authority(
+    scope_key: str,
+    *,
+    agent: Optional[VibeAgent],
+    agent_name: Optional[str],
+) -> None:
+    """Admit a definition that will create its Sessions later, where it will create them.
+
+    ``_require_cli_turn_authority`` answers this for a definition bound to a Session
+    that exists, and the reservation writer answers it for one that reserves during
+    the edit. A ``create_per_run`` definition does neither: it records a destination
+    and creates a Session there on every fire, so without this the placement was
+    admitted for the first time at dispatch — long after the caller who chose it
+    could be told no.
+
+    Refusals travel as they are: ``_print_task_error`` gives each one the code its
+    preflight sibling already reports.
+    """
+
+    from core.services import sessions as sessions_service
+
+    _ensure_cli_sqlite_state()
+    sessions_service.require_session_placement_authority(
+        scope_key=scope_key,
+        agent_id=agent.id if agent else None,
+        agent_name=agent.name if agent else (agent_name or None),
+    )
+
+
+def _require_cli_target_placement(
+    target: _CommandTarget,
+    *,
+    agent: Optional[VibeAgent],
+    agent_name: Optional[str] = None,
+) -> None:
+    """Finish ``_require_cli_turn_authority`` for a target that has no Session yet.
+
+    A legacy key naming a thread nobody has opened is a real, supported target:
+    the work is stored now and its Session is created on the first dispatch. So
+    it is admitted like the placement it is, once the Agent that dispatch will
+    select is known — not left unasked because there was no row to ask about.
+    """
+
+    if not target.placement_scope_key:
+        return
+    _require_cli_placement_authority(
+        target.placement_scope_key,
+        agent=agent,
+        agent_name=agent_name,
+    )
 
 
 def _default_session_id_from_caller(caller_context) -> Optional[str]:
@@ -2573,6 +3467,12 @@ def _validate_callback_session_id(session_id: str, *, help_command: str) -> None
             help_command=help_command,
             details={"session_id": session_id},
         ) from exc
+    # A callback is a turn in the Session it names, posted by this run. Both
+    # spellings reach here -- an explicit ``--callback-session-id`` and the
+    # caller's own Session when Avibe defaults it -- and the answer is needed
+    # before the run is reserved or enqueued, because the callback route is
+    # recorded on the row and replayed under the authority stored with it.
+    _require_cli_turn_authority(session_id, help_command=help_command)
 
 
 def _resolve_runs_list_session_filter(args) -> Optional[str]:
@@ -3019,6 +3919,9 @@ def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: 
             "last_error": watch.last_error,
         }
     payload = watch.to_dict()
+    from storage.message_deliveries import public_message_metadata
+
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
     payload.update(derived)
     return payload
 
@@ -3122,8 +4025,16 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
+    from storage.message_deliveries import public_message_metadata
+
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
+    activity_at = normalized.get("last_activity_at") or normalized.get("started_at")
+    activity_basis = (
+        "output"
+        if normalized.get("last_activity_at")
+        else ("start" if activity_at else None)
+    )
     if brief:
         return {
             "id": normalized.get("id"),
@@ -3134,20 +4045,108 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
             "created_at": normalized.get("created_at"),
             "started_at": normalized.get("started_at"),
+            "last_activity_at": activity_at,
+            "activity_basis": activity_basis,
+            "activity_age_seconds": _seconds_since_iso(activity_at),
             "completed_at": normalized.get("completed_at"),
             "error": normalized.get("error"),
             "callback_session_id": normalized.get("callback_session_id"),
             "callback_status": normalized.get("callback_status"),
             "callback_run_id": normalized.get("callback_run_id"),
         }
+    normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
     return normalized
+
+
+def cmd_harness_status(_args) -> int:
+    """Print one bounded operational snapshot across Harness work types."""
+
+    from core.services.harness_status import build_harness_status
+    from vibe import internal_client
+
+    try:
+        language = _configured_cli_language()
+        request_store = _task_request_store()
+        sqlite_store = request_store.sqlite_backend
+        if sqlite_store is None:
+            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
+        fetch_limit = MAX_PAGE_LIMIT + 1
+        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
+        raw_watches = sqlite_store.list_enabled_definitions(
+            "watch",
+            limit=fetch_limit,
+        )
+        raw_tasks = sqlite_store.list_enabled_definitions(
+            "scheduled",
+            limit=fetch_limit,
+        )
+        runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
+
+        try:
+            response = asyncio.run(
+                internal_client.list_running_agents(
+                    run_ids=[str(row.get("id")) for row in raw_runs if row.get("id")]
+                )
+            )
+            body = response.get("body") if isinstance(response, dict) else None
+            runtime_snapshot = dict(body) if isinstance(body, dict) else {}
+            status_code = response.get("status_code") if isinstance(response, dict) else None
+            runtime_snapshot["available"] = status_code == 200 and bool(
+                runtime_snapshot.get("ok")
+            )
+            if not runtime_snapshot["available"]:
+                runtime_snapshot["error"] = i18n_t(
+                    "harness.cli.error.controllerStatus",
+                    language,
+                    status=status_code,
+                )
+        except internal_client.InternalServerTimeout:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+            }
+        except internal_client.InternalServerUnavailable:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+            }
+
+        # Ownership is a point-in-time controller fact. Keep only Runs that were
+        # active on both sides of that snapshot so a Run completing during the
+        # request cannot be mislabeled as owner-missing.
+        active_run_ids_after = sqlite_store.active_run_ids(
+            row.get("id") for row in raw_runs
+        )
+        raw_runs = [
+            row for row in raw_runs if str(row.get("id")) in active_run_ids_after
+        ]
+
+        snapshot = build_harness_status(
+            runs=raw_runs[:MAX_PAGE_LIMIT],
+            watches=raw_watches[:MAX_PAGE_LIMIT],
+            tasks=raw_tasks[:MAX_PAGE_LIMIT],
+            runtime_snapshot=runtime_snapshot,
+            truncated={
+                "runs": runs_truncated,
+                "watches": len(raw_watches) > MAX_PAGE_LIMIT,
+                "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
+            },
+        )
+        _print_cli_payload("harness_status", **snapshot)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe harness status --help")
+        return 1
 
 
 def _seconds_since_iso(timestamp: object) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        started_at = datetime.fromisoformat(timestamp)
+        started_at = datetime.fromisoformat(text)
     except ValueError:
         return None
     if started_at.tzinfo is None:
@@ -3395,6 +4394,7 @@ def cmd_task_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         command, shell_command, has_command = _resolve_task_command(
             args,
             help_command="vibe task add --help",
@@ -3471,6 +4471,15 @@ def cmd_task_add(args):
                 required=session_policy == "existing",
                 help_command="vibe task add --help",
             )
+            # Before the reservation and before the definition row: a stored
+            # schedule fires under the authority written with it, so the Session
+            # it will speak in is admitted while the caller is still here to be
+            # told no.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe task add --help",
+            )
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=getattr(args, "cwd", None),
                 existing_cwd=None,
@@ -3498,7 +4507,18 @@ def cmd_task_add(args):
             expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
                 agent_resolution
             )
-            if session_policy == "create_once":
+            # Where every future fire lands, admitted before the definition row.
+            # A named target whose Session is still future, a per-run definition
+            # that reserves one on each fire, and a reserved reusable Session all
+            # ask the reservation writer's question; the first two ask it here.
+            _require_cli_target_placement(command_target, agent=agent, agent_name=agent_name)
+            if session_policy == "create_per_run":
+                _require_cli_placement_authority(
+                    scope_key or "",
+                    agent=agent,
+                    agent_name=agent_name,
+                )
+            elif session_policy == "create_once":
                 session_id = _reserve_definition_session(
                     agent_name=agent_name,
                     agent_id=agent.id if agent else None,
@@ -3579,6 +4599,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         else:
             try:
@@ -3611,6 +4632,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -3691,6 +4713,33 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
+    except TaskScheduleRetired as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskScheduleRetired.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskScheduleRetired.hint", lang, id=task_id),
+                help_command=f"vibe task update {task_id} --help",
+                details={"task_id": task_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
@@ -4002,6 +5051,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -4088,7 +5138,6 @@ def cmd_task_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
 
         message_changed = any(
             getattr(args, name, None) is not None
@@ -4117,6 +5166,29 @@ def cmd_task_update(args):
             next_schedule_type=schedule_type,
             help_command="vibe task update --help",
         )
+        # Which Session this definition will actually speak in, decided by the
+        # policy above rather than by what is stored today.
+        retains_existing_session = _update_retains_existing_session(
+            session_policy,
+            stored_session_id=task.session_id,
+            create_session=bool(getattr(args, "create_session", False)),
+        )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
+        )
+        command_target = _CommandTarget()
+        if retains_existing_session:
+            # An update rewrites the definition under the invoker, so the target it
+            # keeps -- named here or inherited by leaving the binding alone -- is
+            # reauthorized, unlike run/pause/resume, which only steer a definition
+            # that already carries its own authority.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe task update --help",
+            )
         explicit_cwd = getattr(args, "cwd", None)
         _reject_inert_create_once_cwd_update(
             explicit_cwd=explicit_cwd,
@@ -4136,14 +5208,7 @@ def cmd_task_update(args):
         # into ``session_workdir``, and for a command task that answer is the command's
         # directory: an unrelated ``--name`` edit on a reserved definition wrote the
         # subprocess directory into ``metadata["session_workdir"]``.
-        command_only_cwd = task.has_command and (
-            session_policy == "existing"
-            or (
-                session_policy == "create_once"
-                and bool(task.session_id)
-                and not getattr(args, "create_session", False)
-            )
-        )
+        command_only_cwd = task.has_command and retains_existing_session
         if command_only_cwd:
             session_workdir = _stored_session_workdir(task, metadata)
             cwd = _resolve_command_only_cwd(
@@ -4205,12 +5270,17 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # Every branch below either rebinds this or leaves the definition's Agent to
+        # someone else; the reservation writer reads it either way, and without a
+        # value the follow-the-Session branch raised UnboundLocalError there.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future fire onto a different Agent.
+            # future fire onto a different Agent. The reservation below still resolves
+            # and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(
@@ -4234,7 +5304,20 @@ def cmd_task_update(args):
         expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
             agent_resolution
         )
-        if session_policy == "create_once" and (
+        # See ``vibe task add``: the effective target's placement, once the Agent
+        # this edit selects is known.
+        _require_cli_target_placement(
+            command_target,
+            agent=agent_resolution.agent,
+            agent_name=agent_name,
+        )
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key,
+                agent=agent_resolution.agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
@@ -4357,6 +5440,7 @@ def cmd_task_update(args):
             metadata=metadata,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -4437,6 +5521,14 @@ def cmd_hook_send(args):
             deliver_key=getattr(args, "deliver_key", None),
             help_command="vibe hook send --help",
         )
+        # Deprecated, but it still queues a real Agent turn, so it is admitted
+        # like one -- including through the legacy key, which names the same
+        # Session by its scope and thread.
+        command_target = _require_cli_turn_authority(
+            session_id,
+            session_key=session_key,
+            help_command="vibe hook send --help",
+        )
         message = _resolve_prompt_input(
             args,
             help_command="vibe hook send --help",
@@ -4449,6 +5541,16 @@ def cmd_hook_send(args):
             help_command="vibe hook send --help",
         )
         agent = agent_resolution.agent
+        # The other half of the gate above, now that the Agent this hook will run
+        # on is known: a key whose thread has not been opened yet reserves its
+        # Session at dispatch, in the Scope named here.
+        _require_cli_target_placement(command_target, agent=agent)
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        # Deprecated, but it still enqueues an Agent turn, so it travels with the
+        # same initiating snapshot ``vibe agent run`` records. Empty for a local
+        # caller, exactly as before.
+        provenance_metadata = metadata_with_resource_user_context(None) or None
         request = _task_request_store().enqueue_hook_send(
             session_key=session_key,
             session_id=session_id,
@@ -4459,6 +5561,7 @@ def cmd_hook_send(args):
             agent_id=agent.id if agent else None,
             run_type="agent_run",
             source_kind="cli",
+            metadata=provenance_metadata,
             expected_enabled_agent_id=(
                 agent.id
                 if agent is not None and agent_resolution.requires_enabled_write_guard
@@ -4562,8 +5665,20 @@ def cmd_agent_list(args):
 
 
 def cmd_agent_show(args):
+    # Reading one Agent is selection-shaped — the row names its backend, model and
+    # instructions — so it answers under use access to that exact resource, the
+    # same ACL ``vibe agent list`` already filters by.
     try:
-        agent = _agent_store().require(args.name)
+        agent = _agent_store().require_accessible(args.name)
+    except VibeAgentAccessError as exc:
+        _print_task_error(
+            TaskCliError(str(exc), code="agent_access_forbidden", details={"agent": args.name})
+        )
+        return 1
+    except Exception as exc:
+        _print_task_error(TaskCliError(str(exc), code="agent_not_found", details={"agent": args.name}))
+        return 1
+    try:
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
     except Exception as exc:
@@ -4632,8 +5747,15 @@ def cmd_agent_models(args):
             )
         agent = None
         if name:
+            # Naming an Agent here reads that Agent's own model and effort, so it
+            # follows the same use access as selecting it. The catalog options
+            # below stay open: they describe a backend, not an Agent.
             try:
-                agent = _agent_store().require(name)
+                agent = _agent_store().require_accessible(name)
+            except VibeAgentAccessError as exc:
+                raise TaskCliError(
+                    str(exc), code="agent_access_forbidden", details={"agent": name}
+                ) from exc
             except Exception as exc:
                 raise TaskCliError(str(exc), code="agent_not_found", details={"agent": name}) from exc
             backend = agent.backend
@@ -5196,6 +6318,60 @@ def _definition_session_policy_for_update(
     return current_policy or "existing"
 
 
+def _update_retains_existing_session(
+    session_policy: str,
+    *,
+    stored_session_id: Optional[str],
+    create_session: bool,
+) -> bool:
+    """Whether the edited definition keeps speaking in a Session that already exists.
+
+    ``existing`` binds to one by definition, and a reusable ``create_once`` binding
+    that has already reserved keeps it unless this edit asks for a replacement. The
+    remaining shapes -- a first or replacement reservation, and one Session per run
+    -- place the work somewhere that does not exist yet, so the old row is not the
+    target and the destination Scope and Agent are what has to be admitted.
+    """
+
+    if session_policy == "existing":
+        return True
+    return (
+        session_policy == "create_once"
+        and bool(stored_session_id)
+        and not create_session
+    )
+
+
+def _follows_session_agent_after_update(
+    metadata: dict[str, Any],
+    *,
+    session_policy: str,
+) -> bool:
+    """Whether Agent authority still belongs to a Session, under this edit's policy.
+
+    "Follow the bound Session's Agent" is authority held by a Session the definition
+    has: ``--clear-agent`` hands it to the one it is bound to, and the reset rebind
+    stamps it on a ``create_once`` definition pointed at a Session it just made. The
+    marker then stops the edit from resolving an Agent, because there is nothing to
+    decide -- the row the definition speaks in already answers, and re-resolving
+    would pin today's default over it (HFR-245).
+
+    ``create_per_run`` has no such row: every fire makes a throwaway Session from the
+    definition itself, so the marker outlives what it described. Left standing it
+    kept the edit from resolving an Agent while each future fire still picked one --
+    the Scope's default, admitted for nobody, because the placement guard below was
+    handed no Agent to ask about. It is cleared here, before that Agent is resolved
+    and admitted, rather than after the row is saved.
+    """
+
+    if not metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY):
+        return False
+    if session_policy != "create_per_run":
+        return True
+    metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
+    return False
+
+
 def _reject_inert_create_once_cwd_update(
     *,
     explicit_cwd: Optional[str],
@@ -5594,6 +6770,7 @@ def _reserve_cli_session(
     metadata: Optional[dict] = None,
     session_anchor_target=None,
     visibility: str = "background",
+    authorization_context=None,
 ) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
@@ -5616,6 +6793,7 @@ def _reserve_cli_session(
             visibility=visibility,
             metadata={"scope_placement": "explicit", **dict(metadata or {})},
             require_enabled_agent=True,
+            authorization_context=authorization_context,
         )
     else:
         session_anchor = f"standalone_{uuid4().hex[:12]}"
@@ -5630,6 +6808,7 @@ def _reserve_cli_session(
             visibility=visibility,
             metadata=metadata,
             require_enabled_agent=True,
+            authorization_context=authorization_context,
         )
     if not session_id:
         raise TaskCliError(
@@ -5660,6 +6839,7 @@ def _reserve_forked_cli_session(
     reasoning_effort: Optional[str],
     scope_key: Optional[str],
     visibility: str,
+    authorization_context=None,
 ):
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,
@@ -5677,6 +6857,7 @@ def _reserve_forked_cli_session(
             scope_id=scope_key,
             visibility=visibility,
             db_path=paths.get_sqlite_state_path(),
+            authorization_context=authorization_context,
         )
     except SessionForkError as exc:
         if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
@@ -5793,13 +6974,11 @@ def cmd_agent_run(args):
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
-            AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
             raise TaskCliError(
                 "--send-now requires an existing Agent Session",
                 code="send_now_requires_existing_session",
@@ -5884,6 +7063,10 @@ def cmd_agent_run(args):
                 session_key=session_key,
                 help_command="vibe agent run --help",
             )
+            # The Agent resolved above is the SESSION's -- an explicit --agent
+            # may only restate it -- so admitting the caller to the Session
+            # answers both halves of the turn it is about to queue.
+            _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
         if session_policy == "existing" and (args.post_to or args.deliver_key):
             _validate_delivery_args(
                 session_id=session_id,
@@ -5898,6 +7081,9 @@ def cmd_agent_run(args):
         legacy_deliver_key = args.deliver_key
         if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
             legacy_deliver_key = None
+        # The caller's own authority, resolved once. A remote caller reserves
+        # under it; a local caller stays ``None`` and keeps Owner semantics.
+        caller_authorization = caller_resource_user_context(caller_context)
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -5906,6 +7092,7 @@ def cmd_agent_run(args):
                 metadata=session_metadata,
                 session_anchor_target=legacy_reservation_target,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             reserved_session_id = session_id
         elif session_policy == "none":
@@ -5915,6 +7102,7 @@ def cmd_agent_run(args):
                 workdir=run_cwd,
                 metadata=session_metadata,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             reserved_session_id = session_id
         elif session_policy == "fork":
@@ -5925,6 +7113,7 @@ def cmd_agent_run(args):
                 reasoning_effort=args.reasoning_effort,
                 scope_key=scope_key,
                 visibility=visibility,
+                authorization_context=caller_authorization,
             )
             session_id = fork_result.session_id
             reserved_session_id = session_id
@@ -5953,6 +7142,15 @@ def cmd_agent_run(args):
                 **provenance_metadata,
                 "session_fork": fork_result.fork.to_metadata(),
             }
+        from storage.resource_access_service import metadata_with_resource_user_context
+
+        # `caller_context` above is descriptive provenance. Deferred execution
+        # rechecks authority from the stored snapshot instead, so a remote
+        # caller's own identity has to travel with the Run; a local caller keeps
+        # no key and stays local.
+        provenance_metadata = metadata_with_resource_user_context(
+            provenance_metadata, caller_authorization
+        )
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -6008,7 +7206,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -6188,6 +7386,17 @@ def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = No
     return result
 
 
+def _record_live_cancel_fallback(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    reason_code: str,
+    detail: object | None = None,
+) -> dict:
+    store.cancel_run(run_id)
+    return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
+
+
 def _initial_cancel_result(run: dict | None) -> dict:
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
@@ -6240,22 +7449,33 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str) -> dict:
+async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id)
+    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     session_id = _run_session_id(run)
+    run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
-        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="internal_unavailable",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="live_cancel_failed",
+            detail=str(exc),
+        )
 
     status_code = controller_result.get("status_code")
     try:
@@ -6263,8 +7483,43 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     except (TypeError, ValueError):
         normalized_status_code = None
     body = controller_result.get("body") or {}
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_detached"
+    ):
+        saved = store.get_run(run_id)
+        return {
+            "code": "run_canceled_without_live_stop",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": bool(
+                saved and normalize_run_status(saved.get("status")) == "canceled"
+            ),
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run was canceled without stopping the shared Session turn.",
+        }
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_settled"
+    ):
+        return {
+            "code": "run_already_settled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": False,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run had already settled before cancellation acquired ownership.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
-        return _recorded_only_cancel_result(
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             detail={
                 "controller_status_code": normalized_status_code,
@@ -6272,7 +7527,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             },
         )
 
-    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    run_terminalized = store.mark_run_canceled(run_id)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,
@@ -6290,13 +7545,14 @@ def cmd_runs_cancel(args):
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
-    if not canceled:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
-    cancel_result = _initial_cancel_result(existing)
     if _should_attempt_live_run_cancel(existing):
         cancel_result = _cancel_live_agent_run(store, existing)
+    else:
+        canceled = store.cancel_run(args.run_id)
+        if not canceled:
+            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+            return 1
+        cancel_result = _initial_cancel_result(existing)
     run = store.get_run(args.run_id)
     _print_cli_payload(
         "agent_run",
@@ -6308,6 +7564,203 @@ def cmd_runs_cancel(args):
     return 0
 
 
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def cmd_data_retention(args):
+    from storage import agent_events_retention
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    try:
+        ensure_sqlite_state()
+        engine = create_sqlite_engine()
+        language = _configured_cli_language()
+        days_override = getattr(args, "days", None)
+        # The configured window is the default; --days overrides for this call.
+        # A recovered/unreadable config must not silently run with substituted
+        # defaults: deletion is irreversible, so the run refuses unless the
+        # user supplies an explicit --days window.
+        policy = agent_events_retention.RetentionPolicy(
+            enabled=False,
+            days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+            recovered=True,
+        )
+        try:
+            config = V2Config.load()
+            policy = agent_events_retention.resolve_policy(config)
+        except Exception:
+            # Unreadable/missing config: the controller disables the
+            # automatic pass, so the status must not claim it is enabled.
+            policy = agent_events_retention.RetentionPolicy(
+                enabled=False,
+                days=agent_events_retention.DEFAULT_RETENTION_DAYS,
+                recovered=True,
+            )
+        retention_days = policy.days
+        enabled = policy.enabled
+        config_recovered = policy.recovered
+        if days_override is not None:
+            retention_days = int(days_override)
+            try:
+                agent_events_retention.validate_retention_days(retention_days)
+            except ValueError:
+                # Never silently clamp an explicit window: --days 0 would
+                # delete everything older than one day after normalization.
+                print(
+                    i18n_t(
+                        "data.retention.invalidDays",
+                        language,
+                        minimum=agent_events_retention.MIN_RETENTION_DAYS,
+                        maximum=agent_events_retention.MAX_RETENTION_DAYS,
+                    ),
+                    file=sys.stderr,
+                )
+                return 1
+            config_recovered = False
+        should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
+        if config_recovered and should_run:
+            print(
+                i18n_t("data.retention.configRecovered", language),
+                file=sys.stderr,
+            )
+            return 1
+
+        exit_code = 0
+        if should_run:
+            payload = agent_events_retention.run_once(
+                engine,
+                retention_days=retention_days,
+                force=True,
+                compact=bool(getattr(args, "compact", False)),
+            )
+            run_status = str(payload.get("status"))
+            if run_status in {"busy", "lease_lost", "cancelled"}:
+                # busy: nothing deleted; lease_lost: partial deletion without
+                # completion marker — automation must retry both, not record
+                # success.
+                exit_code = 1
+            # ok_with_contested_compaction keeps exit 0: deletion completed
+            # and its marker is written; only the compaction was contested.
+        else:
+            payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            _print_data_retention_human(payload, language)
+        return exit_code
+    except Exception as exc:  # noqa: BLE001
+        print(i18n_t("data.retention.error", _configured_cli_language(), error=str(exc)), file=sys.stderr)
+        return 1
+
+
+_COMPACTION_REASON_KEYS = {
+    "checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "post_checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
+    "insufficient_free_space": "data.retention.compactionReasonFreeSpace",
+    "free_space_unknown": "data.retention.compactionReasonFreeSpace",
+}
+
+
+def _print_data_retention_human(payload: dict, language: str) -> None:
+    from storage import agent_events_retention as _retention
+
+    mode = str(payload.get("mode") or "run")
+    if mode == "plan":
+        plan = payload.get("plan") or {}
+        print(
+            i18n_t(
+                "data.retention.plan",
+                language,
+                count=int(plan.get("eligible_count") or 0),
+                size=_format_byte_size(int(plan.get("eligible_logical_bytes") or 0)),
+                days=int(plan.get("retention_days") or _retention.DEFAULT_RETENTION_DAYS),
+            )
+        )
+        last = payload.get("last_run") or {}
+        if last:
+            print(i18n_t("data.retention.lastRun", language, at=str(last.get("finished_at")), rows=int(last.get("deleted_rows") or 0)))
+        else:
+            print(i18n_t("data.retention.neverRun", language))
+        if payload.get("enabled") is False:
+            print(i18n_t("data.retention.disabled", language))
+        compaction = payload.get("compaction") or {}
+        print(
+            i18n_t(
+                "data.retention.compaction",
+                language,
+                size=_format_byte_size(int(compaction.get("reclaimable_bytes") or 0)),
+            )
+        )
+        return
+    status = str(payload.get("status") or "unknown")
+    if status == "ok":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        compaction = payload.get("compaction") or {}
+        compaction_status = str(compaction.get("status") or "not_attempted")
+        if compaction_status == "vacuumed":
+            print(i18n_t("data.retention.compacted", language, size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
+        elif compaction_status == "deferred":
+            print(
+                i18n_t(
+                    "data.retention.compactionDeferred",
+                    language,
+                    reason=i18n_t(_COMPACTION_REASON_KEYS.get(str(compaction.get("reason")), "data.retention.compactionReasonOther"), language),
+                )
+            )
+        elif compaction_status == "skipped":
+            print(i18n_t("data.retention.compactionSkipped", language))
+    elif status == "not_due":
+        print(i18n_t("data.retention.notDue", language))
+    elif status == "busy":
+        print(i18n_t("data.retention.busy", language))
+    elif status == "lease_lost":
+        print(i18n_t("data.retention.leaseLost", language))
+    elif status == "cancelled":
+        print(i18n_t("data.retention.cancelled", language))
+    elif status == "ok_with_contested_compaction":
+        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        print(i18n_t("data.retention.compactionDeferred", language, reason=i18n_t("data.retention.compactionReasonOther", language)))
+    else:
+        print(f"retention status: {status}")
+
+
+def cmd_data_skill_usage(args):
+    """Instance-management diagnostics; statistics remain off the user-facing UI."""
+    try:
+        from storage.resource_access_service import resolve_resource_access_context
+        from storage import skill_observability
+        from core.skill_observability import collection_enabled
+        from storage.db import get_cached_sqlite_engine
+
+        language = _configured_cli_language()
+        caller = caller_resource_user_context(caller_context_from_env())
+        if not resolve_resource_access_context(caller).can_manage_instance:
+            raise TaskCliError(i18n_t("data.skillUsage.ownerRequired", language), code="forbidden")
+        if args.clear and not args.yes:
+            raise TaskCliError(i18n_t("data.skillUsage.confirmationRequired", language), code="confirmation_required")
+        if args.yes and not args.clear:
+            raise TaskCliError(i18n_t("data.skillUsage.clearRequired", language), code="invalid_arguments")
+        enabled = collection_enabled()
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
+        with get_cached_sqlite_engine().begin() as conn:
+            result = skill_observability.clear(conn) if args.clear else skill_observability.status(conn)
+        _print_cli_payload("skill_usage", enabled=enabled, **result)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe data skill-usage --help")
+        return 1
+
+
 def cmd_data_query(args):
     try:
         sql = getattr(args, "sql", None)
@@ -6315,7 +7768,10 @@ def cmd_data_query(args):
         if sql_file:
             sql = sys.stdin.read() if sql_file == "-" else Path(sql_file).read_text(encoding="utf-8")
         page_request = _page_request_from_args(args, help_command="vibe data query --help")
-        result = run_read_only_query(sql or "", page_request=page_request)
+        result = run_read_only_query(
+            sql or "", page_request=page_request,
+            user_context=caller_resource_user_context(caller_context_from_env()),
+        )
         command = ["vibe", "data", "query"]
         if getattr(args, "sql", None):
             _add_optional_arg(command, "--sql", getattr(args, "sql", None))
@@ -6484,7 +7940,9 @@ def cmd_session_send_now(args):
     try:
         engine = _open_session_engine()
         with engine.connect() as conn:
-            sessions_service.get_active_session(conn, session_id)
+            # Promotion is chat work, so it is authorized before the controller
+            # is asked to act — the IPC hop carries no caller identity.
+            sessions_service.require_session_chat_access(conn, session_id)
         controller_result = asyncio.run(internal_client.send_now(session_id))
     except LookupError:
         _print_task_error(
@@ -6570,6 +8028,8 @@ def _session_queue_row(row: dict, *, position: int) -> dict:
         "author": row.get("author"),
         "source": row.get("source"),
         "run_id": _queued_agent_run_id(row),
+        "requires_explicit_retry": row.get("requires_explicit_retry") is True,
+        "retry_reason": row.get("retry_reason"),
     }
 
 
@@ -6585,7 +8045,7 @@ def cmd_session_queue_list(args):
         )
         engine = _open_session_engine()
         with engine.connect() as conn:
-            sessions_service.get_active_session(conn, session_id)
+            sessions_service.require_session_chat_access(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
                 raise TaskCliError(
@@ -6646,7 +8106,9 @@ def cmd_session_queue_remove(args):
             from storage.agent_session_rows import reserve_write_lock
 
             reserve_write_lock(conn)
-            sessions_service.get_active_session(conn, session_id)
+            # Inside the writer transaction, before the row is retired: the
+            # refusal and the delete decide on the same committed state.
+            sessions_service.require_session_chat_access(conn, session_id)
             target = resolve_session_id_target(session_id)
             if target.session_key.platform != "avibe":
                 raise TaskCliError(
@@ -8738,6 +10200,9 @@ def cmd_vault_request(args):
     except vault_service.SecretNameCaseConflictError as exc:
         _print_task_error(TaskCliError(str(exc), code="secret_name_case_conflict", help_command=help_command))
         return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
+        return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
@@ -8814,6 +10279,9 @@ def cmd_vault_sign(args):
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
         return 1
     except api.VaultApiError as exc:
         _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
@@ -9306,31 +10774,6 @@ def cmd_vault_fetch(args):
     return 0 if 200 <= status <= 299 else 1
 
 
-def _write_private_file(path: Path, content: str) -> None:
-    """Atomically write ``content`` to ``path`` as a 0600 file.
-
-    ``tempfile.mkstemp`` creates the temp file 0600 from the start, so the secret is never
-    momentarily world-readable even when ``path`` pre-existed with looser perms (``O_TRUNC``
-    would have kept the old mode until a late ``chmod``). ``os.replace`` swaps it in
-    atomically — a crash mid-write leaves either the old file or the complete new one, never
-    a truncated/partial secret.
-    """
-    import tempfile
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def cmd_vault_export(args):
     # Deprecated. avault (the custody core) deliberately has no plaintext-to-stdout sink —
     # emitting `export NAME=...` for `eval` would hand the decrypted value back to the shell
@@ -9470,9 +10913,10 @@ def cmd_vault_key_export(args):
         blob = api.avault_key_export(passphrase)
         out = getattr(args, "out", None)
         if out:
-            # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
-            # no window where it's world-readable under a permissive umask.
-            _write_private_file(Path(out), json.dumps(blob, indent=2) + "\n")
+            # 0600 from the moment the file exists (the blob holds the passphrase-wrapped
+            # key) — write_atomic leaves no window where it's world-readable, whatever the
+            # umask and whatever mode ``out`` already had.
+            write_atomic(Path(out), json.dumps(blob, indent=2) + "\n")
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))
@@ -9548,6 +10992,7 @@ def cmd_watch_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         session_default_notice = _apply_caller_session_default(
             args,
             caller_context,
@@ -9564,6 +11009,13 @@ def cmd_watch_add(args):
         session_id, session_key = _resolve_session_target_args(
             args,
             required=session_policy == "existing",
+            help_command="vibe watch add --help",
+        )
+        # Same gate as ``vibe task add``: the waiter's hook is a turn in this
+        # Session, replayed later under the authority stored with the Watch.
+        command_target = _require_cli_turn_authority(
+            session_id,
+            session_key=session_key,
             help_command="vibe watch add --help",
         )
         agent_resolution = _resolve_agent_target(
@@ -9589,7 +11041,15 @@ def cmd_watch_add(args):
             if session_policy != "existing"
             else None
         )
-        if session_policy == "create_once":
+        # See ``vibe task add``: where the stored Watch's hook will land.
+        _require_cli_target_placement(command_target, agent=agent, agent_name=agent_name)
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key or "",
+                agent=agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 agent_id=agent.id if agent else None,
@@ -9615,7 +11075,6 @@ def cmd_watch_add(args):
             timeout_seconds=float(args.timeout),
             retry_delay_seconds=float(args.retry_delay),
             lifetime_timeout_seconds=float(args.lifetime_timeout),
-            mode=mode,
             help_command="vibe watch add --help",
         )
         prefix = _normalize_task_name(getattr(args, "prefix", None))
@@ -9649,6 +11108,7 @@ def cmd_watch_add(args):
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_store = _watch_runtime_store()
@@ -9773,6 +11233,7 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -9902,7 +11363,6 @@ def cmd_watch_update(args):
             metadata.pop(BINDING_FOLLOWS_SESSION_METADATA_KEY, None)
         elif getattr(args, "clear_agent", False):
             metadata[BINDING_FOLLOWS_SESSION_METADATA_KEY] = True
-        follows_session_agent = bool(metadata.get(BINDING_FOLLOWS_SESSION_METADATA_KEY))
         cwd = (
             None
             if getattr(args, "clear_cwd", False)
@@ -9931,7 +11391,6 @@ def cmd_watch_update(args):
             timeout_seconds=timeout_seconds,
             retry_delay_seconds=retry_delay_seconds,
             lifetime_timeout_seconds=lifetime_timeout_seconds,
-            mode=mode,
             help_command="vibe watch update --help",
         )
         session_policy = _definition_session_policy_for_update(
@@ -9941,9 +11400,24 @@ def cmd_watch_update(args):
             next_schedule_type="watch",
             help_command="vibe watch update --help",
         )
-        creates_future_session = session_policy == "create_per_run" or (
-            session_policy == "create_once" and (bool(getattr(args, "create_session", False)) or not session_id)
+        creates_future_session = not _update_retains_existing_session(
+            session_policy,
+            stored_session_id=session_id,
+            create_session=bool(getattr(args, "create_session", False)),
         )
+        # ...and therefore whether a Session can still own the Agent choice.
+        follows_session_agent = _follows_session_agent_after_update(
+            metadata,
+            session_policy=session_policy,
+        )
+        command_target = _CommandTarget()
+        if not creates_future_session:
+            # The effective target, named or inherited -- see ``vibe task update``.
+            command_target = _require_cli_turn_authority(
+                session_id,
+                session_key=session_key,
+                help_command="vibe watch update --help",
+            )
         session_workdir = (
             _resolve_definition_session_cwd(
                 explicit_cwd=getattr(args, "cwd", None),
@@ -9966,12 +11440,16 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         agent_resolution = _AgentTargetResolution(None, False)
+        # See ``vibe task update``: the reservation writer reads this on the
+        # follow-the-Session branch too, where nothing else binds it.
+        agent = None
         if follows_session_agent and not explicit_agent_requested:
             # Deliberately resolves NOTHING. Re-resolving here would write today's
             # scope/default Agent back onto a definition whose Agent authority now
             # belongs to its bound Session, and the pin wins over the Session row at
             # dispatch -- so an unrelated ``--name`` edit would silently move every
-            # future watch hook onto a different Agent.
+            # future watch hook onto a different Agent. The reservation below still
+            # resolves and admits the Agent it gives the Session it creates.
             pass
         elif agent_name is None and session_policy != "existing":
             agent_resolution = _resolve_agent_target(
@@ -9995,7 +11473,20 @@ def cmd_watch_update(args):
         expected_enabled_agent_id, expected_reference_agent_id = _agent_write_guard_ids(
             agent_resolution
         )
-        if session_policy == "create_once" and (
+        # See ``vibe task add``: the effective target's placement, once the Agent
+        # this edit selects is known.
+        _require_cli_target_placement(
+            command_target,
+            agent=agent_resolution.agent,
+            agent_name=agent_name,
+        )
+        if session_policy == "create_per_run":
+            _require_cli_placement_authority(
+                scope_key,
+                agent=agent_resolution.agent,
+                agent_name=agent_name,
+            )
+        elif session_policy == "create_once" and (
             getattr(args, "create_session", False) or not session_id
         ):
             session_id = _reserve_definition_session(
@@ -10077,6 +11568,7 @@ def cmd_watch_update(args):
             **changes,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
@@ -10136,86 +11628,136 @@ def _add_dependency_download_failure(
     retry_action: str | None = None,
     failure_status: str = "fail",
 ) -> None:
+    language = _configured_cli_language()
     error = error or {}
     kind = str(error.get("kind") or "unknown")
-    url = str(error.get("url") or "the selected dependency URL")
+    url = str(error.get("url") or i18n_t("doctor.value.selectedDependencyUrl", language))
     attempts = int(error.get("attempts") or 1)
-    attempt_text = f" after {attempts} attempts" if attempts > 1 else ""
-    retry_action = retry_action or f"Run `vibe doctor repair {repair_target}`."
+    retry_action = retry_action or (
+        i18n_t("doctor.action.repairCommand", _configured_cli_language(), target=repair_target)
+        if repair_target
+        else i18n_t("doctor.action.askillManual", _configured_cli_language())
+    )
     if kind == "http" and error.get("http_status") == 404:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} release asset is missing (HTTP 404): {url}",
-            "Verify the exact URL from another network. If the release asset is absent, upgrade or reinstall Avibe; "
-            "if it works elsewhere, fix the proxy or security gateway.",
+            i18n_t("doctor.item.dependencyHttp404", language, label=label, url=url),
+            i18n_t("doctor.action.dependencyHttp404", language),
             code=f"{code_prefix}_http_404",
+            download_kind=kind,
         )
     elif kind == "http":
         status = error.get("http_status") or "error"
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} request returned HTTP {status}{attempt_text}: {url}",
-            f"Check the exact release asset and any proxy response. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyHttpErrorRetried"
+                if attempts > 1
+                else "doctor.item.dependencyHttpError",
+                language,
+                label=label,
+                status=status,
+                attempts=attempts,
+                url=url,
+            ),
+            i18n_t("doctor.action.dependencyHttpError", language, retry=retry_action),
             code=f"{code_prefix}_http_error",
+            download_kind=kind,
         )
     elif kind == "dns":
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} host DNS lookup failed{attempt_text}: {error.get('host') or url}",
-            f"Fix DNS access to the dependency host. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyDnsFailedRetried"
+                if attempts > 1
+                else "doctor.item.dependencyDnsFailed",
+                language,
+                label=label,
+                attempts=attempts,
+                host=error.get("host") or url,
+            ),
+            i18n_t("doctor.action.dependencyDnsFailed", language, retry=retry_action),
             code=f"{code_prefix}_dns_failed",
+            download_kind=kind,
         )
     elif kind == "tls":
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} TLS verification failed: {url}",
-            "Fix the host CA or HTTPS inspection proxy for the Avibe service, then retry the repair.",
+            i18n_t("doctor.item.dependencyTlsFailed", language, label=label, url=url),
+            i18n_t("doctor.action.dependencyTlsFailed", language),
             code=f"{code_prefix}_tls_failed",
+            download_kind=kind,
         )
     elif kind in {"timeout", "network"}:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} network request failed{attempt_text}: {url}",
-            f"Allow HTTPS access to the dependency host. {retry_action}",
+            i18n_t(
+                "doctor.item.dependencyNetworkFailedRetried"
+                if attempts > 1
+                else "doctor.item.dependencyNetworkFailed",
+                language,
+                label=label,
+                attempts=attempts,
+                url=url,
+            ),
+            i18n_t("doctor.action.dependencyNetworkFailed", language, retry=retry_action),
             code=f"{code_prefix}_{kind}_failed",
+            download_kind=kind,
         )
     elif kind in {"permission", "disk", "io"}:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} could not be stored: {error.get('message') or kind}",
-            "Fix the runtime cache permissions or available disk space, then retry the repair.",
+            i18n_t(
+                "doctor.item.dependencyStoreFailed",
+                language,
+                label=label,
+                reason=error.get("message") or i18n_t("doctor.value.unknownError", language),
+            ),
+            i18n_t("doctor.action.dependencyStoreFailed", language),
             code=f"{code_prefix}_{kind}_failed",
+            download_kind=kind,
         )
     else:
         _add_doctor_item(
             items,
             failure_status,
-            f"{label} is unreachable: {error.get('message') or url}",
-            "Inspect the Avibe log for the matching download exception, then retry the repair.",
+            i18n_t(
+                "doctor.item.dependencyUnreachable",
+                language,
+                label=label,
+                reason=error.get("message") or url,
+            ),
+            i18n_t("doctor.action.dependencyUnreachable", language),
             code=f"{code_prefix}_unreachable",
+            download_kind=kind,
         )
 
 
 def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.dependency_network import probe_url
 
+    language = _configured_cli_language()
     labels = {
         "askill": "askill",
         "avault": "avault",
+        "model-hub-engine": i18n_t("doctor.value.modelHubEngine", language),
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
+        "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
         "node": "Node.js",
     }
     repair_targets = {
         "askill": "askill",
         "avault": "avault",
+        "model-hub-engine": "model-hub-engine",
         "git-runtime": "git-runtime",
+        "memory-runtime": "memory-runtime",
         "tmux": "tmux",
     }
     items: list[dict] = []
@@ -10243,8 +11785,8 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Managed dependency status could not be inspected: {exc}",
-            "Inspect the Avibe log and rerun Doctor.",
+            i18n_t("doctor.item.dependencyStatusFailed", language, reason=exc),
+            i18n_t("doctor.action.dependencyStatusFailed", language),
             code="dependencies.status_failed",
         )
         return items
@@ -10257,21 +11799,35 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         status = str(dependency.get("status") or "missing")
         ready = bool(dependency.get("installed")) and status == "ready"
         version = dependency.get("version")
+        memory_details = (
+            {
+                "dependency_reason": dependency.get("reason"),
+                "dependency_required": bool(dependency.get("required")),
+            }
+            if dependency_id == "memory-runtime"
+            else {}
+        )
         if ready:
-            suffix = f" {version}" if version else ""
             if dependency_id == "git-runtime" and dependency.get("source") == "system":
                 _add_doctor_item(
                     items,
                     "pass",
-                    "Git is ready via the system runtime",
+                    i18n_t("doctor.item.gitSystemReady", language),
                     code="dependencies.git-runtime.system_ready",
                 )
             else:
                 _add_doctor_item(
                     items,
                     "pass",
-                    f"{label}{suffix} is ready",
+                    i18n_t(
+                        "doctor.item.dependencyReadyVersioned" if version else "doctor.item.dependencyReady",
+                        language,
+                        label=label,
+                        version=version,
+                    ),
                     code=f"dependencies.{dependency_id}.ready",
+                    dependency_status=status if dependency_id == "memory-runtime" else None,
+                    **memory_details,
                 )
             continue
 
@@ -10281,20 +11837,26 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} is missing or unsupported",
-                "Install a supported Node.js release (^20.19.0 or >=22.12.0).",
+                i18n_t("doctor.item.nodeNotReady", language, label=label),
+                i18n_t("doctor.action.nodeNotReady", language),
                 code="dependencies.node.not_ready",
             )
             continue
 
         dependency_reason = str(dependency.get("reason") or "")
-        if dependency_reason.endswith("_platform_unsupported"):
+        if status == "unsupported" or dependency_reason.endswith("_platform_unsupported"):
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} is not published for this platform",
-                "Use a system dependency where supported, or run Avibe on a platform with a published runtime.",
-                code=f"dependencies.{dependency_id}.platform_unsupported",
+                i18n_t("doctor.item.dependencyPlatformUnsupported", language, label=label),
+                i18n_t("doctor.action.dependencyPlatformUnsupported", language),
+                code=(
+                    f"dependencies.{dependency_id}.unsupported"
+                    if dependency_id == "memory-runtime"
+                    else f"dependencies.{dependency_id}.platform_unsupported"
+                ),
+                dependency_status=status if dependency_id == "memory-runtime" else None,
+                **memory_details,
             )
             continue
 
@@ -10302,15 +11864,19 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         if dependency_id == "askill" and not api.askill_auto_install_supported():
             repair_target = None
         retry_action = (
-            f"Run `vibe doctor repair {repair_target}`."
+            i18n_t("doctor.action.repairCommand", language, target=repair_target)
             if repair_target
-            else "Install askill manually from https://askill.sh."
+            else i18n_t("doctor.action.askillManual", language)
         )
         probe = None
         if deep and dependency_id == "tmux":
             from core.tmux_runtime import TmuxRuntimeManager
 
             probe = TmuxRuntimeManager().probe_archive_reachability()
+        elif deep and dependency_id == "model-hub-engine":
+            from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+            probe = EngineRuntimeManager().probe_archive_reachability()
         elif deep and dependency_id == "git-runtime":
             from core.git_runtime import GitRuntimeManager
 
@@ -10321,8 +11887,13 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} archive URL uses an unsupported scheme: {probe.get('url') or 'unknown'}",
-                "Configure the dependency manifest with an HTTPS or file URL.",
+                i18n_t(
+                    "doctor.item.dependencyArchiveUrlUnsupported",
+                    language,
+                    label=label,
+                    url=probe.get("url") or i18n_t("doctor.value.unknown", language),
+                ),
+                i18n_t("doctor.action.dependencyArchiveUrlUnsupported", language),
                 code=f"dependencies.{dependency_id}.archive_url_unsupported",
             )
             continue
@@ -10330,12 +11901,32 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             severity,
-            f"{label} is not ready ({status})",
-            retry_action,
-            code=f"dependencies.{dependency_id}.not_ready",
+            (
+                i18n_t(
+                    (
+                        "doctor.item.memoryRuntimeMissing"
+                        if status == "missing"
+                        else "doctor.item.memoryRuntimeError"
+                    ),
+                    language,
+                    reason=_doctor_memory_reason(dependency_reason, language),
+                )
+                if dependency_id == "memory-runtime"
+                else i18n_t("doctor.item.dependencyNotReady", language, label=label)
+            ),
+            i18n_t("doctor.action.dependencyNotReady", language, retry=retry_action),
+            code=(
+                f"dependencies.{dependency_id}.{status}"
+                if dependency_id == "memory-runtime"
+                else f"dependencies.{dependency_id}.not_ready"
+            ),
             repair_target=repair_target,
             repair_risk="low",
+            dependency_status=status,
+            **memory_details,
         )
+        if dependency_id == "memory-runtime":
+            continue
         if not deep:
             continue
 
@@ -10359,15 +11950,15 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "pass",
-                f"{label} download endpoint is reachable: {probe.get('url')}",
+                i18n_t("doctor.item.dependencyReachable", language, label=label, url=probe.get("url")),
                 code=f"dependencies.{dependency_id}.reachable",
             )
         elif not probe.get("checked") and probe.get("reason") == "dependency_probe_unsupported":
             _add_doctor_item(
                 items,
                 "warn",
-                f"{label} server does not support a body-free probe",
-                retry_action,
+                i18n_t("doctor.item.dependencyProbeUnsupported", language, label=label),
+                i18n_t("doctor.action.dependencyProbeUnsupported", language, retry=retry_action),
                 code=f"dependencies.{dependency_id}.probe_unsupported",
             )
         elif probe.get("download_error"):
@@ -10384,17 +11975,28 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 severity,
-                f"{label} archive could not be resolved ({probe.get('reason') or 'unknown'})",
-                "Inspect the dependency manifest and platform mapping before retrying.",
+                i18n_t(
+                    "doctor.item.dependencyProbeUnavailable",
+                    language,
+                    label=label,
+                ),
+                i18n_t("doctor.action.dependencyProbeUnavailable", language),
                 code=f"dependencies.{dependency_id}.probe_unavailable",
+                probe_reason=probe.get("reason"),
             )
     return items
+
+
+def _show_runtime_install(payload: dict) -> dict:
+    install = payload.get("install")
+    return install if isinstance(install, dict) else {}
 
 
 def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     from core.show_runtime import ShowRuntimeManager
 
     items: list[dict] = []
+    doctor_language = _configured_cli_language()
     try:
         manager = ShowRuntimeManager(offline=True if not deep else None)
         status = manager.status()
@@ -10402,23 +12004,97 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime status could not be inspected: {exc}",
-            "Inspect the Avibe log and reinstall the current Avibe release if package data is missing.",
+            i18n_t("doctor.item.showRuntimeStatusFailed", doctor_language, reason=exc),
+            i18n_t("doctor.action.showRuntimeStatusFailed", doctor_language),
             code="show_runtime.status_failed",
         )
         return items
 
+    try:
+        archive_cache = manager.archive_cache_status()
+    except Exception:  # noqa: BLE001
+        archive_cache = None
+    archive_skipped_reason = str((archive_cache or {}).get("skipped_reason") or "")
+    if archive_cache and archive_skipped_reason == "archive_inspection_failed":
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("doctor.item.archiveCacheSkipped", doctor_language),
+            i18n_t("doctor.action.archiveCacheSkippedInspection", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+            archive_cache_skip_reason=archive_skipped_reason,
+        )
+    elif archive_cache and archive_skipped_reason:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t("doctor.item.archiveCacheSkipped", doctor_language),
+            i18n_t("doctor.action.archiveCacheSkipped", doctor_language),
+            code="show_runtime.archive_cache_skipped",
+            archive_cache_skip_reason=archive_skipped_reason,
+        )
+    elif archive_cache and int(archive_cache.get("candidate_count") or 0) > 0:
+        _add_doctor_item(
+            items,
+            "warn",
+            i18n_t(
+                "doctor.item.archiveCacheReclaimable",
+                doctor_language,
+                count=int(archive_cache.get("candidate_count") or 0),
+                size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
+            ),
+            i18n_t("doctor.action.archiveCacheReclaimable", doctor_language),
+            code="show_runtime.archive_cache_reclaimable",
+        )
+    elif archive_cache is not None:
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.archiveCacheClean", doctor_language),
+            code="show_runtime.archive_cache_clean",
+        )
+
+    install = _show_runtime_install(status)
+    if (
+        install.get("state") == "failed"
+        and status.get("reason") == "runtime_install_inspection_failed"
+    ):
+        inspection = (
+            status.get("inspection_error")
+            if isinstance(status.get("inspection_error"), dict)
+            else {}
+        )
+        _add_doctor_item(
+            items,
+            "fail",
+            i18n_t(
+                "doctor.item.showRuntimeStatusFailed",
+                doctor_language,
+                reason=inspection.get("message") or status.get("reason"),
+            ),
+            i18n_t("doctor.action.showRuntimeStatusFailed", doctor_language),
+            code="show_runtime.status_failed",
+            status_reason=status.get("reason"),
+        )
+        return items
+    installed = install.get("state") == "installed"
     provider = str(status.get("provider") or "unknown")
+    display_provider = _doctor_display_value(provider, "show_runtime_provider", doctor_language)
+    current_platform = status.get("platform") or i18n_t("doctor.value.currentPlatform", doctor_language)
     explicit_command = status.get("explicit_command")
     if explicit_command:
-        if status.get("installed"):
-            _add_doctor_item(items, "pass", f"Show Runtime explicit command is available: {explicit_command}")
+        if installed:
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.explicitCommandAvailable", doctor_language, command=explicit_command),
+            )
         else:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Show Runtime explicit command is missing: {explicit_command}",
-                "Fix or remove VIBE_SHOW_RUNTIME_BIN, then rerun Doctor.",
+                i18n_t("doctor.item.explicitCommandMissing", doctor_language, command=explicit_command),
+                i18n_t("doctor.action.explicitCommandMissing", doctor_language),
                 code="show_runtime.explicit_command_missing",
             )
         return items
@@ -10440,8 +12116,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                "The packaged Show Runtime manifest is missing or invalid",
-                "Upgrade or reinstall Avibe from an official wheel that includes the pinned runtime manifest.",
+                i18n_t("doctor.item.manifestMissing", doctor_language),
+                i18n_t("doctor.action.manifestMissing", doctor_language),
                 code="show_runtime.manifest_missing",
             )
         elif not archive:
@@ -10449,15 +12125,24 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"The Show Runtime manifest has no archive for {status.get('platform') or 'this platform'}",
-                "Install Avibe on a supported platform or upgrade to a release that publishes this platform archive.",
+                i18n_t(
+                    "doctor.item.manifestPlatformUnsupported",
+                    doctor_language,
+                    platform=current_platform,
+                ),
+                i18n_t("doctor.action.manifestPlatformUnsupported", doctor_language),
                 code="show_runtime.platform_unsupported",
             )
         else:
             _add_doctor_item(
                 items,
                 "pass",
-                f"Show Runtime manifest pins {archive.get('name')} from {archive_url}",
+                i18n_t(
+                    "doctor.item.manifestReady",
+                    doctor_language,
+                    name=archive.get("name"),
+                    url=archive_url,
+                ),
                 code="show_runtime.manifest_ready",
             )
     elif provider == "archive":
@@ -10466,60 +12151,69 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Show Runtime selected the legacy unpinned archive URL: {archive_url}",
-                "Reinstall the official Avibe package or remove VIBE_SHOW_RUNTIME_SOURCE/ARCHIVE overrides. "
-                "The upstream source repository does not publish release assets.",
+                i18n_t("doctor.item.legacyArchiveProvider", doctor_language, url=archive_url),
+                i18n_t("doctor.action.legacyArchiveProvider", doctor_language),
                 code="show_runtime.legacy_archive_provider",
             )
         else:
             _add_doctor_item(
                 items,
                 "warn",
-                "Show Runtime uses an explicit unpinned archive provider",
-                "Prefer the manifest-cache provider for official installations.",
+                i18n_t("doctor.item.unpinnedArchiveProvider", doctor_language),
+                i18n_t("doctor.action.unpinnedArchiveProvider", doctor_language),
                 code="show_runtime.unpinned_archive_provider",
             )
-    elif provider in {"github", "npm"}:
+    elif provider == "npm":
         _add_doctor_item(
             items,
             "warn",
-            f"Show Runtime uses the {provider} development provider",
-            "Use manifest-cache for official installations; keep this override only for development.",
+            i18n_t("doctor.item.developmentProvider", doctor_language, provider=display_provider),
+            i18n_t("doctor.action.developmentProvider", doctor_language),
             code="show_runtime.development_provider",
+            show_runtime_provider=provider,
         )
     else:
         provider_repairable = False
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime provider is unsupported: {provider}",
-            "Remove the provider override and reinstall the official Avibe package.",
+            i18n_t("doctor.item.providerUnsupported", doctor_language, provider=display_provider),
+            i18n_t("doctor.action.providerUnsupported", doctor_language),
             code="show_runtime.provider_unsupported",
+            show_runtime_provider=provider,
         )
 
-    if status.get("installed"):
+    if installed:
         _add_doctor_item(
             items,
             "pass",
-            f"Show Runtime is installed for {status.get('platform') or 'this platform'}",
+            i18n_t(
+                "doctor.item.showRuntimeInstalled",
+                doctor_language,
+                platform=current_platform,
+            ),
             code="show_runtime.installed",
         )
         return items
 
     show_runtime_repairable = provider_repairable and node_available and node_supported and archive_scheme_supported
     show_runtime_retry_action = (
-        "Run `vibe doctor repair show-runtime`."
+        i18n_t("doctor.action.showRuntimeRepair", doctor_language)
         if show_runtime_repairable
-        else "Resolve the provider, platform, Node.js, or archive URL issue above, then rerun Doctor."
+        else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
     )
     _add_doctor_item(
         items,
         "fail",
-        f"Show Runtime is not ready for {status.get('platform') or 'this platform'}",
+        i18n_t(
+            "doctor.item.showRuntimeNotReady",
+            doctor_language,
+            platform=current_platform,
+        ),
         (
-            "Run `vibe doctor repair show-runtime`; use `vibe doctor --deep` first when download access is uncertain."
+            i18n_t("doctor.action.showRuntimeRepair", doctor_language)
             if show_runtime_repairable
-            else show_runtime_retry_action
+            else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
         ),
         code="show_runtime.not_ready",
         repair_target="show-runtime" if show_runtime_repairable else None,
@@ -10532,8 +12226,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            "Show Runtime archive reachability was not checked in fast diagnostics",
-            "Run `vibe doctor --deep` to distinguish HTTP, DNS, TLS, and timeout failures without downloading the archive.",
+            i18n_t("doctor.item.archiveProbeSkipped", doctor_language),
+            i18n_t("doctor.action.archiveProbeSkipped", doctor_language),
             code="show_runtime.archive_probe_skipped",
         )
         return items
@@ -10545,15 +12239,15 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            f"Show Runtime archive is reachable: {target}",
+            i18n_t("doctor.item.archiveReachable", doctor_language, target=target),
             code="show_runtime.archive_reachable",
         )
     elif probe_reason == "runtime_archive_probe_unsupported":
         _add_doctor_item(
             items,
             "warn",
-            "Show Runtime archive server does not support a body-free reachability probe",
-            show_runtime_retry_action,
+            i18n_t("doctor.item.archiveProbeUnsupported", doctor_language),
+            i18n_t("doctor.action.archiveProbeUnsupported", doctor_language, retry=show_runtime_retry_action),
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
@@ -10561,7 +12255,10 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_dependency_download_failure(
             items,
             probe.get("download_error"),
-            label="Show Runtime manifest" if is_manifest_failure else "Show Runtime archive",
+            label=i18n_t(
+                "doctor.value.showRuntimeManifest" if is_manifest_failure else "doctor.value.showRuntimeArchive",
+                doctor_language,
+            ),
             code_prefix="show_runtime.manifest" if is_manifest_failure else "show_runtime.archive",
             repair_target="show-runtime" if show_runtime_repairable else None,
             retry_action=show_runtime_retry_action,
@@ -10570,33 +12267,50 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime archive URL scheme is unsupported: {probe.get('url') or (archive or {}).get('url')}",
-            "Use an HTTPS or file URL for the archive, then rerun deep Doctor.",
+            i18n_t(
+                "doctor.item.archiveUrlUnsupported",
+                doctor_language,
+                url=probe.get("url") or (archive or {}).get("url"),
+            ),
+            i18n_t("doctor.action.archiveUrlUnsupported", doctor_language),
             code="show_runtime.archive_url_unsupported",
         )
     elif probe_reason.startswith("runtime_manifest_"):
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime manifest could not be loaded: {probe_reason}",
-            "Inspect the configured or packaged Runtime manifest, then reinstall the current Avibe release if needed.",
+            i18n_t("doctor.item.manifestUnavailable", doctor_language),
+            i18n_t("doctor.action.manifestUnavailable", doctor_language),
             code="show_runtime.manifest_unavailable",
+            probe_reason=probe_reason,
         )
     elif probe_reason == "runtime_platform_unsupported":
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime manifest has no archive for {status.get('platform') or 'this platform'}",
-            "Install an Avibe release that publishes a Runtime archive for this platform.",
+            i18n_t(
+                "doctor.item.manifestPlatformUnsupported",
+                doctor_language,
+                platform=current_platform,
+            ),
+            i18n_t("doctor.action.showRuntimePlatformUnsupported", doctor_language),
             code="show_runtime.platform_unsupported",
         )
     else:
         _add_doctor_item(
             items,
             "fail",
-            f"Show Runtime archive check failed: {probe_reason or 'unknown error'}",
-            f"Inspect the selected archive path or URL. {show_runtime_retry_action}",
+            i18n_t(
+                "doctor.item.archiveCheckFailed",
+                doctor_language,
+            ),
+            i18n_t(
+                "doctor.action.archiveCheckFailed",
+                doctor_language,
+                retry=show_runtime_retry_action,
+            ),
             code="show_runtime.archive_check_failed",
+            probe_reason=probe_reason,
         )
     return items
 
@@ -10614,63 +12328,77 @@ def _doctor(*, deep: bool = False):
     """
     groups = []
     summary = {"pass": 0, "warn": 0, "fail": 0}
+    language = _configured_cli_language()
 
     home_items = _home_migration_items()
     for item in home_items:
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Runtime Home", "items": home_items})
+    groups.append({"name": i18n_t("doctor.group.runtimeHome", language), "items": home_items})
 
     # Configuration Group
     config_items = []
     config_path = paths.get_config_path()
 
     if config_path.exists():
-        config_items.append(
-            {
-                "status": "pass",
-                "message": f"Configuration file found: {config_path}",
-            }
+        _add_doctor_item(
+            config_items,
+            "pass",
+            i18n_t("doctor.item.configFound", language, path=config_path),
         )
         summary["pass"] += 1
     else:
-        config_items.append(
-            {
-                "status": "fail",
-                "message": "Configuration file not found",
-                "action": "Run 'vibe' to create initial configuration",
-            }
+        _add_doctor_item(
+            config_items,
+            "fail",
+            i18n_t("doctor.item.configMissing", language),
+            i18n_t("doctor.action.configMissing", language),
         )
         summary["fail"] += 1
 
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
+                recovery_language = getattr(config, "language", language) or language
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    i18n_t("doctor.item.configRecovery", recovery_language),
+                    i18n_t("doctor.action.configRecovery", recovery_language),
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            _add_doctor_item(
+                config_items,
+                "pass",
+                i18n_t("doctor.item.configLoaded", language),
+            )
+            summary["pass"] += 1
     except Exception as exc:
-        config_items.append(
-            {
-                "status": "fail",
-                "message": f"Failed to load configuration: {exc}",
-                "action": "Check config.json syntax or delete and reconfigure",
-            }
+        _add_doctor_item(
+            config_items,
+            "fail",
+            i18n_t("doctor.item.configLoadFailed", language, reason=exc),
+            i18n_t("doctor.action.configLoadFailed", language),
         )
         summary["fail"] += 1
 
-    groups.append({"name": "Configuration", "items": config_items})
+    groups.append({"name": i18n_t("doctor.group.configuration", language), "items": config_items})
 
     remote_access_items = []
     if config is None:
-        _add_doctor_item(remote_access_items, "warn", "Cannot check Remote Access: configuration not loaded")
+        _add_doctor_item(
+            remote_access_items,
+            "warn",
+            i18n_t("doctor.item.remoteConfigMissing", language),
+        )
     elif not config.remote_access.vibe_cloud.enabled:
-        _add_doctor_item(remote_access_items, "pass", "Remote Access is disabled")
+        _add_doctor_item(remote_access_items, "pass", i18n_t("doctor.item.remoteDisabled", language))
     else:
         from vibe import remote_access
 
@@ -10679,23 +12407,32 @@ def _doctor(*, deep: bool = False):
             _add_doctor_item(
                 remote_access_items,
                 "fail",
-                "Remote Access connector is not running",
-                "Start Remote Access from Settings or run `vibe remote start`.",
+                i18n_t("doctor.item.remoteNotRunning", language),
+                i18n_t("doctor.action.remoteNotRunning", language),
             )
         else:
-            _add_doctor_item(remote_access_items, "pass", "Remote Access connector is running")
+            _add_doctor_item(remote_access_items, "pass", i18n_t("doctor.item.remoteRunning", language))
 
         quality = remote_status.get("tunnel_quality")
         if not isinstance(quality, dict):
             _add_doctor_item(
                 remote_access_items,
                 "warn",
-                "Tunnel quality is not available yet",
-                "Wait up to 45 seconds for the first metrics samples.",
+                i18n_t("doctor.item.tunnelQualityUnavailable", language),
+                i18n_t("doctor.action.tunnelQualityUnavailable", language),
             )
         else:
             state = str(quality.get("state") or "unknown")
             grade = str(quality.get("grade") or "unknown")
+            protocol = str(quality.get("protocol") or "unknown")
+            display_state = _doctor_tunnel_display_value(state, "state", language)
+            display_grade = _doctor_tunnel_display_value(grade, "grade", language)
+            display_protocol = _doctor_tunnel_display_value(protocol, "protocol", language)
+            quality_details = {
+                "tunnel_state": state,
+                "tunnel_grade": grade,
+                "tunnel_protocol": protocol,
+            }
             try:
                 sampled_at = datetime.fromisoformat(str(quality.get("sampled_at") or "").replace("Z", "+00:00"))
                 quality_stale = time.time() - sampled_at.timestamp() > 150
@@ -10705,8 +12442,8 @@ def _doctor(*, deep: bool = False):
                 _add_doctor_item(
                     remote_access_items,
                     "warn",
-                    "Tunnel quality sample is stale",
-                    "Wait up to 45 seconds for fresh metrics or inspect the Remote Access logs.",
+                    i18n_t("doctor.item.tunnelQualityStale", language),
+                    i18n_t("doctor.action.tunnelQualityStale", language),
                 )
             else:
                 rtt = quality.get("rtt_ms") if isinstance(quality.get("rtt_ms"), dict) else None
@@ -10728,120 +12465,134 @@ def _doctor(*, deep: bool = False):
                         or int(request_path.get("success_count") or 0) == 0
                     )
                 )
-                if request_path_unavailable:
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; remote requests unavailable, "
-                        f"{int(request_path.get('success_count') or 0)}/"
-                        f"{int(request_path.get('sample_count') or 0)} succeeded; "
-                        f"connector {quality.get('protocol') or 'unknown'}"
-                    )
-                elif request_latency is not None:
-                    slow_rate = request_path.get("slow_request_rate") or {}
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; remote requests P95 "
-                        f"{request_latency.get('p95')} ms, P99 {request_latency.get('p99')} ms, "
-                        f"{round(float(slow_rate.get('over_1000_ms') or 0) * 100)}% above 1 second; "
-                        f"connector {quality.get('protocol') or 'unknown'}"
-                    )
-                elif rtt is None:
-                    quality_message = (
-                        f"Tunnel quality: {state}; edge RTT unavailable for "
-                        f"{quality.get('protocol') or 'unknown'} transport"
-                    )
-                else:
-                    quality_message = (
-                        f"Tunnel quality: {state}/{grade}; edge RTT median {rtt.get('median')} ms, "
-                        f"maximum {rtt.get('max')} ms"
-                    )
                 quality_status = "pass" if state == "healthy" and grade in {"good", "fair", "unknown"} else "warn"
                 if request_path_unavailable or (
                     state == "degraded" and int(quality.get("ha_connections") or 0) == 0
                 ):
                     quality_status = "fail"
-                _add_doctor_item(
-                    remote_access_items,
-                    quality_status,
-                    quality_message,
-                    "Avibe will evaluate a second Connector automatically when degradation persists."
-                    if quality_status == "warn"
-                    else None,
-                )
+                if request_path_unavailable:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRequestsUnavailable",
+                            language,
+                            state=display_state,
+                            grade=display_grade,
+                            succeeded=int(request_path.get("success_count") or 0),
+                            samples=int(request_path.get("sample_count") or 0),
+                            protocol=display_protocol,
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                        **quality_details,
+                    )
+                elif request_latency is not None:
+                    slow_rate = request_path.get("slow_request_rate") or {}
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityLatency",
+                            language,
+                            state=display_state,
+                            grade=display_grade,
+                            p95=request_latency.get("p95"),
+                            p99=request_latency.get("p99"),
+                            slow_rate=round(float(slow_rate.get("over_1000_ms") or 0) * 100),
+                            protocol=display_protocol,
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                        **quality_details,
+                    )
+                elif rtt is None:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRttUnavailable",
+                            language,
+                            state=display_state,
+                            protocol=display_protocol,
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                        **quality_details,
+                    )
+                else:
+                    _add_doctor_item(
+                        remote_access_items,
+                        quality_status,
+                        i18n_t(
+                            "doctor.item.tunnelQualityRtt",
+                            language,
+                            state=display_state,
+                            grade=display_grade,
+                            median=rtt.get("median"),
+                            maximum=rtt.get("max"),
+                        ),
+                        i18n_t("doctor.action.tunnelQualityWarn", language)
+                        if quality_status == "warn"
+                        else None,
+                        **quality_details,
+                    )
 
     for item in remote_access_items:
         item_status = item.get("status")
         if item_status in summary:
             summary[item_status] += 1
-    groups.append({"name": "Remote Access", "items": remote_access_items})
+    groups.append({"name": i18n_t("doctor.group.remoteAccess", language), "items": remote_access_items})
 
     # Slack Group
     slack_items = []
     if config:
         try:
             config.slack.validate()
-            slack_items.append(
-                {
-                    "status": "pass",
-                    "message": "Slack token format is valid",
-                }
-            )
+            _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackTokenValid", language))
             summary["pass"] += 1
 
             # Check if tokens are actually set
             if config.slack.bot_token:
-                slack_items.append(
-                    {
-                        "status": "pass",
-                        "message": "Bot token is configured",
-                    }
-                )
+                _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackBotConfigured", language))
                 summary["pass"] += 1
             else:
-                slack_items.append(
-                    {
-                        "status": "warn",
-                        "message": "Bot token is not configured",
-                        "action": "Add your Slack bot token in the setup wizard",
-                    }
+                _add_doctor_item(
+                    slack_items,
+                    "warn",
+                    i18n_t("doctor.item.slackBotMissing", language),
+                    i18n_t("doctor.action.slackBotMissing", language),
                 )
                 summary["warn"] += 1
 
             if config.slack.app_token:
-                slack_items.append(
-                    {
-                        "status": "pass",
-                        "message": "App token is configured (Socket Mode)",
-                    }
-                )
+                _add_doctor_item(slack_items, "pass", i18n_t("doctor.item.slackAppConfigured", language))
                 summary["pass"] += 1
             else:
-                slack_items.append(
-                    {
-                        "status": "warn",
-                        "message": "App token is not configured",
-                        "action": "Add your Slack app token for Socket Mode",
-                    }
+                _add_doctor_item(
+                    slack_items,
+                    "warn",
+                    i18n_t("doctor.item.slackAppMissing", language),
+                    i18n_t("doctor.action.slackAppMissing", language),
                 )
                 summary["warn"] += 1
 
         except Exception as exc:
-            slack_items.append(
-                {
-                    "status": "fail",
-                    "message": f"Slack token validation failed: {exc}",
-                    "action": "Check your Slack tokens in the setup wizard",
-                }
+            _add_doctor_item(
+                slack_items,
+                "fail",
+                i18n_t("doctor.item.slackValidationFailed", language, reason=exc),
+                i18n_t("doctor.action.slackValidationFailed", language),
             )
             summary["fail"] += 1
     else:
-        slack_items.append(
-            {
-                "status": "fail",
-                "message": "Cannot check Slack: configuration not loaded",
-            }
-        )
+        _add_doctor_item(slack_items, "fail", i18n_t("doctor.item.slackConfigMissing", language))
         summary["fail"] += 1
 
-    groups.append({"name": "Slack", "items": slack_items})
+    groups.append({"name": i18n_t("doctor.group.slack", language), "items": slack_items})
 
     # Agent Backends Group
     agent_items = []
@@ -10851,29 +12602,22 @@ def _doctor(*, deep: bool = False):
             cli_path = config.agents.opencode.cli_path
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"OpenCode CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="OpenCode", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"OpenCode CLI not found: {cli_path}",
-                        "action": "Install OpenCode or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="OpenCode", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="OpenCode"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "OpenCode: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="OpenCode"))
             summary["pass"] += 1
 
         # Claude
@@ -10882,29 +12626,22 @@ def _doctor(*, deep: bool = False):
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
 
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"Claude CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="Claude", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"Claude CLI not found: {cli_path}",
-                        "action": "Install Claude Code or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="Claude", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="Claude"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "Claude: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Claude"))
             summary["pass"] += 1
 
         # Codex
@@ -10912,29 +12649,22 @@ def _doctor(*, deep: bool = False):
             cli_path = config.agents.codex.cli_path
             found_path = api.detect_cli(cli_path).get("path") if cli_path else None
             if found_path:
-                agent_items.append(
-                    {
-                        "status": "pass",
-                        "message": f"Codex CLI found: {found_path}",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "pass",
+                    i18n_t("doctor.item.agentCliFound", language, agent="Codex", path=found_path),
                 )
                 summary["pass"] += 1
             else:
-                agent_items.append(
-                    {
-                        "status": "warn",
-                        "message": f"Codex CLI not found: {cli_path}",
-                        "action": "Install Codex or update CLI path",
-                    }
+                _add_doctor_item(
+                    agent_items,
+                    "warn",
+                    i18n_t("doctor.item.agentCliMissing", language, agent="Codex", path=cli_path),
+                    i18n_t("doctor.action.agentCliMissing", language, agent="Codex"),
                 )
                 summary["warn"] += 1
         else:
-            agent_items.append(
-                {
-                    "status": "pass",
-                    "message": "Codex: disabled",
-                }
-            )
+            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Codex"))
             summary["pass"] += 1
 
         # Default Agent check
@@ -10949,71 +12679,52 @@ def _doctor(*, deep: bool = False):
         finally:
             if store is not None:
                 store.close()
-        agent_items.append(
-            {
-                "status": "pass",
-                "message": f"Default Agent: {default_agent_name or 'not configured'}",
-            }
+        _add_doctor_item(
+            agent_items,
+            "pass",
+            i18n_t(
+                "doctor.item.defaultAgent",
+                language,
+                agent=default_agent_name or i18n_t("doctor.value.notConfigured", language),
+            ),
         )
         summary["pass"] += 1
     else:
-        agent_items.append(
-            {
-                "status": "fail",
-                "message": "Cannot check agents: configuration not loaded",
-            }
-        )
+        _add_doctor_item(agent_items, "fail", i18n_t("doctor.item.agentConfigMissing", language))
         summary["fail"] += 1
 
-    groups.append({"name": "Agent Backends", "items": agent_items})
+    groups.append({"name": i18n_t("doctor.group.agentBackends", language), "items": agent_items})
 
     # Runtime Group
     runtime_items = []
     if config:
         cwd = config.runtime.default_cwd
         if cwd and os.path.isdir(cwd):
-            runtime_items.append(
-                {
-                    "status": "pass",
-                    "message": f"Working directory: {cwd}",
-                }
-            )
+            _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.workingDirectory", language, path=cwd))
             summary["pass"] += 1
         else:
-            runtime_items.append(
-                {
-                    "status": "warn",
-                    "message": f"Working directory does not exist: {cwd}",
-                    "action": "Update default_cwd in settings",
-                }
+            _add_doctor_item(
+                runtime_items,
+                "warn",
+                i18n_t("doctor.item.workingDirectoryMissing", language, path=cwd),
+                i18n_t("doctor.action.workingDirectoryMissing", language),
             )
             summary["warn"] += 1
 
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": f"Log level: {config.runtime.log_level}",
-            }
+        _add_doctor_item(
+            runtime_items,
+            "pass",
+            i18n_t("doctor.item.logLevel", language, level=config.runtime.log_level),
         )
         summary["pass"] += 1
 
     # Check log file
     log_path = paths.get_logs_dir() / "vibe_remote.log"
     if log_path.exists():
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": f"Log file: {log_path}",
-            }
-        )
+        _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.logFile", language, path=log_path))
         summary["pass"] += 1
     else:
-        runtime_items.append(
-            {
-                "status": "pass",
-                "message": "Log file will be created on first run",
-            }
-        )
+        _add_doctor_item(runtime_items, "pass", i18n_t("doctor.item.logFilePending", language))
         summary["pass"] += 1
 
     for item in [
@@ -11028,7 +12739,7 @@ def _doctor(*, deep: bool = False):
         if status in summary:
             summary[status] += 1
 
-    groups.append({"name": "Runtime", "items": runtime_items})
+    groups.append({"name": i18n_t("doctor.group.runtime", language), "items": runtime_items})
 
     dependency_items = [
         *_managed_dependencies_doctor_items(deep=deep),
@@ -11038,14 +12749,14 @@ def _doctor(*, deep: bool = False):
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Dependencies", "items": dependency_items})
+    groups.append({"name": i18n_t("doctor.group.dependencies", language), "items": dependency_items})
 
     local_cli_items = _local_cli_installation_items()
     for item in local_cli_items:
         status = item.get("status")
         if status in summary:
             summary[status] += 1
-    groups.append({"name": "Local CLI Installation", "items": local_cli_items})
+    groups.append({"name": i18n_t("doctor.group.localCliInstallation", language), "items": local_cli_items})
 
     # Calculate overall status
     ok = summary["fail"] == 0
@@ -11070,6 +12781,7 @@ def _add_doctor_item(
     code: str | None = None,
     repair_target: str | None = None,
     repair_risk: str | None = None,
+    **details: object,
 ) -> None:
     item = {"status": status, "message": message}
     if code:
@@ -11083,6 +12795,7 @@ def _add_doctor_item(
             "command": f"vibe doctor repair {repair_target}",
             "risk": repair_risk or "medium",
         }
+    item.update({key: value for key, value in details.items() if value is not None})
     items.append(item)
 
 
@@ -11123,6 +12836,17 @@ def _uv_tool_site_packages_for_vibe(vibe_path: Path) -> list[Path]:
         if key not in seen_roots:
             seen_roots.add(key)
             tool_roots.append(resolved)
+
+    # Atomic upgrades keep each validated uv environment in a durable
+    # generation directory and switch only the stable PATH launcher.  Resolve
+    # that generation directly so doctor inspects the active candidate just as
+    # it inspects a conventional ``~/.local/share/uv/tools/<package>`` root.
+    generation_root = atomic_uv_install_root().expanduser().resolve()
+    generation = _launcher_generation(vibe_path, generation_root)
+    if generation:
+        for tools_dir in (generation / "uv" / "tools", generation / "tools"):
+            for package_name in UV_TOOL_PACKAGE_NAMES:
+                add_tool_root(tools_dir / package_name)
 
     parts = vibe_path.parts
     try:
@@ -11239,6 +12963,7 @@ def _current_sqlite_revision() -> str | None:
 
 def _local_cli_installation_items() -> list[dict]:
     items: list[dict] = []
+    language = _configured_cli_language()
 
     vibe_paths = _path_entries_for_executable("vibe")
     preferred_vibe = (Path.home() / ".local" / "bin" / "vibe").expanduser()
@@ -11247,8 +12972,8 @@ def _local_cli_installation_items() -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            "No vibe executable found on PATH",
-            "Install Avibe with uv tool or add the intended vibe executable to PATH.",
+            i18n_t("doctor.item.cliMissing", language),
+            i18n_t("doctor.action.cliMissing", language),
         )
     else:
         first_vibe = vibe_paths[0]
@@ -11261,19 +12986,24 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "warn",
-                f"PATH resolves vibe to {first_vibe} before {preferred_resolved}",
-                "Put ~/.local/bin before system Python bin directories when using the uv tool installation.",
+                i18n_t(
+                    "doctor.item.cliPathPrecedence",
+                    language,
+                    active=first_vibe,
+                    preferred=preferred_resolved,
+                ),
+                i18n_t("doctor.action.cliPathPrecedence", language),
             )
         else:
-            _add_doctor_item(items, "pass", f"PATH resolves vibe to {first_vibe}")
+            _add_doctor_item(items, "pass", i18n_t("doctor.item.cliPath", language, path=first_vibe))
 
     site_packages_dirs = _uv_tool_site_packages_for_vibe(active_vibe_path) if active_vibe_path is not None else []
     if not site_packages_dirs:
         _add_doctor_item(
             items,
             "warn",
-            "Active vibe executable is not the uv tool installation",
-            "uv tool package-integrity checks are skipped for this executable.",
+            i18n_t("doctor.item.cliNotUvTool", language),
+            i18n_t("doctor.action.cliNotUvTool", language),
         )
         return items
 
@@ -11283,11 +13013,53 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"uv tool installation is editable: {site_packages}",
-                "Reinstall Avibe from a normal wheel. Do not use 'uv tool install --editable .' for the live local CLI.",
+                i18n_t("doctor.item.cliEditable", language, path=site_packages),
+                i18n_t("doctor.action.cliEditable", language),
             )
         else:
-            _add_doctor_item(items, "pass", f"uv tool installation is not editable: {site_packages}")
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.cliNotEditable", language, path=site_packages),
+            )
+
+        # A successful package-manager exit only proves that its metadata was
+        # written.  RECORD is the wheel-level evidence that every installed
+        # file is still present and unchanged; this is what catches an
+        # interrupted dependency copy such as a half-written lark-oapi tree.
+        if any(site_packages.glob("*.dist-info")):
+            integrity = verify_site_packages(site_packages)
+            if integrity.ok:
+                _add_doctor_item(
+                    items,
+                    "pass",
+                    i18n_t(
+                        "doctor.item.packageIntegrityOk",
+                        language,
+                        count=integrity.checked_files,
+                    ),
+                    code="installation.package_integrity",
+                )
+            else:
+                failure_detail = ", ".join(integrity.failures[:5]) or i18n_t(
+                    "doctor.value.unknownError",
+                    language,
+                )
+                remaining = max(0, len(integrity.failures) - 5)
+                _add_doctor_item(
+                    items,
+                    "fail",
+                    i18n_t(
+                        "doctor.item.packageIntegrityFailedMore"
+                        if remaining
+                        else "doctor.item.packageIntegrityFailed",
+                        language,
+                        detail=failure_detail,
+                        count=remaining,
+                    ),
+                    i18n_t("doctor.action.packageIntegrityFailed", language),
+                    code="installation.package_integrity",
+                )
 
         alembic_dir = site_packages / "storage" / "alembic"
         versions_dir = alembic_dir / "versions"
@@ -11295,37 +13067,120 @@ def _local_cli_installation_items() -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                f"Packaged Alembic scripts are missing under {alembic_dir}",
-                "Reinstall from a wheel that includes storage/alembic. Editable uv tool installs can miss this package data.",
+                i18n_t("doctor.item.alembicMissing", language, path=alembic_dir),
+                i18n_t("doctor.action.alembicMissing", language),
             )
             continue
 
         revisions = _available_alembic_revisions(versions_dir)
         recognized_revisions.update(revisions)
         if revisions:
-            _add_doctor_item(items, "pass", f"Packaged Alembic scripts found: {versions_dir}")
+            _add_doctor_item(
+                items,
+                "pass",
+                i18n_t("doctor.item.alembicFound", language, path=versions_dir),
+            )
         else:
             _add_doctor_item(
                 items,
                 "fail",
-                f"No Alembic revision files found under {versions_dir}",
-                "Reinstall from a wheel that includes storage/alembic/versions.",
+                i18n_t("doctor.item.alembicRevisionsMissing", language, path=versions_dir),
+                i18n_t("doctor.action.alembicRevisionsMissing", language),
             )
 
     sqlite_revision = _current_sqlite_revision()
     if sqlite_revision is None:
-        _add_doctor_item(items, "pass", "SQLite schema revision is not initialized yet")
+        _add_doctor_item(items, "pass", i18n_t("doctor.item.sqliteRevisionAbsent", language))
     elif sqlite_revision in recognized_revisions:
-        _add_doctor_item(items, "pass", f"SQLite schema revision is recognized by this CLI: {sqlite_revision}")
+        _add_doctor_item(
+            items,
+            "pass",
+            i18n_t("doctor.item.sqliteRevisionKnown", language, revision=sqlite_revision),
+        )
     else:
         _add_doctor_item(
             items,
             "fail",
-            f"SQLite schema revision is newer than or unknown to this CLI: {sqlite_revision}",
-            "Install an Avibe wheel built from code that contains this migration revision.",
+            i18n_t("doctor.item.sqliteRevisionUnknown", language, revision=sqlite_revision),
+            i18n_t("doctor.action.sqliteRevisionUnknown", language),
         )
 
     return items
+
+
+def _doctor_tunnel_display_value(value: object, value_type: str, language: str) -> str:
+    return _doctor_display_value(value, f"tunnel_{value_type}", language)
+
+
+def _doctor_display_value(value: object, category: str, language: str) -> str:
+    """Project finite Doctor vocabulary at the human-rendering boundary."""
+
+    raw_value = str(value or "unknown")
+    key = DOCTOR_DISPLAY_PROJECTIONS.get(category, {}).get(raw_value)
+    return i18n_t(key, language) if key else i18n_t("doctor.value.unknown", language)
+
+
+def _doctor_memory_reason(reason: object, language: str) -> str:
+    reason_code = reason.strip() if isinstance(reason, str) else ""
+    key = _DOCTOR_MEMORY_REASON_I18N_KEYS.get(
+        reason_code,
+        _MEMORY_CLI_REASON_I18N_KEYS.get(reason_code),
+    )
+    if key:
+        return i18n_t(key, language)
+    return reason_code or i18n_t("doctor.value.unknownError", language)
+
+
+def _doctor_managed_reason_key(reason: str) -> str | None:
+    projections = DOCTOR_DISPLAY_PROJECTIONS
+    key = projections["repair_reason"].get(reason)
+    if key:
+        return key
+    for suffix, suffix_key in sorted(
+        projections["repair_suffix"].items(),
+        key=lambda entry: len(entry[0]),
+        reverse=True,
+    ):
+        if reason == suffix or reason.endswith(f"_{suffix}"):
+            return suffix_key
+    return None
+
+
+def _doctor_managed_failure_detail(target: str, result: dict, language: str) -> str:
+    download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
+    if download_error:
+        kind = str(download_error.get("kind") or "")
+        key = DOCTOR_DISPLAY_PROJECTIONS["download_kind"].get(kind)
+        attempts = int(download_error.get("attempts") or 1)
+        if key == "doctor.repair.dependencyDownloadHttp":
+            return i18n_t(
+                key,
+                language,
+                status=download_error.get("http_status") or i18n_t("doctor.value.unknown", language),
+                attempts=attempts,
+            )
+        if key:
+            return i18n_t(key, language, attempts=attempts)
+        return i18n_t("doctor.repair.dependencyDownloadUnknown", language)
+
+    reason = str(result.get("reason") or "")
+    key = _doctor_managed_reason_key(reason)
+    error = result.get("error") or i18n_t("doctor.value.unknownError", language)
+    kwargs = {"target": target, "error": error}
+    if reason == "askill_auto_install_unsupported":
+        kwargs["tools"] = "+".join(str(tool) for tool in result.get("required_tools") or ("curl", "bash"))
+    elif reason == "avault_platform_unsupported":
+        kwargs["platform"] = result.get("platform") or i18n_t("doctor.value.unknown", language)
+    elif reason == "avault_checksum_mismatch":
+        kwargs["expected_sha256"] = result.get("expected_sha256") or i18n_t("doctor.value.unknown", language)
+        kwargs["actual_sha256"] = result.get("actual_sha256") or i18n_t("doctor.value.unknown", language)
+    elif reason in {"askill_install_timeout"}:
+        kwargs["timeout_seconds"] = result.get("timeout_seconds") or 300
+    elif reason == "askill_install_failed" or reason.endswith("_install_failed"):
+        kwargs["exit_code"] = result.get("exit_code") or i18n_t("doctor.value.unknown", language)
+    if key:
+        return i18n_t(key, language, **kwargs)
+    return i18n_t("doctor.repair.dependencyFailedDefault", language)
 
 
 def _doctor_repair_result(target: str, status: str, message: str, **details) -> dict:
@@ -11335,23 +13190,23 @@ def _doctor_repair_result(target: str, status: str, message: str, **details) -> 
 
 
 def _write_refreshed_runtime_status() -> None:
+    # Asked, not re-derived. A repair that wrote its own idea of the state word
+    # would be the second place deciding one fact -- and the one that persists
+    # it, so a lock holder still migrating would be recorded as `running` and
+    # every later reader would inherit that answer instead of measuring.
     status = runtime.read_status()
-    ui_pid = status.get("ui_pid")
-    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
-    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
-    if owner_pid:
-        detail = f"pid={owner_pid}"
-        if extra_pids:
-            detail = f"{detail}; extra_service_pids={','.join(map(str, extra_pids))}"
-        runtime.write_status("running", detail, owner_pid, ui_pid)
-    elif extra_pids:
-        runtime.write_status("degraded", f"lockless service process detected pid={extra_pids[0]}", extra_pids[0], ui_pid)
-    else:
-        runtime.write_status("stopped", "process not running", None, ui_pid)
+    resolved = runtime.resolve_service_state()
+    runtime.write_status(resolved.state, resolved.detail, resolved.service_pid, status.get("ui_pid"))
 
 
-def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
-    from core.memory.ui_access import generate_ui_read_secret
+def _start_service_after_repair(
+    target: str,
+    success_key: str,
+    failure_key: str,
+    *,
+    stopped_pids: list[int],
+) -> dict:
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # This repair stopped the old service and starts a replacement, so it is the
     # same shape ``cmd_start`` handles when it starts a service beside a
@@ -11361,6 +13216,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
     # old one. Mint a secret for the process being started and realign the UI.
     memory_ui_secret = generate_ui_read_secret()
     live_ui_pid = _live_ui_server_pid()
+    language = _configured_cli_language()
     try:
         new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
     except Exception as exc:
@@ -11368,7 +13224,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
         return _doctor_repair_result(
             target,
             "failed",
-            f"{failure_message}: {exc}",
+            i18n_t(failure_key, language, reason=exc),
             stopped_pids=stopped_pids,
         )
     ui_pid = runtime.read_status().get("ui_pid")
@@ -11394,7 +13250,7 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
     return _doctor_repair_result(
         target,
         "repaired",
-        success_message,
+        i18n_t(success_key, language),
         stopped_pids=stopped_pids,
         service_pid=new_pid,
     )
@@ -11407,8 +13263,13 @@ def _runtime_home_exists_for_repair() -> bool:
 
 def _repair_home_migration(*, dry_run: bool = False) -> dict:
     target = "home-migration"
+    language = _configured_cli_language()
     if os.environ.get(paths.AVIBE_HOME_ENV):
-        return _doctor_repair_result(target, "skipped", "AVIBE_HOME is explicit; default home migration does not apply.")
+        return _doctor_repair_result(
+            target,
+            "skipped",
+            i18n_t("doctor.repair.homeExplicit", language),
+        )
 
     avibe_home = Path.home() / paths.AVIBE_HOME_DIRNAME
     legacy_home = Path.home() / paths.LEGACY_HOME_DIRNAME
@@ -11416,31 +13277,31 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
     legacy_present = legacy_home.exists() or legacy_home.is_symlink()
 
     if not avibe_present and not legacy_present:
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; nothing needs migration.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoRuntime", language))
 
     if avibe_present and legacy_present and not legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            "Both ~/.avibe and ~/.vibe_remote are real directories; manual merge is required.",
+            i18n_t("doctor.repair.homeConflict", language),
         )
 
     if not avibe_present and legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            "Legacy home is a symlink but ~/.avibe is missing; inspect the symlink target manually.",
+            i18n_t("doctor.repair.homeSymlinkMissingCanonical", language),
         )
 
     if avibe_present and legacy_home.is_symlink() and _path_points_to(legacy_home, avibe_home):
-        return _doctor_repair_result(target, "skipped", "Runtime home migration is already healthy.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeHealthy", language))
 
     if dry_run:
         if not avibe_present and legacy_present and not legacy_home.is_symlink():
-            return _doctor_repair_result(target, "planned", "Would move ~/.vibe_remote to ~/.avibe and create a back-symlink.")
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryMove", language))
         if avibe_present:
-            return _doctor_repair_result(target, "planned", "Would recreate the ~/.vibe_remote compatibility symlink.")
-        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryLink", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
 
     if avibe_present:
         if legacy_home.is_symlink() or not legacy_present:
@@ -11448,54 +13309,68 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
             try:
                 legacy_home.symlink_to(avibe_home, target_is_directory=True)
             except OSError as exc:
-                return _doctor_repair_result(target, "failed", f"Failed to create compatibility symlink: {exc}")
-            return _doctor_repair_result(target, "repaired", "Created ~/.vibe_remote compatibility symlink.")
-        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+                return _doctor_repair_result(
+                    target,
+                    "failed",
+                    i18n_t("doctor.repair.homeLinkFailed", language, reason=exc),
+                )
+            return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeLinkCreated", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
 
     migrated_home = paths.migrate_default_home()
     if not _path_points_to(migrated_home, avibe_home):
-        return _doctor_repair_result(target, "failed", f"Default home remains at {migrated_home}; migration did not complete.")
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t("doctor.repair.homeMigrationIncomplete", language, path=migrated_home),
+        )
     if not _path_points_to(legacy_home, avibe_home):
         return _doctor_repair_result(
             target,
             "failed",
-            "Migrated ~/.vibe_remote to ~/.avibe, but failed to create the compatibility symlink.",
+            i18n_t("doctor.repair.homeMigrationLinkFailed", language),
         )
     paths.ensure_data_dirs()
-    return _doctor_repair_result(target, "repaired", "Migrated ~/.vibe_remote to ~/.avibe.")
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeMigrated", language))
 
 
 def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
     target = "stale-restart-state"
+    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
-        return _doctor_repair_result(target, "skipped", "No restart metadata is present.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartAbsent", language))
     if not _restart_status_is_stale(payload, restart_path):
-        return _doctor_repair_result(target, "skipped", "Restart metadata is still current.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartCurrent", language))
     if dry_run:
-        return _doctor_repair_result(target, "planned", "Would remove stale restart metadata and refresh runtime status.")
+        return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.restartDryRun", language))
     restart_path.unlink(missing_ok=True)
     _write_refreshed_runtime_status()
-    return _doctor_repair_result(target, "repaired", "Removed stale restart metadata and refreshed runtime status.")
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.restartRepaired", language))
 
 
 def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     target = "duplicate-service-processes"
+    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
     if not extra_pids:
-        return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noExtraProcess", language))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            f"Would stop extra Avibe service process(es): {','.join(map(str, extra_pids))}.",
+            i18n_t(
+                "doctor.repair.extraProcessDryRun",
+                language,
+                pids=",".join(map(str, extra_pids)),
+            ),
             pids=extra_pids,
         )
 
@@ -11510,8 +13385,8 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     if not owner_pid and stopped and not failed:
         return _start_service_after_repair(
             target,
-            "Stopped lockless service process(es) and started a clean service.",
-            "Stopped lockless service process(es), but failed to start a clean service",
+            "doctor.repair.duplicateStoppedStarted",
+            "doctor.repair.duplicateStoppedStartFailed",
             stopped_pids=stopped,
         )
 
@@ -11520,19 +13395,25 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "Some extra service processes could not be stopped.",
+            i18n_t("doctor.repair.extraProcessPartial", language),
             stopped_pids=stopped,
             failed_pids=failed,
         )
-    return _doctor_repair_result(target, "repaired", "Stopped extra Avibe service process(es).", stopped_pids=stopped)
+    return _doctor_repair_result(
+        target,
+        "repaired",
+        i18n_t("doctor.repair.extraProcessStopped", language),
+        stopped_pids=stopped,
+    )
 
 
 def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
     target = "stale-install-runtime"
+    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
 
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -11547,12 +13428,12 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         elif family == PACKAGE_NAME:
             current_pids.append(pid)
     if not stale_pids:
-        return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noLegacyProcess", language))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            f"Would stop legacy service process(es) and start current Avibe: {','.join(map(str, stale_pids))}.",
+            i18n_t("doctor.repair.staleInstallDryRun", language, pids=",".join(map(str, stale_pids))),
             pids=stale_pids,
         )
 
@@ -11569,7 +13450,7 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            "Some legacy vibe-remote service processes could not be stopped.",
+            i18n_t("doctor.repair.staleInstallPartial", language),
             stopped_pids=stopped,
             failed_pids=failed,
         )
@@ -11579,39 +13460,79 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "repaired",
-            "Stopped legacy vibe-remote service process(es).",
+            i18n_t("doctor.repair.staleInstallStopped", language),
             stopped_pids=stopped,
         )
 
     return _start_service_after_repair(
         target,
-        "Stopped legacy vibe-remote service process and started the current Avibe service.",
-        "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
+        "doctor.repair.staleInstallStoppedStarted",
+        "doctor.repair.staleInstallStoppedStartFailed",
         stopped_pids=stopped,
     )
 
 
 def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False) -> dict:
+    language = _configured_cli_language()
     if dry_run:
-        return _doctor_repair_result(target, "planned", DOCTOR_REPAIR_DRY_RUN_MESSAGES[target])
+        return _doctor_repair_result(
+            target,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+        )
     try:
         result = installer(force=True)
     except Exception as exc:  # noqa: BLE001
-        return _doctor_repair_result(target, "failed", f"{target} repair failed: {exc}")
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t(
+                "doctor.repair.dependencyResultFailed",
+                language,
+                target=target,
+                detail=i18n_t("doctor.repair.dependencyException", language, target=target, error=exc),
+            ),
+            reason=f"{target}_repair_exception",
+            error=str(exc),
+        )
+    if not isinstance(result, dict):
+        result = {
+            "ok": False,
+            "reason": f"{target}_invalid_result",
+            "error": i18n_t("doctor.value.unknownError", language),
+        }
     if result.get("ok"):
+        version = result.get("version")
+        detail = (
+            i18n_t("doctor.repair.dependencyVersion", language, version=version)
+            if version
+            else i18n_t("doctor.repair.dependencyReadyDefault", language)
+        )
         return _doctor_repair_result(
             target,
             "repaired" if result.get("changed", True) else "skipped",
-            str(result.get("message") or f"{target} is ready."),
+            i18n_t(
+                "doctor.repair.dependencyReady",
+                language,
+                target=target,
+                detail=detail,
+            ),
             path=result.get("path"),
-            version=result.get("version"),
+            version=version,
         )
+    download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
+    detail = _doctor_managed_failure_detail(target, result, language)
     return _doctor_repair_result(
         target,
         "failed",
-        str(result.get("message") or result.get("reason") or f"{target} repair failed"),
+        i18n_t(
+            "doctor.repair.dependencyResultFailed",
+            language,
+            target=target,
+            detail=detail,
+        ),
         reason=result.get("reason"),
-        download_error=result.get("download_error"),
+        download_error=download_error,
         output=result.get("output"),
     )
 
@@ -11624,10 +13545,66 @@ def _repair_avault(*, dry_run: bool = False) -> dict:
     return _repair_managed_dependency("avault", api.ensure_avault_installed, dry_run=dry_run)
 
 
+def _repair_model_hub_engine(*, dry_run: bool = False) -> dict:
+    return _repair_managed_dependency(
+        "model-hub-engine",
+        api.ensure_model_hub_engine_installed,
+        dry_run=dry_run,
+    )
+
+
 def _repair_tmux(*, dry_run: bool = False) -> dict:
     from core.tmux_runtime import ensure_tmux_installed
 
     return _repair_managed_dependency("tmux", ensure_tmux_installed, dry_run=dry_run)
+
+
+def _repair_memory_runtime(*, dry_run: bool = False) -> dict:
+    target = "memory-runtime"
+    language = _configured_cli_language()
+    if dry_run:
+        return _doctor_repair_result(
+            target,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+        )
+
+    try:
+        from vibe import internal_client
+
+        response = internal_client.memory_install_runtime_sync()
+    except Exception as exc:  # noqa: BLE001
+        return _doctor_repair_result(
+            target,
+            "failed",
+            i18n_t("doctor.repair.memoryRuntimeControllerUnavailable", language, reason=exc),
+            reason="memory_runtime_install_failed",
+        )
+
+    payload = response.get("body") if isinstance(response.get("body"), dict) else {}
+    reason = str(payload.get("reason") or "memory_runtime_install_failed")
+    download_error = (
+        payload.get("download_error")
+        if isinstance(payload.get("download_error"), dict)
+        else None
+    )
+    if response.get("status_code") == 200 and payload.get("ok") is True:
+        return _doctor_repair_result(
+            target,
+            "repaired",
+            i18n_t("doctor.repair.memoryRuntimeReady", language),
+        )
+    return _doctor_repair_result(
+        target,
+        "failed",
+        i18n_t(
+            "doctor.repair.memoryRuntimeFailed",
+            language,
+            reason=_doctor_memory_reason(reason, language),
+        ),
+        reason=reason,
+        download_error=download_error,
+    )
 
 
 def _repair_git_runtime(*, dry_run: bool = False) -> dict:
@@ -11640,61 +13617,103 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     from core.show_runtime import ShowRuntimeManager
 
     target = "show-runtime"
+    language = _configured_cli_language()
     if dry_run:
-        return _doctor_repair_result(target, "planned", DOCTOR_REPAIR_DRY_RUN_MESSAGES[target])
-
-    manager = ShowRuntimeManager()
-    before = manager.status()
-    if before.get("installed"):
-        return _doctor_repair_result(target, "skipped", "Show Runtime is already ready.")
-
-    archive = before.get("archive") if isinstance(before.get("archive"), dict) else {}
-    archive_url = str(archive.get("url") or "")
-    if (
-        before.get("provider") == "archive"
-        and "github.com/avibe-bot/vibe-show-runtime/releases/latest/download/" in archive_url
-    ):
         return _doctor_repair_result(
             target,
-            "failed",
-            "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. "
-            "Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides.",
-            provider=before.get("provider"),
-            archive_url=archive_url,
+            "planned",
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
         )
 
-    result = manager.prepare(force=False)
-    status = result.get("status") if isinstance(result.get("status"), dict) else {}
-    if result.get("ok"):
+    result = ShowRuntimeManager().repair()
+    outcome = result.get("outcome")
+    verification = (
+        result.get("verification")
+        if isinstance(result.get("verification"), dict)
+        else {}
+    )
+    if outcome == "healthy":
+        return _doctor_repair_result(
+            target,
+            "skipped",
+            i18n_t("doctor.repair.showRuntimeHealthy", language),
+            provider=result.get("provider"),
+            platform=result.get("platform"),
+            install_dir=result.get("install_dir"),
+        )
+    if outcome == "repaired":
         return _doctor_repair_result(
             target,
             "repaired",
-            "Prepared the manifest-selected Show Runtime.",
+            i18n_t(
+                (
+                    "doctor.repair.showRuntimeReinstalled"
+                    if result.get("was_installed")
+                    else "doctor.repair.showRuntimeInstalled"
+                ),
+                language,
+            ),
             provider=result.get("provider"),
             platform=result.get("platform"),
-            install_dir=status.get("install_dir"),
+            install_dir=result.get("install_dir"),
         )
 
     reason = str(result.get("reason") or "runtime_prepare_failed")
-    download_error = status.get("download_error") if isinstance(status.get("download_error"), dict) else None
-    if download_error:
-        detail = str(download_error.get("message") or reason)
-        if download_error.get("url"):
-            detail = f"{detail}: {download_error['url']}"
+    message_kwargs: dict[str, object]
+    if result.get("explicit_command"):
+        message_key = "doctor.repair.showRuntimeExplicitFailed"
+        message_kwargs = {"reason": reason}
+    elif reason == "runtime_legacy_archive_unavailable":
+        message_key = "doctor.repair.showRuntimeLegacyUnavailable"
+        message_kwargs = {}
+    elif verification.get("state") == "undetermined":
+        message_key = (
+            "doctor.repair.showRuntimePostVerificationFailed"
+            if result.get("verification_phase") == "after"
+            else "doctor.repair.showRuntimeVerificationFailed"
+        )
+        message_kwargs = {"detail": verification.get("detail") or reason}
+    elif result.get("verification_phase") == "after" and verification.get("state") == "not_startable":
+        message_key = (
+            "doctor.repair.showRuntimeReinstallStartFailed"
+            if result.get("was_installed")
+            else "doctor.repair.showRuntimeInstallStartFailed"
+        )
+        message_kwargs = {"reason": verification.get("reason") or reason}
     else:
-        detail = reason
+        download_error = (
+            result.get("download_error")
+            if isinstance(result.get("download_error"), dict)
+            else None
+        )
+        detail = str(download_error.get("message") or reason) if download_error else reason
+        if download_error and download_error.get("url"):
+            detail = f"{detail}: {download_error['url']}"
+        message_key = "doctor.repair.showRuntimePrepareFailed"
+        message_kwargs = {"detail": detail}
+    download_error = (
+        result.get("download_error")
+        if isinstance(result.get("download_error"), dict)
+        else None
+    )
     return _doctor_repair_result(
         target,
         "failed",
-        f"Show Runtime preparation failed: {detail}",
+        i18n_t(message_key, language, **message_kwargs),
         provider=result.get("provider"),
         platform=result.get("platform"),
+        install_dir=result.get("install_dir"),
+        installed=result.get("installed"),
         reason=reason,
         download_error=download_error,
+        start_error=result.get("start_error"),
+        explicit_command=result.get("explicit_command"),
+        archive_url=result.get("archive_url"),
     )
 
 
 def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: bool = False) -> dict:
+    language = _configured_cli_language()
     requested_targets = targets or list(DOCTOR_DEFAULT_REPAIR_TARGETS)
     unknown = [target for target in requested_targets if target not in DOCTOR_REPAIR_TARGETS]
     if unknown:
@@ -11706,7 +13725,12 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                 _doctor_repair_result(
                     target,
                     "failed",
-                    f"Unknown repair target. Known targets: {', '.join(DOCTOR_REPAIR_TARGETS)}.",
+                    i18n_t(
+                        "doctor.repair.unknownTarget",
+                        language,
+                        target=target,
+                        known_targets=", ".join(DOCTOR_REPAIR_TARGETS),
+                    ),
                 )
                 for target in unknown
             ],
@@ -11721,7 +13745,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                 _doctor_repair_result(
                     target,
                     "planned",
-                    DOCTOR_REPAIR_DRY_RUN_MESSAGES[target],
+                    i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
                 )
                 for target in requested_targets
             ],
@@ -11734,7 +13758,9 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
         "stale-restart-state": _repair_stale_restart_state,
         "askill": _repair_askill,
         "avault": _repair_avault,
+        "model-hub-engine": _repair_model_hub_engine,
         "git-runtime": _repair_git_runtime,
+        "memory-runtime": _repair_memory_runtime,
         "show-runtime": _repair_show_runtime,
         "tmux": _repair_tmux,
     }
@@ -11755,7 +13781,13 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     if not sys.stdin.isatty():
         return False
     target_text = ", ".join(targets or DOCTOR_DEFAULT_REPAIR_TARGETS)
-    answer = input(f"Repair Avibe doctor target(s): {target_text}? Type 'yes' to continue: ")
+    answer = input(
+        i18n_t(
+            "doctor.repairConfirm",
+            _configured_cli_language(),
+            targets=target_text,
+        )
+    )
     return answer.strip().lower() == "yes"
 
 
@@ -11811,7 +13843,7 @@ def cmd_start(*, open_browser: bool | None = None):
     else:
         _write_status("starting")
 
-    from core.memory.ui_access import generate_ui_read_secret
+    from vibe.memory_ui_access import generate_ui_read_secret
 
     # The Memory UI read proof is a per-launch secret: it reaches a child only
     # over stdin and is deliberately never persisted, so this launcher can only
@@ -11860,21 +13892,32 @@ def cmd_start(*, open_browser: bool | None = None):
             language = normalize_language(getattr(config, "language", None))
             print(i18n_t("memory.cli.partialRestartWarning", language))
             print("")
-    service_ready = runtime.service_pid_recorded(service_pid)
-    if not service_ready:
+    # The WAIT below is asked unconditionally. The predicate that used to guard
+    # it is the lock, which is taken before the database is migrated -- so it is
+    # already true of a process that has not finished starting and may never, and
+    # guarding with it skipped the wait in exactly the case the wait exists for.
+    # Nothing is paid for asking: a service that is up answers on the first probe.
+    #
+    # The provisional "starting" WRITE is guarded, and the difference is the
+    # point: `write_status` carries `started_at` forward only across consecutive
+    # `running` writes, so announcing a transition for a service this command did
+    # not start resets its recorded uptime to now and briefly shows a starting
+    # service to every status consumer. `vibe start` against a live instance is
+    # idempotent and must stay observably so.
+    if not service_reused:
         runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
-        # Resolve the authoritative service.lock holder rather than waiting on the
-        # raw pid start_service handed back: under a delegated user scope that pid
-        # can be a launcher that never takes the lock, so wait_for_service_ready
-        # adopts and returns the real owner instead of stalling the full timeout.
-        resolved_pid = runtime.wait_for_service_ready(
-            service_pid,
-            timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
-        )
-        if resolved_pid is not None:
-            service_pid = resolved_pid
-            service_start.capture(service_pid, reused=service_reused)
-            service_ready = True
+    # The wait resolves the authoritative service.lock holder rather than waiting
+    # on the raw pid start_service handed back: under a delegated user scope that
+    # pid can be a launcher that never takes the lock, so wait_for_service_ready
+    # adopts and returns the real owner instead of stalling the full timeout.
+    resolved_pid = runtime.wait_for_service_ready(
+        service_pid,
+        timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS,
+    )
+    service_ready = resolved_pid is not None
+    if resolved_pid is not None:
+        service_pid = resolved_pid
+        service_start.capture(service_pid, reused=service_reused)
     if service_ready:
         runtime.write_status("running", "pid={}".format(service_pid), service_pid, ui_pid)
     elif runtime.pid_alive(service_pid):
@@ -12208,6 +14251,27 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         if current.get("paired"):
             _print_remote_already_configured(current)
             return 0
+
+    # The guided entry point (``vibe`` / ``vibe remote``) is admitted at the
+    # management floor so it can report what is already configured, but past this
+    # line it performs exactly what ``vibe remote pair`` does: it writes this
+    # machine's identity. Refusing here, before a pairing key is solicited or
+    # spent, keeps both entry points on the one Owner answer.
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    try:
+        require_instance_role(None, "owner")
+    except InstanceAuthorizationError as exc:
+        _print_task_error(
+            TaskCliError(
+                str(exc),
+                code=exc.code,
+                details={"command": "vibe remote pair", "minimum_role": exc.minimum_role},
+            )
+        )
+        return 1
+
+    if guided:
         _print_remote_setup_intro()
         if not _wait_for_pairing_key_ready():
             print("Remote access setup cancelled.")
@@ -12499,13 +14563,17 @@ def cmd_show_list(args):
 
 def cmd_show_path(args):
     from core.show_pages import ensure_show_page_dir
+    from core.show_runtime import ShowRuntimeContext
 
     store = _load_show_page_store()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show path --help")
         page = store.ensure(session_id)
         page_dir = ensure_show_page_dir(session_id)
-        _prewarm_show_page_session_best_effort(session_id)
+        _prewarm_show_page_session_best_effort(
+            session_id,
+            context=ShowRuntimeContext.PRIVATE.value,
+        )
         payload = _show_page_result(
             page,
             message=f"Show Page workspace is ready at {page_dir}.",
@@ -12524,12 +14592,18 @@ def cmd_show_path(args):
         store.close()
 
 
-def _prewarm_show_page_session_best_effort(session_id: str, *, base_path: str | None = None) -> None:
-    if _request_show_page_prewarm_best_effort(session_id, base_path=base_path) is None:
+def _prewarm_show_page_session_best_effort(
+    session_id: str,
+    *,
+    context: str,
+) -> None:
+    if _request_show_page_prewarm_best_effort(session_id, context=context) is None:
         logger.debug("Show Page session prewarm skipped for %s", session_id)
 
 
 def cmd_show_status(args):
+    from core.show_git import show_history_status
+
     store = _load_show_page_store()
     try:
         session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show status --help")
@@ -12553,7 +14627,10 @@ def cmd_show_status(args):
         payload = _show_page_result(
             page,
             message=f"Show Page is {page.visibility}.",
-            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+            extra={
+                "history": show_history_status(session_id),
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+            },
         )
         if getattr(args, "json", False):
             _print_json(payload)
@@ -12569,6 +14646,7 @@ def cmd_show_status(args):
 
 def cmd_show_update(args):
     from core.show_pages import public_url, show_page_payload
+    from core.show_runtime import ShowRuntimeContext
 
     store = _load_show_page_store()
     try:
@@ -12619,8 +14697,11 @@ def cmd_show_update(args):
                 message = "Show Page has been taken offline. Local files were not deleted."
 
         if updated.visibility != "offline":
-            base_path = f"/p/{updated.share_id}/" if updated.visibility == "public" and updated.share_id else None
-            _prewarm_show_page_session_best_effort(updated.session_id, base_path=base_path)
+            context = ShowRuntimeContext.SHARED if updated.visibility == "public" else ShowRuntimeContext.PRIVATE
+            _prewarm_show_page_session_best_effort(
+                updated.session_id,
+                context=context.value,
+            )
         payload = _show_page_result(updated, message=message, extra=extra)
         if getattr(args, "json", False):
             _print_json(payload)
@@ -12739,13 +14820,17 @@ def _show_prewarm_target_matches_ui_pid(url: str, expected_ui_pid: int | None) -
     return actual_ui_pid == expected_ui_pid
 
 
-def _request_show_page_prewarm_best_effort(session_id: str, *, base_path: str | None = None) -> dict | None:
+def _request_show_page_prewarm_best_effort(
+    session_id: str,
+    *,
+    context: str,
+) -> dict | None:
     from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 
     targets = _local_show_prewarm_targets(session_id)
     if not targets:
         return None
-    payload = {"base_path": base_path} if base_path else {}
+    payload = {"context": context}
     body = json.dumps(payload).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -12765,6 +14850,42 @@ def _request_show_page_prewarm_best_effort(session_id: str, *, base_path: str | 
         except Exception:
             logger.debug("Failed to request Show Page prewarm from live UI at %s", url, exc_info=True)
     return None
+
+
+def _reserve_dispatching_show_event(session_id: str, payload: dict) -> None:
+    """Write a dispatching Show event here, under this invocation's authority.
+
+    A dispatching event is deferred Agent work, and the controller rebuilds that
+    turn from the reservation rather than from whatever woke it. The live UI is a
+    separate process reached over a local token, so it would resolve a remote
+    caller as this machine's Owner and record the wrong authority. Reserving
+    first keeps the answer this invocation was admitted under; the POST that
+    follows replays the same event id, so the live path still owns publishing and
+    dispatch, and an unreachable UI still falls back exactly as before.
+
+    Non-dispatching events start no turn and have no deferred consumer, so they
+    stay on the single-write path.
+
+    This reservation is the only point where the caller's authority is still
+    known, so its failure is the command's failure. Falling through would hand
+    the same turn to the live UI or to the local fallback, and both would write
+    it again as this machine's Owner -- turning a refusal into an escalation and
+    a storage fault into an unstamped row. Either path may replay this
+    reservation once it exists; neither may create a second one after it did not.
+    """
+
+    from core.show_session_events import (
+        ShowSessionEventStore,
+        show_event_request_requests_dispatch,
+    )
+
+    if not show_event_request_requests_dispatch(payload):
+        return
+    store = ShowSessionEventStore()
+    try:
+        store.append(session_id, payload)
+    finally:
+        store.close()
 
 
 def _post_show_event_to_live_ui(session_id: str, payload: dict) -> dict | None:
@@ -13302,6 +15423,7 @@ def cmd_show_event(args):
             else f"show_evt_{uuid4().hex[:16]}"
         )
         event_id_for_retry = payload["id"]
+        _reserve_dispatching_show_event(session_id, payload)
         event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             # The local bridge handles both shapes: non-dispatch events are
@@ -13448,9 +15570,10 @@ def _doctor_repair_requested(args) -> bool:
 
 
 def _print_doctor_repair_result(result: dict) -> None:
-    title = "Avibe Doctor Repair"
+    language = _configured_cli_language()
+    title = i18n_t("doctor.repairTitle", language)
     if result.get("dry_run"):
-        title = f"{title} (dry run)"
+        title += i18n_t("doctor.dryRunSuffix", language)
     print(f"\n  {title}")
     print("  " + "=" * 40)
     for item in result.get("results", []):
@@ -13470,7 +15593,7 @@ def cmd_doctor(args=None):
         targets = list(getattr(args, "doctor_repair_targets", []) or [])
         dry_run = bool(getattr(args, "dry_run", False))
         if not dry_run and not getattr(args, "yes", False) and not _confirm_doctor_repair(targets):
-            print("Doctor repair was not run. Pass --yes to confirm non-interactively.", file=sys.stderr)
+            print(i18n_t("doctor.repairNotRun", _configured_cli_language()), file=sys.stderr)
             return 2
         result = _repair_doctor_targets(
             targets,
@@ -13484,7 +15607,8 @@ def cmd_doctor(args=None):
     result = _doctor(deep=deep)
 
     # Terminal-friendly output
-    print("\n  Avibe Diagnostics")
+    language = _configured_cli_language()
+    print(f"\n  {i18n_t('doctor.title', language)}")
     print("  " + "=" * 40)
 
     for group in result.get("groups", []):
@@ -13506,9 +15630,9 @@ def cmd_doctor(args=None):
     summary = result.get("summary", {})
     print("\n  " + "-" * 30)
     print(
-        f"  \033[32m{summary.get('pass', 0)} passed\033[0m  "
-        f"\033[33m{summary.get('warn', 0)} warnings\033[0m  "
-        f"\033[31m{summary.get('fail', 0)} failed\033[0m"
+        f"  \033[32m{i18n_t('doctor.summary.passed', language, count=summary.get('pass', 0))}\033[0m  "
+        f"\033[33m{i18n_t('doctor.summary.warnings', language, count=summary.get('warn', 0))}\033[0m  "
+        f"\033[31m{i18n_t('doctor.summary.failed', language, count=summary.get('fail', 0))}\033[0m"
     )
     print()
 
@@ -13596,45 +15720,112 @@ def cmd_upgrade():
 
     if info["error"]:
         print(f"\033[33mFailed to check for updates: {info['error']}\033[0m")
-        print("Attempting upgrade anyway...")
     elif not info["has_update"]:
         print("\033[32mYou are already using the latest version.\033[0m")
         return 0
     else:
         print(f"New version available: {info['latest']}")
 
-    print("\nUpgrading...")
-
     current_vibe_path = cache_running_vibe_path()
-    plan = build_upgrade_plan(vibe_path=current_vibe_path)
+    try:
+        plan = build_upgrade_plan(
+            vibe_path=current_vibe_path,
+            memory_enabled=configured_memory_enabled(),
+            target_version=info.get("latest"),
+        )
+    except MemoryRequirementUnreadableError:
+        print(f"\033[31m{i18n_t('update.memoryRequirementUnreadable')}\033[0m")
+        return 1
+    except ValueError as exc:
+        print(f"\033[31mUpgrade failed: {exc}\033[0m")
+        return 1
+    if info["error"]:
+        print("Attempting upgrade anyway...")
+    print("\nUpgrading...")
+    if plan.preflight_error:
+        print(f"\033[31mUpgrade cannot be activated safely: {plan.preflight_error}\033[0m")
+        return 1
     print(f"Using {plan.method}: {' '.join(plan.command)}")
     runtime_was_running = _runtime_process_was_running()
 
     # Use a stable directory as cwd to avoid issues when running from a
     # directory that uv may delete during upgrade (e.g. inside the uv tool venv).
     safe_cwd = get_safe_cwd()
+    restart = None
+    restart_error = None
+    deferred_activation = False
+    restart_python = None
 
     try:
-        result = subprocess.run(plan.command, capture_output=True, text=True, env=plan.env, cwd=safe_cwd)
-        if result.returncode == 0:
-            print("\033[32mUpgrade successful!\033[0m")
-            if runtime_was_running:
+        with atomic_upgrade_lock():
+            if restart_is_pending():
+                print("\033[31mUpgrade already has a restart in progress; wait for it to finish.\033[0m")
+                return 1
+            if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
+                print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
+                return 1
+            result = execute_upgrade_plan(
+                plan,
+                run=subprocess.run,
+                capture_output=True,
+                text=True,
+                cwd=safe_cwd,
+                timeout=UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            )
+            if result.returncode == 0 and plan.activation is not None:
+                try:
+                    if os.name == "nt" and launcher_is_current_process(plan.activation.launcher):
+                        candidate_result = verify_upgrade_candidate(plan.activation)
+                        if not candidate_result.ok:
+                            raise RuntimeError(candidate_result.detail)
+                        defer_upgrade_activation(
+                            plan.activation,
+                            parent_pid=os.getpid(),
+                            restart_required=runtime_was_running,
+                            prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        )
+                        deferred_activation = True
+                    else:
+                        restart_python = _candidate_python(plan.activation.candidate_launcher)
+                        activate_upgrade_candidate(plan.activation)
+                except Exception as exc:  # noqa: BLE001
+                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                    print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
+                    return 1
+            elif result.returncode != 0 and plan.activation is not None:
+                discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+            if result.returncode == 0 and plan.activation is None and plan.method == "pip":
+                integrity = verify_python_environment(sys.executable)
+                if not integrity.ok:
+                    print(f"\033[31mUpgrade installed an incomplete Python environment: {integrity.detail}\033[0m")
+                    return 1
+            if result.returncode == 0 and runtime_was_running and not deferred_activation:
                 try:
                     restart = schedule_restart(
                         delay_seconds=0.0,
                         vibe_path=current_vibe_path,
                         trigger="upgrade",
                         prepare_show_runtime=not should_skip_show_runtime_prepare(),
+                        **({"python_executable": str(restart_python)} if restart_python else {}),
                     )
                 except Exception as exc:
-                    print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                    print(f"Restart error: {exc}")
-                    print("Run `vibe restart` to use the new version.")
-                    return 2
-                else:
-                    print("Restart scheduled to use the new version.")
-                    print(f"Job ID: {restart['job_id']}")
-                    print("Run `vibe status` to inspect the restart result.")
+                    restart_error = exc
+        if result.returncode == 0:
+            print("\033[32mUpgrade successful!\033[0m")
+            if deferred_activation:
+                print("Upgrade validated; launcher activation will complete after this command exits.")
+                if runtime_was_running:
+                    print("Restart will be scheduled by the activation helper.")
+                return 0
+            if restart_error is not None:
+                print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
+                print(f"Restart error: {restart_error}")
+                print("Run `vibe restart` to use the new version.")
+                return 2
+            if restart is not None:
+                print("Restart scheduled to use the new version.")
+                print(f"Job ID: {restart['job_id']}")
+                print("Run `vibe status` to inspect the restart result.")
             else:
                 _prepare_show_runtime_after_install(current_vibe_path)
                 print("Avibe was not running; the new version will be used next time you start it.")
@@ -13643,6 +15834,8 @@ def cmd_upgrade():
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:
+        if plan.activation is not None:
+            discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1
 
@@ -13698,9 +15891,10 @@ def _print_runtime_status(payload: dict) -> None:
     if archive:
         print(f"  Archive: {archive.get('name')}")
         print(f"  Archive sha256: {archive.get('sha256')}")
-    print(f"  Installed: {'yes' if payload.get('installed') else 'no'}")
-    if payload.get("install_dir"):
-        print(f"  Install dir: {payload.get('install_dir')}")
+    install = _show_runtime_install(payload)
+    print(f"  Installed: {'yes' if install.get('state') == 'installed' else 'no'}")
+    if install.get("install_dir"):
+        print(f"  Install dir: {install.get('install_dir')}")
     if payload.get("reason"):
         print(f"  Reason: {payload.get('reason')}")
     git = payload.get("git") or {}
@@ -13732,25 +15926,56 @@ def cmd_runtime(args) -> int:
     if command == "prepare":
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
-        askill = _ensure_askill_during_prepare(offline=bool(offline))
-        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
-        git = _ensure_git_during_prepare(offline=offline, force=getattr(args, "force", False))
-        avault = _ensure_avault_during_prepare(offline=bool(offline))
+        force = bool(getattr(args, "force", False))
+        askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
+        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
+        git = _ensure_git_during_prepare(offline=offline, force=force)
+        avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
+        model_hub_engine = _ensure_model_hub_engine_during_prepare(
+            offline=bool(offline),
+            force=force,
+        )
         payload["askill"] = askill
         payload["avault"] = avault
+        payload["model_hub_engine"] = model_hub_engine
         payload["tmux"] = tmux
         payload["git"] = git
+        install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        runtime_prepared = bool(payload.get("ok"))
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
-            if payload.get("ok"):
-                print("Show Runtime ready.")
+            language = _configured_cli_language()
+            if runtime_prepared:
+                print(i18n_t("runtime.prepare.prepared", language))
                 status = payload.get("status") or {}
-                if status.get("install_dir"):
-                    print(f"Install dir: {status['install_dir']}")
+                status_install = _show_runtime_install(status)
+                if status_install.get("install_dir"):
+                    print(f"Install dir: {status_install['install_dir']}")
+            elif policy.get("state") == "skipped":
+                print(
+                    i18n_t(
+                        "runtime.prepare.skipped",
+                        language,
+                        reason=policy.get("reason") or "unknown",
+                    ),
+                    file=sys.stderr,
+                )
             else:
-                reason = payload.get("reason") or "unknown"
-                print(f"Show Runtime prepare failed: {reason}", file=sys.stderr)
+                reason = payload.get("reason") or install.get("reason") or "unknown"
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.unsupportedSource"
+                            if reason == "runtime_source_unsupported"
+                            else "runtime.prepare.failed"
+                        ),
+                        language,
+                        reason=reason,
+                    ),
+                    file=sys.stderr,
+                )
             if askill.get("skipped"):
                 print(f"askill: skipped ({askill.get('reason') or 'skipped'}).")
             elif askill.get("ok"):
@@ -13763,6 +15988,38 @@ def cmd_runtime(args) -> int:
                 print("avault installed." if avault.get("changed") else "avault ready.")
             else:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
+            if model_hub_engine.get("skipped"):
+                print(
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineSkipped",
+                        language,
+                        reason=model_hub_engine.get("reason") or "skipped",
+                    )
+                )
+            elif model_hub_engine.get("ok"):
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.modelHubEngineInstalled"
+                            if model_hub_engine.get("changed")
+                            else "runtime.prepare.modelHubEngineReady"
+                        ),
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.modelHubEngineNotReady",
+                        language,
+                        reason=(
+                            model_hub_engine.get("message")
+                            or model_hub_engine.get("reason")
+                            or "install failed"
+                        ),
+                    ),
+                    file=sys.stderr,
+                )
             if tmux.get("skipped") or tmux.get("status") == "skipped":
                 print(f"tmux: skipped ({tmux.get('reason') or 'skipped'}).")
             elif tmux.get("ok"):
@@ -13778,19 +16035,101 @@ def cmd_runtime(args) -> int:
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
                     file=sys.stderr,
                 )
-        strict_ok = bool(payload.get("ok")) and _git_prepare_satisfies_strict(git)
+        strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
         return 1 if getattr(args, "strict", False) and not strict_ok else 0
     if command == "clean":
-        payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
-        git = _clean_git_runtime(keep_previous=getattr(args, "keep_previous", 1))
-        payload["git"] = git
+        dry_run = bool(getattr(args, "dry_run", False))
+        keep_previous = getattr(args, "keep_previous", 1)
+        payload = manager.clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+        managed_runtimes = _clean_managed_runtime_consumers(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+        payload.update(managed_runtimes)
+        show_verdict = _runtime_clean_verdict(payload, dry_run=dry_run)
+        managed_verdicts = {
+            runtime_id: _runtime_clean_verdict(result, dry_run=dry_run)
+            for runtime_id, result in managed_runtimes.items()
+        }
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
+            language = _configured_cli_language()
+            archives_value = payload.get("archives")
+            archives = archives_value if isinstance(archives_value, Mapping) else {}
+            skipped_reason = str(archives.get("skipped_reason") or "")
+            outcome = str(archives.get("outcome") or "")
+            # Consumer results are reported independently of the Show archive
+            # outcome: a skipped archive pass must not hide what the rest of
+            # the cleanup actually reclaimed (or would reclaim).
+            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
             removed = payload.get("removed") or []
-            print(f"Removed {len(removed)} Show Runtime cache item(s).")
-            print(f"Removed {len(git.get('removed') or [])} Git Runtime cache item(s).")
-        return 0
+            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            if show_verdict.failed:
+                _print_runtime_clean_failure(
+                    consumer="Show Runtime",
+                    reason=show_verdict.reason,
+                    dry_run=dry_run,
+                    language=language,
+                )
+            is_partial_run = outcome == "partial" and not dry_run
+            if is_partial_run:
+                print(
+                    i18n_t(
+                        "runtime.clean.removedArchives",
+                        language,
+                        count=int(archives.get("removed_count") or 0),
+                        size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+                    )
+                )
+                print(
+                    i18n_t("runtime.clean.partiallyRemoved", language, failed=int(archives.get("failed_count") or 0)),
+                    file=sys.stderr,
+                )
+            elif skipped_reason:
+                # A skipped/failed archive pass is not a completed zero-removal
+                # cleanup; say so instead of printing placeholder counts, with
+                # remediation that matches the actual reason.
+                if skipped_reason == "archive_removal_failed":
+                    print(
+                        i18n_t(
+                            "runtime.clean.removalFailed",
+                            language,
+                            failed=int(archives.get("failed_count") or 0),
+                        ),
+                        file=sys.stderr,
+                    )
+                else:
+                    skip_key = (
+                        "runtime.clean.skippedInspection"
+                        if skipped_reason == "archive_inspection_failed"
+                        else "runtime.clean.skipped"
+                    )
+                    print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
+            elif not show_verdict.archives_failed and (archives or not show_verdict.failed):
+                archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
+                archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
+                print(
+                    i18n_t(
+                        f"{prefix_key}Archives",
+                        language,
+                        count=archive_count,
+                        size=_format_byte_size(archive_bytes),
+                    )
+                )
+            for runtime_id, result in managed_runtimes.items():
+                _print_managed_runtime_clean_result(
+                    runtime_id=runtime_id,
+                    result=result,
+                    dry_run=dry_run,
+                    language=language,
+                    verdict=managed_verdicts[runtime_id],
+                )
+        failed = show_verdict.failed or any(verdict.failed for verdict in managed_verdicts.values())
+        return 1 if failed else 0
     raise TaskCliError("runtime command is required", code="invalid_arguments", help_command="vibe runtime --help")
 
 
@@ -13826,25 +16165,67 @@ def _prepare_show_runtime_after_install(vibe_path: str | None) -> None:
         print(detail)
 
 
-def _ensure_askill_during_prepare(offline: bool = False) -> dict:
+def _ensure_askill_during_prepare(offline: bool = False, force: bool = False) -> dict:
     """Ensure askill (a required local dependency) alongside the Show Runtime.
 
     Folded into ``vibe runtime prepare`` so askill auto-installs at exactly the
     same lifecycle points as the Show Page runtime (post install / upgrade),
     with a ``VIBE_INSTALL_SKIP_ASKILL`` escape hatch mirroring the Show Runtime
     one. Skipped under ``--offline`` (the askill installer needs the network).
-    Refreshes askill to latest even when a binary already exists — prepare is
-    the chokepoint that keeps required local deps current on upgrade. An askill
-    hiccup never fails the prepare; the Dependencies page offers a manual retry.
+    Refreshes askill to latest so prepare stays the chokepoint that keeps
+    required local deps current on upgrade, but asks whether that refresh would
+    change anything before running the installer: askill.sh re-downloads the CLI
+    on every run, so an unconditional refresh charged every prepare ~30s to
+    install the version already on disk. An askill hiccup never fails the
+    prepare; the Dependencies page offers a manual retry.
+
+    ``force`` is prepare's ``--force``, and it means repair, not currency: a
+    corrupted binary can still report the current version, so an explicit
+    ``vibe runtime prepare --force`` must reinstall rather than ask. Currency is
+    the default; repair stays available on request, exactly as it is for the
+    Show Runtime, tmux, and git phases.
+
+    Only an explicit ``up_to_date`` verdict may report ready. Any other verdict
+    that installed nothing means currency was not established, not that it holds,
+    so prepare installs instead of claiming a fact it never checked.
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
-        return api.ensure_askill_installed(force=True)
+        if force:
+            return api.ensure_askill_installed(force=True)
+        result = api.refresh_askill_if_stale()
+        if not (result.get("ok") and result.get("action") is None):
+            return result
+        if result.get("reason") != "up_to_date":
+            # The owner skipped without establishing currency — today that is
+            # ``latest_unavailable``, when the upstream version probe failed.
+            # Prepare is the chokepoint that must *make* the dependency current,
+            # so with no evidence either way it does what it did before this fast
+            # path existed and installs. The probe and the askill.sh installer
+            # are independent paths: a rate-limited or blipped version lookup
+            # says nothing about whether the install would succeed, and reporting
+            # ready off the back of it would claim currency we never checked.
+            # Only ``up_to_date`` may report ready, so a skip reason added later
+            # takes this branch rather than inheriting a false pass.
+            refreshed = api.ensure_askill_installed(force=True)
+            refreshed["action"] = "refresh_currency_unknown"
+            return refreshed
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
+    # Already current, and the owner said so: report ready rather than skipped so
+    # prepare's dependency lines read the same way as the pinned providers when
+    # nothing needed doing.
+    status = result.get("status") or {}
+    return {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": status.get("path"),
+        "version": status.get("version"),
+    }
 
 
 def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:
@@ -13878,23 +16259,262 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return {"ok": False, "message": str(exc)}
 
 
-def _clean_git_runtime(*, keep_previous: int) -> dict:
+def _format_byte_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PiB"
+
+
+def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
+    """Return the shared-runtime cleanup passes in stable output order."""
+
+    from core.tmux_runtime import get_tmux_runtime_manager
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    def clean_memory(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        try:
+            from avibe_memory.artifact import get_memory_artifact_manager
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"avibe_memory", "avibe_memory.artifact"}:
+                raise
+            return {
+                "ok": True,
+                "removed": [],
+                "skipped": True,
+                "reason": "memory_implementation_unavailable",
+            }
+
+        return get_memory_artifact_manager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    def clean_model_hub(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return EngineRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    def clean_tmux(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return get_tmux_runtime_manager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
+    return (
+        ("git", _clean_git_runtime),
+        ("memory-runtime", clean_memory),
+        ("model_hub_engine", clean_model_hub),
+        ("tmux", clean_tmux),
+    )
+
+
+def _clean_managed_runtime_consumers(*, keep_previous: int, dry_run: bool = False) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for runtime_id, cleaner in _managed_runtime_cleaners():
+        try:
+            result = cleaner(keep_previous=keep_previous, dry_run=dry_run)
+            if not isinstance(result, Mapping):
+                raise TypeError("runtime cleanup returned a non-mapping result")
+            results[runtime_id] = dict(result)
+        except Exception as exc:  # noqa: BLE001
+            results[runtime_id] = {
+                "ok": False,
+                "removed": [],
+                "reason": f"{runtime_id}_clean_failed",
+                "message": str(exc),
+            }
+    return results
+
+
+@dataclass(frozen=True)
+class _RuntimeCleanVerdict:
+    reason: str | None
+    archives_failed: bool
+
+    @property
+    def failed(self) -> bool:
+        return self.reason is not None
+
+
+def _runtime_clean_verdict(result: Mapping[str, Any], *, dry_run: bool) -> _RuntimeCleanVerdict:
+    archives_value = result.get("archives")
+    archives = archives_value if isinstance(archives_value, Mapping) else {}
+    archive_reason = archives.get("skipped_reason")
+    failed_count = archives.get("failed_count")
+    archives_failed = bool(archive_reason) or (
+        not dry_run
+        and (
+            archives.get("outcome") == "partial"
+            or (isinstance(failed_count, (int, float)) and failed_count > 0)
+        )
+    )
+    nested_reason = archive_reason or ("archive_removal_failed" if archives_failed else None)
+    ok = result.get("ok")
+    reason = result.get("reason")
+    top_level_failed = ok is False or (ok is not True and bool(reason))
+    if not top_level_failed and not archives_failed:
+        return _RuntimeCleanVerdict(reason=None, archives_failed=False)
+    return _RuntimeCleanVerdict(
+        reason=str(reason or nested_reason or "unknown"),
+        archives_failed=archives_failed,
+    )
+
+
+def _managed_runtime_label(runtime_id: str) -> str:
+    labels = {
+        "git": "Git Runtime",
+        "memory-runtime": "Memory Runtime",
+        "model_hub_engine": "Model Hub Runtime",
+        "tmux": "tmux Runtime",
+    }
+    return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
+
+
+def _print_runtime_clean_failure(
+    *,
+    consumer: str,
+    reason: str | None,
+    dry_run: bool,
+    language: str,
+) -> None:
+    key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
+    print(
+        i18n_t(
+            key,
+            language,
+            consumer=consumer,
+            reason=reason or "unknown",
+        ),
+        file=sys.stderr,
+    )
+
+
+def _print_managed_runtime_clean_result(
+    *,
+    runtime_id: str,
+    result: Mapping[str, Any],
+    dry_run: bool,
+    language: str,
+    verdict: _RuntimeCleanVerdict,
+) -> None:
+    consumer = _managed_runtime_label(runtime_id)
+    prefix_key = "runtime.clean.consumerWouldRemove" if dry_run else "runtime.clean.consumerRemoved"
+    removed = result.get("removed")
+    removed_count = len(removed) if isinstance(removed, list) else 0
+    print(i18n_t(f"{prefix_key}Items", language, consumer=consumer, count=removed_count))
+
+    if verdict.failed:
+        _print_runtime_clean_failure(
+            consumer=consumer,
+            reason=verdict.reason,
+            dry_run=dry_run,
+            language=language,
+        )
+
+    archives_value = result.get("archives")
+    if not isinstance(archives_value, Mapping) or not archives_value:
+        return
+    archives = archives_value
+    skipped_reason = str(archives.get("skipped_reason") or "")
+    outcome = str(archives.get("outcome") or "")
+    if outcome == "partial" and not dry_run:
+        print(
+            i18n_t(
+                "runtime.clean.consumerRemovedArchives",
+                language,
+                consumer=consumer,
+                count=int(archives.get("removed_count") or 0),
+                size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
+            )
+        )
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesPartial",
+                language,
+                consumer=consumer,
+                reason=skipped_reason or "archive_removal_failed",
+                failed=int(archives.get("failed_count") or 0),
+            ),
+            file=sys.stderr,
+        )
+        return
+    if skipped_reason:
+        print(
+            i18n_t(
+                "runtime.clean.consumerArchivesSkipped",
+                language,
+                consumer=consumer,
+                reason=skipped_reason,
+            ),
+            file=sys.stderr,
+        )
+        return
+    if verdict.archives_failed:
+        return
+    count_key = "candidate_count" if dry_run else "removed_count"
+    bytes_key = "candidate_bytes" if dry_run else "removed_bytes"
+    print(
+        i18n_t(
+            f"{prefix_key}Archives",
+            language,
+            consumer=consumer,
+            count=int(archives.get(count_key) or 0),
+            size=_format_byte_size(int(archives.get(bytes_key) or 0)),
+        )
+    )
+
+
+def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
     try:
         from core.git_runtime import get_git_runtime_manager
 
-        return get_git_runtime_manager().clean(keep_previous=keep_previous)
+        return get_git_runtime_manager().clean(keep_previous=keep_previous, dry_run=dry_run)
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "removed": [], "message": str(exc)}
+        return {
+            "ok": False,
+            "removed": [],
+            "reason": "git_clean_failed",
+            "message": str(exc),
+        }
 
 
-def _ensure_avault_during_prepare(offline: bool = False) -> dict:
-    """Ensure avault (the Vault custody core) alongside other local deps."""
+def _ensure_avault_during_prepare(offline: bool = False, force: bool = False) -> dict:
+    """Ensure avault (the Vault custody core) alongside other local deps.
+
+    Raises avault to the managed pin on upgrade, but only downloads when the pin
+    is not already satisfied: the reinstall it used to force on every prepare
+    took ~20s to put back the release that was already installed. ``force`` is
+    prepare's ``--force`` repair request and still reinstalls the managed
+    release, since a corrupted binary can report the pinned version.
+    """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
     if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
-        return api.ensure_avault_installed(force=True)
+        if force:
+            return api.ensure_avault_installed(force=True)
+        return api.refresh_avault_if_stale()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_model_hub_engine_during_prepare(
+    offline: bool = False,
+    force: bool = False,
+) -> dict:
+    """Converge CPA to the Avibe pin without making upgrade success depend on it."""
+
+    try:
+        return api.ensure_model_hub_engine_installed(
+            force=force,
+            offline=True if offline else None,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 
@@ -13966,13 +16586,11 @@ def build_parser():
         default=0,
         help="Schedule the restart to run asynchronously after N seconds, then exit immediately.",
     )
-    supervisor_parser = subparsers.add_parser("__restart-supervisor", help=argparse.SUPPRESS)
-    supervisor_parser.add_argument("--job-id", required=True)
-    supervisor_parser.add_argument("--delay-seconds", type=_non_negative_float, default=0)
-    supervisor_parser.add_argument("--trigger", default="cli")
-    supervisor_parser.add_argument("--scope", default="all", choices=("all", "service"))
-    supervisor_parser.add_argument("--vibe-path")
-    supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
+    # `__restart-supervisor` is deliberately absent here. It is never typed: this
+    # program spawns it, and `vibe/restart_supervisor.py` owns both the argv it
+    # builds and the parser that reads it back. Restating those flags here made
+    # this parser a second, silently authoritative owner -- and the one that runs
+    # first. See `_dispatch_restart_supervisor`.
     subparsers.add_parser("status", help="Show service status")
     doctor_parser = subparsers.add_parser(
         "doctor",
@@ -13988,7 +16606,7 @@ def build_parser():
     doctor_parser.add_argument(
         "doctor_repair_targets",
         nargs="*",
-        choices=DOCTOR_REPAIR_TARGETS,
+        type=_doctor_repair_target,
         help="Repair target(s). Defaults to all safe first-phase repair targets.",
     )
     doctor_depth_group = doctor_parser.add_mutually_exclusive_group()
@@ -14011,23 +16629,166 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    memory_parser = subparsers.add_parser("memory", help="Use local Memory through the running controller")
+    memory_help_language = _memory_cli_language()
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help=i18n_t("memory.cli.help.command", memory_help_language),
+    )
     memory_subparsers = memory_parser.add_subparsers(
         dest="memory_command",
-        metavar="{status,profile,search,remember}",
+        metavar="{status,profile,list,search,remember}",
     )
     memory_subparsers.required = True
-    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
-    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
-    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
-    memory_search_parser.add_argument("query", help="Search query")
-    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
-    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_remember_parser = memory_subparsers.add_parser("remember", help="Queue durable personal context")
-    memory_remember_parser.add_argument("text", help="Text to remember (maximum 4,000 characters)")
-    memory_remember_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    skill_help_language = _configured_cli_language()
+    skill_parser = subparsers.add_parser(
+        "skill",
+        help=i18n_t("skill.cli.help.command", skill_help_language),
+    )
+    skill_subparsers = skill_parser.add_subparsers(
+        dest="skill_command",
+        metavar="{list,load}",
+    )
+    skill_subparsers.required = True
+    skill_list_parser = skill_subparsers.add_parser(
+        "list",
+        help=i18n_t("skill.cli.help.list", skill_help_language),
+    )
+    skill_list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help=i18n_t("skill.cli.help.page", skill_help_language),
+    )
+    skill_load_parser = skill_subparsers.add_parser(
+        "load",
+        help=i18n_t("skill.cli.help.load", skill_help_language),
+    )
+    skill_load_parser.add_argument(
+        "name",
+        help=i18n_t("skill.cli.help.name", skill_help_language),
+    )
+    debug_help_language = _configured_cli_language()
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help=i18n_t("debug.cli.help.command", debug_help_language),
+    )
+    debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt}")
+    debug_subparsers.required = True
+    debug_prompt_parser = debug_subparsers.add_parser(
+        "prompt",
+        help=i18n_t("debug.cli.help.prompt", debug_help_language),
+    )
+    debug_prompt_subparsers = debug_prompt_parser.add_subparsers(
+        dest="prompt_debug_command",
+        metavar="{export}",
+    )
+    debug_prompt_subparsers.required = True
+    debug_prompt_export_parser = debug_prompt_subparsers.add_parser(
+        "export",
+        help=i18n_t("debug.cli.help.promptExport", debug_help_language),
+    )
+    debug_prompt_export_parser.add_argument(
+        "--context-file",
+        help=i18n_t("debug.cli.help.promptContext", debug_help_language),
+    )
+    debug_prompt_export_parser.add_argument(
+        "--format",
+        choices=("json",),
+        default="json",
+        help=i18n_t("debug.cli.help.promptFormat", debug_help_language),
+    )
+    memory_status_parser = memory_subparsers.add_parser(
+        "status",
+        help=i18n_t("memory.cli.help.status", memory_help_language),
+    )
+    memory_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_profile_parser = memory_subparsers.add_parser(
+        "profile",
+        help=i18n_t("memory.cli.help.profile", memory_help_language),
+    )
+    memory_profile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_list_parser = memory_subparsers.add_parser(
+        "list",
+        help=i18n_t("memory.cli.help.list", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--page",
+        type=int,
+        default=1,
+        help=i18n_t("memory.cli.help.page", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help=i18n_t("memory.cli.help.pageLimit", memory_help_language),
+    )
+    memory_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_search_parser = memory_subparsers.add_parser(
+        "search",
+        help=i18n_t("memory.cli.help.search", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "query",
+        help=i18n_t("memory.cli.help.query", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help=i18n_t("memory.cli.help.limit", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--mode",
+        choices=("hybrid", "keyword", "vector", "agentic"),
+        default="hybrid",
+        help=i18n_t("memory.cli.help.mode", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_remember_parser = memory_subparsers.add_parser(
+        "remember",
+        help=i18n_t("memory.cli.help.remember", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "text",
+        help=i18n_t("memory.cli.help.text", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "--project",
+        default=None,
+        help=i18n_t("memory.cli.help.project", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -14041,7 +16802,7 @@ def build_parser():
     def add_runtime_provider_args(runtime_command_parser):
         runtime_command_parser.add_argument(
             "--source",
-            choices=("manifest-cache", "manifest", "archive", "prebuilt", "github", "github-source", "npm"),
+            choices=("manifest-cache", "manifest", "archive", "prebuilt", "npm"),
             help="Runtime provider override. Defaults to the packaged manifest cache.",
         )
         manifest_group = runtime_command_parser.add_mutually_exclusive_group()
@@ -14063,8 +16824,19 @@ def build_parser():
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
     runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
-    runtime_clean_parser = runtime_subparsers.add_parser("clean", help="Clean stale managed runtime cache entries")
+    runtime_clean_language = _configured_cli_language()
+    runtime_clean_help = i18n_t("runtime.clean.commandHelp", runtime_clean_language)
+    runtime_clean_parser = runtime_subparsers.add_parser(
+        "clean",
+        help=runtime_clean_help,
+        description=runtime_clean_help,
+    )
     runtime_clean_parser.add_argument("--keep-previous", type=int, default=1, help="Number of previous runtime versions to keep.")
+    runtime_clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=i18n_t("runtime.clean.dryRunHelp", runtime_clean_language),
+    )
     runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
     remote_parser = subparsers.add_parser(
         "remote",
@@ -14281,7 +17053,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",
@@ -14370,6 +17142,24 @@ def build_parser():
     runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
+
+    harness_help_language = _configured_cli_language()
+    harness_parser = subparsers.add_parser(
+        "harness",
+        help=i18n_t("harness.cli.help.command", harness_help_language),
+        description=i18n_t("harness.cli.help.description", harness_help_language),
+        error_help_command="vibe harness --help",
+    )
+    harness_subparsers = harness_parser.add_subparsers(
+        dest="harness_command",
+        metavar="{status}",
+    )
+    harness_subparsers.required = True
+    harness_status_parser = harness_subparsers.add_parser(
+        "status",
+        help=i18n_t("harness.cli.help.status", harness_help_language),
+    )
+    _add_json_noop(harness_status_parser)
 
     session_parser = subparsers.add_parser(
         "session",
@@ -14834,7 +17624,7 @@ def build_parser():
     )
     show_list_parser.add_argument(
         "--visibility",
-        choices=("private", "public", "offline"),
+        choices=("private", "limited", "public", "offline"),
         help="Filter by Show Page visibility.",
     )
     show_list_parser.add_argument("--session-id", help="Filter by Agent Session ID prefix.")
@@ -14844,15 +17634,24 @@ def build_parser():
     _add_pagination_args(show_list_parser, help_command="vibe show list --help")
     show_list_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
+    _data_help_lang = _configured_cli_language()
     data_parser = subparsers.add_parser(
         "data",
-        help="Run read-only queries against Avibe data",
-        description="Inspect local Avibe SQLite state with guarded read-only SQL.",
+        help=i18n_t("data.helpCommand", _data_help_lang),
+        description=i18n_t("data.helpDescription", _data_help_lang),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
-    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query}")
+    data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention,skill-usage}")
     data_subparsers.required = True
+    skill_usage_parser = data_subparsers.add_parser(
+        "skill-usage", help=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        description=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        error_help_command="vibe data skill-usage --help",
+    )
+    skill_usage_parser.add_argument("--clear", action="store_true", help=i18n_t("data.skillUsage.helpClear", _data_help_lang))
+    skill_usage_parser.add_argument("--yes", action="store_true", help=i18n_t("data.skillUsage.helpYes", _data_help_lang))
+    _add_json_noop(skill_usage_parser)
     data_query_parser = data_subparsers.add_parser(
         "query",
         help="Run one read-only SQL query",
@@ -14865,6 +17664,35 @@ def build_parser():
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
+    _retention_help_lang = _configured_cli_language()
+    data_retention_parser = data_subparsers.add_parser(
+        "retention",
+        help=i18n_t("data.retention.helpCommand", _retention_help_lang),
+        description=i18n_t("data.retention.helpDescription", _retention_help_lang),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe data retention --help",
+    )
+    data_retention_parser.add_argument(
+        "--run",
+        action="store_true",
+        help=i18n_t("data.retention.helpRun", _retention_help_lang),
+    )
+    data_retention_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help=i18n_t(
+            "data.retention.helpDays",
+            _retention_help_lang,
+            current=_configured_trace_retention_days(_retention_help_lang),
+        ),
+    )
+    data_retention_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help=i18n_t("data.retention.helpCompact", _retention_help_lang),
+    )
+    _add_json_noop(data_retention_parser)
 
     show_path_parser = show_subparsers.add_parser(
         "path",
@@ -15339,7 +18167,7 @@ def build_parser():
         epilog=_watch_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch add --help",
-        error_hint="Use --session-id and either --shell or a command after '--'. Add --forever only when the waiter should re-arm after successful cycles and only retry failures for explicit retry exit codes.",
+        error_hint="Use --session-id and either --shell or a command after '--'. Retry exit codes keep either mode waiting; add --forever only when distinct successful events should re-arm the Watch.",
     )
     watch_add_parser.add_argument("--name", help="Optional human-friendly watch name")
     watch_add_parser.add_argument(
@@ -15384,13 +18212,13 @@ def build_parser():
     watch_add_parser.add_argument(
         "--forever",
         action="store_true",
-        help="Keep re-arming the watch after each successful cycle instead of stopping after the first event. Terminal failures still stop the watch unless a retry exit code is allowed.",
+        help="Monitor distinct events continuously. After each event's Agent Run settles, the Watch re-arms; terminal failures still stop it unless their exit code is retryable.",
     )
     watch_add_parser.add_argument(
         "--lifetime-timeout",
         type=float,
         default=0,
-        help="Overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit. Requires --forever.",
+        help="Overall Watch lifetime timeout in seconds across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_add_parser.add_argument(
         "--retry-exit-code",
@@ -15398,13 +18226,13 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help=f"Cycle exit code that should be retried in forever mode. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
+        help=f"Cycle exit code that should keep waiting. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
     )
     watch_add_parser.add_argument(
         "--retry-delay",
         type=float,
         default=30,
-        help="Delay in seconds before retrying an allowed forever cycle failure. Default: 30",
+        help="Delay in seconds before retrying an allowed cycle result. Default: 30",
     )
     watch_add_parser.add_argument(
         "--shell",
@@ -15477,7 +18305,7 @@ def build_parser():
     watch_update_parser.add_argument(
         "--lifetime-timeout",
         type=float,
-        help="Set overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit.",
+        help="Set the overall Watch lifetime timeout across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_update_parser.add_argument(
         "--retry-exit-code",
@@ -15485,7 +18313,7 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help="Replace retryable forever-mode exit codes. Repeat to add more.",
+        help="Replace exit codes that keep this Watch waiting. Repeat to add more.",
     )
     watch_update_parser.add_argument("--retry-delay", type=float, help="Set retry delay in seconds")
     watch_update_parser.add_argument("--shell", help="Replace waiter with a shell command")
@@ -15564,10 +18392,382 @@ def build_parser():
     return parser
 
 
+def _dispatch_restart_supervisor(argv: list[str]) -> int:
+    """Hand a spawned restart job's own argv straight to its own parser.
+
+    `__restart-supervisor` is not a command a person types; `schedule_restart`
+    builds this argv and `vibe/restart_supervisor.py` parses it back. Declaring
+    those flags on the top-level parser as well made two owners for one command,
+    with a hand-copied translation between them -- and the top-level one runs
+    first, so a flag added only to the supervisor's parser was not merely
+    unavailable, it was rejected. That is how the rollback flags shipped dead:
+    every unit test called `restart_supervisor.main([...])` directly, and the one
+    path that goes through this file was the one path nothing exercised.
+
+    Passing the tail through leaves a single parser for the command, so the two
+    can no longer disagree.
+    """
+
+    from vibe.restart_supervisor import main as restart_supervisor_main
+
+    return restart_supervisor_main(argv)
+
+
+def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
+    """Activate a Windows CLI upgrade after the parent launcher exits."""
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--parent-started-at", type=float)
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--source-generation")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--prepare-show-runtime", action="store_true")
+    args = parser.parse_args(argv)
+
+    deadline = time.monotonic() + DEFERRED_ACTIVATION_TIMEOUT_SECONDS
+    while runtime.pid_alive(args.parent_pid):
+        if args.parent_started_at is not None:
+            observed = runtime.process_create_time(args.parent_pid)
+            if observed is not None and observed != args.parent_started_at:
+                break
+        if time.monotonic() >= deadline:
+            print("deferred upgrade activation timed out waiting for the parent launcher", file=sys.stderr)
+            return 1
+        time.sleep(0.1)
+
+    source_generation = Path(args.source_generation) if args.source_generation else None
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=source_generation,
+    )
+    activated = False
+    try:
+        with atomic_upgrade_lock():
+            reason = activation_block_reason(activation)
+            if reason == "restart_pending":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation found another restart in progress", file=sys.stderr)
+                return 1
+            if reason == "superseded":
+                discard_atomic_uv_install_generation(activation.candidate_launcher)
+                print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
+                return 1
+            activate_upgrade_candidate(activation)
+            activated = True
+            if args.restart:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=args.launcher,
+                    trigger="upgrade",
+                    prepare_show_runtime=args.prepare_show_runtime,
+                    python_executable=sys.executable,
+                )
+    except Exception as exc:
+        if not activated:
+            discard_atomic_uv_install_generation(activation.candidate_launcher)
+            print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        else:
+            print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.restart and args.prepare_show_runtime:
+        _prepare_show_runtime_after_install(args.launcher)
+    return 0
+
+
+def _dispatch_installer_activation(argv: list[str]) -> int:
+    """Activate a staged one-command install through the shared Python owner."""
+
+    if argv == ["--protocol-version"]:
+        print("2")
+        return 0
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--snapshot", action="store_true")
+    parser.add_argument("--launcher", required=True)
+    parser.add_argument("--candidate")
+    parser.add_argument("--source-generation")
+    args = parser.parse_args(argv)
+    if args.snapshot:
+        generation = _launcher_generation(Path(args.launcher), atomic_uv_install_root())
+        if generation is not None:
+            print(generation)
+        return 0
+    if not args.candidate:
+        parser.error("--candidate is required unless --snapshot is used")
+    activation = AtomicActivation(
+        launcher=Path(args.launcher),
+        candidate_launcher=Path(args.candidate),
+        source_generation=Path(args.source_generation) if args.source_generation else None,
+    )
+    try:
+        activate_installer_candidate(activation)
+    except Exception as exc:
+        discard_atomic_uv_install_generation(activation.candidate_launcher)
+        print(f"installer activation failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+#: The role floor each public command namespace runs under, keyed by the parser
+#: leaf path the user actually typed (aliases are their own keys). It is a
+#: NAMESPACE floor, not a second policy engine: the resource answer — which
+#: Project, Agent, page or secret — stays with the existing policy functions the
+#: services call. ``None`` means the leaf deliberately carries no instance-role
+#: contract, and every one of those is classified in the audit rather than left
+#: out. A leaf missing from this table is admitted as Owner, so a command added
+#: later fails closed until it is classified; ``test_cli_command_admission``
+#: walks the parser so that classification cannot be forgotten silently.
+_CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
+    # Public facts, unchanged: a version and an update check answer the same
+    # thing to anyone, and status is not gated merely because doctor is.
+    ("version",): None,
+    ("check-update",): None,
+    ("status",): None,
+    ("desktop", "endpoint"): "member",
+    # Host scope, not instance scope: these act on this machine's screen and on
+    # authored files, and have no role contract to repair here.
+    ("screenshot",): None,
+    ("debug", "prompt", "export"): None,
+    # Memory owns its own verified identity and proof lifecycle.
+    ("memory", "status"): None,
+    ("memory", "profile"): None,
+    ("memory", "list"): None,
+    ("memory", "search"): None,
+    ("memory", "remember"): None,
+    # Runtime, configuration and retention are operational management.
+    (): "member",
+    ("start",): "member",
+    ("stop",): "member",
+    ("restart",): "member",
+    ("doctor",): "member",
+    ("upgrade",): "member",
+    ("runtime", "status"): "member",
+    ("runtime", "prepare"): "member",
+    ("runtime", "clean"): "member",
+    # Remote access: operating the tunnel is management, but pairing writes this
+    # machine's identity, so setup admits at the management floor and the command
+    # itself keeps the Owner check in front of any pairing effect.
+    ("remote",): "member",
+    ("remote", "status"): "member",
+    ("remote", "start"): "member",
+    ("remote", "stop"): "member",
+    ("remote", "pair"): "owner",
+    # Agents: discovery, selection and running are use; the definition lifecycle
+    # is management, admitted before any builtin synchronization or import.
+    ("agent", "list"): "editor",
+    ("agent", "show"): "editor",
+    ("agent", "models"): "editor",
+    ("agent", "run"): "editor",
+    ("agent", "create"): "member",
+    ("agent", "update"): "member",
+    ("agent", "enable"): "member",
+    ("agent", "disable"): "member",
+    ("agent", "remove"): "member",
+    ("agent", "import"): "member",
+    ("agent", "default"): "member",
+    # Harness: one instance-wide Editor floor for reads and ordinary control.
+    ("runs", "list"): "editor",
+    ("runs", "show"): "editor",
+    ("runs", "cancel"): "editor",
+    ("harness", "status"): "editor",
+    ("task", "add"): "editor",
+    ("task", "update"): "editor",
+    ("task", "list"): "editor",
+    ("task", "ls"): "editor",
+    ("task", "show"): "editor",
+    ("task", "pause"): "editor",
+    ("task", "resume"): "editor",
+    ("task", "run"): "editor",
+    ("task", "remove"): "editor",
+    ("task", "rm"): "editor",
+    ("watch", "add"): "editor",
+    ("watch", "update"): "editor",
+    ("watch", "list"): "editor",
+    ("watch", "ls"): "editor",
+    ("watch", "show"): "editor",
+    ("watch", "pause"): "editor",
+    ("watch", "resume"): "editor",
+    ("watch", "remove"): "editor",
+    ("watch", "rm"): "editor",
+    ("hook", "send"): "editor",
+    # Sessions and their queue, mirroring the HTTP surface: reading is Viewer
+    # work, editing and the queue are Editor work, and both sides are narrowed
+    # further by the effective Project role of each session the command touches.
+    ("session", "list"): "viewer",
+    ("session", "get"): "viewer",
+    ("session", "update"): "editor",
+    ("session", "send-now"): "editor",
+    ("session", "queue", "list"): "editor",
+    ("session", "queue", "remove"): "editor",
+    # Vault: the namespace is Editor work, as it is over HTTP. Metadata and
+    # deletion stay Member work, but that answer belongs to the secret's own
+    # policy (``_require_secret_resource_management``), which now sees the
+    # caller — the same split the browser goes through. Key material is this
+    # machine's identity and is the one Owner floor here.
+    ("vault", "list"): "editor",
+    ("vault", "find"): "editor",
+    ("vault", "tags"): "editor",
+    ("vault", "run"): "editor",
+    ("vault", "fetch"): "editor",
+    ("vault", "access"): "editor",
+    ("vault", "sign"): "editor",
+    ("vault", "await"): "editor",
+    ("vault", "request"): "editor",
+    ("vault", "inject"): "editor",
+    ("vault", "export"): "editor",
+    ("vault", "edit"): "editor",
+    ("vault", "rm"): "editor",
+    ("vault", "key", "export"): "owner",
+    ("vault", "key", "import"): "owner",
+    # Show: reading a page is Viewer work and writing to one is Editor work; the
+    # page's own ACL still decides which page, on both sides.
+    ("show", "list"): "viewer",
+    ("show", "path"): "viewer",
+    ("show", "status"): "viewer",
+    ("show", "marks"): "viewer",
+    ("show", "update"): "editor",
+    ("show", "mark"): "editor",
+    ("show", "unmark"): "editor",
+    ("show", "reply"): "editor",
+    ("show", "event"): "editor",
+    ("show", "annotate"): "editor",
+    # Skills are an Editor capability; these two already carry their own scope
+    # contract and keep it.
+    ("skill", "list"): "editor",
+    ("skill", "load"): "editor",
+    ("data", "query"): "editor",
+    ("data", "skill-usage"): "editor",
+    ("data", "retention"): "member",
+}
+
+#: Argv-level entry points the supervisor and the installer use. They are not
+#: parser leaves, and they are Owner work: an invocation that declares a remote
+#: caller must not reach them as an alternate entry.
+_INTERNAL_ACTIVATION_COMMANDS = ("__restart-supervisor", "__activate-upgrade", "__activate-install")
+
+
+def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
+    """Resolve, once, the authority this CLI invocation runs under.
+
+    A genuinely local invocation resolves to ``None``, which keeps standalone
+    Owner administration. A remote Agent invocation runs as the remote user whose
+    snapshot Avibe injected — but only while that snapshot still describes this
+    installation. The environment is carried across process boundaries and
+    outlives the pairing it was minted under, so the claims alone are not
+    provenance: they are validated the same way every other deferred consumer
+    validates a stored snapshot, against the configured instance and its durable
+    ready binding.
+
+    A declared-remote invocation whose provenance is missing, malformed or no
+    longer valid here stays an anonymous remote context and fails closed. It does
+    not become local just because the claims it should have carried are absent or
+    stale — that would turn a rejected remote caller into the machine's owner.
+    """
+
+    from storage.resource_access_service import (
+        RESOURCE_USER_CONTEXT_METADATA_KEY,
+        resource_user_context_from_metadata,
+    )
+    from vibe.authorization import AuthorizationContext
+
+    source = os.environ if env is None else env
+    snapshot = caller_resource_user_context(caller_context_from_env(source))
+    if snapshot is None and not env_declares_remote_caller(source):
+        return None
+    context = resource_user_context_from_metadata({RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot})
+    return AuthorizationContext(is_remote=True) if context is None else context
+
+
+def _dispatch_path(parser: argparse.ArgumentParser, args) -> tuple[tuple[str, ...], bool]:
+    """Return the parser leaf the user reached, and whether it needs a subcommand."""
+
+    path: list[str] = []
+    current = parser
+    while True:
+        action = next(
+            (item for item in current._actions if isinstance(item, argparse._SubParsersAction)),
+            None,
+        )
+        if action is None:
+            return tuple(path), False
+        chosen = getattr(args, action.dest, None)
+        if not chosen or chosen not in action.choices:
+            return tuple(path), True
+        path.append(chosen)
+        current = action.choices[chosen]
+
+
+def _require_command_admission(parser: argparse.ArgumentParser, args) -> None:
+    """Admit the invocation to this command's namespace before it can act."""
+
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    path, subcommand_missing = _dispatch_path(parser, args)
+    if path not in _CLI_COMMAND_FLOORS and subcommand_missing:
+        # Not a command at all: argparse is about to print usage and exit, and no
+        # product effect can run in between.
+        return
+    floor = _CLI_COMMAND_FLOORS.get(path, "owner")
+    if floor is None:
+        return
+    try:
+        require_instance_role(None, floor)
+    except InstanceAuthorizationError as exc:
+        command = " ".join(("vibe", *path)).strip()
+        _print_task_error(
+            TaskCliError(
+                str(exc),
+                code=exc.code,
+                details={"command": command, "minimum_role": exc.minimum_role},
+            )
+        )
+        sys.exit(1)
+
+
+def _require_internal_activation_admission(command: str) -> None:
+    from vibe.authorization import InstanceAuthorizationError, require_instance_role
+
+    try:
+        require_instance_role(None, "owner")
+    except InstanceAuthorizationError as exc:
+        print(f"{command}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
+    """Public CLI entry: resolve the invocation's authority once, then dispatch.
+
+    The whole dispatch runs inside the invocation, including argument parsing and
+    the internal activation entry points, so nothing this process does on the
+    caller's behalf can be mistaken for local administration. Entering it with
+    ``None`` for a local invocation is deliberate: skipping activation would leave
+    a surrounding authority in place for a nested local call.
+    """
+
+    from vibe.authorization import invocation_authority
+
     cache_running_vibe_path()
-    parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    with invocation_authority(_cli_invocation_authority()):
+        if argv and argv[0] in _INTERNAL_ACTIVATION_COMMANDS:
+            _require_internal_activation_admission(argv[0])
+        if argv and argv[0] == "__restart-supervisor":
+            sys.exit(_dispatch_restart_supervisor(argv[1:]))
+        if argv and argv[0] == "__activate-upgrade":
+            sys.exit(_dispatch_deferred_upgrade_activation(argv[1:]))
+        if argv and argv[0] == "__activate-install":
+            sys.exit(_dispatch_installer_activation(argv[1:]))
+        parser = build_parser()
+        args = parser.parse_args()
+        _require_command_admission(parser, args)
+        _dispatch_parsed_command(parser, args)
+
+
+def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
+    """Run the admitted command. Every branch exits; nothing returns to ``main``."""
 
     if args.command == "stop":
         sys.exit(cmd_stop(receipt=args.receipt) if args.receipt is not None else cmd_stop())
@@ -15577,28 +18777,14 @@ def main():
         sys.exit(cmd_desktop_endpoint())
     if args.command == "restart":
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
-    if args.command == "__restart-supervisor":
-        from vibe.restart_supervisor import main as restart_supervisor_main
-
-        sys.exit(
-            restart_supervisor_main(
-                [
-                    "--job-id",
-                    args.job_id,
-                    "--delay-seconds",
-                    str(args.delay_seconds),
-                    "--trigger",
-                    args.trigger,
-                    *(["--scope", args.scope] if args.scope != "all" else []),
-                    *(["--prepare-show-runtime"] if args.prepare_show_runtime else []),
-                    *(["--vibe-path", args.vibe_path] if args.vibe_path else []),
-                ]
-            )
-        )
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "memory":
         sys.exit(cmd_memory(args))
+    if args.command == "skill":
+        sys.exit(cmd_skill(args))
+    if args.command == "debug":
+        sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":
         sys.exit(cmd_doctor(args))
     if args.command == "screenshot":
@@ -15665,6 +18851,10 @@ def main():
         if args.runs_command == "cancel":
             sys.exit(cmd_runs_cancel(args))
         parser.error("runs command is required")
+    if args.command == "harness":
+        if args.harness_command == "status":
+            sys.exit(cmd_harness_status(args))
+        parser.error("harness command is required")
     if args.command == "session":
         if args.session_command == "list":
             sys.exit(cmd_session_list(args))
@@ -15718,6 +18908,10 @@ def main():
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))
+        if args.data_command == "skill-usage":
+            sys.exit(cmd_data_skill_usage(args))
+        if args.data_command == "retention":
+            sys.exit(cmd_data_retention(args))
         parser.error("data command is required")
     if args.command == "task":
         if args.task_command == "add":

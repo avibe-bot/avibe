@@ -1,3 +1,5 @@
+import { platformText } from '@/lib/platforms';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -6,17 +8,19 @@ import { Check, ChevronUp, Loader2, Pencil } from 'lucide-react';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import {
+  configChanges,
+  updateEnabledPlatforms,
+  type ConfigMutation,
+} from '@/lib/configMutations';
+import {
   getEnabledPlatforms,
   getImPlatforms,
   getPlatformCatalog,
   platformHasRunnableConfig,
 } from '@/lib/platforms';
 import { PlatformIcon } from '@/components/visual';
-import { SlackConfig } from '@/components/steps/SlackConfig';
-import { DiscordConfig } from '@/components/steps/DiscordConfig';
-import { TelegramConfig } from '@/components/steps/TelegramConfig';
-import { LarkConfig } from '@/components/steps/LarkConfig';
-import { WeChatConfig } from '@/components/steps/WeChatConfig';
+import { PlatformConfigEmbed } from './PlatformConfigEmbed';
+import { savePlatformSettings } from './shared/savePlatformSettings';
 import { SettingsPageShell } from './SettingsPageShell';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -50,6 +54,8 @@ const tileStyle = (id: string) =>
 //    and save. There is no user-facing "primary platform" — the backend derives
 //    an internal default from the enabled set, so this page never sends one.
 export const SettingsPlatformsPage: React.FC = () => {
+  const { capabilities } = useInstanceAuthorization();
+  const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -81,25 +87,11 @@ export const SettingsPlatformsPage: React.FC = () => {
     return togglablePlatforms.filter((p) => shown.has(p.id)).map((p) => p.id);
   }, [togglablePlatforms, enabledPlatforms, revealed]);
 
-  const saveConfig = async (nextData: any) => {
-    const savedConfig = await api.saveConfig(nextData);
+  const saveMutations = async (mutations: readonly ConfigMutation[]) => {
+    if (mutations.length === 0) return config;
+    const savedConfig = await api.mutateConfig(mutations);
     setConfig(savedConfig);
     return savedConfig;
-  };
-
-  const savePlatformSettings = async (platform: string, nextData: any) => {
-    const discordGuildAllowlist = nextData?.discordGuildAllowlist;
-    if (
-      platform === 'discord' &&
-      Array.isArray(discordGuildAllowlist) &&
-      (discordGuildAllowlist.length > 0 || nextData?.discordGuildAllowlistTouched === true)
-    ) {
-      await api.saveSettings({
-        guilds: Object.fromEntries(
-          discordGuildAllowlist.map((guildId: string) => [guildId, { enabled: true }])
-        ),
-      }, 'discord');
-    }
   };
 
   // Persist the enabled set. ``primary`` is intentionally omitted:
@@ -123,11 +115,21 @@ export const SettingsPlatformsPage: React.FC = () => {
     return true;
   };
 
-  const persistEnabled = async (nextEnabled: string[]) => {
+  // Patch-write shape with list OPERATIONS: sending the whole enabled
+  // list (even as a section patch) replaces it wholesale in the merge —
+  // a stale browser snapshot would drop platforms another process
+  // enabled (e.g. WeChat QR confirmation). The backend verb applies
+  // add/remove against the lock-fresh persisted list instead.
+  const persistEnabledChange = async (
+    op: 'add' | 'remove',
+    platform: string
+  ): Promise<boolean> => {
     setRestartPhase('saving');
     try {
       try {
-        const savedConfig = await saveConfig({ ...config, platforms: { enabled: nextEnabled } });
+        const savedConfig = await saveMutations([
+          updateEnabledPlatforms({ [op]: [platform] }),
+        ]);
         showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
@@ -144,7 +146,7 @@ export const SettingsPlatformsPage: React.FC = () => {
   const doDisable = async (id: string) => {
     setBusyPlatform(id);
     try {
-      await persistEnabled(enabledPlatforms.filter((p) => p !== id));
+      await persistEnabledChange('remove', id);
       setRevealed((prev) => prev.filter((p) => p !== id));
       setOpenConfig((prev) => (prev === id ? null : prev));
     } finally {
@@ -170,7 +172,7 @@ export const SettingsPlatformsPage: React.FC = () => {
       // Already configured → checking enables it immediately.
       setBusyPlatform(id);
       try {
-        await persistEnabled([...enabledPlatforms, id]);
+        await persistEnabledChange('add', id);
       } finally {
         setBusyPlatform(null);
       }
@@ -191,12 +193,20 @@ export const SettingsPlatformsPage: React.FC = () => {
     try {
       let savedConfig: any;
       try {
-        savedConfig = await saveConfig({ ...nextData, platforms: { enabled: enabledPlatforms } });
+        // Patch-write shape: ONLY the platform section this card owns.
+        // The enabled list must never ride along as a stale snapshot —
+        // replacing it wholesale would drop platforms another process
+        // enabled (e.g. WeChat QR confirmation). Enablement changes go
+        // through the list-operation verb below, which mutates the
+        // lock-fresh persisted list.
+        savedConfig = await saveMutations(
+          configChanges(config?.[platform], nextData?.[platform], [platform]),
+        );
       } catch {
         showToast(t('common.saveFailed'), 'error');
         return;
       }
-      await savePlatformSettings(platform, nextData);
+      await savePlatformSettings(api, platform, nextData, canManageAccessMembers);
       const runnable = platformHasRunnableConfig(savedConfig, platform);
       if (!wasEnabled && !runnable) {
         // Saved credentials but they are incomplete — keep the card open so the
@@ -211,9 +221,10 @@ export const SettingsPlatformsPage: React.FC = () => {
         }
         return;
       }
-      const nextEnabled = [...enabledPlatforms, platform];
       try {
-        savedConfig = await saveConfig({ ...savedConfig, platforms: { enabled: nextEnabled } });
+        savedConfig = await saveMutations([
+          updateEnabledPlatforms({ add: [platform] }),
+        ]);
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;
@@ -253,7 +264,7 @@ export const SettingsPlatformsPage: React.FC = () => {
             aria-live="polite"
             className="sticky top-2 z-10 flex items-center gap-3 rounded-xl border border-cyan/35 bg-cyan/[0.08] px-4 py-3 shadow-[0_8px_24px_-8px_rgba(0,212,255,0.35)]"
           >
-            <Loader2 size={16} className="shrink-0 animate-spin text-cyan" />
+            <Loader2 size={16} className="shrink-0 animate-spin text-cyan-ink" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-semibold text-foreground">
                 {t('platform.applyingConfig')}
@@ -293,7 +304,7 @@ export const SettingsPlatformsPage: React.FC = () => {
                   )}
                 >
                   {active && (
-                    <span className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-mint text-background">
+                    <span className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-mint text-primary-foreground">
                       {busy ? <Loader2 size={10} className="animate-spin" /> : <Check size={11} strokeWidth={3} />}
                     </span>
                   )}
@@ -312,7 +323,7 @@ export const SettingsPlatformsPage: React.FC = () => {
                       active ? 'font-bold text-foreground' : 'font-medium text-muted'
                     )}
                   >
-                    {t(platform.title_key || `platform.${id}.title`)}
+                    {platformText(t, id, 'title', platform.title_key)}
                   </span>
                 </button>
               );
@@ -324,8 +335,8 @@ export const SettingsPlatformsPage: React.FC = () => {
             with no credentials only appear here after the user checks them. */}
         {cardPlatforms.map((id) => {
           const descriptor = platformCatalog.find((p) => p.id === id);
-          const label = t(descriptor?.title_key || `platform.${id}.title`);
-          const description = t(descriptor?.description_key || `platform.${id}.desc`);
+          const label = platformText(t, id, 'title', descriptor?.title_key);
+          const description = platformText(t, id, 'desc', descriptor?.description_key);
           const tile = tileStyle(id);
           const runnable = platformHasRunnableConfig(config, id);
           const enabled = enabledPlatforms.includes(id);
@@ -353,12 +364,12 @@ export const SettingsPlatformsPage: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <span className="text-[14px] font-semibold text-foreground">{label}</span>
                       {runnable ? (
-                        <span className="inline-flex items-center gap-1 rounded border border-mint/30 bg-mint/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-mint">
+                        <span className="inline-flex items-center gap-1 rounded border border-mint/30 bg-mint/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-mint-ink">
                           <Check size={10} />
                           {t('platform.validationSuccess')}
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded border border-gold/30 bg-gold/10 px-1.5 py-0.5 text-[10px] font-medium text-gold">
+                        <span className="inline-flex items-center gap-1 rounded border border-gold/30 bg-gold/10 px-1.5 py-0.5 text-[10px] font-medium text-gold-ink">
                           {t('platform.stepAddBotToken')}
                         </span>
                       )}
@@ -393,10 +404,7 @@ export const SettingsPlatformsPage: React.FC = () => {
             <DialogDescription>
               {t('platform.disableConfirmBody', {
                 name: confirmDisableId
-                  ? t(
-                      platformCatalog.find((p) => p.id === confirmDisableId)?.title_key ||
-                        `platform.${confirmDisableId}.title`
-                    )
+                  ? platformText(t, confirmDisableId, 'title', platformCatalog.find((p) => p.id === confirmDisableId)?.title_key)
                   : '',
               })}
             </DialogDescription>
@@ -434,7 +442,7 @@ const PlatformCard: React.FC<{
     <section
       className={clsx(
         'overflow-hidden rounded-xl border bg-surface-2 transition-colors',
-        expanded ? 'border-mint/35 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]' : 'border-border'
+        expanded ? 'border-mint/35 shadow-mint-card-sm' : 'border-border'
       )}
     >
       <div className="flex items-stretch gap-3 px-5 py-4">
@@ -445,7 +453,7 @@ const PlatformCard: React.FC<{
           className={clsx(
             'inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] font-medium transition',
             expanded
-              ? 'border-mint/35 bg-mint/[0.08] text-mint'
+              ? 'border-mint/35 bg-mint/[0.08] text-mint-ink'
               : 'border-border bg-foreground/[0.04] text-foreground hover:border-border-strong'
           )}
         >
@@ -465,38 +473,4 @@ const PlatformCard: React.FC<{
       {expanded && <div className="border-t border-border bg-background/40">{children}</div>}
     </section>
   );
-};
-
-const PlatformConfigEmbed: React.FC<{
-  platform: string;
-  config: any;
-  onApply: (data: any) => Promise<void>;
-  onCancel: () => void;
-}> = ({ platform, config, onApply, onCancel }) => {
-  const noopNext = () => {};
-  if (platform === 'slack') {
-    return <SlackConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'discord') {
-    return <DiscordConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'telegram') {
-    return <TelegramConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'lark') {
-    return <LarkConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
-  }
-  if (platform === 'wechat') {
-    return (
-      <WeChatConfig
-        data={config}
-        onNext={noopNext}
-        embedded
-        onApply={onApply}
-        onCancel={onCancel}
-        autoStartLogin={false}
-      />
-    );
-  }
-  return null;
 };

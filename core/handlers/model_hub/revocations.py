@@ -3,22 +3,23 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast, get_args
+
+from .state_file import write_state_document
 
 
 RevocationOperation = Literal[
     "revoke_credential",
     "cleanup_orphaned_oauth_material",
 ]
-_REVOCATION_OPERATIONS = {
-    "revoke_credential",
-    "cleanup_orphaned_oauth_material",
-}
+_REVOCATION_OPERATIONS = frozenset(get_args(RevocationOperation))
+
+
+def _invalid_journal() -> OSError:
+    return OSError("invalid credential revocation journal")
 
 
 @dataclass(frozen=True)
@@ -40,42 +41,56 @@ class CredentialRevocationJournal:
             return []
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
+        except json.JSONDecodeError:
+            raise _invalid_journal() from None
         if not isinstance(payload, list):
-            return []
-        return [
-            PendingCredentialRevocation(
-                source_id=item["source_id"],
-                credential_ref=item["credential_ref"],
-                operation=item.get("operation", "revoke_credential"),
+            raise _invalid_journal()
+        entries: list[PendingCredentialRevocation] = []
+        identities: set[tuple[str, str]] = set()
+        for item in payload:
+            if not isinstance(item, dict) or set(item) != {
+                "source_id",
+                "credential_ref",
+                "operation",
+            }:
+                raise _invalid_journal()
+            source_id = item["source_id"]
+            credential_ref = item["credential_ref"]
+            operation = item["operation"]
+            if (
+                not isinstance(source_id, str)
+                or not source_id
+                or not isinstance(credential_ref, str)
+                or not credential_ref
+                or not isinstance(operation, str)
+                or operation not in _REVOCATION_OPERATIONS
+            ):
+                raise _invalid_journal()
+            identity = (source_id, credential_ref)
+            if identity in identities:
+                raise _invalid_journal()
+            identities.add(identity)
+            entries.append(
+                PendingCredentialRevocation(
+                    source_id=source_id,
+                    credential_ref=credential_ref,
+                    operation=cast(RevocationOperation, operation),
+                )
             )
-            for item in payload
-            if isinstance(item, dict)
-            and isinstance(item.get("source_id"), str)
-            and isinstance(item.get("credential_ref"), str)
-            and item.get("operation", "revoke_credential")
-            in _REVOCATION_OPERATIONS
-        ]
+        return entries
 
     def _write(self, entries: list[PendingCredentialRevocation]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {
-                "source_id": entry.source_id,
-                "credential_ref": entry.credential_ref,
-                "operation": entry.operation,
-            }
-            for entry in entries
-        ]
-        content = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.chmod(temp_name, 0o600)
-        os.replace(temp_name, self.path)
+        write_state_document(
+            self.path,
+            [
+                {
+                    "source_id": entry.source_id,
+                    "credential_ref": entry.credential_ref,
+                    "operation": entry.operation,
+                }
+                for entry in entries
+            ],
+        )
 
     def add(
         self,
@@ -85,17 +100,37 @@ class CredentialRevocationJournal:
         operation: RevocationOperation = "revoke_credential",
     ) -> None:
         with self._lock:
+            if (
+                not isinstance(source_id, str)
+                or not source_id
+                or not isinstance(credential_ref, str)
+                or not credential_ref
+                or not isinstance(operation, str)
+                or operation not in _REVOCATION_OPERATIONS
+            ):
+                raise ValueError("invalid credential revocation entry")
             entries = self._read()
             entry = PendingCredentialRevocation(
                 source_id,
                 credential_ref,
                 operation,
             )
+            existing = next(
+                (
+                    pending
+                    for pending in entries
+                    if pending.source_id == source_id
+                    and pending.credential_ref == credential_ref
+                ),
+                None,
+            )
+            if existing is not None and existing.operation != operation:
+                raise ValueError("credential revocation entry has conflicting operation")
             if entry not in entries:
                 entries.append(entry)
                 self._write(entries)
 
-    def remove(self, source_id: str, credential_ref: str | None = None) -> None:
+    def remove(self, source_id: str, credential_ref: str) -> None:
         with self._lock:
             entries = self._read()
             remaining = [
@@ -103,10 +138,7 @@ class CredentialRevocationJournal:
                 for entry in entries
                 if not (
                     entry.source_id == source_id
-                    and (
-                        credential_ref is None
-                        or entry.credential_ref == credential_ref
-                    )
+                    and entry.credential_ref == credential_ref
                 )
             ]
             if len(remaining) != len(entries):

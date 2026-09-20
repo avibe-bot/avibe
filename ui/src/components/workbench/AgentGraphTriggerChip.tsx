@@ -43,17 +43,17 @@ export const AgentGraphTriggerChip: React.FC<AgentGraphTriggerChipProps> = ({
       className={clsx(
         'flex h-full w-full items-center gap-2 rounded-xl border bg-violet-soft px-3 py-2 text-left transition hover:brightness-110',
         // Selected mirrors the session card's colored-border + glow (violet here).
-        selected ? 'border-violet shadow-[0_0_20px_-6px_rgba(124,91,255,0.6)]' : 'border-violet/40',
+        selected ? 'border-violet shadow-glow-md-violet' : 'border-violet/40',
         faded ? 'opacity-25' : disabled && 'opacity-60',
         className,
       )}
     >
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-violet/30 bg-violet/[0.12] text-violet">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-violet/30 bg-violet/[0.12] text-violet-ink">
         <Icon className="size-3.5" />
       </span>
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-[12px] font-semibold text-foreground">{name}</span>
-        <span className="truncate font-mono text-[10px] uppercase tracking-wide text-violet">
+        <span className="truncate font-mono text-[10px] uppercase tracking-wide text-violet-ink">
           {kindLabel}
           {disabled && <span className="text-muted"> · {t('agents.graph.trigger.disabled')}</span>}
           {trigger.schedule_label && <span className="text-muted"> · {trigger.schedule_label}</span>}

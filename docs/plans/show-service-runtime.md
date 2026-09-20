@@ -209,27 +209,17 @@ Vibe Remote resolution order:
 
 1. `VIBE_SHOW_RUNTIME_BIN`, for local development or pinned custom runtime.
 2. `avibe-show-runtime` on PATH.
-3. Managed GitHub source install under Vibe Remote runtime state.
+3. The packaged manifest cache and its verified platform archive.
 
-Managed GitHub source install:
-
-```text
-~/.vibe_remote/runtime/show-runtime/source/github/avibe-bot_vibe-show-runtime/main/
-  package.json
-  node_modules/
-  packages/runtime/dist/cli.js
-```
-
-The default managed source is GitHub, so early runtime iteration does not
-require publishing npm packages for every change:
+Developers build and maintain their own Show Runtime, then point Avibe at its
+entry point explicitly:
 
 ```bash
-VIBE_SHOW_RUNTIME_SOURCE=github
-VIBE_SHOW_RUNTIME_GITHUB_REPO=https://github.com/avibe-bot/vibe-show-runtime.git
-VIBE_SHOW_RUNTIME_GITHUB_REF=main
+VIBE_SHOW_RUNTIME_BIN=/path/to/vibe-show-runtime
 ```
 
-For stable releases, the same manager can use npm explicitly:
+Stable releases use the packaged manifest cache by default. The same manager
+can use npm explicitly:
 
 ```bash
 VIBE_SHOW_RUNTIME_SOURCE=npm
@@ -261,8 +251,8 @@ context TTL/LRU enforcement belongs in `@avibe/show-runtime`.
 Vibe Remote can update the Show Runtime independently if the sidecar API stays
 compatible:
 
-- runtime releases can be GitHub refs during fast iteration and npm package
-  versions for stable channels
+- developers can point Avibe at a locally built runtime with
+  `VIBE_SHOW_RUNTIME_BIN`; stable channels use packaged manifest archives
 - Vibe Remote installs them under managed runtime state
 - active sessions keep their current process until idle or restart
 - new sessions use the currently installed package

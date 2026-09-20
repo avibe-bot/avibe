@@ -1,17 +1,53 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
-import { apiFetch } from '../lib/apiFetch';
+import type { AgentSupply } from '../components/settings/models/types';
+import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
+import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
+import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
+import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
+import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
+  classifyShowPageAccessProbe,
+  type ShowPageAccess,
+  type ShowPageAccessProbe,
+  type ShowAccessApplyRequest,
+  type ShowAccessApplyResult,
+  type ShowAccessSettingsResult,
+} from '../lib/showPageAccess';
+import {
   WorkbenchEventReconnectLoop,
+  WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS,
+  declaredWorkbenchHeartbeatInterval,
+  isWorkbenchHeartbeatFresh,
+  parseWorkbenchHeartbeatInterval,
+  streamCoveredGap,
+  workbenchEventStaleAfterMs,
+  type WorkbenchControllerLegState,
   type WorkbenchEventConnectionState,
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
+import {
+  SessionDraftPersistence,
+  type SessionDraftSaveResult,
+  type SessionDraftServerState,
+  type SessionDraftWrite,
+} from '../lib/sessionDraftPersistence';
+import { getExistingWebPushSubscription, getWebPushDeviceId } from '../lib/webPush';
+import { reportRemoteAuthorizationState, type RemoteAuthorizationState } from '../lib/remoteAuth';
+import {
+  configMutationsToPayload,
+  type ConfigMutation,
+} from '../lib/configMutations';
+
+export type { InstanceCapabilities, SessionInfo };
+export type { ShowPageAccess };
+export type { ConfigMutation };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -474,7 +510,9 @@ export type TunnelConnectivityDiagnostics = {
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
-  saveConfig: (payload: any) => Promise<any>;
+  mutateConfig: (mutations: readonly ConfigMutation[]) => Promise<any>;
+  waitForAgentActivityConfigMutations: () => Promise<void>;
+  onConfigChanged: (handler: (config: unknown) => void) => () => void;
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
@@ -484,6 +522,13 @@ export type ApiContextType = {
   toggleAdmin: (userId: string, isAdmin: boolean, platform?: string) => Promise<any>;
   removeUser: (userId: string, platform?: string) => Promise<any>;
   getShowPages: () => Promise<any>;
+  getShowPageAccess: (sessionId: string) => Promise<ShowPageAccess>;
+  probeShowPageAccess: (sessionId: string) => Promise<ShowPageAccessProbe>;
+  getShowAccessSettings: (sessionId: string) => Promise<ShowAccessSettingsResult>;
+  applyShowAccess: (
+    sessionId: string,
+    payload: ShowAccessApplyRequest,
+  ) => Promise<ShowAccessApplyResult>;
   getWebPushStatus: (payload?: WebPushStatusPayload) => Promise<WebPushStatus>;
   getWebPushVapidPublicKey: () => Promise<{ ok: boolean; public_key: string }>;
   subscribeWebPush: (
@@ -494,12 +539,17 @@ export type ApiContextType = {
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
-  setShowPageVisibility: (sessionId: string, visibility: string) => Promise<any>;
-  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
+  setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
+  /** Read the session's Show Page without creating it; rejects with
+   *  `show_page_not_found` — silently, as an expected answer — when there is none.
+   *  Everything that only DISPLAYS the page uses this — `ensureShowPage` is reserved
+   *  for the one caller that owns the first-creation prompt. */
+  getShowPage: (sessionId: string) => Promise<ShowPagePayload>;
+  /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. Callers
+   *  MUST honor `existed === false` by sending the visualize prompt: that edge is
+   *  reported once, so a caller that ignores it silently consumes it. To only read the
+   *  page, use `getShowPage`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
-  rotateShowPageShare: (sessionId: string) => Promise<any>;
-  /** Set a custom public link suffix (public pages only); rejects on a taken/invalid id. */
-  setShowPageShareId: (sessionId: string, shareId: string) => Promise<any>;
   /** Upload an image as the page's workspace-root favicon (multipart); resolves to the
    *  refreshed page payload carrying the fresh `icon_version` (§7.1j). */
   uploadShowPageIcon: (sessionId: string, file: File) => Promise<any>;
@@ -524,18 +574,32 @@ export type ApiContextType = {
   getFirstBindCode: () => Promise<any>;
   detectCli: (binary: string) => Promise<any>;
   installAgent: (name: string) => Promise<InstallResult>;
-  listDependencies: () => Promise<DependenciesResult>;
+  listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
+  getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
+  getMemoryProcessingRecordEntries: (project: string, cursor?: string | null, limit?: number) => Promise<MemoryProcessingRecordListResult>;
+  getMemoryProcessingRecordEntry: (project: string, memcellId: string) => Promise<MemoryProcessingRecordDetailResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
+  getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
-  searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
-  getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
-  getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
-  clearMemory: () => Promise<MemoryClearResult>;
-  restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
+  searchMemory: (query: string, limit?: number, project?: string) => Promise<MemoryRecallResult>;
+  listMemoryEpisodes: (
+    project: string,
+    options?: {
+      page?: number;
+      cursor?: string | null;
+      limit?: number;
+      origin?: MemoryOrigin;
+    },
+  ) => Promise<MemoryListResult>;
+  listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
+  deleteMemoryData: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
+  wakeMemory: () => Promise<MemoryWakeResult>;
+  repairMemory: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
+  getBackendConnection: (name: 'claude' | 'codex' | 'opencode') => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -576,14 +640,15 @@ export type ApiContextType = {
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   getOpencodeProviders: () => Promise<OpencodeProviderListResult>;
+  readOpencodeOptionsForModelPicker: () => Promise<OpencodeOptionsResult>;
   saveOpencodeCustomProvider: (
     payload: OpencodeCustomProviderPayload,
   ) => Promise<OpencodeMutationResult>;
   deleteOpencodeCustomProvider: (providerId: string) => Promise<OpencodeMutationResult>;
   setOpencodeProviderAuth: (
     providerId: string,
-    apiKey: string,
-    baseUrl?: string,
+    apiKey?: string,
+    baseUrl?: string | null,
   ) => Promise<OpencodeMutationResult>;
   deleteOpencodeProviderAuth: (providerId: string) => Promise<OpencodeMutationResult>;
   setOpencodeDefaultProvider: (providerId: string) => Promise<OpencodeMutationResult>;
@@ -618,6 +683,10 @@ export type ApiContextType = {
   claudeModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
   codexAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string; description?: string }[]; error?: string }>;
   codexModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
+  /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
+  readModelHubAgentCatalogForModelPicker: (
+    backend: string,
+  ) => Promise<Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'> | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
   getVersion: () => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
@@ -625,6 +694,7 @@ export type ApiContextType = {
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
   browseMkdir: (path: string) => Promise<{ path: string }>;
   listProjects: (includeArchived?: boolean, options?: { cache?: boolean }) => Promise<{ projects: WorkbenchProject[] }>;
+  reorderProjects: (order: string[], expectedOrder: string[]) => Promise<{ projects: WorkbenchProject[] }>;
   getWorkbenchProjectsBootstrap: (params?: {
     includeArchived?: boolean;
     projectIds?: string[];
@@ -672,6 +742,9 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Apply the terminal archived state for raw request paths that intentionally
+   *  bypass the shared JSON error handler. */
+  convergeSessionArchived: (sessionId: string) => void;
   /** Subscribe to "the server just refused a write because that session is
    *  archived". Fires for EVERY request whose error body carries
    *  ``session_archived``, whatever the verb — the messages POST, the sessions
@@ -699,8 +772,8 @@ export type ApiContextType = {
     q: string,
     opts?: { limit?: number; includeArchived?: boolean },
   ) => Promise<MessageSearchResult>;
-  sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
-  markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
+  sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string; retry_for?: string }) => Promise<WorkbenchMessage>;
+  markSessionRead: (sessionId: string, untilMessageId?: string, opts?: { handleError?: boolean }) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session?: Record<string, number> }>;
   cancelSession: (
     sessionId: string,
   ) => Promise<{
@@ -715,8 +788,15 @@ export type ApiContextType = {
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
+  getCachedSessionDraft: (sessionId: string) => string | null;
+  cacheSessionDraft: (sessionId: string, text: string) => void;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
+  reconcileSessionDraftAfterSend: (
+    sessionId: string,
+    draft: { text: string; updated_at: string | null },
+  ) => Promise<void>;
+  recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
@@ -725,7 +805,12 @@ export type ApiContextType = {
     includeArchived?: boolean;
     cache?: boolean;
   }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
-  getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
+  getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
+  onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
+  getVibeAgent: (
+    name: string,
+    params?: { cache?: boolean; handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
@@ -845,6 +930,10 @@ export type WorkbenchProject = {
   archived: boolean;
   default_agent?: ProjectDefaultAgent | null;
   metadata?: Record<string, unknown>;
+  capabilities: {
+    can_chat: boolean;
+    has_folder: boolean;
+  };
 };
 
 export type ProjectSessionsPage = {
@@ -943,6 +1032,40 @@ export type VibeAgentFull = VibeAgentBrief & {
   system_prompt: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
+};
+
+export type VibeAgentOnboardingItem = {
+  id: string;
+  name: string;
+  backend: string;
+  source: string;
+  enabled: boolean;
+  status: 'not_onboarded' | 'private' | 'published' | 'managed_elsewhere';
+  access_level: 'private' | 'scope' | 'public' | null;
+  group_ids: string[];
+  policy_revision: number | null;
+  applied_acl_revision: number | null;
+};
+
+export type VibeAgentOnboardingResult = {
+  ok: boolean;
+  available: boolean;
+  organization_id: string | null;
+  console_url?: string;
+  agents: VibeAgentOnboardingItem[];
+  counts: {
+    total: number;
+    system: number;
+    custom: number;
+    not_onboarded: number;
+    private: number;
+    published: number;
+    conflicts: number;
+  };
+  created?: number;
+  unchanged?: number;
+  conflicts?: number;
+  sync?: { ok?: boolean; error?: string };
 };
 
 export type VibeAgentCreatePayload = {
@@ -1063,10 +1186,45 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 };
 
 export type WorkbenchEventHandlers = {
-  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  /**
+   * A stream is live and reaching this consumer, and any gap before now is
+   * over. Every gap ends here, on either of the two legs a stream is carried
+   * over: the browser socket breaking (an error, a page that came back to a
+   * stream that could not prove it survived, a heartbeat that stopped arriving)
+   * is recovered by reconnecting, and this fires once the new subscription
+   * exists; the UI server's controller bridge dropping and coming back is
+   * recovered in place, and this fires when it does. Nothing replays either
+   * gap, so this is also the one place to re-read whatever this consumer keeps
+   * live off the stream — including the window between its own first read and
+   * this subscription.
+   *
+   * Consumers must not re-derive when a gap happened. Neither the reactivation
+   * edge nor `onEventBridgeStatus` is that signal: a returning page whose stream
+   * never broke has missed nothing, and a bridge report is a level rather than
+   * an edge. Both verdicts are made in one place, and a consumer recomputing
+   * them will drift from it.
+   *
+   * It carries no payload, deliberately. Which leg came back, and whether any
+   * handshake stands behind this edge at all -- a page returning onto a stream
+   * that could not prove it survived says to catch up now, rather than wait for
+   * a replacement several backoff windows away -- are distinctions a catch-up
+   * cannot branch on without silently skipping the gaps it does not recognise.
+   * So there is nothing here to branch on. `onEventBridgeStatus` stays the level
+   * a bridge indicator renders from, and is not a second catch-up trigger: every
+   * bridge recovery arrives here too, so refetching from both would charge each
+   * one twice.
+   */
+  onConnected?: () => void;
+  onProjectsChanged?: () => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
+  onAuthorizationChanged?: (data: {
+    project_ids?: string[];
+    resource_kinds?: string[];
+    instance_authorization_revision?: number;
+  }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
+  onMessageUpdated?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
   // restore the card live. Absent on pre-M1 backends ⇒ consumers no-op.
@@ -1103,6 +1261,11 @@ export type WorkbenchEventHandlers = {
   onSessionStatus?: (data: { session_id: string; agent_status: 'idle' | 'running' | 'failed' }) => void;
   // The send-while-busy queue for a session changed (enqueue / flush / remove).
   onQueueUpdated?: (data: { session_id: string }) => void;
+  // A Task / Watch definition was created, edited, enabled, paused or removed.
+  // Instance-scoped like the two below, and `definition_type` is a hint, not a
+  // filter: below runtime management the server reduces the frame to `{}`, so a
+  // consumer that reads the field must still refetch when it is absent.
+  onDefinitionsUpdated?: (data: { definition_type?: string }) => void;
   onRunsUpdated?: (data: {
     run_id: string;
     status: HarnessRunStatus;
@@ -1151,6 +1314,11 @@ export type WorkbenchMessage = {
   source_session_agent_name?: string | null;
   native_message_id: string | null;
   parent_native_message_id: string | null;
+  // Server-owned read projection. Durable Message rows never carry this field.
+  projection?: 'claimed_delivery' | null;
+  // Server-owned queued Delivery recovery projection, not Message metadata.
+  requires_explicit_retry?: boolean;
+  retry_reason?: string | null;
   text: string;
   content: Record<string, unknown>;
   metadata: Record<string, unknown>;
@@ -1226,6 +1394,17 @@ export type SessionActivityState = {
   schedule_type?: 'at' | 'cron' | null;
 };
 
+export type ModelRecoveryState = {
+  request_id: string;
+  phase: 'waiting' | 'attempting';
+  attempt_count: number;
+  started_at: string;
+  window_end: string;
+  source_id: string | null;
+  reason: string | null;
+  next_eligible_at: string | null;
+};
+
 export type SessionRuntimeState = {
   in_flight: boolean | null;
   foreground: 'idle' | 'running' | 'unknown';
@@ -1236,10 +1415,12 @@ export type SessionRuntimeState = {
   connection: 'connected' | 'reconnecting' | 'disconnected' | 'unknown';
   backend?: string;
   recovered_agent_status?: boolean;
+  model_recovery?: ModelRecoveryState[];
 };
 
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
+  capabilities: { can_chat: boolean };
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   config: any | null;
@@ -1247,9 +1428,22 @@ export type WorkbenchSessionBootstrap = {
   next_after_id: string | null;
   next_before_id?: string | null;
   queued: WorkbenchMessage[];
-  draft: { text: string };
+  draft: { text: string; updated_at: string | null };
   turn_state: SessionRuntimeState;
 };
+
+function sessionDraftServerState(payload: unknown): SessionDraftServerState {
+  const draft = payload && typeof payload === 'object'
+    ? payload as { text?: unknown; updated_at?: unknown }
+    : {};
+  return {
+    text: typeof draft.text === 'string' ? draft.text : '',
+    updatedAt: typeof draft.updated_at === 'string' ? draft.updated_at : null,
+  };
+}
+
+const SESSION_DRAFT_WRITE_TIMEOUT_MS = 12_000;
+const SESSION_DRAFT_RECONCILE_TIMEOUT_MS = 5_000;
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
 // Aggregated per session at query time: ``preview_text`` is the session's latest
@@ -1309,7 +1503,7 @@ export type HarnessSessionSummary = {
 // one-shot that finished on its own indistinguishable from one the user paused.
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed' | 'canceled';
 export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
@@ -1326,6 +1520,8 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  retired_at?: string | null;
+  lifecycle_finished_at?: string | null;
   // Derived from this definition's own settled run outcomes, never from
   // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
   // success used to erase days of failure and a daily-failing cron rendered
@@ -1369,6 +1565,10 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  resume_blocked?: {
+    code: string;
+    owner_session_id: string;
+  } | null;
   // Command tasks: a scheduled definition that runs a subprocess instead of
   // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
   // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
@@ -1426,6 +1626,10 @@ export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   last_event_at: string | null;
   last_error: string | null;
   last_exit_code: number | null;
+  // Decoded server-side metadata includes durable Watch admission facts such as
+  // the circuit-breaker incident; it is troubleshooting evidence, not a new UI
+  // lifecycle state.
+  metadata: Record<string, unknown> | null;
   runtime: HarnessWatchRuntime;
   // Whether the waiter process is alive. ``null`` means we have never seen a
   // heartbeat for it, which is not the same as having seen it exit — the row
@@ -1643,13 +1847,6 @@ export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
 
-export type SessionInfo =
-  | { remote: false }
-  | { remote: true; authenticated: false }
-  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
-  // be absent or shared across subjects).
-  | { remote: true; authenticated: true; email: string; sub?: string };
-
 export type LogEntry = {
   timestamp: string;
   level: string;
@@ -1694,9 +1891,10 @@ export type InstallResult = {
   output: string | null;
   path?: string | null;
   job_id?: string;
-  status?: 'running' | 'succeeded' | 'failed';
+  status?: 'running' | 'succeeded' | 'failed' | 'rejected';
   poll_timeout_seconds?: number;
   reason?: string | null;
+  action_class?: 'operator_only';
   download_error?: DependencyDownloadError | null;
 };
 
@@ -1713,13 +1911,18 @@ export type DependencyDownloadError = {
 export type DependencyItem = {
   id: string;
   kind: 'tool' | 'runtime' | 'node';
-  required: boolean;
-  installed: boolean;
+  required: boolean | null;
+  installed: boolean | null;
   version: string | null;
-  status: 'ready' | 'missing' | 'upgrade_required' | 'unsupported' | 'error';
+  latest_version?: string | null;
+  has_update?: boolean;
+  status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error' | 'unknown';
+  readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
+  action_class?: 'none' | 'repairable' | 'operator_only';
   reason?: string | null;
   release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
+  inspection_error?: { kind: string; message: string } | null;
 };
 
 export type DependenciesResult = {
@@ -1728,9 +1931,12 @@ export type DependenciesResult = {
   reconciling?: boolean;
   reconciling_dependencies?: string[];
 };
+export type DependencyReadOptions = { ids?: readonly string[]; signal?: AbortSignal };
 
-// Memory plugin contract: docs/plans/memory-plugin-system.md.
+// Current Memory contract: docs/MEMORY.md.
 // Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
+export type MemoryRerankProvider = 'deepinfra' | 'vllm' | 'dashscope';
+
 export type MemoryEndpointConfig = {
   base_url: string | null;
   model: string | null;
@@ -1738,91 +1944,87 @@ export type MemoryEndpointConfig = {
   // Typed as `null` so no caller can read a saved key back off the response.
   api_key: null;
   has_api_key: boolean;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemoryProcessingConfig = {
   llm: MemoryEndpointConfig;
   embedding: MemoryEndpointConfig;
+  rerank?: MemoryEndpointConfig;
+  multimodal?: MemoryEndpointConfig;
 };
 
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  profile_enabled: boolean;
+  mode: 'organization' | 'platform' | 'custom';
+  cloud_available?: boolean;
+  managed?: boolean;
+  transition_notice_pending?: boolean;
+  capability_paused?: boolean;
+  im_attachment_capture_available?: boolean;
   processing: MemoryProcessingConfig;
 };
 
-// Omitting a field keeps its current value; an explicit `api_key: null` clears it
-// (only accepted while Memory is disabled/clearing per the backend contract).
+// Omitting a field keeps its current value; an explicit `api_key: null` clears it.
+// Required keys can clear only while Memory is disabled; optional endpoints can
+// be removed while Memory stays enabled.
 export type MemoryEndpointPatch = {
   base_url?: string | null;
   model?: string | null;
   api_key?: string | null;
+  provider?: MemoryRerankProvider | null;
 };
 
 export type MemorySettingsPatch = {
   enabled?: boolean;
+  profile_enabled?: boolean;
+  mode?: 'platform' | 'custom';
+  acknowledge_transition?: true;
   processing?: {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
+    rerank?: MemoryEndpointPatch;
+    multimodal?: MemoryEndpointPatch;
   };
+  confirm_loss?: boolean;
 };
 
-export type MemoryFailure = { status: 'failed'; error: string };
+export type MemoryFailureDiagnostic = {
+  side?: 'embedding' | 'llm' | 'rerank' | 'multimodal';
+  http_status?: number | null;
+  provider_error_code?: string | null;
+  message?: string;
+};
+export type MemoryFailure = {
+  status: 'failed';
+  error: string;
+  diagnostic?: MemoryFailureDiagnostic;
+};
 
 export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
   | MemoryFailure;
 
-export type MemoryStatusState =
-  | 'disabled'
-  | 'starting'
-  | 'ready'
-  | 'syncing'
-  | 'degraded'
-  | 'down'
-  | 'clearing'
-  | 'error';
-
-// The six display buckets the backend derives from the counters below, so this
-// rule lives in exactly one place (`core/memory/presentation.py`).
-export type MemoryStatusBuckets = {
-  syncing: number;
-  succeeded: number;
-  unknown: number;
-  failed: number;
-  dead: number;
-  missed: number;
-};
-
 export type MemoryStatus = {
   status: 'ok';
-  state: MemoryStatusState;
-  buckets: MemoryStatusBuckets;
-  pending: number;
-  processing: number;
-  awaiting_receipt: number;
-  succeeded: number;
-  receipt_unknown: number;
-  distill_failed: number;
-  dead: number;
-  missed: number;
-  queue_plaintext_bytes: number;
-  provider_disk_bytes: number;
-  last_success_at: string | null;
-  last_flush_observation: 'succeeded' | 'rejected' | 'unknown' | null;
-  last_flush_status: 'extracted' | 'no_extraction' | null;
-  last_flush_error_code: string | null;
-  last_flush_request_id: string | null;
-  last_flush_at: string | null;
-  processing_fault_kind: 'credential' | 'engine' | null;
-  processing_fault_since: string | null;
-  processing_alert_active: boolean;
-  recorder?: {
-    state: 'active' | 'degraded' | 'disabled';
+  state: 'disabled' | 'starting' | 'running' | 'degraded' | 'needs_repair';
+  reason: string | null;
+  source: {
+    status: 'available' | 'stale' | 'unknown' | 'unavailable';
+    observed_at: string | null;
     reason: string | null;
   };
-  error: string | null;
-  data_exists: boolean;
+  health: null | {
+    status: string;
+    version: string | null;
+    capabilities: Record<string, unknown>;
+    disabled_features: string[];
+  };
+  attachment_capture?: {
+    status: 'ready' | 'not_configured' | 'unavailable';
+  };
 };
 
 // A dependency-missing failure from the internal handler omits `status` and
@@ -1830,15 +2032,57 @@ export type MemoryStatus = {
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
 export type MemoryFailureLogEntry = {
-  kind: 'delivery_abandoned' | 'distillation_rejected' | 'result_unknown';
+  affected_count?: number;
+  id: string;
+  kind: string;
+  state: string;
+  operation: string;
   occurred_at: string;
   error_code: string | null;
-  request_id: string | null;
   attempts: number;
+  generation: number | null;
+  request_id: string | null;
+};
+
+export type MemoryFailureLog = {
+  status: 'ok';
+  source?: MemoryProcessingSourceStatus;
+  items: MemoryFailureLogEntry[];
 };
 
 export type MemoryFailureLogResult =
-  | { items: MemoryFailureLogEntry[]; retention_days: number }
+  | MemoryFailureLog
+  | MemoryFailure
+  | { error: string };
+
+export type MemoryMaintenance = {
+  status: 'ok';
+  data_exists: boolean;
+  can_delete_data: boolean;
+};
+
+export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
+
+export type MemoryProcessingRecordSummary = {
+  status: 'ok';
+  runtime: {
+    source: MemoryStatus['source'];
+    health: MemoryStatus['health'];
+  };
+  sources: MemoryProcessingRecordSources;
+  anomalies: {
+    source: MemoryProcessingSourceStatus;
+    items: MemoryFailureLogEntry[];
+  };
+  maintenance: {
+    source: MemoryProcessingSourceStatus;
+    data_exists: boolean;
+    can_delete_data: boolean;
+  };
+};
+
+export type MemoryProcessingRecordResult =
+  | MemoryProcessingRecordSummary
   | MemoryFailure
   | { error: string };
 
@@ -1864,114 +2108,171 @@ export type MemoryProfile = {
   updated_at: string | null;
 };
 
+export type MemorySearchWarning = 'memory_search_partial' | 'memory_search_truncated';
+
 export type MemoryItem = {
   kind: MemoryItemKind;
   text: string;
   date: string | null;
   profile?: MemoryProfile;
+  project?: string;
+  origin?: 'user' | 'agent' | 'both';
 };
 
 export type MemoryItemsResult =
   | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
   | MemoryFailure;
 
-export type MemoryLogSourceStatus = {
-  status: 'available' | 'partial' | 'unavailable';
-  reason?: string;
+export type MemoryRecallResult =
+  | {
+      status: 'ok';
+      items: MemoryItem[];
+      warnings: MemorySearchWarning[];
+      requested_mode: 'auto' | 'keyword' | 'vector' | 'hybrid' | 'agentic';
+      effective_mode: 'keyword' | 'vector' | 'hybrid' | 'agentic';
+      source: 'everos';
+      current_session_overlay: boolean;
+      watermark_ms: number | null;
+      freshness: 'unknown';
+    }
+  | MemoryFailure;
+
+export type MemoryListWarning = 'memory_list_partial' | 'memory_list_truncated';
+export type MemoryOrigin = 'user' | 'agent';
+
+export type MemoryListItem = {
+  id: string;
+  kind: 'episode';
+  subject: string;
+  summary: string;
+  body: string;
+  timestamp: string;
+  project: string;
+  origin?: MemoryOrigin;
 };
 
-export type MemoryLogSections = {
-  everos: MemoryLogSourceStatus;
-  capture: MemoryLogSourceStatus;
-  calls: MemoryLogSourceStatus;
+export type MemoryListResult =
+  | {
+      status: 'ok';
+      items: MemoryListItem[];
+      count: number;
+      total_count: number | null;
+      warnings: MemoryListWarning[];
+      page?: number;
+      page_size?: number;
+      next_cursor?: string | null;
+    }
+  | MemoryFailure;
+
+export type MemoryProcessingSourceStatus = {
+  status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
+  observed_at: string | null;
+  reason?: string | null;
 };
 
-export type MemoryLogEntry = {
+export type MemoryProcessingRecordSources = {
+  memcells: MemoryProcessingSourceStatus;
+  runs: MemoryProcessingSourceStatus;
+  semantic: MemoryProcessingSourceStatus;
+};
+
+export type MemoryProcessingRecordEntry = {
   memcell_id: string;
   project_id: string;
-  principal_id: string;
+  session_id: string;
+  owner_id: string;
   timestamp_ms: number;
   preview: string;
-  message_count: number;
-  run_summary: { total: number; statuses: Record<string, number> } | null;
-  authorized_call_count: number | null;
+  payload: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; item_count: number };
+  runs: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; total: number; statuses: Record<string, number> };
 };
 
-export type MemoryLogListResult =
+export type MemoryProcessingRecordListResult =
   | {
       status: 'ok';
-      entries: MemoryLogEntry[];
+      entries: MemoryProcessingRecordEntry[];
       next_cursor: string | null;
-      sections: MemoryLogSections;
+      sections: MemoryProcessingRecordSources;
     }
   | MemoryFailure;
 
-export type MemoryLogCapture =
-  | { status: 'available'; delivery_states: string[]; matched_message_count: number }
-  | { status: 'unavailable'; reason: string };
-
-export type MemoryLogStep = {
-  type: 'capture' | 'memcell' | 'strategy';
-  status: string;
-  timestamp_ms?: number;
-  started_at_ms?: number;
-  finished_at_ms?: number | null;
-  memcell_id?: string;
-  run_id?: string;
-  strategy?: string;
-  relation?: 'profile_trigger' | 'run';
-  attempt?: number;
-  error?: string | null;
-  reason?: string;
-};
-
-export type MemoryProviderCall = {
+export type MemoryProcessingPayloadItem = {
   id: string;
-  started_at_ms: number;
-  duration_ms: number;
-  kind: string;
-  stage: string;
-  model: string | null;
-  status: string;
-  error: string | null;
-  finish_reason: string | null;
-  prompt_tokens: number | null;
-  completion_tokens: number | null;
-  request: unknown;
-  response: unknown;
-  request_bytes: number | null;
-  response_bytes: number | null;
-  dropped_before: number;
+  timestamp_ms: number;
+  sender_id: string;
+  content: Array<{ type: 'text'; text: string; omitted_bytes: number }>;
 };
 
-export type MemoryLogCurrentState =
-  | {
-      status: 'available';
-      profile: { status: 'present' | 'missing'; updated_at_ms: number | null };
-      indexing: { status: string; updated_at_ms?: number; error?: string | null };
-      label: 'current_state';
-    }
-  | { status: 'unavailable'; reason: string };
+export type MemoryProcessingRun = {
+  run_id: string;
+  strategy: string;
+  attempt: number;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+  event_topic: string;
+};
 
-export type MemoryLogDetailResult =
+export type MemoryProcessingSemanticItem = {
+  kind: 'episode' | 'fact';
+  entry_id: string;
+  timestamp: string | null;
+  content: string;
+  subject?: string | null;
+  summary?: string | null;
+};
+
+export type MemoryProcessingRecordDetailResult =
   | {
       status: 'ok';
-      entry: Pick<MemoryLogEntry, 'memcell_id' | 'project_id' | 'principal_id' | 'timestamp_ms' | 'preview' | 'message_count'>;
-      capture: MemoryLogCapture;
-      steps: MemoryLogStep[];
-      calls: MemoryProviderCall[];
-      omitted_call_count: number;
-      omitted_step_count: number;
-      current_state: MemoryLogCurrentState;
-      sections: MemoryLogSections;
+      entry: Pick<MemoryProcessingRecordEntry, 'memcell_id' | 'project_id' | 'session_id' | 'owner_id' | 'timestamp_ms'>;
+      payload: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingPayloadItem[]; omitted_count?: number };
+      runs: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingRun[]; omitted_count?: number };
+      semantic: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingSemanticItem[]; omitted_count?: number };
+      current_state: {
+        status: 'available' | 'partial' | 'unavailable';
+        reason?: string | null;
+        label?: 'current_unattributed';
+        profile?: { status: 'present' | 'missing'; updated_at_ms: number | null };
+        indexing?: { status: string; reason?: string; items?: Array<{ md_path: string; status: string; updated_at: string | null; error: string | null }> };
+      };
     }
   | MemoryFailure;
 
-export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
+export type MemoryWakeResult = (
+  | { ok: true; state: 'running' }
+  | { ok: false; state?: MemoryStatus['state']; error?: string }
+) & { artifact_update?: { ok: boolean; reason?: string | null } };
 
-// Reconciliation answers the controller's ok/error shape rather than the
-// status/error one the read routes use.
-export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
+export type MemoryDataOperationResult = {
+  ok: boolean;
+  operation: 'repair' | 'delete_data';
+  state?: MemoryStatus['state'];
+  result?: 'completed' | 'unchanged' | 'partial' | 'deleted_readiness_failed' | 'failed';
+  error?: string;
+  data_deleted?: boolean;
+  data_remaining?: boolean;
+  roots?: Array<{
+    path: string;
+    existed: boolean;
+    deleted: boolean;
+    error?: string;
+  }>;
+};
+
+export type BackendConnectionState = {
+  ok: boolean;
+  backend: 'claude' | 'codex' | 'opencode';
+  installed: boolean;
+  enabled: boolean;
+  auth: 'subscription' | 'api_key' | 'none' | 'unknown';
+  application: 'applied' | 'draining' | 'failed' | 'stopped' | 'unknown';
+  ready: boolean;
+  entry_eligible: boolean;
+  permission_required?: boolean;
+  message?: string;
+};
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -2136,11 +2437,12 @@ export type OAuthWebState =
 export type OAuthWebStartResult = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex';
+  backend?: 'claude' | 'codex' | 'opencode';
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;
   awaiting_code?: boolean;
+  callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string;
   detail?: string;
 };
@@ -2148,11 +2450,12 @@ export type OAuthWebStartResult = {
 export type OAuthWebStatus = {
   ok: boolean;
   flow_id?: string;
-  backend?: 'claude' | 'codex';
+  backend?: 'claude' | 'codex' | 'opencode';
   state?: OAuthWebState;
   url?: string | null;
   device_code?: string | null;
   awaiting_code?: boolean;
+  callback_kind?: 'code' | 'device' | 'redirect' | null;
   error?: string | null;
 };
 
@@ -2200,7 +2503,6 @@ export type OpencodeProvider = {
     user_managed: boolean;
     reasoning_efforts?: string[];
   }[];
-  default_model: string | null;
   // Optional ``baseURL`` override persisted in opencode.json. Surfaced so
   // the Settings page can pre-populate the Base URL input with the last
   // saved value instead of starting empty on every reload.
@@ -2240,8 +2542,18 @@ export type OpencodeProviderListResult = {
   permission_allowed?: boolean;
 };
 
+export type OpencodeOptionsResult = {
+  ok: boolean;
+  data?: {
+    models?: { providers?: unknown[] };
+    reasoning_options?: Record<string, { value: string; label: string }[]>;
+    [key: string]: unknown;
+  };
+};
+
 export type OpencodeMutationResult = {
   ok: boolean;
+  restart?: BackendRestartResult;
   message?: string;
   default_provider?: string;
   provider_id?: string;
@@ -2253,12 +2565,38 @@ export type OpencodeMutationResult = {
   };
 };
 
+export type WebPushNormalDeliveryOwner = {
+  policy?: string;
+  disposition?: string | null;
+  reason?: string;
+};
+
+export type WebPushNormalDeliveryRecent = {
+  at?: string;
+  message_id?: string | null;
+  session_id?: string | null;
+  owners?: Record<string, WebPushNormalDeliveryOwner>;
+  disposition?: string | null;
+};
+
+/** Normal-path authorization evaluation shared by the test/status surface. */
+export type WebPushNormalDelivery = {
+  user_key?: string;
+  policy?: string;
+  authorized?: boolean | null;
+  disposition?: string | null;
+  reason?: string;
+  revision_state?: string;
+  recent_deliveries?: WebPushNormalDeliveryRecent[];
+};
+
 export type WebPushStatus = {
   ok: boolean;
   configured: boolean;
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 export type WebPushStatusPayload = {
@@ -2287,6 +2625,7 @@ export type WebPushTestResult = {
   sent?: number;
   failed?: number;
   error?: string;
+  normal_delivery?: WebPushNormalDelivery;
 };
 
 // Error thrown by the JSON helpers below when a request fails. Carries the
@@ -2321,20 +2660,67 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const { showToast } = useToast();
   const { t } = useTranslation();
   const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
+  const configChangedHandlersRef = useRef(new Set<(config: unknown) => void>());
+  // Agent Activity is global across chat routes. Keep its writes ordered for the
+  // provider lifetime without making unrelated runtime-backed config saves block chat.
+  const agentActivityConfigMutationTailRef = useRef<Promise<unknown>>(Promise.resolve());
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
   const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
-  const eventBridgeConnectedRef = useRef(false);
+  // The controller leg of this stream, which is the second thing that can break:
+  // the browser socket stays open and heartbeating while the UI server loses
+  // `/internal/events`, and `vibe/inbox_bridge.py` resumes the live feed without
+  // replaying what the controller published in between. `unknown` is not a third
+  // kind of outage -- it is a stream that has not heard from the leg yet, which
+  // is what keeps its first "connected" report from reading as a recovery.
+  const eventControllerLegRef = useRef<WorkbenchControllerLegState>('unknown');
+  // When the active stream last proved it was alive, and the cadence the server
+  // said it would prove it at. Null whenever there is no stream to speak for --
+  // including a stream that has connected but not yet been heard from, because a
+  // heartbeat is the only thing that proves continuity and nothing else may
+  // stand in for one. A server too old to send them therefore never reads as
+  // proven, which is the pre-heartbeat behavior this optimization replaces.
+  const eventHeartbeatAtRef = useRef<number | null>(null);
+  const eventHeartbeatIntervalRef = useRef(WORKBENCH_EVENT_HEARTBEAT_FALLBACK_MS);
+  // When the deadline the current stream is being held to started running, or
+  // null when this server never promised a cadence and so cannot be held to one.
+  // Deliberately separate from the stamp above: a promise is what makes a
+  // deadline enforceable, and only a heartbeat is proof the stream is carrying
+  // events. Collapsing them either lets a handshake vouch for a stream or leaves
+  // a stream that dies before its first heartbeat with no deadline at all.
+  const eventHeartbeatClockAtRef = useRef<number | null>(null);
+  // Fires when the next heartbeat is overdue. A heartbeat is a continuous clock,
+  // so whoever trusts it has to keep watching it: sampling only at the moment a
+  // page returns would leave a stream that dies one second later unquestioned
+  // until the next return, which may never come while the tab stays open.
+  const eventHeartbeatWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
-  const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const resumeWorkbenchEventsRef = useRef<PageReactivationListener>(() => {});
+  const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
+  const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
 
-  const handleApiError = async (res: Response, path: string) => {
+  const convergeSessionArchived = (sessionId: string) => {
+    sessionDraftPersistence.clearSession(sessionId);
+    for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+      try {
+        handler(sessionId);
+      } catch (err) {
+        console.error('[API] session-archived subscriber failed', err);
+      }
+    }
+  };
+
+  const handleApiError = async (
+    res: Response,
+    path: string,
+    { expectedCodes }: { expectedCodes?: readonly string[] } = {},
+  ) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
     let errorCode: string | null = null;
-    
+
     try {
       const data = await res.json();
       const parsed = selectApiErrorFields(data, errorMessage);
@@ -2351,15 +2737,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       errorMessage = `${path}: ${res.statusText || 'Unknown error'} (${res.status})`;
     }
 
-    // Log error details to console
-    console.error(`[API Error] ${path}`, {
-      status: res.status,
-      statusText: res.statusText,
-      error: errorMessage,
-    });
+    // A code the caller declared EXPECTED is an answer, not a failure: it still
+    // rejects, so no caller can mistake an error body for data, but it is neither
+    // announced to the user nor logged as an error. Declared per call site, applied
+    // here, so "expected" cannot mean two different things in two helpers.
+    if (!(errorCode !== null && expectedCodes?.includes(errorCode))) {
+      // Log error details to console
+      console.error(`[API Error] ${path}`, {
+        status: res.status,
+        statusText: res.statusText,
+        error: errorMessage,
+      });
 
-    // Show toast to user
-    showToast(errorMessage, 'error');
+      // Show toast to user
+      showToast(errorMessage, 'error');
+    }
 
     // Archive is TERMINAL, so this particular refusal is not a failure to retry
     // but a state change the client missed (a backgrounded/offline tab can drop
@@ -2369,13 +2761,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // must never change whether/what this handler throws.
     const archivedSessionId = archivedConflictSessionId(errorCode, path);
     if (archivedSessionId) {
-      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
-        try {
-          handler(archivedSessionId);
-        } catch (err) {
-          console.error('[API] session-archived subscriber failed', err);
-        }
-      }
+      convergeSessionArchived(archivedSessionId);
     }
 
     throw new ApiError(errorMessage, res.status, errorCode);
@@ -2388,13 +2774,48 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
-    const res = await apiFetch(path);
+  const onConfigChanged = (handler: (config: unknown) => void) => {
+    configChangedHandlersRef.current.add(handler);
+    return () => {
+      configChangedHandlersRef.current.delete(handler);
+    };
+  };
+
+  const convergeConfig = (config: unknown) => {
+    for (const handler of Array.from(configChangedHandlersRef.current)) {
+      try {
+        handler(config);
+      } catch (err) {
+        console.error('[API] config-changed subscriber failed', err);
+      }
+    }
+  };
+
+  const getJson = async (
+    path: string,
+    { handleError = true, expectedCodes, signal }: {
+      handleError?: boolean;
+      expectedCodes?: readonly string[];
+      signal?: AbortSignal;
+    } = {},
+  ) => {
+    const res = await (signal ? apiFetch(path, { signal }) : apiFetch(path));
     if (!res.ok && handleError) {
-      await handleApiError(res, path);
+      await handleApiError(res, path, { expectedCodes });
     }
     return res.json();
   };
+
+  // Absence is data for a GET of ONE session's Show Page, never an incident: the share
+  // panel opens on sessions that have no page yet and renders that as an empty link.
+  // The property is owned here instead of declared per call site because the panel fires
+  // several of these reads at once — one of them forgetting is a toast the user sees for
+  // the normal case, and the reader cannot tell which of the parallel reads produced it.
+  // Mutations stay off this path deliberately: pinning or re-skinning a page that does
+  // not exist IS a fault worth announcing. So is the POST-shaped access-settings read,
+  // which only mounts once an access read has already proven the page exists, so an
+  // absent page there means it vanished mid-session rather than never existed.
+  const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
 
   const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
@@ -2474,12 +2895,148 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const clearWorkbenchHeartbeatWatchdog = () => {
+    if (eventHeartbeatWatchdogRef.current === null) return;
+    clearTimeout(eventHeartbeatWatchdogRef.current);
+    eventHeartbeatWatchdogRef.current = null;
+  };
+
   const closeActiveWorkbenchEventSource = () => {
     const source = eventSourceRef.current;
     eventSourceRef.current = null;
     source?.close();
     eventConnectionRef.current = null;
-    eventBridgeConnectedRef.current = false;
+    eventControllerLegRef.current = 'unknown';
+    // The stamp and the cadence both speak for one socket only; a later stream
+    // must earn its own, including the right to be watched on a timer.
+    eventHeartbeatAtRef.current = null;
+    eventHeartbeatClockAtRef.current = null;
+    clearWorkbenchHeartbeatWatchdog();
+  };
+
+  /**
+   * The stream's own handshake, or null while events cannot reach handlers. A
+   * controller-sourced stream is itself the controller leg, so it is down when
+   * that leg reports down.
+   */
+  const workbenchEventHandshake = () => {
+    const connection = eventConnectionRef.current;
+    if (!connection) return null;
+    if (connection.source === 'controller' && eventControllerLegRef.current !== 'connected') return null;
+    return connection;
+  };
+
+  /**
+   * Reconnecting this socket would close no gap, because it is carrying
+   * everything it can carry right now.
+   *
+   * Scoped to this socket on purpose: a stream reaches the browser over two legs
+   * that fail independently, and each one is judged by whoever can see it. This
+   * is the browser leg. Reopening it cannot repair the controller leg behind the
+   * UI server -- the replacement would inherit the same severed bridge -- so the
+   * controller leg is not a term here; it announces its own recovery instead, in
+   * the `workbench.events.bridge.status` listener below.
+   *
+   * That makes this the answer to one question only: whether recycling this
+   * socket would close anything. It is not a verdict on the stream, and asking
+   * it as one is how a controller-leg outage came to read as a gap-free resume.
+   * `streamCoveredGap` is where every leg is accounted for.
+   *
+   * All three terms are needed for this leg. `readyState` is the browser's own
+   * transport verdict, which it revises on network changes and HTTP/2 ping
+   * timeouts. The handshake says a stream that is open can also reach handlers.
+   * Neither survives suspension: a backgrounded tab can have its socket dropped
+   * and be resumed with the connection still reported `OPEN` and no `error` ever
+   * delivered, so only a recent heartbeat distinguishes a quiet stream from that
+   * zombie.
+   */
+  const isWorkbenchBrowserLegLive = () =>
+    eventSourceRef.current?.readyState === EventSource.OPEN &&
+    workbenchEventHandshake() !== null &&
+    isWorkbenchHeartbeatFresh(
+      eventHeartbeatAtRef.current,
+      eventHeartbeatIntervalRef.current,
+      Date.now(),
+    );
+
+  /**
+   * This stream is over: drop it, say so, and let the loop schedule the next
+   * attempt. One owner for the transition, because a stream that dies silently
+   * has to end up in exactly the same state as one that reports `error` --
+   * consumers recover through the reconnect's `connected`, so a path that
+   * skipped any of these steps would strand them.
+   */
+  const failWorkbenchEventStream = () => {
+    closeActiveWorkbenchEventSource();
+    setWorkbenchEventConnectionState('reconnecting');
+    dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
+    getWorkbenchEventReconnectLoop().failed();
+  };
+
+  /**
+   * Watch for the heartbeat the current stream owes us. A stream that stops
+   * proving itself is dead whether or not the browser ever says so, and the
+   * only way a consumer learns that is if someone is still looking.
+   */
+  const armWorkbenchHeartbeatWatchdog = () => {
+    clearWorkbenchHeartbeatWatchdog();
+    // Only a stream whose server promised a cadence owes a heartbeat. A deadline
+    // is a claim about a cadence, so a server that never declared one cannot be
+    // held to it: against an older server -- a rollback under a tab that stayed
+    // open -- this would otherwise close a healthy stream every stale window
+    // forever, charging every consumer a catch-up each round. A modern server
+    // makes that promise in its handshake, which is what puts a stream that dies
+    // before its first heartbeat on a deadline too.
+    const clockAt = eventHeartbeatClockAtRef.current;
+    if (clockAt === null) return;
+    const staleAt = clockAt + workbenchEventStaleAfterMs(eventHeartbeatIntervalRef.current);
+    eventHeartbeatWatchdogRef.current = setTimeout(() => {
+      eventHeartbeatWatchdogRef.current = null;
+      // A hidden page cannot hold a stream open anyway, and its timers are
+      // throttled or frozen: the reactivation edge is the honest check there.
+      if (document.visibilityState !== 'visible') return;
+      // A heartbeat may have landed since this timer was set, in which case the
+      // stream is proving itself and only the deadline moved.
+      if (isWorkbenchBrowserLegLive()) {
+        armWorkbenchHeartbeatWatchdog();
+        return;
+      }
+      failWorkbenchEventStream();
+    }, Math.max(0, staleAt - Date.now()));
+  };
+
+  /**
+   * Start this stream's clock from its server's promise. Called from the
+   * handshake, so a stream that opens and never sends a heartbeat still has a
+   * deadline to miss -- the case a stamp-only clock cannot express, because
+   * there is nothing to stamp.
+   *
+   * Sticky per stream: only a frame that carries a cadence is allowed to speak
+   * for one, so a controller-relayed handshake (no cadence of its own) never
+   * clears a clock the UI server's own handshake started.
+   */
+  const declareWorkbenchHeartbeatCadence = (intervalMs: number) => {
+    eventHeartbeatIntervalRef.current = intervalMs;
+    eventHeartbeatClockAtRef.current = Date.now();
+    armWorkbenchHeartbeatWatchdog();
+  };
+
+  /**
+   * Record proof of life and keep watching for the next one. Stamping and
+   * watching are one action on purpose: a stamp nobody watches expires
+   * unnoticed, and a watchdog armed off a stale stamp fires against the wrong
+   * deadline.
+   *
+   * A heartbeat also restarts the clock, and does so even from a server that
+   * never declared a cadence: whatever the deadline was measured from, the
+   * newest proof is now the honest starting point.
+   */
+  const stampWorkbenchHeartbeat = (intervalMs?: number) => {
+    const now = Date.now();
+    eventHeartbeatAtRef.current = now;
+    eventHeartbeatClockAtRef.current = now;
+    if (intervalMs !== undefined) eventHeartbeatIntervalRef.current = intervalMs;
+    armWorkbenchHeartbeatWatchdog();
   };
 
   function reconnectWorkbenchEventSource(): void {
@@ -2493,6 +3050,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       eventReconnectLoopRef.current = new WorkbenchEventReconnectLoop({
         reconnect: reconnectWorkbenchEventSource,
         isVisible: () => document.visibilityState === 'visible',
+        isBrowserLegLive: isWorkbenchBrowserLegLive,
       });
     }
     return eventReconnectLoopRef.current;
@@ -2521,15 +3079,34 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWorkbenchEventReconnectLoop().attemptStarted();
     source.addEventListener('connected', (e: MessageEvent) => {
       if (eventSourceRef.current !== source) return;
+      // Deliberately no stamp here. This frame proves the stream is alive now,
+      // which is not the question: the question is whether it will still be
+      // proving that in a minute, and only a heartbeat answers it. Seeding from
+      // the handshake would hand a stream up to one stale window of unearned
+      // trust -- enough for a suspended tab to return, be believed, and skip the
+      // catch-up for a gap it did have.
+      //
+      // What it may do is start the clock: the frame's `interval_ms` is the
+      // server declaring the cadence it owes, which is a promise, not proof.
+      // That is what puts a stream that opens and then goes silent on a
+      // deadline, while a server too old to declare one is still never
+      // watchdogged and still never believed without a heartbeat.
       try {
-        const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
+        const parsed = JSON.parse(e.data) as {
+          sub_id?: number;
+          interval_ms?: unknown;
+          type?: string;
+          data?: unknown;
+        };
         const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
         eventConnectionRef.current = {
           sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
           source: sourceKind,
         };
+        const declaredIntervalMs = declaredWorkbenchHeartbeatInterval(parsed.interval_ms);
+        if (declaredIntervalMs !== undefined) declareWorkbenchHeartbeatCadence(declaredIntervalMs);
         if (sourceKind === 'controller') {
-          eventBridgeConnectedRef.current = true;
+          eventControllerLegRef.current = 'connected';
           setWorkbenchEventConnectionState('connected');
           dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
         }
@@ -2539,8 +3116,54 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (eventConnectionRef.current) {
         getWorkbenchEventReconnectLoop().streamOpened();
-        const connected = eventConnectionRef.current;
-        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+      }
+    });
+    // The server's proof of life. It carries no news, so nothing is dispatched
+    // to handlers -- the arrival itself is the whole payload, and the declared
+    // cadence lets the staleness window be sized by the side that sets it.
+    source.addEventListener('heartbeat', (e: MessageEvent) => {
+      if (eventSourceRef.current !== source) return;
+      let intervalMs: number | undefined;
+      try {
+        const payload = JSON.parse(e.data) as { interval_ms?: unknown };
+        intervalMs = parseWorkbenchHeartbeatInterval(payload.interval_ms);
+      } catch {
+        // The frame arrived, which is what matters; keep the current cadence.
+      }
+      // The only place a stream is ever stamped, which is what lets a null stamp
+      // mean "nothing has proved this stream yet" even on a stream already
+      // running against a declared deadline.
+      stampWorkbenchHeartbeat(intervalMs);
+    });
+    source.addEventListener('authorization.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{
+        project_ids?: string[];
+        resource_kinds?: string[];
+        instance_authorization_revision?: number;
+      }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching(isAuthorizationSensitiveReadPath);
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onAuthorizationChanged?.(envelope.data);
+      });
+    });
+    source.addEventListener('projects.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<Record<string, never>>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/projects') || path.startsWith('/api/workbench/projects-bootstrap'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onProjectsChanged?.();
+      });
+    });
+    source.addEventListener('remote.authorization', (e: MessageEvent) => {
+      try {
+        const payload = JSON.parse(e.data) as { state?: RemoteAuthorizationState };
+        if (payload.state) reportRemoteAuthorizationState(payload.state);
+      } catch (err) {
+        console.error('[workbench-events] remote authorization parse failed', err, e.data);
       }
     });
     source.addEventListener('message.new', (e: MessageEvent) => {
@@ -2556,11 +3179,23 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onMessageNew?.(envelope.data);
       });
     });
+    source.addEventListener('message.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
+      if (!envelope?.data.session_id) return;
+      clearSessionReadCache(envelope.data.session_id);
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onMessageUpdated?.(envelope.data);
+      });
+    });
     source.addEventListener('session.activity', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<any>(e.data);
       if (!envelope) return;
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
+        if (envelope.data.event === 'archived') {
+          sessionDraftPersistence.clearSession(envelope.data.session_id);
+        }
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -2626,6 +3261,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onQueueUpdated?.(envelope.data);
       });
     });
+    source.addEventListener('definitions.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{ definition_type?: string }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/harness'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onDefinitionsUpdated?.(envelope.data);
+      });
+    });
     source.addEventListener('runs.updated', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<{
         run_id: string;
@@ -2672,20 +3316,33 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
       if (!envelope) return;
       getWorkbenchEventReconnectLoop().streamOpened();
-      eventBridgeConnectedRef.current = envelope.data.connected;
+      const previousLeg = eventControllerLegRef.current;
+      eventControllerLegRef.current = envelope.data.connected ? 'connected' : 'disconnected';
       setWorkbenchEventConnectionState(envelope.data.connected ? 'connected' : 'reconnecting');
       dispatchToWorkbenchHandlers((handlers) => {
         handlers.onAny?.(envelope);
         handlers.onEventBridgeStatus?.(envelope.data);
       });
+      // A leg that was down and is now up is a gap that just ended. The browser
+      // socket stayed open across it, so no reconnect will announce this one --
+      // but the meaning is identical, so it arrives through the same signal, and
+      // consumers need no second concept to handle it. Only from `disconnected`:
+      // a new stream's opening report is the leg's state, not a recovery, and
+      // treating it as one would charge every connect a duplicate catch-up.
+      if (previousLeg === 'disconnected' && envelope.data.connected) {
+        dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+      }
     });
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
-      closeActiveWorkbenchEventSource();
-      setWorkbenchEventConnectionState('reconnecting');
-      dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
+      failWorkbenchEventStream();
+      // EventSource does not expose a failed response's status or JSON body.
+      // Probe through apiFetch, then inspect the successful /api/session form;
+      // both 401s and the 200 refresh payload enter the shared login recovery.
+      void apiFetch('/api/session', { cache: 'no-store' })
+        .then(recoverRemoteAuthFromSessionProbe)
+        .catch(() => undefined);
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
-      getWorkbenchEventReconnectLoop().failed();
     };
   }
 
@@ -2702,24 +3359,80 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
   stopWorkbenchEventsRef.current = stopWorkbenchEventSource;
 
-  const wakeWorkbenchEvents = () => {
+  /**
+   * The page or the network came back. Catch the transport up; the stream then
+   * tells consumers whether anything was missed, by reconnecting or not.
+   *
+   * One owner, deliberately. Every consumer used to subscribe to the raw
+   * reactivation edge and refetch unconditionally, which is why returning to a
+   * tab cost a burst of reads that a healthy stream had already delivered. Now
+   * only a stream that cannot prove it survived the gap costs a catch-up, and
+   * consumers hear about it through the same `connected` signal an ordinary
+   * mid-session reconnect already used.
+   *
+   * `awaySince` is when the gap being recovered from opened, or null for one
+   * nothing can date -- a network return, or a page back from an away period
+   * the sampler never saw begin.
+   */
+  const wakeWorkbenchEvents: PageReactivationListener = (awaySince) => {
     if (eventHandlersRef.current.size === 0 || document.visibilityState !== 'visible') return;
-    setWorkbenchEventConnectionState('reconnecting');
+    // Read before waking, because waking is what changes the answer.
+    //
+    // Two questions, asked separately because they have different subjects. The
+    // transport one -- is this socket worth keeping -- is about the browser leg,
+    // and is the reconnect loop's. This one is about the whole path across an
+    // interval, so it is asked of every leg, by the one function that knows what
+    // the legs are; the browser leg's own verdict goes in as a term rather than
+    // standing in for the answer.
+    const survivedTheGap = streamCoveredGap({
+      browserLegLive: isWorkbenchBrowserLegLive(),
+      lastHeartbeatAt: eventHeartbeatAtRef.current,
+      controllerLeg: eventControllerLegRef.current,
+      awaySince,
+      intervalMs: eventHeartbeatIntervalRef.current,
+      now: Date.now(),
+    });
+    // The indicator belongs to whoever opens a stream: openWorkbenchEventSource
+    // marks it reconnecting on every attempt. Announcing it here instead made a
+    // wake that keeps a live stream flash "reconnecting" over a healthy one.
     getWorkbenchEventReconnectLoop().wake();
+    // Timers are not trustworthy across a hidden period -- throttled, frozen,
+    // or fired while hidden and declined -- so re-establish the watch on a
+    // stream that was kept rather than reasoning about which of those happened.
+    // Idempotent: it re-arms off the surviving clock, and declines for a stream
+    // that was recycled or never declared a cadence.
+    armWorkbenchHeartbeatWatchdog();
+    // This edge owns its own catch-up. Deferring it to the replacement stream's
+    // handshake would make recovery depend on the thing being recovered: a
+    // server that is down, an offline network, or a backoff wait leaves the
+    // reconnect pending for as long as it takes, and until then a returning page
+    // shows whatever it had before it was hidden with nothing on the way. Paying
+    // it here is what the unconditional refetch did before this change, so a
+    // reactivation onto a broken stream costs no more than it used to; the
+    // replacement's later `connected` is a second catch-up in exactly the case
+    // that already paid for two.
+    if (!survivedTheGap) {
+      dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.());
+    }
   };
-  wakeWorkbenchEventsRef.current = wakeWorkbenchEvents;
+  resumeWorkbenchEventsRef.current = wakeWorkbenchEvents;
 
   useEffect(() => {
-    const wakeIfVisible = () => {
-      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+    const wakeIfVisible: PageReactivationListener = (awaySince) => {
+      if (document.visibilityState !== 'visible') return;
+      resumeWorkbenchEventsRef.current(awaySince);
+      syncSessionDraftsRef.current();
     };
-    document.addEventListener('visibilitychange', wakeIfVisible);
-    window.addEventListener('online', wakeIfVisible);
-    window.addEventListener('focus', wakeIfVisible);
+    // Regaining the network is its own gap, independent of the page coming back,
+    // and an undated one: nothing here watched the connection drop, so no
+    // heartbeat can be placed inside it.
+    const wakeFromNetwork = () => wakeIfVisible(null);
+    const stopReactivation = onPageReactivated(wakeIfVisible);
+    window.addEventListener('online', wakeFromNetwork);
+    if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
-      document.removeEventListener('visibilitychange', wakeIfVisible);
-      window.removeEventListener('online', wakeIfVisible);
-      window.removeEventListener('focus', wakeIfVisible);
+      stopReactivation();
+      window.removeEventListener('online', wakeFromNetwork);
       stopWorkbenchEventsRef.current();
     };
   }, []);
@@ -2728,11 +3441,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     path: string,
     init: RequestInit,
     errorPath = path,
-    { clearCache = true, handleError = true }: { clearCache?: boolean; handleError?: boolean } = {},
+    {
+      clearCache = true,
+      handleError = true,
+      expectedCodes,
+    }: {
+      clearCache?: boolean;
+      handleError?: boolean;
+      expectedCodes?: readonly string[];
+    } = {},
   ) => {
     const res = await apiFetch(path, init);
     if (!res.ok && handleError) {
-      await handleApiError(res, errorPath);
+      await handleApiError(res, errorPath, { expectedCodes });
     }
     const payloadJson = await res.json().catch(() => ({}));
     if (res.ok && clearCache) {
@@ -2741,7 +3462,100 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { res, payloadJson };
   };
 
-  const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
+  const readSessionDraftServer = async (
+    sessionId: string,
+    timeoutMs = SESSION_DRAFT_RECONCILE_TIMEOUT_MS,
+  ): Promise<SessionDraftServerState | null> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return null;
+      return sessionDraftServerState(await res.json().catch(() => null));
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  const writeSessionDraft = async (
+    sessionId: string,
+    draft: SessionDraftWrite,
+  ): Promise<SessionDraftSaveResult> => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SESSION_DRAFT_WRITE_TIMEOUT_MS);
+    try {
+      const { res, payloadJson } = await requestJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: draft.text,
+            expected_updated_at: draft.expectedUpdatedAt,
+          }),
+          signal: controller.signal,
+        },
+        `/api/sessions/${sessionId}/draft`,
+        { handleError: false },
+      );
+      const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
+      const server = sessionDraftServerState(payloadJson?.draft);
+      if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
+        return { ok: false, conflict: true, server };
+      }
+      return res.ok
+        ? { ok: true, ...(hasServerDraft ? { server } : {}) }
+        : { ok: false };
+    } catch (error) {
+      if (!timedOut) throw error;
+      // The request may have committed before its response stalled. Reconcile
+      // once before releasing queued successors so they inherit the actual
+      // cloud revision instead of manufacturing a conflict from uncertainty.
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return { ok: false };
+      if (server.text === draft.text) return { ok: true, server };
+      return server.updatedAt !== draft.expectedUpdatedAt
+        ? { ok: false, conflict: true, server }
+        : {
+            ok: false,
+            server,
+            // The abort only stops waiting for the response; the synchronous
+            // server transaction may still commit. If the queued successor
+            // conflicts specifically with this text, rebase and retry once.
+            retryConflictIfServerText: draft.text,
+          };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  const rebaseAndRetrySessionDraft = async (
+    sessionId: string,
+    server: SessionDraftServerState,
+  ): Promise<void> => {
+    sessionDraftPersistence.rebase(sessionId, server);
+    await sessionDraftPersistence.retry(
+      sessionId,
+      (draft) => writeSessionDraft(sessionId, draft),
+    );
+  };
+  syncSessionDraftsRef.current = () => {
+    void sessionDraftPersistence.retryAll(writeSessionDraft);
+  };
+
+  const postJson = async (
+    path: string,
+    payload: any,
+    opts?: { handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => {
     const { payloadJson } = await requestJson(
       path,
       {
@@ -2794,7 +3608,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
     if (!jobId) return started;
 
-    const deadline = Date.now() + 310_000;
+    // Covers the 120s controller readiness bound plus the 300s CPA RPC bound.
+    const deadline = Date.now() + 430_000;
     let last = started;
     while (Date.now() < deadline) {
       await sleep(1000);
@@ -2862,7 +3677,34 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const value: ApiContextType = useMemo(() => ({
     getConfig: () => getCachedJson('/api/config', CONFIG_CACHE_TTL_MS),
     getPlatformCatalog: () => getJson('/api/platforms'),
-    saveConfig: (payload) => postJson('/api/config', payload),
+    mutateConfig: (mutations) => {
+      const save = async () => {
+        const config = await postJson('/api/config', configMutationsToPayload(mutations));
+        convergeConfig(config);
+        return config;
+      };
+      const touchesAgentActivity = mutations.some((mutation) => (
+        mutation.kind === 'set'
+        && mutation.path.length <= 2
+        && mutation.path.every((part, index) => part === ['ui', 'show_agent_activity'][index])
+      ));
+      if (!touchesAgentActivity) return save();
+      const mutation = agentActivityConfigMutationTailRef.current
+        .catch(() => undefined)
+        .then(save);
+      agentActivityConfigMutationTailRef.current = mutation;
+      return mutation;
+    },
+    waitForAgentActivityConfigMutations: async () => {
+      // Include writes appended while the current tail is settling; return only
+      // when the provider's Agent Activity queue is actually idle.
+      while (true) {
+        const pending = agentActivityConfigMutationTailRef.current;
+        await pending.catch(() => undefined);
+        if (pending === agentActivityConfigMutationTailRef.current) return;
+      }
+    },
+    onConfigChanged,
     getSettings: (platform) => getJson(platform ? `/api/settings?platform=${encodeURIComponent(platform)}` : '/api/settings'),
     saveSettings: (payload, platform) => postJson('/api/settings', platform ? { ...payload, platform } : payload),
     saveThreadSettings: (platform, channelId, threadId, settings) => postJson('/api/settings/thread', {
@@ -2880,6 +3722,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     removeUser: (userId, platform) =>
       deleteJson(platform ? `/api/users/${encodeURIComponent(userId)}?platform=${encodeURIComponent(platform)}` : `/api/users/${encodeURIComponent(userId)}`),
     getShowPages: () => getJson('/api/show-pages'),
+    getShowPageAccess: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}/access`),
+    probeShowPageAccess: async (sessionId) => {
+      try {
+        const response = await apiFetch(`/api/show-pages/${encodeURIComponent(sessionId)}/access`);
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          return { status: 'error', access: null };
+        }
+        return classifyShowPageAccessProbe(response.status, payload);
+      } catch {
+        return { status: 'error', access: null };
+      }
+    },
+    getShowAccessSettings: (sessionId) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/access-settings/read`,
+      { page_id: sessionId },
+    ),
+    applyShowAccess: (sessionId, payload) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/access-settings/apply`,
+      { page_id: sessionId, ...payload },
+    ),
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
@@ -2892,10 +3757,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }),
     unsubscribeWebPush: (endpoint) => deleteJson('/api/web-push/subscriptions', { endpoint }),
     sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
-    setShowPageVisibility: (sessionId, visibility) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/visibility`, { visibility }),
+    setShowPageAvailability: (sessionId, offline) => postJson(
+      `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
+      { offline },
+    ),
+    getShowPage: (sessionId) => readShowPageJson(`/api/show-pages/${encodeURIComponent(sessionId)}`),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
-    rotateShowPageShare: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/rotate-share`, {}),
-    setShowPageShareId: (sessionId, shareId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/share-id`, { share_id: shareId }),
     uploadShowPageIcon: async (sessionId, file) => {
       // Multipart POST: the server names the on-disk file, so we send only the bytes
       // and a filename hint. `requestJson` adds CSRF + surfaces errors like everything
@@ -2952,25 +3819,58 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getFirstBindCode: () => getJson('/api/setup/first-bind-code'),
     detectCli: (binary) => getJson(`/api/cli/detect?binary=${encodeURIComponent(binary)}`),
     installAgent: (name) => startAndPollAgentInstall(name),
-    listDependencies: () => getJson('/api/dependencies'),
+    listDependencies: ({ ids, signal } = {}) => {
+      const params = new URLSearchParams();
+      for (const id of ids ?? []) params.append('id', id);
+      const query = params.toString();
+      const path = `/api/dependencies${query ? `?${query}` : ''}`;
+      return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
+    },
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     // handleError: false — every route returns closed `{status:'failed',error}` bodies (never a
     // thrown ApiError/toast) so the Memory page can render its own inline state per code.
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
+    getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
+    getMemoryProcessingRecordEntries: (project, cursor = null, limit = 20) => {
+      const query = new URLSearchParams({ limit: String(limit), project });
+      if (cursor) query.set('cursor', cursor);
+      return getJson(`/api/memory/processing-record/entries?${query.toString()}`, { handleError: false });
+    },
+    getMemoryProcessingRecordEntry: (project, memcellId) => {
+      const query = new URLSearchParams({ memcell_id: memcellId, project });
+      return getJson(`/api/memory/processing-record/entry?${query.toString()}`, { handleError: false });
+    },
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
+    getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
-    searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
-    getMemoryLog: (cursor = null, limit = 20) => {
-      const query = new URLSearchParams({ limit: String(limit) });
-      if (cursor) query.set('cursor', cursor);
-      return getJson(`/api/memory/log?${query.toString()}`, { handleError: false });
+    searchMemory: (query, limit = 20, project) => postJson('/api/memory/search', {
+      query,
+      policy: {
+        mode: 'hybrid',
+        max_results: limit,
+        include_profile: true,
+        include_current_session: false,
+      },
+      ...(project ? { project } : {}),
+    }, { handleError: false }),
+    listMemoryEpisodes: (project, options = {}) => {
+      const limit = options.limit ?? 20;
+      return postJson('/api/memory/list', {
+        project,
+        limit,
+        ...(options.origin ? { origin: options.origin } : {}),
+        ...(project === 'all'
+          ? (options.cursor ? { cursor: options.cursor } : {})
+          : { page: options.page ?? 1 }),
+      }, { handleError: false });
     },
-    getMemoryLogEntry: (memcellId) =>
-      getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
-    clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
-    restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
+    listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
+    deleteMemoryData: (confirmLoss) => postJson('/api/memory/delete-data', { confirm_loss: confirmLoss }, { handleError: false }),
+    wakeMemory: () => postJson('/api/memory/runtime/wake', {}, { handleError: false }),
+    repairMemory: (confirmLoss) => postJson('/api/memory/repair', { confirm_loss: confirmLoss }, { handleError: false }),
+    getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),
@@ -3014,6 +3914,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...(options?.model ? { model: options.model } : {}),
       }),
     getOpencodeProviders: () => getJson('/api/backend/opencode/providers'),
+    // Model pickers absorb the expected Owner-only refusal and retain typed-value
+    // fallback. Keep that policy on this dedicated reader so direct options calls
+    // still report access failures and no picker can forget the suppression.
+    readOpencodeOptionsForModelPicker: () =>
+      postJson('/api/opencode/options', { cwd: '~' }, {
+        expectedCodes: ['instance_access_forbidden'],
+      }),
     saveOpencodeCustomProvider: (payload) =>
       postJson('/api/backend/opencode/custom-provider', payload),
     deleteOpencodeCustomProvider: (providerId) =>
@@ -3061,6 +3968,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     claudeModels: () => getJson('/api/claude/models'),
     codexAgents: (cwd) => cwd ? getJson(`/api/codex/agents?cwd=${encodeURIComponent(cwd)}`) : getJson('/api/codex/agents'),
     codexModels: () => getJson('/api/codex/models'),
+    // Direct mode, rolling upgrades, and a temporarily unreadable Hub catalog
+    // all keep the existing native picker behavior without surfacing a toast.
+    readModelHubAgentCatalogForModelPicker: (backend) =>
+      getJson(`/api/models/agents/${encodeURIComponent(backend)}/models`, { handleError: false })
+        .then((payload) => {
+          const agent = payload?.ok === false ? null : payload?.agent;
+          return agent && typeof agent === 'object'
+            ? (agent as Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>)
+            : null;
+        })
+        .catch(() => null),
     getLogs: (lines = 500, source) => postJson('/api/logs', source ? { lines, source } : { lines }),
     getVersion: () => getCachedJson('/api/version', 10_000),
     doUpgrade: () => postJson('/api/upgrade', {}),
@@ -3084,6 +4002,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return params?.cache === false ? getJson(path) : getCachedJson(path);
     },
     createProject: (payload) => postJson('/api/projects', payload),
+    reorderProjects: async (order, expectedOrder) => {
+      try {
+        const { payloadJson } = await requestJson('/api/projects/order', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order, expected_order: expectedOrder }),
+        });
+        return payloadJson;
+      } catch (error) {
+        if (!(error instanceof ApiError)) showToast(t('errors.invalid_project_order'), 'error');
+        throw error;
+      }
+    },
     updateProject: async (projectId, payload) => {
       const { payloadJson } = await requestJson(`/api/projects/${encodeURIComponent(projectId)}`, {
         method: 'PATCH',
@@ -3138,8 +4069,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
       };
     },
-    getSessionBootstrap: (sessionId) =>
-      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
+    getSessionBootstrap: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        if (payload?.session?.status === 'archived') {
+          sessionDraftPersistence.clearSession(sessionId);
+          return payload;
+        }
+        const server = sessionDraftServerState(payload?.draft);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return text === server.text
+          ? payload
+          : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
     updateSession: async (sessionId, payload) => {
       const { payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: 'PATCH',
@@ -3148,7 +4099,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, `PATCH /api/sessions/${sessionId}`);
       return payloadJson;
     },
-    archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    archiveSession: async (sessionId) => {
+      const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      sessionDraftPersistence.clearSession(sessionId);
+      return payload;
+    },
+    convergeSessionArchived,
     onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
@@ -3185,10 +4141,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     sendSessionMessage: (sessionId, payload) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload),
-    markSessionRead: (sessionId, untilMessageId) =>
+    markSessionRead: (sessionId, untilMessageId, opts) =>
       postJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/mark-read`,
         untilMessageId ? { until_message_id: untilMessageId } : {},
+        opts,
       ),
     cancelSession: async (sessionId) => {
       const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
@@ -3237,14 +4194,40 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return res.json();
     },
-    getSessionDraft: (sessionId) => getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`),
-    setSessionDraft: async (sessionId, text) => {
-      const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      }, `/api/sessions/${sessionId}/draft`, { handleError: false });
-      return res.ok ? payloadJson : { ok: false };
+    getCachedSessionDraft: (sessionId) => sessionDraftPersistence.peek(sessionId),
+    cacheSessionDraft: (sessionId, text) => sessionDraftPersistence.cache(sessionId, text),
+    getSessionDraft: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+        const server = sessionDraftServerState(payload);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return { text };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
+    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(
+      sessionId,
+      text,
+      (draft) => writeSessionDraft(sessionId, draft),
+    ),
+    reconcileSessionDraftAfterSend: (sessionId, draft) => (
+      rebaseAndRetrySessionDraft(sessionId, sessionDraftServerState(draft))
+    ),
+    recoverSessionDraftAfterRejectedSend: async (sessionId) => {
+      // The message reservation clears the cloud draft before dispatch. A
+      // rejected/unknown dispatch therefore needs an authoritative revision
+      // before the composer's optimistic text restoration is replayed.
+      sessionDraftPersistence.markRejectedSend(sessionId);
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return;
+      await rebaseAndRetrySessionDraft(sessionId, server);
     },
     listInbox: (params) => {
       const search = new URLSearchParams();
@@ -3267,7 +4250,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = qs ? `/api/agents?${qs}` : '/api/agents';
       return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
-    getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
+    getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
+    onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
+    getVibeAgent: (name, params) => {
+      const path = `/api/agents/${encodeURIComponent(name)}`;
+      return params?.cache === false
+        ? getJson(path, { handleError: params.handleError, expectedCodes: params.expectedCodes })
+        : getCachedJson(path, 5_000, { handleError: params?.handleError });
+    },
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {
       const { payloadJson } = await requestJson(`/api/agents/${encodeURIComponent(name)}`, {
@@ -3446,21 +4436,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           handlers.onConnectionState?.(eventConnectionStateRef.current);
         }
       });
-      if (
-        eventConnectionRef.current &&
-        (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-      ) {
+      if (workbenchEventHandshake()) {
         queueMicrotask(() => {
-          if (
-            eventHandlersRef.current.has(handlers) &&
-            eventConnectionRef.current &&
-            (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
-          ) {
-            handlers.onConnected?.(eventConnectionRef.current);
+          if (eventHandlersRef.current.has(handlers) && workbenchEventHandshake()) {
+            handlers.onConnected?.();
           }
         });
       }
-      if (eventBridgeConnectedRef.current) {
+      if (eventControllerLegRef.current === 'connected') {
         queueMicrotask(() => {
           if (eventHandlersRef.current.has(handlers)) {
             handlers.onEventBridgeStatus?.({ connected: true });
@@ -3534,10 +4517,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
-    getAuthSession: () => getJson('/api/session'),
-    signOut: () => postJson('/auth/logout', {}),
+    getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
+    signOut: async () => {
+      let endpoint: string | undefined;
+      try {
+        endpoint = (await getExistingWebPushSubscription())?.endpoint;
+      } catch {
+        // Logout remains authoritative when Push APIs are unavailable.
+      }
+      return postJson('/auth/logout', {
+        device_id: getWebPushDeviceId(),
+        ...(endpoint ? { endpoint } : {}),
+      });
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [showToast, t]);
+  }), [sessionDraftPersistence, showToast, t]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };

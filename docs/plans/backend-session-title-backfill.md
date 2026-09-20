@@ -166,13 +166,21 @@ class BackendSessionTitleProvider(Protocol):
 Provider behavior:
 
 - `OpenCodeSessionTitleProvider`: read `session.title` by native id, ignore
-  default `New session - ...` and `Child session - ...`.
+  default `New session - ...` and `Child session - ...`. When no usable
+  backend title exists, derive from the first user message like Claude.
 - `CodexSessionTitleProvider`: read `threads.title` by native thread id, ignore
   empty/default-looking values. Use `first_user_message` only if we explicitly
   choose derived fallback.
 - `ClaudeSessionTitleProvider`: derive a fallback from the first user message's
   first 10 visible characters with `source="derived_first_prompt"` and
   `confidence="low"`.
+
+The `derived_first_prompt` construction is shared:
+`modules.agents.native_sessions.base.derive_first_prompt_title()` is the single
+home for the truncated-first-message title, used by all three providers, so an
+agent backend that never sets a title (observed with GLM on OpenCode, which
+under-complies with the proactive title prompt) still gets a deterministic
+backfilled title.
 
 Implemented shape:
 

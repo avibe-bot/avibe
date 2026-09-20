@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import atexit
 import base64
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import hmac
 import http.client
@@ -29,7 +30,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping, Sequence
 
 import jwt
 import psutil
@@ -37,7 +38,7 @@ import requests
 from jwt import PyJWKClient
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -45,8 +46,29 @@ logger = logging.getLogger(__name__)
 
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
-SESSION_TTL_SECONDS = 24 * 60 * 60
+PERSONAL_SESSION_TTL_SECONDS = 24 * 60 * 60
+PERSONAL_SESSION_RENEW_AFTER_SECONDS = PERSONAL_SESSION_TTL_SECONDS // 2
+ORGANIZATION_SESSION_TTL_SECONDS = 24 * 60 * 60
+ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS = 12 * 60 * 60
+ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS = 6 * 60 * 60
+# Compatibility aliases for released callers and persisted metadata. Policy
+# decisions below use the independently named Personal/Organization values.
+SESSION_TTL_SECONDS = PERSONAL_SESSION_TTL_SECONDS
+SESSION_AUTHORIZATION_REFRESH_SECONDS = ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS
+# Keep enough headroom for the cookie name and attributes under the common
+# 4096-byte per-cookie browser limit.
+SESSION_COOKIE_MAX_VALUE_BYTES = 3800
+_SESSION_AUTHORIZATION_REFERENCE_KEY = "authorization_ref"
+_SESSION_AUTHORIZATION_REFERENCE_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
+_SESSION_BROWSER_ID_KEY = "browser_session_id"
+_SESSION_BROWSER_ID_RE = re.compile(r"\A[A-Za-z0-9_-]{24,64}\Z")
 OAUTH_ID_TOKEN_CLOCK_LEEWAY_SECONDS = 30
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
+_INSTANCE_ACCESS_SOURCES = frozenset(
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+)
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
+_INSTANCE_KINDS = frozenset({"personal", "organization"})
 _CONNECTOR_LOCK = threading.RLock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
@@ -54,7 +76,45 @@ _STATUS_REPORT_LOCK = threading.Lock()
 _STATUS_REPORT_THREADS: set[threading.Thread] = set()
 _STATUS_REPORT_PENDING: tuple[V2Config | None, str, str | None] | None = None
 _STATUS_REPORT_ATEXIT_REGISTERED = False
+_ACTIVE_HOSTNAMES_LOCK = threading.Lock()
+_ACTIVE_HOSTNAMES_CACHE: tuple[Path, str, frozenset[str], float | None] | None = None
+_AUTHORIZATION_REVISION_KEY = "vibe_instance_authorization_revision"
+_AUTHORIZATION_CHECKED_REVISION_KEY = "_authorization_checked_revision"
+_AUTHORIZATION_REVISION_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _AuthorizationRevisionCache:
+    state_path: Path
+    instance_id: str
+    revision: int
+    source_updated_at: float
+    file_signature: tuple[int, int, int, int] | None
+
+
+_AUTHORIZATION_REVISION_CACHE: _AuthorizationRevisionCache | None = None
+_AUTHORIZATION_REVISION_SYNC_LOCK = threading.Lock()
+_AUTHORIZATION_REVISION_POLL_LOCK = threading.Lock()
+_AUTHORIZATION_REVISION_POLL_STARTED = False
+_AUTHORIZATION_REFRESH_LOCK = threading.Lock()
+_AUTHORIZATION_REFRESH_FAILURES: dict[tuple[str, str, str, str, int], float] = {}
+_AUTHORIZATION_REFRESH_RESULTS: dict[
+    tuple[str, str, str, str, int],
+    tuple[float, str, str | None, int | None],
+] = {}
+_AUTHORIZATION_REFRESH_FLIGHTS: dict[
+    tuple[str, str, str, str, int],
+    tuple[threading.Lock, int],
+] = {}
+_AUTHORIZATION_BACKGROUND_REFRESH_LOCK = threading.Lock()
+_AUTHORIZATION_BACKGROUND_REFRESHES: set[tuple[str, str, str, str, int]] = set()
+AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS = 5.0
+_REVOKED_BROWSER_SESSIONS_LOCK = threading.Lock()
+_REVOKED_BROWSER_SESSIONS: dict[str, int] = {}
 STATUS_HEARTBEAT_SECONDS = 5 * 60
+RESOURCE_ACL_SYNC_INTERVAL_SECONDS = 30
+AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS = 15
+AUTHORIZATION_REVISION_MAX_AGE_SECONDS = 60
 QUALITY_REPORT_SECONDS = 60
 QUALITY_SAMPLE_SECONDS = tunnel_quality.SAMPLE_INTERVAL_SECONDS
 STATUS_LOG_TAIL_BYTES = 64 * 1024
@@ -82,6 +142,20 @@ _RECOVERY_CANCEL_EVENT = threading.Event()
 _RECOVERY_MANUAL_BYPASS_USED = False
 _RECOVERY_EMERGENCY_BYPASS_USED = False
 _PREFERRED_PROTOCOL: str | None = None
+_RESOURCE_ACL_SYNC_LOCK = threading.Lock()
+_RESOURCE_ACL_SYNC_POLL_LOCK = threading.Lock()
+_RESOURCE_ACL_SYNC_POLL_STARTED = False
+_RESOURCE_ACL_SYNC_ERROR_CODE_RE = re.compile(r"\A[a-z0-9][a-z0-9_:-]{0,119}\Z")
+_RESOURCE_ACL_RESOURCE_KINDS = frozenset({"agent", "vault_secret", "skill"})
+_RESOURCE_ACL_ACCESS_LEVELS = frozenset({"public", "scope", "private"})
+_RESOURCE_ACL_SYNC_STATUSES = frozenset({"in_sync", "pending", "offline", "error", "deleted"})
+_RESOURCE_ACL_MAX_REVISION = (1 << 53) - 1
+_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX = "resource_acl_pending_vault_release:"
+_INSTANCE_ACCESS_ROLES = frozenset({"owner", "member", "editor", "viewer"})
+_INSTANCE_ACCESS_SOURCES = frozenset(
+    {"owner", "public_instance", "email", "email_domain", "organization_group"}
+)
+_ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "localhost",
     "localhost.localdomain",
@@ -109,6 +183,23 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+class AuthorizationRevisionPairingChangedError(ValueError):
+    """The caller's revision acknowledgement belongs to an older pairing."""
+
+
+@dataclass(frozen=True)
+class AuthorizationResolution:
+    state: str
+    payload: dict[str, Any] | None = None
+    policy: str | None = None
+    refreshed: bool = False
+    reason: str | None = None
+
+    @property
+    def current(self) -> bool:
+        return self.state == "current" and self.payload is not None
 
 
 @dataclass(frozen=True)
@@ -147,6 +238,23 @@ def _pid_path() -> Path:
 
 def _state_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-cloudflared.json"
+
+
+def _active_hostnames_state_path() -> Path:
+    return paths.get_state_dir() / "remote-access-active-hostnames.json"
+
+
+def _authorization_revision_state_path() -> Path:
+    return paths.get_state_dir() / "remote-access-authorization-revision.json"
+
+
+def _authorization_revision_file_lock(path: Path):
+    """Return the cross-process lock for the authorization watermark."""
+
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
 
 
 def _quality_state_path() -> Path:
@@ -486,6 +594,394 @@ def _read_state() -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _normalize_active_hostnames(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        hostname = item.strip().lower().rstrip(".")
+        if not hostname or "/" in hostname or ":" in hostname or hostname in seen:
+            continue
+        seen.add(hostname)
+        normalized.append(hostname)
+    return tuple(normalized)
+
+
+def _replace_active_hostnames(config: V2Config, value: Any) -> frozenset[str]:
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    hostnames = _normalize_active_hostnames(value)
+    source_updated_at = time.time()
+    state_path = _active_hostnames_state_path()
+    payload = {
+        "schema_version": 1,
+        "instance_id": instance_id,
+        "active_hostnames": list(hostnames),
+        "source_updated_at": source_updated_at,
+    }
+    with _ACTIVE_HOSTNAMES_LOCK:
+        _ACTIVE_HOSTNAMES_CACHE = (state_path, instance_id, frozenset(hostnames), source_updated_at)
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            runtime.write_json(state_path, payload)
+        except OSError as exc:
+            logger.warning("failed to persist remote access hostname snapshot: %s", exc)
+    return frozenset(hostnames)
+
+
+def active_hostnames(config: V2Config) -> frozenset[str]:
+    """Return the latest control-plane hostname snapshot for this instance."""
+
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    if not instance_id:
+        return frozenset()
+    state_path = _active_hostnames_state_path()
+    with _ACTIVE_HOSTNAMES_LOCK:
+        cached = _ACTIVE_HOSTNAMES_CACHE
+        if cached is not None and cached[0] == state_path and cached[1] == instance_id:
+            return cached[2]
+
+        payload = runtime.read_json(state_path)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return frozenset()
+        if str(payload.get("instance_id") or "").strip() != instance_id:
+            return frozenset()
+        hostnames = frozenset(_normalize_active_hostnames(payload.get("active_hostnames")))
+        try:
+            source_updated_at = float(payload["source_updated_at"])
+        except (KeyError, TypeError, ValueError):
+            source_updated_at = None
+        _ACTIVE_HOSTNAMES_CACHE = (state_path, instance_id, hostnames, source_updated_at)
+        return hostnames
+
+
+def _clear_active_hostnames_cache() -> None:
+    global _ACTIVE_HOSTNAMES_CACHE
+
+    with _ACTIVE_HOSTNAMES_LOCK:
+        _ACTIVE_HOSTNAMES_CACHE = None
+
+
+def _authorization_revision_sync_configured(config: V2Config | None) -> bool:
+    if config is None:
+        return False
+    cloud = config.remote_access.vibe_cloud
+    return bool(
+        cloud.enabled
+        and cloud.instance_id
+        and cloud.instance_secret
+        and cloud.backend_url
+    )
+
+
+def _normalize_authorization_revision(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_authorization_revision")
+    return value
+
+
+def _authorization_revision_pairing_identity(
+    config: V2Config,
+) -> tuple[bool, str, str, str]:
+    cloud = config.remote_access.vibe_cloud
+    return (
+        bool(cloud.enabled),
+        str(cloud.backend_url or "").strip().rstrip("/"),
+        str(cloud.instance_id or "").strip(),
+        str(cloud.instance_secret or "").strip(),
+    )
+
+
+def _assert_authorization_revision_pairing(
+    expected: tuple[bool, str, str, str],
+) -> None:
+    """Fail closed when the captured acknowledgement no longer owns pairing."""
+
+    try:
+        current = _authorization_revision_pairing_identity(V2Config.load())
+    except Exception as exc:
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        ) from exc
+    if current != expected:
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        )
+
+
+@contextmanager
+def _authorization_revision_pairing_lock(*, persistence_required: bool):
+    try:
+        with config_file_lock():
+            yield
+    except TimeoutError as exc:
+        if persistence_required:
+            raise
+        raise AuthorizationRevisionPairingChangedError(
+            "authorization_revision_pairing_changed"
+        ) from exc
+
+
+def _authorization_revision_file_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        metadata = path.stat()
+    except OSError:
+        return None
+    return (
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_size,
+        metadata.st_ino,
+    )
+
+
+def _read_authorization_revision_payload(path: Path) -> Any:
+    """Read the watermark payload, treating malformed content as absent."""
+
+    try:
+        return runtime.read_json(path)
+    except (OSError, TypeError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _load_authorization_revision_snapshot(config: V2Config) -> tuple[int, float] | None:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    instance_id = str(config.remote_access.vibe_cloud.instance_id or "").strip()
+    if not instance_id:
+        return None
+    state_path = _authorization_revision_state_path()
+    with _AUTHORIZATION_REVISION_LOCK:
+        file_signature = _authorization_revision_file_signature(state_path)
+        cached = _AUTHORIZATION_REVISION_CACHE
+        cache_matches = (
+            cached is not None
+            and cached.state_path == state_path
+            and cached.instance_id == instance_id
+        )
+        if cache_matches and cached.file_signature == file_signature:
+            return cached.revision, cached.source_updated_at
+        payload = _read_authorization_revision_payload(state_path)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            if cache_matches and cached is not None:
+                _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                    state_path=state_path,
+                    instance_id=instance_id,
+                    revision=cached.revision,
+                    source_updated_at=cached.source_updated_at,
+                    file_signature=file_signature,
+                )
+                return cached.revision, cached.source_updated_at
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
+            return None
+        if str(payload.get("instance_id") or "").strip() != instance_id:
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
+            return None
+        try:
+            revision = _normalize_authorization_revision(payload.get("authorization_revision"))
+            source_updated_at = float(payload["source_updated_at"])
+        except (KeyError, TypeError, ValueError):
+            if cache_matches and cached is not None:
+                _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                    state_path=state_path,
+                    instance_id=instance_id,
+                    revision=cached.revision,
+                    source_updated_at=cached.source_updated_at,
+                    file_signature=file_signature,
+                )
+                return cached.revision, cached.source_updated_at
+            if cache_matches:
+                _AUTHORIZATION_REVISION_CACHE = None
+            return None
+        if cache_matches and cached.revision > revision:
+            revision = cached.revision
+            source_updated_at = cached.source_updated_at
+        _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+            state_path=state_path,
+            instance_id=instance_id,
+            revision=revision,
+            source_updated_at=source_updated_at,
+            file_signature=file_signature,
+        )
+        return revision, source_updated_at
+
+
+def current_authorization_revision(
+    config: V2Config,
+    *,
+    now: float | None = None,
+) -> int | None:
+    """Return the current fresh device-synchronized authorization revision."""
+
+    snapshot = _load_authorization_revision_snapshot(config)
+    if snapshot is None:
+        return None
+    revision, source_updated_at = snapshot
+    current = time.time() if now is None else now
+    age = current - source_updated_at
+    if age < 0 or age > AUTHORIZATION_REVISION_MAX_AGE_SECONDS:
+        return None
+    return revision
+
+
+def _install_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    persistence_required: bool,
+    pairing_guard: Callable[[], None] | None = None,
+) -> int:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    revision = _normalize_authorization_revision(value)
+    pairing_identity = _authorization_revision_pairing_identity(config)
+    instance_id = pairing_identity[2]
+    if not instance_id:
+        raise ValueError("invalid_authorization_revision")
+    state_path = _authorization_revision_state_path()
+    source_updated_at = time.time()
+    with _authorization_revision_pairing_lock(
+        persistence_required=persistence_required,
+    ):
+        with _AUTHORIZATION_REVISION_LOCK:
+            cached = _AUTHORIZATION_REVISION_CACHE
+            cache_matches = (
+                cached is not None
+                and cached.state_path == state_path
+                and cached.instance_id == instance_id
+            )
+            cached_revision = cached.revision if cache_matches else None
+            previous_revision = cached_revision
+            changed = cached_revision != revision
+            file_signature = None
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                with _authorization_revision_file_lock(state_path):
+                    if pairing_guard is not None:
+                        try:
+                            pairing_guard()
+                        except AuthorizationRevisionPairingChangedError:
+                            raise
+                        except Exception as exc:
+                            raise AuthorizationRevisionPairingChangedError(
+                                "authorization_revision_pairing_changed"
+                            ) from exc
+                    _assert_authorization_revision_pairing(pairing_identity)
+                    persisted = _read_authorization_revision_payload(state_path)
+                    persisted_revision = None
+                    if (
+                        isinstance(persisted, dict)
+                        and persisted.get("schema_version") == 1
+                        and str(persisted.get("instance_id") or "").strip() == instance_id
+                    ):
+                        try:
+                            persisted_revision = _normalize_authorization_revision(
+                                persisted.get("authorization_revision")
+                            )
+                        except ValueError:
+                            persisted_revision = None
+                    if persisted_revision is not None and (
+                        previous_revision is None or persisted_revision > previous_revision
+                    ):
+                        previous_revision = persisted_revision
+                    if cached_revision is None:
+                        changed = persisted_revision != revision
+                    if previous_revision is not None and revision < previous_revision:
+                        raise ValueError("authorization_revision_regressed")
+                    runtime.write_json(
+                        state_path,
+                        {
+                            "schema_version": 1,
+                            "instance_id": instance_id,
+                            "authorization_revision": revision,
+                            "source_updated_at": source_updated_at,
+                        },
+                    )
+                    file_signature = _authorization_revision_file_signature(state_path)
+            except (OSError, TimeoutError):
+                if persistence_required:
+                    raise
+                if previous_revision is not None and revision < previous_revision:
+                    raise ValueError("authorization_revision_regressed") from None
+                logger.warning(
+                    "Authorization revision acknowledgement could not be persisted",
+                    exc_info=True,
+                )
+            _AUTHORIZATION_REVISION_CACHE = _AuthorizationRevisionCache(
+                state_path=state_path,
+                instance_id=instance_id,
+                revision=revision,
+                source_updated_at=source_updated_at,
+                file_signature=file_signature,
+            )
+    if changed:
+        try:
+            from vibe.sse_broker import broker
+
+            broker.publish(
+                "authorization.changed",
+                {"instance_authorization_revision": revision},
+            )
+        except Exception:
+            logger.debug("failed to publish authorization revision change", exc_info=True)
+    return revision
+
+
+def _replace_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    pairing_guard: Callable[[], None] | None = None,
+) -> int:
+    return _install_authorization_revision(
+        config,
+        value,
+        persistence_required=True,
+        pairing_guard=pairing_guard,
+    )
+
+
+def acknowledge_authorization_revision(
+    config: V2Config,
+    value: Any,
+    *,
+    pairing_guard: Callable[[], None] | None = None,
+) -> int:
+    """Record a mutation acknowledgement without regressing a newer watermark."""
+
+    try:
+        return _install_authorization_revision(
+            config,
+            value,
+            persistence_required=False,
+            pairing_guard=pairing_guard,
+        )
+    except ValueError as exc:
+        if str(exc) != "authorization_revision_regressed":
+            raise
+        snapshot = _load_authorization_revision_snapshot(config)
+        if snapshot is None:
+            raise
+        # An out-of-order acknowledgement must not refresh the timestamp for the
+        # newer revision; it confirms only the older epoch carried in its result.
+        return snapshot[0]
+
+
+def _clear_authorization_revision_cache() -> None:
+    global _AUTHORIZATION_REVISION_CACHE
+
+    with _AUTHORIZATION_REVISION_LOCK:
+        _AUTHORIZATION_REVISION_CACHE = None
 
 
 def _state_connector(name: str) -> dict[str, Any] | None:
@@ -1067,6 +1563,7 @@ def _local_ui_healthy(config: V2Config) -> bool:
 def runtime_status_payload(config: V2Config | None = None, event: str = "heartbeat", last_error: str | None = None) -> dict[str, Any]:
     config = config or V2Config.load()
     current = status(config)
+    observed_origin_service = _observed_cloudflared_origin_service()
     payload = {
         "event": event,
         "local_version": "dev",
@@ -1074,8 +1571,9 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "tunnel_running": bool(current.get("running")),
         "cloudflared_found": bool(current.get("binary_found")),
         "expected_origin_service": origin_service_for_pairing(config),
-        "observed_origin_service": _observed_cloudflared_origin_service(),
     }
+    if observed_origin_service:
+        payload["observed_origin_service"] = observed_origin_service
     quality = current.get("tunnel_quality")
     if isinstance(quality, dict) and quality.get("schema_version") in {1, 2}:
         payload["tunnel_quality"] = quality
@@ -1091,18 +1589,235 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
         cloud = config.remote_access.vibe_cloud
         if not (cloud.instance_id and cloud.instance_secret and cloud.backend_url):
             return {"ok": False, "error": "remote_status_not_configured"}
+        if urllib.parse.urlsplit(cloud.backend_url).scheme.lower() != "https":
+            return {"ok": False, "error": "remote_status_backend_url_invalid"}
+        from storage import remote_access_authorization_service
+
+        request_instance_id = str(cloud.instance_id)
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
         payload = {
             "instance_secret": cloud.instance_secret,
             **runtime_status_payload(config, event=event, last_error=last_error),
         }
         result = _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{cloud.instance_id}/runtime-status",
+            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
             payload,
             timeout=5.0,
         )
+        _replace_active_hostnames(config, result.get("active_hostnames"))
+        reported_kind = _normalized_instance_kind(result.get("instance_kind"))
+        if reported_kind is not None:
+            # Capture-before-IO: overlapping heartbeats can arrive out of
+            # order. A late Personal response must CAS-fail against a newer
+            # Organization generation rather than rewrite the live binding.
+            _persist_instance_kind(
+                request_instance_id,
+                reported_kind,
+                reconcile=True,
+                expected_binding_generation=request_binding_generation,
+            )
         return {"ok": True, **result}
     except Exception as exc:
         return {"ok": False, "error": "remote_status_report_failed", "detail": str(exc)}
+
+
+def _normalized_instance_kind(value: object) -> str | None:
+    return value if isinstance(value, str) and value in _INSTANCE_KINDS else None
+
+
+def _run_pending_deferred_context_migration() -> dict[str, int | str]:
+    """Bind or seal released snapshots against the current pairing."""
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.resource_access_service import (
+        RESOURCE_BINDING_STATE_UNAVAILABLE,
+        RESOURCE_BINDING_STATUS_KEY,
+        migrate_legacy_deferred_resource_contexts,
+    )
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        result = migrate_legacy_deferred_resource_contexts(connection)
+    if result.get(RESOURCE_BINDING_STATUS_KEY) == RESOURCE_BINDING_STATE_UNAVAILABLE:
+        raise RuntimeError("legacy_deferred_context_provenance_unavailable")
+    return result
+
+
+def _runtime_pairing_available(config: V2Config) -> bool:
+    try:
+        return config.remote_access.vibe_cloud.runtime_credentials() is not None
+    except Exception:
+        return False
+
+
+def _known_kind_requires_runtime_pairing(config: V2Config) -> bool:
+    """Require complete device credentials once the server-owned kind is known.
+
+    Legacy pre-kind pairings still use the existing authorization path while
+    they await backfill. They cannot take either Personal or Organization
+    kind-specific bypass; an explicit server-owned kind, however, must never
+    be projected from a degraded pairing.
+    """
+
+    return _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) is not None
+
+
+def binding_is_ready(config: V2Config, identity: Mapping[str, Any] | None = None) -> bool:
+    """C3: single gate for every authorization consumer.
+
+    A missing durable row is the fail-open legacy no-kind path. Once a row
+    exists, only ``ready`` for the current pairing admits kind-specific bypass.
+    """
+
+    try:
+        from storage import remote_access_authorization_service
+
+        cloud = config.remote_access.vibe_cloud
+        # bootstrap=True: on the upgrade path a known configured kind with no
+        # durable row earns a validated binding through one real transition
+        # (C2) before any kind-specific bypass is granted.
+        return remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=str(cloud.instance_id or ""),
+            instance_kind=_normalized_instance_kind(cloud.instance_kind),
+            ensure=False,
+            bootstrap=True,
+        )
+    except Exception:
+        return False
+
+
+def _transition_instance_binding(
+    *,
+    instance_id: str,
+    instance_kind: str | None,
+    previous_instance_id: str | None = None,
+    hold_config_lock: bool = True,
+) -> dict[str, Any]:
+    """One cross-process identity transition (C2). SQLite is initialized first."""
+
+    from storage import remote_access_authorization_service
+
+    return remote_access_authorization_service.reconcile_instance_binding(
+        instance_id=instance_id,
+        instance_kind=instance_kind,
+        previous_instance_id=previous_instance_id,
+        reconcile=_run_pending_deferred_context_migration,
+        hold_config_lock=hold_config_lock,
+    )
+
+
+def _authorization_binding_epoch() -> int:
+    """Compatibility no-op: durable generation is the only fencing token."""
+
+    return 0
+
+
+def _persist_instance_kind(
+    instance_id: str,
+    value: object,
+    *,
+    reconcile: bool = False,
+    expected_binding_generation: int | None = None,
+    expected_binding_epoch: int | None = None,
+) -> bool | int:
+    """Persist kind + reconcile under one cross-process critical section (C2).
+
+    Lock order is owned by reconcile_instance_binding: SQLite init, then
+    config_file_lock. This function never takes CONFIG_LOCK. The unused
+    ``expected_binding_epoch`` argument exists only so older in-process tests
+    that still pass it keep exercising the durable generation CAS.
+    """
+
+    del expected_binding_epoch
+    instance_kind = _normalized_instance_kind(value)
+    if instance_kind is None:
+        return False
+    from storage import remote_access_authorization_service
+    from storage.importer import ensure_sqlite_state
+
+    # C2 lock order: initialize SQLite before taking the config lock, then
+    # keep compare + config-write + transition in one critical section.
+    ensure_sqlite_state()
+    with config_file_lock():
+        live_config = V2Config.load()
+        live_cloud = live_config.remote_access.vibe_cloud
+        if str(live_cloud.instance_id or "") != instance_id:
+            return False
+        previous_kind = _normalized_instance_kind(live_cloud.instance_kind)
+        current_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
+        if (
+            expected_binding_generation is not None
+            and current_generation > int(expected_binding_generation)
+        ):
+            return False
+        already_ready = remote_access_authorization_service.binding_is_ready_for_pairing(
+            instance_id=instance_id,
+            instance_kind=instance_kind,
+            ensure=False,
+        )
+        if previous_kind == instance_kind and already_ready:
+            return current_generation
+        if previous_kind != instance_kind:
+            live_generation = (
+                remote_access_authorization_service.current_instance_binding_generation(
+                    ensure=False
+                )
+            )
+            if (
+                expected_binding_generation is not None
+                and live_generation > int(expected_binding_generation)
+            ):
+                return False
+            api.save_config(
+                {"remote_access": {"vibe_cloud": {"instance_kind": instance_kind}}},
+                validate_remote_access_network=False,
+            )
+        # Whether the kind was already persisted by a prior attempt or just
+        # saved above, reconcile it now. The transition is what moves the
+        # durable binding to ready.
+        try:
+            transition = _transition_instance_binding(
+                instance_id=instance_id,
+                instance_kind=instance_kind,
+                hold_config_lock=False,
+            )
+        except Exception:
+            logger.warning("Remote instance binding reconciliation failed", exc_info=True)
+            return False
+        if expected_binding_generation is not None:
+            live_generation = (
+                remote_access_authorization_service.current_instance_binding_generation(
+                    ensure=False
+                )
+            )
+            try:
+                persisted_generation = int(transition.get("generation"))
+            except (TypeError, ValueError):
+                persisted_generation = live_generation
+            # Our own transition advancing the generation is success; only a
+            # FOREIGN writer moving past our transition is a lost race.
+            if live_generation > persisted_generation:
+                return False
+            if persisted_generation < int(expected_binding_generation):
+                return False
+        if not (transition.get("ok") and (transition.get("ready") or instance_kind is None)):
+            return False
+        try:
+            return int(transition.get("generation"))
+        except (TypeError, ValueError):
+            return remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
 
 
 def mint_cloud_token(
@@ -1140,15 +1855,38 @@ def cloud_token_for_request(
     cookie_value: str | None,
     scope: str = "asr",
 ) -> dict[str, Any] | None:
-    """Resolve the logged-in user from the remote-access session cookie and mint a
-    short-lived cloud token for them.
+    """Mint a short-lived, subject-bound Cloud ASR token for a remote editor.
 
     Returns ``{base_url, token, expires_at, scope}`` for the frontend, or ``None``
-    when there is no authenticated user or the mint fails.
+    when the request is not an eligible remote ASR request or the mint fails.
+
+    This deliberately does not reuse ``can_chat``: that capability authorizes a
+    local Agent turn and must remain false for every remote caller. New Cloud
+    scopes require their own explicit entitlement instead of inheriting ASR.
     """
+    if scope != "asr":
+        return None
     config = config or V2Config.load()
-    payload = parse_session_cookie(config, cookie_value)
-    if payload is None:
+    identity = parse_session_identity(config, cookie_value)
+    if identity is None:
+        return None
+    resolution = resolve_current_authorization(config, identity)
+    if not resolution.current:
+        return None
+    return cloud_token_for_authorization(config, resolution.payload, scope=scope)
+
+
+def cloud_token_for_authorization(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    scope: str = "asr",
+) -> dict[str, Any] | None:
+    if scope != "asr":
+        return None
+    from vibe.authorization import context_from_session_payload
+
+    if not context_from_session_payload(payload).can_use_cloud_asr:
         return None
     email = str(payload.get("email", "")).strip()
     sub = str(payload.get("sub", "")).strip()
@@ -1164,6 +1902,712 @@ def cloud_token_for_request(
         "expires_at": int(time.time()) + int(minted.get("expires_in", 0) or 0),
         "scope": scope,
     }
+
+
+def _resource_acl_sync_configured(config: V2Config | None) -> bool:
+    if config is None:
+        return False
+    cloud = config.remote_access.vibe_cloud
+    return bool(cloud.enabled and cloud.instance_id and cloud.instance_secret and cloud.backend_url)
+
+
+def _resource_acl_device_url(config: V2Config, suffix: str) -> str:
+    cloud = config.remote_access.vibe_cloud
+    instance_id = urllib.parse.quote(str(cloud.instance_id), safe="")
+    return f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{instance_id}/{suffix.lstrip('/')}"
+
+
+def _device_json_request(
+    config: V2Config,
+    method: str,
+    suffix: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    """Make a paired-instance device request without exposing its secret.
+
+    This is intentionally separate from pairing's pinned-host request path. The
+    backend URL here was accepted and normalized during pairing, and the device
+    secret only travels in the required request header.
+    """
+
+    cloud = config.remote_access.vibe_cloud
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "avibe/dev",
+        "X-Vibe-Device-Secret": str(cloud.instance_secret),
+    }
+    try:
+        response = requests.request(
+            method,
+            _resource_acl_device_url(config, suffix),
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError("resource_acl_device_unavailable") from exc
+    if 300 <= response.status_code < 400:
+        raise BackendRequestError(response.status_code, {"error": "backend_http_redirect_blocked"})
+    if response.status_code >= 400:
+        try:
+            error_payload = response.json()
+        except ValueError:
+            error_payload = {}
+        if not isinstance(error_payload, dict):
+            error_payload = {}
+        error_payload.setdefault("error", "resource_acl_device_rejected")
+        raise BackendRequestError(response.status_code, error_payload)
+    try:
+        parsed = response.json()
+    except ValueError as exc:
+        raise RuntimeError("resource_acl_device_invalid_response") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("resource_acl_device_invalid_response")
+    return parsed
+
+
+def sync_authorization_revision_once(
+    config: V2Config | None = None,
+) -> dict[str, Any]:
+    """Refresh the current paired-instance authorization watermark."""
+
+    if not _AUTHORIZATION_REVISION_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "authorization_revision_sync_in_progress"}
+    try:
+        config = config or V2Config.load()
+        if not _authorization_revision_sync_configured(config):
+            return {"ok": False, "error": "authorization_revision_sync_not_configured"}
+        result = _device_json_request(config, "GET", "authorization-revision")
+        revision = _replace_authorization_revision(
+            config,
+            result.get("authorization_revision"),
+        )
+        try:
+            from storage import remote_access_authorization_service
+
+            remote_access_authorization_service.mark_matching_revision_checked(
+                instance_id=str(config.remote_access.vibe_cloud.instance_id),
+                authorization_revision=revision,
+                checked_at=int(time.time()),
+            )
+        except Exception:
+            logger.warning("Authorization revision context update failed", exc_info=True)
+        return {"ok": True, "authorization_revision": revision}
+    except BackendRequestError as exc:
+        error = exc.payload.get("error")
+        return {
+            "ok": False,
+            "error": error if isinstance(error, str) and error else "authorization_revision_sync_failed",
+        }
+    except Exception as exc:
+        error = str(exc)
+        if error not in {
+            "authorization_revision_regressed",
+            "invalid_authorization_revision",
+        }:
+            error = "authorization_revision_sync_failed"
+        return {"ok": False, "error": error}
+    finally:
+        _AUTHORIZATION_REVISION_SYNC_LOCK.release()
+
+
+def start_authorization_revision_polling(
+    config: V2Config | None = None,
+    *,
+    interval_seconds: int = AUTHORIZATION_REVISION_SYNC_INTERVAL_SECONDS,
+) -> None:
+    """Start the paired-device authorization watermark poller once."""
+
+    global _AUTHORIZATION_REVISION_POLL_STARTED
+    if config is None:
+        try:
+            config = V2Config.load()
+        except Exception:
+            return
+    if not _authorization_revision_sync_configured(config):
+        return
+
+    def loop() -> None:
+        while True:
+            result = sync_authorization_revision_once()
+            if not result.get("ok") and result.get("error") not in {
+                "authorization_revision_sync_not_configured",
+                "authorization_revision_sync_in_progress",
+            }:
+                logger.debug(
+                    "Authorization revision sync did not complete: %s",
+                    result.get("error"),
+                )
+            time.sleep(max(1, interval_seconds))
+
+    with _AUTHORIZATION_REVISION_POLL_LOCK:
+        if _AUTHORIZATION_REVISION_POLL_STARTED:
+            return
+        try:
+            thread = threading.Thread(
+                target=loop,
+                name="vibe-authorization-revision-sync",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            return
+        _AUTHORIZATION_REVISION_POLL_STARTED = True
+
+
+def _safe_resource_acl_identifier(value: Any, *, code: str = "invalid_resource_metadata", limit: int = 200) -> str:
+    if not isinstance(value, str):
+        raise ValueError(code)
+    cleaned = value.strip()
+    if (
+        not cleaned
+        or len(cleaned) > limit
+        or any(ord(char) < 32 or ord(char) == 127 for char in cleaned)
+        or "/" in cleaned
+        or "\\" in cleaned
+    ):
+        raise ValueError(code)
+    return cleaned
+
+
+def _safe_resource_acl_display_name(value: Any, *, code: str = "invalid_resource_metadata", limit: int = 240) -> str:
+    if not isinstance(value, str):
+        raise ValueError(code)
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise ValueError(code)
+    return cleaned
+
+
+def _safe_resource_acl_revision(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("invalid_resource_metadata")
+    return value
+
+
+def _normalize_resource_index_descriptor(resource: Mapping[str, Any]) -> dict[str, Any]:
+    resource_kind = resource.get("resource_kind")
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_metadata")
+    access_level = resource.get("access_level", "private")
+    if access_level not in _RESOURCE_ACL_ACCESS_LEVELS:
+        raise ValueError("invalid_resource_metadata")
+    raw_groups = resource.get("group_ids", [])
+    if not isinstance(raw_groups, (list, tuple, set, frozenset)):
+        raise ValueError("invalid_resource_metadata")
+    group_ids = [_safe_resource_acl_identifier(group_id) for group_id in raw_groups]
+    if len(set(group_ids)) != len(group_ids) or len(group_ids) > 256:
+        raise ValueError("invalid_resource_metadata")
+    if access_level == "scope" and not group_ids:
+        raise ValueError("invalid_resource_metadata")
+    if access_level != "scope" and group_ids:
+        raise ValueError("invalid_resource_metadata")
+    descriptor = {
+        "resource_id": _safe_resource_acl_identifier(resource.get("resource_id")),
+        "resource_kind": resource_kind,
+        "display_name": _safe_resource_acl_display_name(resource.get("display_name")),
+        "metadata_revision": _safe_resource_acl_revision(resource.get("metadata_revision")),
+        "applied_acl_revision": _safe_resource_acl_revision(resource.get("applied_acl_revision")),
+        # T5a's baseline endpoint requires access metadata on the first
+        # publication. These are ACL identifiers only, never resource content.
+        "access_level": access_level,
+        "group_ids": group_ids,
+    }
+    owner_user_id = resource.get("owner_user_id")
+    if owner_user_id is not None:
+        descriptor["owner_user_id"] = _safe_resource_acl_identifier(owner_user_id)
+    sync_status = resource.get("sync_status")
+    if sync_status is not None:
+        if sync_status not in _RESOURCE_ACL_SYNC_STATUSES:
+            raise ValueError("invalid_resource_metadata")
+        descriptor["sync_status"] = sync_status
+    return descriptor
+
+
+def publish_resource_index(
+    config: V2Config,
+    *,
+    organization_id: str,
+    resources: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Publish the device-safe resource index and applied ACL revisions."""
+
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("resource_acl_sync_not_configured")
+    organization = _safe_resource_acl_identifier(organization_id, code="invalid_organization_id")
+    descriptors = [_normalize_resource_index_descriptor(resource) for resource in resources]
+    return _device_json_request(
+        config,
+        "PUT",
+        "resource-index",
+        {"organization_id": organization, "resources": descriptors},
+    )
+
+
+def pull_resource_acl_intents(config: V2Config) -> dict[str, Any]:
+    """Fetch the current desired organization ACL intents for this device."""
+
+    if not _resource_acl_sync_configured(config):
+        raise RuntimeError("resource_acl_sync_not_configured")
+    return _device_json_request(config, "GET", "resource-acl-intents")
+
+
+def acknowledge_resource_acl_intent(
+    config: V2Config,
+    *,
+    resource_kind: str,
+    resource_id: str,
+    revision: int,
+    outcome: str,
+    error_code: str | None = None,
+) -> dict[str, Any]:
+    """Acknowledge exactly one applied or rejected control-plane revision."""
+
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_metadata")
+    if outcome not in {"applied", "rejected"}:
+        raise ValueError("invalid_resource_metadata")
+    payload: dict[str, Any] = {
+        "resource_kind": resource_kind,
+        "resource_id": _safe_resource_acl_identifier(resource_id),
+        "revision": _safe_resource_acl_revision(revision),
+        "outcome": outcome,
+    }
+    if outcome == "rejected":
+        if not isinstance(error_code, str) or not _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(error_code):
+            raise ValueError("invalid_resource_metadata")
+        payload["error_code"] = error_code
+    elif error_code is not None:
+        raise ValueError("invalid_resource_metadata")
+    return _device_json_request(config, "POST", "resource-acl-acks", payload)
+
+
+def _resource_acl_sync_error_code(exc: BaseException) -> str:
+    if isinstance(exc, BackendRequestError):
+        candidate = exc.payload.get("error")
+        if isinstance(candidate, str) and _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(candidate):
+            return candidate
+    candidate = getattr(exc, "code", None)
+    if isinstance(candidate, str) and _RESOURCE_ACL_SYNC_ERROR_CODE_RE.fullmatch(candidate):
+        return candidate
+    return "resource_acl_sync_failed"
+
+
+def _resource_metadata_revision(value: Any) -> int:
+    if not isinstance(value, str) or not value.strip():
+        return 0
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return max(0, min(int(parsed.timestamp() * 1_000_000), _RESOURCE_ACL_MAX_REVISION))
+    except (OverflowError, ValueError):
+        return 0
+
+
+def _local_resource_metadata(connection, resource_kind: str, resource_id: str) -> Mapping[str, Any] | None:
+    if resource_kind == "agent":
+        from core.vibe_agents import get_agent_resource_metadata
+
+        return get_agent_resource_metadata(connection, resource_id)
+    if resource_kind == "vault_secret":
+        from storage.vault_service import get_secret_resource_metadata
+
+        return get_secret_resource_metadata(connection, resource_id)
+    if resource_kind == "skill":
+        from core.services.skills import get_skill_resource_metadata
+
+        return get_skill_resource_metadata(resource_id)
+    return None
+
+
+def _safe_resource_display_name(value: Any, fallback: str) -> str:
+    try:
+        return _safe_resource_acl_display_name(value)
+    except ValueError:
+        return _safe_resource_acl_identifier(fallback, limit=240)
+
+
+def _local_policy_resource_descriptors(organization_id: str) -> list[dict[str, Any]]:
+    from storage import resource_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    descriptors: list[dict[str, Any]] = []
+    engine = get_cached_sqlite_engine()
+    with engine.connect() as connection:
+        policies = resource_access_service.list_resource_policies(
+            organization_id=organization_id,
+            connection=connection,
+        )
+        for policy in policies:
+            metadata = _local_resource_metadata(
+                connection,
+                str(policy["resource_kind"]),
+                str(policy["resource_id"]),
+            )
+            # Omitting a missing source row lets snapshot reconciliation publish
+            # the existing control-plane deletion state without exposing stale data.
+            if metadata is None:
+                continue
+            descriptors.append(
+                {
+                    "resource_id": policy["resource_id"],
+                    "resource_kind": policy["resource_kind"],
+                    "display_name": _safe_resource_display_name(
+                        metadata.get("display_name"),
+                        str(policy["resource_id"]),
+                    ),
+                    "owner_user_id": policy.get("owner_user_id"),
+                    "metadata_revision": max(
+                        int(policy.get("policy_revision") or 0),
+                        _resource_metadata_revision(metadata.get("updated_at")),
+                    ),
+                    "applied_acl_revision": int(
+                        policy.get("last_applied_control_plane_revision") or 0
+                    ),
+                    "access_level": policy["access_level"],
+                    "group_ids": policy.get("group_ids") or [],
+                    "sync_status": "in_sync",
+                }
+            )
+    return descriptors
+
+
+def _validated_intent_fields(intent: Any) -> tuple[str, str, int, str, list[str]]:
+    if not isinstance(intent, Mapping):
+        raise ValueError("invalid_resource_acl_intent")
+    resource_kind = intent.get("resource_kind")
+    if resource_kind not in _RESOURCE_ACL_RESOURCE_KINDS:
+        raise ValueError("invalid_resource_acl_intent")
+    resource_id = _safe_resource_acl_identifier(intent.get("resource_id"), code="invalid_resource_acl_intent")
+    revision = _safe_resource_acl_revision(intent.get("revision"))
+    access_level = intent.get("access_level")
+    if access_level not in _RESOURCE_ACL_ACCESS_LEVELS:
+        raise ValueError("invalid_resource_acl_intent")
+    raw_groups = intent.get("group_ids")
+    if not isinstance(raw_groups, list):
+        raise ValueError("invalid_resource_acl_intent")
+    group_ids = [_safe_resource_acl_identifier(group_id, code="invalid_resource_acl_intent") for group_id in raw_groups]
+    if len(set(group_ids)) != len(group_ids) or len(group_ids) > 256:
+        raise ValueError("invalid_resource_acl_intent")
+    if access_level == "scope" and not group_ids:
+        raise ValueError("invalid_resource_acl_intent")
+    if access_level != "scope" and group_ids:
+        raise ValueError("invalid_resource_acl_intent")
+    return str(resource_kind), resource_id, revision, str(access_level), group_ids
+
+
+def _pending_vault_release_key(organization_id: str, resource_id: str, revision: int) -> str:
+    digest = hashlib.sha256(f"{organization_id}\0{resource_id}\0{revision}".encode()).hexdigest()
+    return f"{_RESOURCE_ACL_PENDING_VAULT_RELEASE_PREFIX}{digest}"
+
+
+def _load_pending_vault_release_scopes(connection, key: str) -> list[dict[str, str]]:
+    from sqlalchemy import select
+    from storage.models import state_meta
+
+    raw_value = connection.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none()
+    try:
+        value = json.loads(raw_value) if raw_value else []
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    grant_ids = [str(item.get("grant_id") or "") for item in value if isinstance(item, Mapping)]
+    return [{"grant_id": grant_id} for grant_id in dict.fromkeys(grant_ids) if grant_id]
+
+
+def _store_pending_vault_release_scopes(connection, key: str, scopes: list[dict[str, str]]) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+    connection.execute(
+        state_meta.insert().values(
+            key=key,
+            value_json=json.dumps(scopes, separators=(",", ":")),
+            updated_at=datetime.now().astimezone().isoformat(),
+        )
+    )
+
+
+def _clear_pending_vault_release_scopes(connection, key: str) -> None:
+    from storage.models import state_meta
+
+    connection.execute(state_meta.delete().where(state_meta.c.key == key))
+
+
+def _sync_one_organization(
+    config: V2Config,
+    *,
+    organization_id: str,
+    resources: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    from storage import resource_access_service
+    from storage.db import get_cached_sqlite_engine
+
+    organization = _safe_resource_acl_identifier(organization_id, code="invalid_organization_id")
+    descriptors = list(resources) if resources is not None else _local_policy_resource_descriptors(organization)
+    try:
+        publication = publish_resource_index(config, organization_id=organization, resources=descriptors)
+        if publication.get("organization_id") != organization:
+            return {"organization_id": organization, "ok": False, "error": "resource_organization_mismatch"}
+        pulled = pull_resource_acl_intents(config)
+    except Exception as exc:
+        return {"organization_id": organization, "ok": False, "error": _resource_acl_sync_error_code(exc)}
+    if pulled.get("organization_id") != organization:
+        return {"organization_id": organization, "ok": False, "error": "resource_organization_mismatch"}
+    intents = pulled.get("intents")
+    if not isinstance(intents, list):
+        return {"organization_id": organization, "ok": False, "error": "resource_acl_device_invalid_response"}
+
+    applied = 0
+    rejected = 0
+    acknowledged = 0
+    skipped = 0
+    ack_errors = 0
+    changed_resource_kinds: set[str] = set()
+    engine = get_cached_sqlite_engine()
+    for raw_intent in intents:
+        try:
+            resource_kind, resource_id, revision, access_level, group_ids = _validated_intent_fields(raw_intent)
+        except Exception:
+            # A malformed device response is not safe to acknowledge because it
+            # does not identify an exact valid revision.
+            rejected += 1
+            ack_errors += 1
+            continue
+        release_scopes: list[dict[str, str]] = []
+        release_key = (
+            _pending_vault_release_key(organization, resource_id, revision)
+            if resource_kind == "vault_secret"
+            else None
+        )
+        try:
+            with engine.begin() as connection:
+                previous_policy = resource_access_service.get_resource_policy(
+                    resource_kind,
+                    resource_id,
+                    connection=connection,
+                )
+                outcome = resource_access_service.apply_control_plane_intent(
+                    connection,
+                    organization_id=organization,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    access_level=access_level,
+                    group_ids=group_ids,
+                )
+                policy_narrowed = bool(
+                    outcome["status"] == "applied"
+                    and resource_access_service.resource_policy_narrowed(
+                        previous_policy,
+                        outcome["policy"],
+                    )
+                )
+                if resource_kind == "vault_secret" and outcome["status"] == "applied":
+                    from storage import vault_service
+
+                    if policy_narrowed:
+                        revoked_rows = vault_service.revoke_active_grants_for_secret_resource(
+                            connection,
+                            resource_id,
+                        )
+                        release_scopes = vault_service.agent_release_scopes_after_rows(connection, revoked_rows)
+                        if release_scopes and release_key is not None:
+                            _store_pending_vault_release_scopes(connection, release_key, release_scopes)
+                if release_key is not None:
+                    release_scopes = _load_pending_vault_release_scopes(connection, release_key)
+            if outcome["status"] == "applied":
+                changed_resource_kinds.add(resource_kind)
+                applied += 1
+            if release_scopes:
+                try:
+                    api.release_vault_agent_scopes(
+                        release_scopes,
+                        reason="resource-access-policy-narrowed",
+                    )
+                except Exception:
+                    logger.warning("failed to release narrowed Vault grant scopes", exc_info=True)
+                    ack_errors += 1
+                    continue
+                try:
+                    with engine.begin() as connection:
+                        assert release_key is not None
+                        _clear_pending_vault_release_scopes(connection, release_key)
+                except Exception:
+                    logger.warning("failed to clear pending narrowed Vault grant release", exc_info=True)
+                    ack_errors += 1
+                    continue
+            if outcome["status"] == "stale":
+                skipped += 1
+                continue
+            try:
+                acknowledge_resource_acl_intent(
+                    config,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    outcome="applied",
+                )
+                acknowledged += 1
+            except Exception:
+                # Keep the committed local policy. The next poll receives the
+                # same pending intent and retries this exact acknowledgement.
+                ack_errors += 1
+        except resource_access_service.ResourceAccessError as exc:
+            rejected += 1
+            try:
+                acknowledge_resource_acl_intent(
+                    config,
+                    resource_kind=resource_kind,
+                    resource_id=resource_id,
+                    revision=revision,
+                    outcome="rejected",
+                    error_code=_resource_acl_sync_error_code(exc),
+                )
+                acknowledged += 1
+            except Exception:
+                ack_errors += 1
+        except Exception:
+            # Unexpected storage or I/O failures are retryable. Do not let the
+            # control plane retire the intent while the previous ACL may still
+            # be active locally.
+            logger.warning("failed to apply resource ACL intent", exc_info=True)
+            ack_errors += 1
+    if ack_errors == 0 and not descriptors:
+        try:
+            with engine.begin() as connection:
+                resource_access_service.forget_resource_organization(connection, organization)
+        except Exception:
+            logger.warning("failed to clear published empty resource organization", exc_info=True)
+            ack_errors += 1
+    if changed_resource_kinds:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "authorization.changed",
+            {
+                "project_ids": [],
+                "resource_kinds": sorted(changed_resource_kinds),
+            },
+        )
+    return {
+        "organization_id": organization,
+        "ok": ack_errors == 0,
+        "applied": applied,
+        "rejected": rejected,
+        "acknowledged": acknowledged,
+        "skipped": skipped,
+        "ack_errors": ack_errors,
+        "poll_after_seconds": int(pulled.get("poll_after_seconds") or RESOURCE_ACL_SYNC_INTERVAL_SECONDS),
+    }
+
+
+def sync_resource_acl_once(
+    config: V2Config | None = None,
+    *,
+    organization_id: str | None = None,
+    resources: Sequence[Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Publish applied state, pull intents, atomically apply, and ACK them.
+
+    Network failures leave the SQLite policy untouched. A caller can provide
+    richer safe descriptors for one organization; otherwise the persisted local
+    policy rows supply a conservative index baseline.
+    """
+
+    if not _RESOURCE_ACL_SYNC_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "resource_acl_sync_in_progress"}
+    try:
+        config = config or V2Config.load()
+        if not _resource_acl_sync_configured(config):
+            return {"ok": False, "error": "resource_acl_sync_not_configured"}
+        if resources is not None and organization_id is None:
+            return {"ok": False, "error": "invalid_organization_id"}
+        if organization_id is not None:
+            organizations = [_safe_resource_acl_identifier(organization_id, code="invalid_organization_id")]
+        else:
+            from storage import resource_access_service
+
+            organizations = resource_access_service.list_resource_organization_ids()
+        results = [
+            _sync_one_organization(
+                config,
+                organization_id=organization,
+                resources=resources if resources is not None else None,
+            )
+            for organization in organizations
+        ]
+        return {"ok": all(result.get("ok") for result in results), "organizations": results}
+    except Exception as exc:
+        return {"ok": False, "error": _resource_acl_sync_error_code(exc)}
+    finally:
+        _RESOURCE_ACL_SYNC_LOCK.release()
+
+
+def _resource_acl_poll_delay(result: Mapping[str, Any], fallback_seconds: int) -> int:
+    fallback = max(1, fallback_seconds)
+    organizations = result.get("organizations")
+    if not isinstance(organizations, list):
+        return fallback
+
+    delays: list[int] = []
+    for organization in organizations:
+        if not isinstance(organization, Mapping) or not organization.get("ok"):
+            continue
+        raw_delay = organization.get("poll_after_seconds")
+        if isinstance(raw_delay, bool):
+            continue
+        try:
+            delay = int(raw_delay)
+        except (TypeError, ValueError):
+            continue
+        if delay > 0:
+            delays.append(delay)
+    # One poller serves every organization, so do not poll any organization
+    # sooner than the control plane requested.
+    return max(delays, default=fallback)
+
+
+def start_resource_acl_sync_polling(
+    config: V2Config | None = None,
+    *,
+    interval_seconds: int = RESOURCE_ACL_SYNC_INTERVAL_SECONDS,
+) -> None:
+    """Start the paired-device ACL poller once for the UI process."""
+
+    global _RESOURCE_ACL_SYNC_POLL_STARTED
+    if config is None:
+        try:
+            config = V2Config.load()
+        except Exception:
+            return
+    if not _resource_acl_sync_configured(config):
+        return
+
+    def loop() -> None:
+        while True:
+            result = sync_resource_acl_once()
+            if not result.get("ok") and result.get("error") not in {
+                "resource_acl_sync_not_configured",
+                "resource_acl_sync_in_progress",
+            }:
+                logger.debug("Resource ACL sync poll did not complete: %s", result.get("error"))
+            time.sleep(_resource_acl_poll_delay(result, interval_seconds))
+
+    with _RESOURCE_ACL_SYNC_POLL_LOCK:
+        if _RESOURCE_ACL_SYNC_POLL_STARTED:
+            return
+        try:
+            thread = threading.Thread(target=loop, name="vibe-resource-acl-sync", daemon=True)
+            thread.start()
+        except Exception:
+            return
+        _RESOURCE_ACL_SYNC_POLL_STARTED = True
 
 
 def drain_runtime_status_reports(timeout_seconds: float = STATUS_REPORT_DRAIN_SECONDS) -> None:
@@ -2493,10 +3937,17 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
 
 
 def start_runtime_monitoring(config: V2Config | None = None) -> None:
-    """Ensure the UI-owned heartbeat and quality workers are running."""
+    """Ensure all UI-owned remote-access workers are running."""
 
     start_tunnel_quality_monitor()
     start_status_heartbeat(config)
+    start_authorization_revision_polling(config)
+    from vibe.project_access_sync import start_project_access_sync
+    from vibe.model_service import start_model_service_polling
+
+    start_project_access_sync(config)
+    start_model_service_polling(config)
+    start_resource_acl_sync_polling(config)
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:
@@ -2551,8 +4002,19 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
 
 
 def rotate_session_secret(config: V2Config) -> None:
-    config.remote_access.vibe_cloud.session_secret = secrets.token_urlsafe(32)
-    config.save()
+    """Rotate the cloud session secret through the cross-process write
+    transaction (#1458) so the rotation cannot revert a concurrent
+    Settings save, and mirror the new secret onto the caller's live
+    config object."""
+    from config.v2_config import update_config_fields
+
+    new_secret = secrets.token_urlsafe(32)
+
+    def _apply(cfg: V2Config) -> None:
+        cfg.remote_access.vibe_cloud.session_secret = new_secret
+
+    update_config_fields(_apply)
+    config.remote_access.vibe_cloud.session_secret = new_secret
 
 
 def start(config: V2Config | None = None) -> dict[str, Any]:
@@ -3054,7 +4516,9 @@ def _origin_host_for_pairing(config: V2Config) -> str:
 
     if address.is_loopback:
         return f"[{address.compressed}]" if address.version == 6 else address.compressed
-    if address.is_unspecified and address.version == 6:
+    # Cloud widens non-loopback IPv6 binds to ::. Its IPv6-only listener
+    # requires an IPv6 loopback origin, including for specific interface IPs.
+    if address.version == 6:
         return "[::1]"
     return "127.0.0.1"
 
@@ -3076,6 +4540,31 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
     except Exception:
         origin_service = "http://127.0.0.1:5123"
     try:
+        previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
+    except FileNotFoundError:
+        previous_instance_id = ""
+    except Exception as exc:
+        logger.warning("pre-pair config read failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": "pairing_provenance_unavailable",
+            "detail": str(exc),
+            "pairing": {"ok": False},
+        }
+    # Provenance must be validated BEFORE the one-time redeem. An unavailable
+    # read or failing migration aborts without consuming the key; a genuine
+    # unpaired install seals unattributed snapshots so they cannot be adopted.
+    try:
+        _run_pending_deferred_context_migration()
+    except Exception as exc:
+        logger.warning("legacy deferred context migration before pairing failed", exc_info=True)
+        return {
+            "ok": False,
+            "error": "pairing_provenance_unavailable",
+            "detail": str(exc),
+            "pairing": {"ok": False},
+        }
+    try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
             {
@@ -3094,6 +4583,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
     missing = [field for field in required if not result.get(field)]
     if missing:
         return {"ok": False, "error": "invalid_pairing_response", "missing": missing}
+    instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
         return {
@@ -3101,28 +4591,85 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         }
-    config = api.save_config(
-        {
-            "remote_access": {
-                "provider": "vibe_cloud",
-                "vibe_cloud": {
-                    "enabled": True,
-                    "backend_url": backend.base_url,
-                    "instance_id": result["instance_id"],
-                    "client_id": result["client_id"],
-                    "issuer": result["issuer"],
-                    "authorization_endpoint": result["authorization_endpoint"],
-                    "token_endpoint": result["token_endpoint"],
-                    "jwks_uri": result["jwks_uri"],
-                    "public_url": result["public_url"],
-                    "redirect_uri": result["redirect_uri"],
-                    "tunnel_token": result["tunnel_token"],
-                    "instance_secret": result["instance_secret"],
-                    "session_secret": secrets.token_urlsafe(32),
-                },
+    # C2: the pairing save and its binding transition form ONE cross-process
+    # critical section, so two concurrent pair() calls cannot interleave
+    # save A / save B / transition B / transition A. SQLite initializes
+    # before the config lock per the canonical lock order.
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+    with config_file_lock():
+        try:
+            previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
+        except Exception:
+            previous_instance_id = ""
+        config = api.save_config(
+            {
+                "remote_access": {
+                    "provider": "vibe_cloud",
+                    "vibe_cloud": {
+                        "enabled": True,
+                        "backend_url": backend.base_url,
+                        "instance_id": result["instance_id"],
+                        "instance_kind": instance_kind or "",
+                        "client_id": result["client_id"],
+                        "issuer": result["issuer"],
+                        "authorization_endpoint": result["authorization_endpoint"],
+                        "token_endpoint": result["token_endpoint"],
+                        "jwks_uri": result["jwks_uri"],
+                        "public_url": result["public_url"],
+                        "redirect_uri": result["redirect_uri"],
+                        "tunnel_token": result["tunnel_token"],
+                        "instance_secret": result["instance_secret"],
+                        "session_secret": secrets.token_urlsafe(32),
+                    },
+                }
             }
+        )
+        if previous_instance_id and previous_instance_id != str(result["instance_id"]):
+            try:
+                from storage import remote_access_authorization_service
+
+                remote_access_authorization_service.delete_for_instance(previous_instance_id)
+            except Exception:
+                logger.warning("Old remote authorization cleanup failed after pairing", exc_info=True)
+        # Under the held cross-process lock, save_config's returned config IS
+        # the persisted config; verify it still names the instance this call
+        # redeemed before publishing a binding for it.
+        persisted_instance_id = str(config.remote_access.vibe_cloud.instance_id or "")
+        if persisted_instance_id != str(result["instance_id"]):
+            # The persisted pairing is no longer the one this call redeemed;
+            # do not publish a binding for it.
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "detail": "persisted_instance_mismatch",
+                "pairing": {"ok": False, "reconciling": True},
+            }
+        try:
+            transition = _transition_instance_binding(
+                instance_id=str(result["instance_id"]),
+                instance_kind=instance_kind,
+                previous_instance_id=previous_instance_id or None,
+                hold_config_lock=False,
+            )
+        except Exception:
+            logger.warning("Remote instance binding transition failed after pairing", exc_info=True)
+            return {
+                **status(config),
+                "ok": False,
+                "error": "pairing_reconciliation_failed",
+                "pairing": {"ok": False, "reconciling": True},
+            }
+    if not transition.get("ok"):
+        return {
+            **status(config),
+            "ok": False,
+            "error": "pairing_reconciliation_failed",
+            "detail": transition.get("error"),
+            "pairing": {"ok": False, "reconciling": True},
         }
-    )
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return {**status(config), "ok": True, "pairing": {"ok": True}, "start": start_result}
@@ -3132,25 +4679,341 @@ def _session_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def make_session_cookie(config: V2Config, email: str, subject: str) -> str:
+_ORGANIZATION_SESSION_CLAIM_KEYS = (
+    "vibe_organization_id",
+    "vibe_organization_member_id",
+    "vibe_organization_role",
+    "vibe_group_ids",
+    "vibe_membership_version",
+)
+
+
+def _oidc_claim_string(value: Any, *, reason: str, limit: int = 200) -> str:
+    if not isinstance(value, str):
+        raise OAuthCodeExchangeError(reason)
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise OAuthCodeExchangeError(reason)
+    return cleaned
+
+
+def session_claims_from_oidc(config: V2Config, claims: Mapping[str, Any]) -> dict[str, Any]:
+    """Select and validate the OIDC claims safe to retain in the local cookie.
+
+    Current paired control planes must satisfy the frozen claim shape. Only the
+    selected values are copied, so unrelated ID-token data never enters the
+    local browser session.
+    """
+
+    instance_id = _oidc_claim_string(claims.get("vibe_instance_id"), reason="invalid_instance_id")
+    if instance_id != config.remote_access.vibe_cloud.instance_id:
+        raise OAuthCodeExchangeError("invalid_instance_id")
+    instance_role = _oidc_claim_string(claims.get("vibe_instance_role"), reason="invalid_instance_role")
+    if instance_role not in _INSTANCE_ACCESS_ROLES:
+        raise OAuthCodeExchangeError("invalid_instance_role")
+    access_source_raw = claims.get("vibe_instance_access_source")
+    # An explicit null is not equivalent to an omitted organization claim. It
+    # is a malformed frozen-claim shape and must not silently downgrade into a
+    # base-only session.
+    organization_claim_present = any(key in claims for key in _ORGANIZATION_SESSION_CLAIM_KEYS)
+    if access_source_raw is None:
+        raise OAuthCodeExchangeError("invalid_instance_access_source")
+    access_source = _oidc_claim_string(access_source_raw, reason="invalid_instance_access_source")
+    if access_source not in _INSTANCE_ACCESS_SOURCES:
+        raise OAuthCodeExchangeError("invalid_instance_access_source")
+
+    session_claims: dict[str, Any] = {
+        "vibe_instance_id": instance_id,
+        "vibe_instance_role": instance_role,
+        "vibe_instance_access_source": access_source,
+    }
+    raw_authorization_revision = claims.get(_AUTHORIZATION_REVISION_KEY)
+    if raw_authorization_revision is None:
+        if _authorization_revision_sync_configured(config):
+            raise OAuthCodeExchangeError("invalid_authorization_revision")
+    else:
+        try:
+            session_claims[_AUTHORIZATION_REVISION_KEY] = _normalize_authorization_revision(
+                raw_authorization_revision
+            )
+        except ValueError as exc:
+            raise OAuthCodeExchangeError("invalid_authorization_revision") from exc
+    if not organization_claim_present:
+        return session_claims
+    organization_id = _oidc_claim_string(claims.get("vibe_organization_id"), reason="invalid_organization_claims")
+    member_id = _oidc_claim_string(claims.get("vibe_organization_member_id"), reason="invalid_organization_claims")
+    role = _oidc_claim_string(claims.get("vibe_organization_role"), reason="invalid_organization_claims")
+    if role not in _ORGANIZATION_ROLES:
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    raw_group_ids = claims.get("vibe_group_ids")
+    if not isinstance(raw_group_ids, list) or len(raw_group_ids) > 256:
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    group_ids = [_oidc_claim_string(group_id, reason="invalid_organization_claims") for group_id in raw_group_ids]
+    if len(set(group_ids)) != len(group_ids):
+        raise OAuthCodeExchangeError("invalid_organization_claims")
+    session_claims.update(
+        {
+            "vibe_organization_id": organization_id,
+            "vibe_organization_member_id": member_id,
+            "vibe_organization_role": role,
+            "vibe_group_ids": group_ids,
+        }
+    )
+    membership_version = claims.get("vibe_membership_version")
+    if membership_version is not None:
+        if isinstance(membership_version, int) and not isinstance(membership_version, bool):
+            membership_version = str(membership_version)
+        session_claims["vibe_membership_version"] = _oidc_claim_string(
+            membership_version,
+            reason="invalid_organization_claims",
+        )
+    return session_claims
+
+
+def session_authorization_revision_state(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> str:
+    """Classify signed remote claims against the fresh device watermark.
+
+    Returns one of ``not_configured`` (no paired revision sync), ``unsigned``
+    (the claims carry no usable revision), ``unavailable`` (the fresh device
+    watermark could not be read — a recoverable connectivity state, not
+    evidence that authorization changed), ``current``, or ``mismatch``.
+    """
+
+    if not _authorization_revision_sync_configured(config):
+        return "not_configured"
+    try:
+        signed_revision = _normalize_authorization_revision(
+            payload.get(_AUTHORIZATION_REVISION_KEY)
+        )
+    except ValueError:
+        return "unsigned"
+    current_revision = current_authorization_revision(config, now=now)
+    if current_revision is None:
+        return "unavailable"
+    return "current" if signed_revision == current_revision else "mismatch"
+
+
+def session_authorization_is_current(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: float | None = None,
+) -> bool:
+    """Return whether signed remote claims match the fresh device watermark."""
+
+    return session_authorization_revision_state(config, payload, now=now) in {
+        "current",
+        "not_configured",
+    }
+
+
+def _encode_session_cookie(secret: str, payload: Mapping[str, Any]) -> str:
+    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
+    signature = _session_signature(secret, payload_text)
+    cookie_value = f"{payload_text}.{signature}"
+    if len(cookie_value.encode("ascii")) > SESSION_COOKIE_MAX_VALUE_BYTES:
+        raise OAuthCodeExchangeError("session_cookie_too_large")
+    return cookie_value
+
+
+_SESSION_AUTHORIZATION_CLAIM_KEYS = (
+    "vibe_instance_id",
+    "vibe_instance_role",
+    "vibe_instance_access_source",
+    "vibe_instance_authorization_revision",
+    *_ORGANIZATION_SESSION_CLAIM_KEYS,
+)
+
+
+def _authorization_claims_from_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    claims = {
+        key: payload[key]
+        for key in _SESSION_AUTHORIZATION_CLAIM_KEYS
+        if key in payload
+    }
+    claims_issued_at = payload.get("claims_issued_at")
+    if isinstance(claims_issued_at, int) and not isinstance(claims_issued_at, bool):
+        claims["claims_issued_at"] = claims_issued_at
+    return claims
+
+
+def _authorization_revision_from_claims(claims: Mapping[str, Any]) -> int | None:
+    try:
+        return _normalize_authorization_revision(claims.get(_AUTHORIZATION_REVISION_KEY))
+    except ValueError:
+        return None
+
+
+def _authorization_checked_revision(claims: Mapping[str, Any]) -> int | None:
+    try:
+        checked_revision = _normalize_authorization_revision(
+            claims.get(_AUTHORIZATION_CHECKED_REVISION_KEY)
+        )
+    except ValueError:
+        checked_revision = None
+    if checked_revision is not None:
+        return checked_revision
+    return _authorization_revision_from_claims(claims)
+
+
+def _store_scoped_authorization(
+    config: V2Config,
+    *,
+    reference: str | None,
+    subject: str,
+    email: str,
+    claims: Mapping[str, Any],
+    authorization_state: str,
+    checked_at: int,
+    instance_kind: str | None = None,
+    expected_binding_generation: int | None = None,
+) -> str:
+    from storage import remote_access_authorization_service
+
+    stored_claims = dict(claims)
+    persisted_kind = _normalized_instance_kind(instance_kind) or _normalized_instance_kind(
+        config.remote_access.vibe_cloud.instance_kind
+    )
+    if persisted_kind is not None:
+        stored_claims["vibe_instance_kind"] = persisted_kind
+    scope_kind = "instance"
+    scope_ref = str(config.remote_access.vibe_cloud.instance_id or "")
+    if expected_binding_generation is None:
+        # Recapturing live generation here is the TOCTOU: a transition can
+        # complete between the caller's persist-kind CAS and this write, and
+        # the recaptured gen would let a stale response resurrect a current
+        # row. Callers that produced claims via network/IO must pass the
+        # generation they captured BEFORE that IO. Local cookie/legacy paths
+        # capture immediately before this call.
+        raise remote_access_authorization_service.InstanceBindingChangedError(
+            "expected_binding_generation_required"
+        )
+    return remote_access_authorization_service.upsert_scoped(
+        reference=reference,
+        instance_id=str(config.remote_access.vibe_cloud.instance_id),
+        subject=subject,
+        email=email,
+        scope_kind=scope_kind,
+        scope_ref=scope_ref,
+        authorization_state=authorization_state,
+        claims=stored_claims,
+        last_checked_at=checked_at,
+        updated_at=checked_at,
+        expected_binding_generation=expected_binding_generation,
+    )
+
+
+def make_session_cookie(
+    config: V2Config,
+    email: str,
+    subject: str,
+    *,
+    session_claims: Mapping[str, Any],
+) -> str:
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
         raise ValueError("Remote access session secret is not configured")
     issued_at = int(time.time())
+    validated_claims = session_claims_from_oidc(config, session_claims)
+    revision = _authorization_revision_from_claims(validated_claims)
+    if revision is not None:
+        try:
+            _replace_authorization_revision(config, revision)
+        except ValueError as exc:
+            raise OAuthCodeExchangeError("stale_authorization_revision") from exc
+    stored_claims = {**validated_claims, "claims_issued_at": issued_at}
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    )
+    reference = _store_scoped_authorization(
+        config,
+        reference=None,
+        subject=subject,
+        email=email,
+        claims=stored_claims,
+        authorization_state="current",
+        checked_at=issued_at,
+        expected_binding_generation=request_binding_generation,
+    )
     payload = {
         "email": email,
         "sub": subject,
         "instance_id": cloud.instance_id,
         "iat": issued_at,
-        "exp": issued_at + SESSION_TTL_SECONDS,
+        "exp": issued_at + PERSONAL_SESSION_TTL_SECONDS,
+        "claims_issued_at": issued_at,
+        _SESSION_BROWSER_ID_KEY: secrets.token_urlsafe(24),
+        _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
     }
-    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
-    signature = _session_signature(cloud.session_secret, payload_text)
-    return f"{payload_text}.{signature}"
+    return _encode_session_cookie(cloud.session_secret, payload)
 
 
-def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+def _prune_revoked_browser_sessions(now: int) -> None:
+    for session_id in [
+        value
+        for value, expires_at in _REVOKED_BROWSER_SESSIONS.items()
+        if expires_at <= now
+    ]:
+        _REVOKED_BROWSER_SESSIONS.pop(session_id, None)
+
+
+def _legacy_browser_session_id(secret: str, cookie_value: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        f"legacy-browser-session:{cookie_value}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def revoke_browser_session(payload: Mapping[str, Any]) -> bool:
+    session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
+        return False
+    try:
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return False
+    with _REVOKED_BROWSER_SESSIONS_LOCK:
+        _prune_revoked_browser_sessions(int(time.time()))
+        _REVOKED_BROWSER_SESSIONS[session_id] = expires_at
+    try:
+        from vibe.sse_broker import broker
+
+        broker.publish(
+            "authorization.session-revoked",
+            {"browser_session_id": session_id},
+        )
+    except Exception:
+        logger.debug("failed to publish browser session revocation", exc_info=True)
+    return True
+
+
+def _browser_session_is_revoked(payload: Mapping[str, Any], *, now: int) -> bool:
+    session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if session_id is None:
+        return False
+    if not isinstance(session_id, str) or not _SESSION_BROWSER_ID_RE.fullmatch(session_id):
+        return True
+    with _REVOKED_BROWSER_SESSIONS_LOCK:
+        _prune_revoked_browser_sessions(now)
+        return session_id in _REVOKED_BROWSER_SESSIONS
+
+
+def parse_session_identity(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """Verify browser identity without evaluating current authorization."""
+
     if not cookie_value or "." not in cookie_value:
+        return None
+    if len(cookie_value.encode("utf-8")) > SESSION_COOKIE_MAX_VALUE_BYTES:
         return None
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
@@ -3163,11 +5026,815 @@ def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str
         payload = json.loads(urllib.parse.unquote(payload_text))
     except Exception:
         return None
-    if payload.get("instance_id") != cloud.instance_id:
+    if not isinstance(payload, dict):
         return None
-    if int(payload.get("exp", 0)) <= int(time.time()):
+    instance_id = payload.get("instance_id")
+    subject = payload.get("sub")
+    if instance_id != cloud.instance_id or not isinstance(subject, str) or not subject:
+        return None
+    email = payload.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return None
+    try:
+        issued_at = int(payload.get("iat", 0))
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return None
+    current = int(time.time())
+    if issued_at <= 0 or expires_at <= current or expires_at <= issued_at:
+        return None
+    authorization_reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if authorization_reference is not None:
+        if not isinstance(authorization_reference, str) or not _SESSION_AUTHORIZATION_REFERENCE_RE.fullmatch(
+            authorization_reference
+        ):
+            return None
+    browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if browser_session_id is not None and (
+        not isinstance(browser_session_id, str)
+        or not _SESSION_BROWSER_ID_RE.fullmatch(browser_session_id)
+    ):
+        return None
+    if browser_session_id is None:
+        payload[_SESSION_BROWSER_ID_KEY] = _legacy_browser_session_id(
+            cloud.session_secret,
+            cookie_value,
+        )
+    if _browser_session_is_revoked(payload, now=current):
         return None
     return payload
+
+
+def session_identity_is_current(payload: Mapping[str, Any], *, now: int | None = None) -> bool:
+    current = int(time.time()) if now is None else now
+    try:
+        expires_at = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return False
+    return expires_at > current and not _browser_session_is_revoked(payload, now=current)
+
+
+def _load_authorization_record(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int,
+) -> dict[str, Any] | None:
+    from storage import remote_access_authorization_service
+
+    instance_id = str(identity.get("instance_id") or "")
+    subject = str(identity.get("sub") or "")
+    reference = identity.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if isinstance(reference, str):
+        record = remote_access_authorization_service.load_reference_record(
+            reference=reference,
+            instance_id=instance_id,
+            subject=subject,
+            now=now,
+        )
+        if record is not None:
+            return record
+
+    inline_claims = _authorization_claims_from_payload(identity)
+    if not inline_claims:
+        return None
+    try:
+        validated = session_claims_from_oidc(config, inline_claims)
+        checked_at = int(inline_claims.get("claims_issued_at", identity.get("iat", 0)))
+    except (OAuthCodeExchangeError, TypeError, ValueError):
+        return None
+    if checked_at <= 0:
+        return None
+    claims = {**validated, "claims_issued_at": checked_at}
+    scope_kind = "instance"
+    scope_ref = instance_id
+    existing = remote_access_authorization_service.load_scoped(
+        instance_id=instance_id,
+        subject=subject,
+        scope_kind=scope_kind,
+        scope_ref=scope_ref,
+    )
+    if existing is not None:
+        return existing
+    try:
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
+        stored_reference = _store_scoped_authorization(
+            config,
+            reference=None,
+            subject=subject,
+            email=str(identity.get("email") or ""),
+            claims=claims,
+            authorization_state="current",
+            checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
+        )
+        return remote_access_authorization_service.load_reference_record(
+            reference=stored_reference,
+            instance_id=instance_id,
+            subject=subject,
+            now=now,
+        )
+    except Exception:
+        logger.warning("legacy remote authorization migration failed", exc_info=True)
+        return {
+            "id": None,
+            "instance_id": instance_id,
+            "subject": subject,
+            "email": identity.get("email"),
+            "scope_kind": scope_kind,
+            "scope_ref": scope_ref,
+            "authorization_state": "current",
+            "claims": claims,
+            "expires_at": identity.get("exp"),
+            "created_at": checked_at,
+            "last_checked_at": checked_at,
+            "updated_at": checked_at,
+        }
+
+
+def _validated_authorization_payload(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any],
+    *,
+    binding_gate: bool | None = None,
+) -> dict[str, Any] | None:
+    # Class 2: one (ready, kind, generation) consultation per evaluation.
+    # Callers that already captured the gate pass it in; this function must
+    # not trigger a second live read inside the same evaluation.
+    gate = binding_is_ready(config, identity) if binding_gate is None else binding_gate
+    if not gate:
+        return None
+    if (
+        _known_kind_requires_runtime_pairing(config)
+        and not _runtime_pairing_available(config)
+    ):
+        return None
+    claims = record.get("claims")
+    if not isinstance(claims, Mapping):
+        return None
+    from vibe.authorization import instance_kind_is_unsupported
+
+    if instance_kind_is_unsupported(claims.get("vibe_instance_kind")):
+        # A present-but-unrecognized persisted kind (corruption or a newer
+        # release's artifact) is not a legacy no-kind row. Fail closed so the
+        # row revalidates instead of falling through to legacy-current.
+        return None
+    payload = dict(identity)
+    payload.update(claims)
+    reference = record.get("id")
+    if isinstance(reference, str):
+        payload[_SESSION_AUTHORIZATION_REFERENCE_KEY] = reference
+    try:
+        session_claims_from_oidc(config, claims)
+    except OAuthCodeExchangeError:
+        return None
+    return payload
+
+
+def _authorization_within_grace(record: Mapping[str, Any], *, now: int) -> bool:
+    try:
+        last_checked_at = int(
+            record.get("last_checked_at")
+            or record.get("created_at")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return False
+    age = now - last_checked_at
+    return 0 <= age <= ORGANIZATION_AUTHORIZATION_OUTAGE_GRACE_SECONDS
+
+
+def _authorization_refresh_due(payload: Mapping[str, Any], *, now: int) -> bool:
+    try:
+        issued_at = int(payload.get("claims_issued_at", 0))
+    except (TypeError, ValueError):
+        return True
+    return issued_at <= 0 or now >= issued_at + ORGANIZATION_AUTHORIZATION_REFRESH_SECONDS
+
+
+def _fetch_authorization_context(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+    observed_revision: int | None,
+) -> AuthorizationResolution:
+    from storage import remote_access_authorization_service
+
+    request_binding_generation = (
+        remote_access_authorization_service.current_instance_binding_generation()
+    )
+    subject = str(identity.get("sub") or "").strip()
+    email = str(identity.get("email") or "").strip()
+    request_payload: dict[str, Any] = {"sub": subject, "email": email}
+    try:
+        response = _device_json_request(
+            config,
+            "POST",
+            "authorization-context",
+            request_payload,
+            timeout=8.0,
+        )
+    except BackendRequestError as exc:
+        if exc.status == 403 and exc.payload.get("error") == "access_denied":
+            previous_claims = record.get("claims") if record is not None else {}
+            if not isinstance(previous_claims, Mapping):
+                previous_claims = {}
+            revoked_claims = dict(previous_claims)
+            if observed_revision is not None:
+                revoked_claims[_AUTHORIZATION_CHECKED_REVISION_KEY] = observed_revision
+            try:
+                _store_scoped_authorization(
+                    config,
+                    reference=(
+                        str(record.get("id"))
+                        if record is not None and record.get("id")
+                        else None
+                    ),
+                    subject=subject,
+                    email=email,
+                    claims=revoked_claims,
+                    authorization_state="revoked",
+                    checked_at=now,
+                    expected_binding_generation=request_binding_generation,
+                )
+            except remote_access_authorization_service.InstanceBindingChangedError:
+                return AuthorizationResolution(
+                    "unavailable",
+                    reason="instance_binding_changed",
+                )
+            except Exception:
+                logger.warning("remote authorization revocation persistence failed", exc_info=True)
+            return AuthorizationResolution("revoked", reason="access_denied")
+        return AuthorizationResolution("unavailable", reason="authorization_context_unavailable")
+    except Exception:
+        return AuthorizationResolution("unavailable", reason="authorization_context_unavailable")
+
+    if response.get("sub") != subject or response.get("email") != email:
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    instance_kind = _normalized_instance_kind(response.get("instance_kind"))
+    if instance_kind is None:
+        return AuthorizationResolution("unavailable", reason="instance_kind_unavailable")
+    try:
+        claims = session_claims_from_oidc(config, response)
+    except Exception:
+        logger.warning("remote authorization context validation failed", exc_info=True)
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    live_state = remote_access_authorization_service.load_instance_binding_state(
+        ensure=False
+    )
+    live_generation = int((live_state or {}).get("generation") or 0)
+    live_id = str((live_state or {}).get("instance_id") or "")
+    request_id = str(identity.get("instance_id") or "")
+    if live_id and request_id and live_id != request_id:
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+    if live_generation > int(request_binding_generation):
+        # Same-instance kind reclassification is still a binding change.
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+    try:
+        persisted = _persist_instance_kind(
+            str(identity.get("instance_id") or ""),
+            instance_kind,
+            expected_binding_generation=request_binding_generation,
+        )
+    except Exception:
+        logger.warning("remote instance kind persistence failed", exc_info=True)
+        persisted = False
+    if persisted is False:
+        live_state = remote_access_authorization_service.load_instance_binding_state(
+            ensure=False
+        )
+        live_generation = int((live_state or {}).get("generation") or 0)
+        live_id = str((live_state or {}).get("instance_id") or "")
+        request_id = str(identity.get("instance_id") or "")
+        if live_id and request_id and live_id != request_id:
+            return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+        if live_generation > int(request_binding_generation):
+            return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+        return AuthorizationResolution("unavailable", reason="instance_kind_persistence_failed")
+    try:
+        revision = _authorization_revision_from_claims(claims)
+        if revision is not None:
+            _replace_authorization_revision(config, revision)
+        stored_claims = {**claims, "claims_issued_at": now}
+        reference = _store_scoped_authorization(
+            config,
+            reference=(
+                str(record.get("id"))
+                if record is not None and record.get("id")
+                else None
+            ),
+            subject=subject,
+            email=email,
+            claims=stored_claims,
+            authorization_state="current",
+            checked_at=now,
+            instance_kind=instance_kind,
+            expected_binding_generation=(
+                int(persisted)
+                if not isinstance(persisted, bool)
+                else request_binding_generation
+            ),
+        )
+        refreshed_record = remote_access_authorization_service.load_reference_record(
+            reference=reference,
+            instance_id=str(identity.get("instance_id") or ""),
+            subject=subject,
+            now=now,
+        )
+    except remote_access_authorization_service.InstanceBindingChangedError:
+        return AuthorizationResolution("unavailable", reason="instance_binding_changed")
+    except Exception:
+        logger.warning("remote authorization context persistence failed", exc_info=True)
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    config.remote_access.vibe_cloud.instance_kind = instance_kind
+    if refreshed_record is None:
+        return AuthorizationResolution("unavailable", reason="authorization_context_persistence_failed")
+    payload = _validated_authorization_payload(config, identity, refreshed_record)
+    if payload is None:
+        return AuthorizationResolution("unavailable", reason="authorization_context_invalid")
+    return AuthorizationResolution(
+        "current",
+        payload=payload,
+        policy=instance_kind,
+        refreshed=True,
+    )
+
+
+def _refresh_authorization_context(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+    force: bool = False,
+) -> AuthorizationResolution:
+    key = _authorization_refresh_key(identity, record)
+    with _AUTHORIZATION_REFRESH_LOCK:
+        flight = _AUTHORIZATION_REFRESH_FLIGHTS.get(key)
+        if flight is None:
+            flight_lock = threading.Lock()
+            flight_users = 0
+        else:
+            flight_lock, flight_users = flight
+        _AUTHORIZATION_REFRESH_FLIGHTS[key] = (flight_lock, flight_users + 1)
+    flight_lock.acquire()
+    try:
+        monotonic_now = time.monotonic()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            recent_result = _AUTHORIZATION_REFRESH_RESULTS.get(key)
+            last_failure = _AUTHORIZATION_REFRESH_FAILURES.get(key)
+        observed_revision = (
+            current_authorization_revision(config)
+            if _authorization_revision_sync_configured(config)
+            else None
+        )
+        if (
+            not force
+            and recent_result is not None
+            and monotonic_now - recent_result[0] < AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+            and (
+                observed_revision is None
+                or recent_result[3] == observed_revision
+            )
+        ):
+            from storage import remote_access_authorization_service
+
+            current_record = remote_access_authorization_service.load_scoped(
+                instance_id=key[0],
+                subject=key[1],
+                scope_kind=key[2],
+                scope_ref=key[3],
+            )
+            if recent_result[1] == "revoked":
+                return AuthorizationResolution("revoked", reason="access_denied")
+            if current_record is not None:
+                if current_record.get("authorization_state") == "revoked":
+                    return AuthorizationResolution("revoked", reason="access_denied")
+                if (
+                    recent_result[1] == "current"
+                    and current_record.get("authorization_state") == "current"
+                ):
+                    current_payload = _validated_authorization_payload(
+                        config,
+                        identity,
+                        current_record,
+                    )
+                    if current_payload is not None:
+                        return AuthorizationResolution(
+                            "current",
+                            payload=current_payload,
+                            policy=recent_result[2],
+                            refreshed=True,
+                        )
+        if (
+            not force
+            and last_failure is not None
+            and monotonic_now - last_failure < AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+        ):
+            return AuthorizationResolution("unavailable", reason="authorization_refresh_backoff")
+        refreshed = _fetch_authorization_context(
+            config,
+            identity,
+            record,
+            now=now,
+            observed_revision=observed_revision,
+        )
+        completed_at = time.monotonic()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            _AUTHORIZATION_REFRESH_RESULTS.pop(key, None)
+            if (
+                refreshed.state == "unavailable"
+                and refreshed.reason != "instance_binding_changed"
+            ):
+                _AUTHORIZATION_REFRESH_FAILURES[key] = completed_at
+                if len(_AUTHORIZATION_REFRESH_FAILURES) > 1024:
+                    cutoff = completed_at - AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+                    for stale_key in [
+                        item
+                        for item, failed_at in _AUTHORIZATION_REFRESH_FAILURES.items()
+                        if failed_at < cutoff
+                    ]:
+                        _AUTHORIZATION_REFRESH_FAILURES.pop(stale_key, None)
+            else:
+                _AUTHORIZATION_REFRESH_FAILURES.pop(key, None)
+                if refreshed.state in {"current", "revoked"}:
+                    refreshed_revision = (
+                        observed_revision
+                        if refreshed.state == "revoked"
+                        else _authorization_revision_from_claims(refreshed.payload)
+                        if refreshed.payload is not None
+                        else None
+                    )
+                    _AUTHORIZATION_REFRESH_RESULTS[key] = (
+                        completed_at,
+                        refreshed.state,
+                        refreshed.policy,
+                        refreshed_revision,
+                    )
+            if len(_AUTHORIZATION_REFRESH_RESULTS) > 1024:
+                cutoff = completed_at - AUTHORIZATION_REFRESH_FAILURE_BACKOFF_SECONDS
+                for stale_key in [
+                    item
+                    for item, (finished_at, _state, _policy, _revision) in _AUTHORIZATION_REFRESH_RESULTS.items()
+                    if finished_at < cutoff
+                ]:
+                    _AUTHORIZATION_REFRESH_RESULTS.pop(stale_key, None)
+        return refreshed
+    finally:
+        flight_lock.release()
+        with _AUTHORIZATION_REFRESH_LOCK:
+            current_flight = _AUTHORIZATION_REFRESH_FLIGHTS.get(key)
+            if current_flight is not None and current_flight[0] is flight_lock:
+                if current_flight[1] <= 1:
+                    _AUTHORIZATION_REFRESH_FLIGHTS.pop(key, None)
+                else:
+                    _AUTHORIZATION_REFRESH_FLIGHTS[key] = (
+                        flight_lock,
+                        current_flight[1] - 1,
+                    )
+
+
+def _authorization_refresh_key(
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+) -> tuple[str, str, str, str, int]:
+    scope_kind = str(record.get("scope_kind") or "instance") if record else "instance"
+    scope_ref = (
+        str(record.get("scope_ref") or identity.get("instance_id") or "")
+        if record
+        else str(identity.get("instance_id") or "")
+    )
+    try:
+        from storage import remote_access_authorization_service
+
+        generation = remote_access_authorization_service.current_instance_binding_generation(
+            ensure=False
+        )
+    except Exception:
+        generation = 0
+    return (
+        str(identity.get("instance_id") or ""),
+        str(identity.get("sub") or ""),
+        scope_kind,
+        scope_ref,
+        int(generation),
+    )
+
+
+def _schedule_authorization_refresh(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    record: Mapping[str, Any] | None,
+    *,
+    now: int,
+) -> None:
+    key = _authorization_refresh_key(identity, record)
+    with _AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
+        if key in _AUTHORIZATION_BACKGROUND_REFRESHES:
+            return
+        _AUTHORIZATION_BACKGROUND_REFRESHES.add(key)
+
+    def run() -> None:
+        try:
+            _refresh_authorization_context(config, identity, record, now=now)
+        except Exception:
+            logger.warning("Background remote authorization refresh failed", exc_info=True)
+        finally:
+            with _AUTHORIZATION_BACKGROUND_REFRESH_LOCK:
+                _AUTHORIZATION_BACKGROUND_REFRESHES.discard(key)
+
+    threading.Thread(
+        target=run,
+        name="remote-authorization-refresh",
+        daemon=True,
+    ).start()
+
+
+def resolve_current_authorization(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int | None = None,
+    allow_refresh: bool = True,
+    refresh_revoked: bool = False,
+) -> AuthorizationResolution:
+    """Resolve current access without turning control-plane failure into logout."""
+
+    revision_now = None if now is None else float(now)
+    current = int(time.time()) if now is None else now
+    if not session_identity_is_current(identity, now=current):
+        return AuthorizationResolution("invalid_identity", reason="identity_expired")
+    try:
+        record = _load_authorization_record(config, identity, now=current)
+    except Exception:
+        logger.warning("remote authorization record load failed", exc_info=True)
+        return AuthorizationResolution(
+            "unavailable",
+            reason="authorization_record_unavailable",
+        )
+    if (
+        record is None
+        and isinstance(identity.get(_SESSION_AUTHORIZATION_REFERENCE_KEY), str)
+    ):
+        return AuthorizationResolution(
+            "invalid_identity",
+            reason="authorization_record_missing",
+        )
+    if record is not None and record.get("authorization_state") == "revoked":
+        claims = record.get("claims")
+        record_revision = (
+            _authorization_checked_revision(claims)
+            if isinstance(claims, Mapping)
+            else None
+        )
+        observed_revision = (
+            current_authorization_revision(config, now=revision_now)
+            if _authorization_revision_sync_configured(config)
+            else None
+        )
+        authority_changed = (
+            observed_revision is not None
+            and record_revision is not None
+            and observed_revision != record_revision
+        )
+        if allow_refresh and (refresh_revoked or authority_changed):
+            refreshed = _refresh_authorization_context(
+                config,
+                identity,
+                record,
+                now=current,
+                force=refresh_revoked,
+            )
+            if refreshed.state != "unavailable":
+                return refreshed
+        return AuthorizationResolution("revoked", reason="access_denied")
+    # Class 2: capture the binding gate ONCE for this evaluation. Both the
+    # payload admission and the kind derivation below use this snapshot; a
+    # reconciling that begins mid-evaluation can no longer collapse a failed
+    # second read into the legacy no-kind branch.
+    binding_gate = binding_is_ready(config, identity)
+    payload = (
+        _validated_authorization_payload(
+            config, identity, record, binding_gate=binding_gate
+        )
+        if record is not None
+        else None
+    )
+    if (
+        payload is None
+        and record is not None
+        and not _runtime_pairing_available(config)
+        and _known_kind_requires_runtime_pairing(config)
+    ):
+        return AuthorizationResolution("unavailable", reason="pairing_unavailable")
+    if payload is None:
+        return (
+            _refresh_authorization_context(config, identity, record, now=current)
+            if allow_refresh
+            else AuthorizationResolution("unavailable", reason="authorization_context_missing")
+        )
+
+    instance_kind = (
+        _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind)
+        if binding_gate
+        else None
+    )
+    signed_revision = _authorization_revision_from_claims(payload)
+    current_revision = (
+        current_authorization_revision(config, now=revision_now)
+        if _authorization_revision_sync_configured(config)
+        else None
+    )
+    stored_kind = None
+    if record is not None:
+        stored_claims = record.get("claims")
+        if isinstance(stored_claims, Mapping):
+            stored_kind = _normalized_instance_kind(stored_claims.get("vibe_instance_kind"))
+    kindless_current_needs_refresh = (
+        instance_kind is not None
+        and stored_kind is None
+        and record is not None
+        and record.get("authorization_state") == "current"
+    )
+    kind_mismatch = (
+        (
+            instance_kind is not None
+            and stored_kind is not None
+            and stored_kind != instance_kind
+        )
+        or (
+            instance_kind is not None
+            and stored_kind is None
+            and record is not None
+            and record.get("authorization_state") == "stale"
+        )
+        or kindless_current_needs_refresh
+    )
+    if kind_mismatch:
+        # A row tagged with the previous kind (or invalidated by a
+        # reclassification) must revalidate before EITHER kind-specific
+        # policy runs — returning it as current under the new kind would let
+        # the old kind's claims outlive the reclassification.
+        if allow_refresh:
+            return _refresh_authorization_context(config, identity, record, now=current)
+        return AuthorizationResolution(
+            "unavailable",
+            reason="authorization_context_missing",
+        )
+
+    if instance_kind == "personal":
+        if (
+            current_revision is not None
+            and signed_revision is not None
+            and current_revision != signed_revision
+            and allow_refresh
+        ):
+            _schedule_authorization_refresh(config, identity, record, now=current)
+        return AuthorizationResolution("current", payload=payload, policy="personal")
+
+    if instance_kind == "organization":
+        revision_unknown = current_revision is None or signed_revision is None
+        revision_changed = (
+            current_revision is not None
+            and signed_revision is not None
+            and current_revision != signed_revision
+        )
+        scheduled_refresh = _authorization_refresh_due(payload, now=current)
+        within_grace = _authorization_within_grace(record, now=current)
+        if (
+            scheduled_refresh
+            and not revision_unknown
+            and not revision_changed
+            and within_grace
+            and allow_refresh
+        ):
+            _schedule_authorization_refresh(config, identity, record, now=current)
+            return AuthorizationResolution(
+                "current",
+                payload=payload,
+                policy="organization",
+                reason="authorization_refresh_scheduled",
+            )
+        if (revision_changed or scheduled_refresh) and allow_refresh:
+            refreshed = _refresh_authorization_context(config, identity, record, now=current)
+            if refreshed.state != "unavailable":
+                return refreshed
+        if revision_unknown or revision_changed or scheduled_refresh:
+            if within_grace:
+                return AuthorizationResolution(
+                    "current",
+                    payload=payload,
+                    policy="organization",
+                    reason="authorization_grace",
+                )
+            return AuthorizationResolution(
+                "unavailable",
+                policy="organization",
+                reason="authorization_grace_expired",
+            )
+        return AuthorizationResolution("current", payload=payload, policy="organization")
+
+    # Pre-kind pairings keep the former strict freshness contract until a
+    # successful backchannel response fills the kind. They fail unavailable,
+    # never as a fake browser logout.
+    if not _authorization_revision_sync_configured(config):
+        return AuthorizationResolution("current", payload=payload, policy=None)
+    legacy_current = (
+        current_revision is not None
+        and signed_revision == current_revision
+        and not _authorization_refresh_due(payload, now=current)
+    )
+    if legacy_current:
+        return AuthorizationResolution("current", payload=payload, policy=None)
+    if allow_refresh:
+        return _refresh_authorization_context(config, identity, record, now=current)
+    return AuthorizationResolution("unavailable", reason="instance_kind_unavailable")
+
+
+async def resolve_current_authorization_async(
+    config: V2Config,
+    identity: Mapping[str, Any],
+    *,
+    now: int | None = None,
+    allow_refresh: bool = True,
+    refresh_revoked: bool = False,
+) -> AuthorizationResolution:
+    import asyncio
+
+    return await asyncio.to_thread(
+        resolve_current_authorization,
+        config,
+        identity,
+        now=now,
+        allow_refresh=allow_refresh,
+        refresh_revoked=refresh_revoked,
+    )
+
+
+def renew_session_cookie(
+    config: V2Config,
+    payload: Mapping[str, Any],
+    *,
+    now: int | None = None,
+) -> str:
+    """Slide browser identity without pretending cached claims were refreshed."""
+
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.session_secret:
+        raise ValueError("Remote access session secret is not configured")
+    current = int(time.time()) if now is None else now
+    reference = payload.get(_SESSION_AUTHORIZATION_REFERENCE_KEY)
+    if not isinstance(reference, str):
+        from storage import remote_access_authorization_service
+
+        claims = _authorization_claims_from_payload(payload)
+        checked_at = int(payload.get("claims_issued_at", payload.get("iat", current)))
+        request_binding_generation = (
+            remote_access_authorization_service.current_instance_binding_generation(
+                ensure=False
+            )
+        )
+        reference = _store_scoped_authorization(
+            config,
+            reference=None,
+            subject=str(payload.get("sub") or ""),
+            email=str(payload.get("email") or ""),
+            claims=claims,
+            authorization_state="current",
+            checked_at=checked_at,
+            expected_binding_generation=request_binding_generation,
+        )
+    browser_session_id = payload.get(_SESSION_BROWSER_ID_KEY)
+    if not isinstance(browser_session_id, str):
+        browser_session_id = secrets.token_urlsafe(24)
+    identity = {
+        "email": str(payload.get("email") or ""),
+        "sub": str(payload.get("sub") or ""),
+        "instance_id": str(payload.get("instance_id") or ""),
+        "iat": current,
+        "exp": current + PERSONAL_SESSION_TTL_SECONDS,
+        "claims_issued_at": int(payload.get("claims_issued_at", payload.get("iat", current))),
+        _SESSION_BROWSER_ID_KEY: browser_session_id,
+        _SESSION_AUTHORIZATION_REFERENCE_KEY: reference,
+    }
+    return _encode_session_cookie(cloud.session_secret, identity)
+
+
+def parse_session_cookie(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """Compatibility wrapper returning only a currently authorized session."""
+
+    identity = parse_session_identity(config, cookie_value)
+    if identity is None:
+        return None
+    result = resolve_current_authorization(config, identity)
+    return result.payload if result.current else None
 
 
 def validate_session_cookie(config: V2Config, cookie_value: str | None) -> bool:
@@ -3185,11 +5852,37 @@ def session_needs_renewal(payload: dict[str, Any], now: int | None = None) -> bo
     return int(payload.get("exp", 0)) - current < SESSION_TTL_SECONDS // 2
 
 
-def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: str) -> str:
+def session_authorization_refresh_deadline(payload: Mapping[str, Any]) -> int | None:
+    """Return the wall-clock deadline for refreshing signed authorization claims."""
+
+    try:
+        claims_issued_at = int(payload.get("claims_issued_at", payload.get("iat", 0)))
+    except (TypeError, ValueError):
+        return None
+    if claims_issued_at <= 0:
+        return None
+    return claims_issued_at + SESSION_AUTHORIZATION_REFRESH_SECONDS
+
+
+def session_needs_authorization_refresh(payload: Mapping[str, Any], now: int | None = None) -> bool:
+    """Return whether authorization claims must be refreshed through OIDC."""
+
+    current = now if now is not None else int(time.time())
+    deadline = session_authorization_refresh_deadline(payload)
+    return deadline is None or current >= deadline
+
+
+def authorization_url(
+    config: V2Config,
+    state: str,
+    nonce: str,
+    code_challenge: str,
+    redirect_uri: str | None = None,
+) -> str:
     cloud = config.remote_access.vibe_cloud
     params = {
         "client_id": cloud.client_id,
-        "redirect_uri": cloud.redirect_uri,
+        "redirect_uri": redirect_uri or cloud.redirect_uri,
         "response_type": "code",
         "scope": "openid email",
         "state": state,
@@ -3202,14 +5895,19 @@ def authorization_url(config: V2Config, state: str, nonce: str, code_challenge: 
     return f"{cloud.authorization_endpoint}?{urllib.parse.urlencode(params)}"
 
 
-def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict[str, Any]:
+def exchange_oauth_code(
+    config: V2Config,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str | None = None,
+) -> dict[str, Any]:
     cloud = config.remote_access.vibe_cloud
     response = requests.post(
         cloud.token_endpoint,
         data={
             "grant_type": "authorization_code",
             "client_id": cloud.client_id,
-            "redirect_uri": cloud.redirect_uri,
+            "redirect_uri": redirect_uri or cloud.redirect_uri,
             "code": code,
             "code_verifier": code_verifier,
         },
@@ -3260,7 +5958,8 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
         raise OAuthCodeExchangeError("invalid_instance_id")
     if not claims.get("email_verified"):
         raise OAuthCodeExchangeError("email_not_verified")
-    return {"claims": claims, "token": token_payload}
+    session_claims = session_claims_from_oidc(config, claims)
+    return {"claims": claims, "session_claims": session_claims, "token": token_payload}
 
 
 # --- OAuth handshake store -------------------------------------------------
@@ -3310,7 +6009,13 @@ def _warn_oauth_store_at_capacity() -> None:
 
 
 def store_oauth_handshake(
-    rid: str, *, nonce: str, code_verifier: str, next_target: str, device_hash: str | None = None
+    rid: str,
+    *,
+    nonce: str,
+    code_verifier: str,
+    next_target: str,
+    device_hash: str | None = None,
+    redirect_uri: str | None = None,
 ) -> None:
     """Persist a login handshake in memory, keyed by the signed state's random id.
 
@@ -3325,6 +6030,7 @@ def store_oauth_handshake(
         "code_verifier": code_verifier,
         "next": next_target,
         "device_hash": device_hash,
+        "redirect_uri": redirect_uri,
         "exp": now + OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     with _OAUTH_STORE_LOCK:

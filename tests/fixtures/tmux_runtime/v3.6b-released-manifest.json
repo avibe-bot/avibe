@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "tmux_version": "3.6b",
+  "source": "tmux/tmux-builds",
+  "source_url": "https://github.com/tmux/tmux-builds/releases/tag/v3.6b",
+  "requires_utf8proc": true,
+  "terminfo": "bundled-or-system",
+  "archives": {
+    "darwin-arm64": {
+      "name": "tmux-3.6b-macos-arm64.tar.gz",
+      "url": "https://github.com/tmux/tmux-builds/releases/download/v3.6b/tmux-3.6b-macos-arm64.tar.gz",
+      "sha256": "88323402bd28d21103239caf009b130086ebf334807de485d4a1e1c7188ee810",
+      "size": 623837,
+      "bin_path": "tmux"
+    },
+    "darwin-x64": {
+      "name": "tmux-3.6b-macos-x86_64.tar.gz",
+      "url": "https://github.com/tmux/tmux-builds/releases/download/v3.6b/tmux-3.6b-macos-x86_64.tar.gz",
+      "sha256": "073f6e2c2baa7eb5d643563600ee6052ca8619f3ec5a0cfdf99c56397fb72c94",
+      "size": 650495,
+      "bin_path": "tmux"
+    },
+    "linux-arm64": {
+      "name": "tmux-3.6b-linux-arm64.tar.gz",
+      "url": "https://github.com/tmux/tmux-builds/releases/download/v3.6b/tmux-3.6b-linux-arm64.tar.gz",
+      "sha256": "fd4a2206c5e468dd2ee4e9a65f2d40e0762551965d7fdbe849c494ab14f513e9",
+      "size": 956861,
+      "bin_path": "tmux"
+    },
+    "linux-x64": {
+      "name": "tmux-3.6b-linux-x86_64.tar.gz",
+      "url": "https://github.com/tmux/tmux-builds/releases/download/v3.6b/tmux-3.6b-linux-x86_64.tar.gz",
+      "sha256": "002a6f4fd52212600fa0d72d865dcf328e5b8b6e83c179788144d8587b75677a",
+      "size": 958795,
+      "bin_path": "tmux"
+    }
+  }
+}

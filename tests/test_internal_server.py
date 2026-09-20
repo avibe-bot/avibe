@@ -16,14 +16,19 @@ We exercise three layers:
 from __future__ import annotations
 
 import asyncio
+import ast
+import builtins
 import contextlib
+import inspect
 import socket
 import sys
 import tempfile
+import time
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
@@ -32,7 +37,14 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
-from core.message_context import build_context_turn_sink_key
+from core.controller import Controller
+from core.message_context import build_context_turn_sink_key, resolve_turn_sink_key
+from core.vibe_agents import VibeAgentStore
+from vibe.memory_contract import (
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
+    MemoryStoreUnavailableError,
+)
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -42,7 +54,9 @@ from core.services.dispatch import (
     dispatch_turn,
 )
 from modules.im import MessageContext
-from storage import message_deliveries
+from storage import message_deliveries, resource_access_service
+from vibe.authorization import AuthorizationContext
+from config.v2_config import MemoryConfig
 
 
 # ---------------------------------------------------------------------
@@ -73,6 +87,44 @@ def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "202
     )
 
 
+def _seed_remote_worker(*, backend: str = "claude") -> None:
+    store = VibeAgentStore()
+    try:
+        agent = store.get("worker")
+        if agent is None:
+            agent = store.create(name="worker", backend=backend)
+        with store.engine.begin() as conn:
+            resource_access_service.ensure_resource_policy(
+                conn,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id="org-1",
+                owner_user_id="remote-user",
+                owner_email="remote-user@example.com",
+                access_level="public",
+            )
+    finally:
+        store.close()
+
+
+def _authorized_remote_message_metadata() -> dict:
+    return resource_access_service.metadata_with_resource_user_context(
+        {},
+        AuthorizationContext(
+            subject="remote-user",
+            email="remote-user@example.com",
+            instance_role="editor",
+            instance_access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-remote-user",
+            organization_role="member",
+            group_ids=frozenset({"group-engineering"}),
+            claims_issued_at=int(time.time()),
+            is_remote=True,
+        ),
+    )
+
+
 def _reserve_submission(
     conn,
     *,
@@ -86,6 +138,7 @@ def _reserve_submission(
     content: dict | None = None,
     metadata: dict | None = None,
     native_message_id: str | None = None,
+    message_kind: str | None = None,
 ):
     delivery_id = message_deliveries.new_delivery_id()
     row = message_deliveries.insert_delivery(
@@ -106,6 +159,7 @@ def _reserve_submission(
             metadata=metadata,
             author_name=author_name,
             native_message_id=native_message_id,
+            message_kind=message_kind,
         ),
         dispatch_text=text,
         dedupe_key=(
@@ -232,8 +286,26 @@ def _build_controller_double(handler=None):
     """
 
     controller = MagicMock()
+    controller.memory_read_scope_for_cli_session = lambda session_id: controller.memory_scope_for_cli_session(session_id)
     controller.message_handler = MagicMock()
-    controller.message_handler.handle_user_message = AsyncMock(side_effect=handler or (lambda ctx, text: None))
+
+    async def _handle_user_message(
+        context,
+        text,
+        *,
+        lifecycle_snapshot=None,
+    ):
+        payload = context.platform_specific or {}
+        assert "_turn_lifecycle_admission" not in payload
+        assert "_turn_lifecycle_snapshot" not in payload
+        del lifecycle_snapshot
+        if handler is not None:
+            return await handler(context, text)
+        return None
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
 
     sinks: dict = {}
     controller.active_turn_sinks = sinks
@@ -280,7 +352,7 @@ def _build_controller_double(handler=None):
                     runtime_key=f"runtime:{logical_turn_id}",
                     runtime_turn_id=f"runtime-turn:{logical_turn_id}",
                 )
-        sink = sinks.get(controller._get_session_key(ctx))
+        sink = sinks.get(resolve_turn_sink_key(controller, ctx))
         if sink and sink.get("done_event") is not None:
             sink["done_event"].set()
 
@@ -293,7 +365,1760 @@ def _build_controller_double(handler=None):
     # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
+    controller.config = SimpleNamespace(memory=MemoryConfig(enabled=True))
+    controller.memory_adapter = None
+    controller.memory_runtime = None
+    controller.memory_module = None
+    controller._memory_reconcile_task = None
+    controller._memory_disabled_cleanup_task = None
+    controller._memory_disabled_cleanup_unproved = False
+    controller._memory_replacement_gate = None
+    controller.default_memory_project_id.return_value = "default"
+    for method_name in (
+        "_memory_replacement_lock",
+        "_await_disabled_memory_cleanup",
+        "_attach_memory_runtime",
+        "_detach_memory_runtime",
+        "_memory_runtime_for_operation",
+        "_disabled_memory_source_payload",
+        "_disabled_memory_status_payload",
+        "_disabled_memory_status_payload_locked",
+        "_disabled_memory_processing_record_payload",
+        "_disabled_memory_maintenance_payload",
+        "_memory_scope_for_runtime",
+        "_memory_scope_for_project",
+        "wake_memory",
+        "install_memory_runtime",
+        "memory_status_payload",
+        "memory_processing_record_payload",
+        "memory_failure_log_payload",
+        "memory_maintenance_payload",
+        "memory_profile_payload",
+        "memory_processing_record_entries_payload",
+        "memory_processing_record_entry_payload",
+        "memory_projects_payload",
+        "memory_search_payload",
+        "memory_list_payload",
+    ):
+        method = getattr(Controller, method_name)
+        setattr(controller, method_name, method.__get__(controller, Controller))
     return controller
+
+
+def test_memory_internal_routes_cannot_bypass_controller_lifecycle() -> None:
+    """Wave 0: internal Memory routes must not inspect runtime ownership."""
+
+    tree = ast.parse(inspect.getsource(internal_server.create_app))
+    bypasses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "memory_runtime"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "controller"
+    ]
+    private_runtime_helpers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_memory_runtime"
+    ]
+    reflective_bypasses = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "getattr"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "controller"
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "memory_runtime"
+    ]
+
+    assert bypasses == []
+    assert private_runtime_helpers == []
+    assert reflective_bypasses == []
+
+
+def test_memory_internal_server_keeps_implementation_imports_out_of_host_boundary() -> None:
+    tree = ast.parse(Path(internal_server.__file__).read_text(encoding="utf-8"))
+    implementation_imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "avibe_memory" and [alias.name for alias in node.names] != [
+                "CaptureRequest"
+            ]:
+                implementation_imports.append(node.module)
+            elif node.module.startswith("avibe_memory.") and node.module != "core.memory_loader":
+                implementation_imports.append(node.module)
+        elif isinstance(node, ast.Import):
+            implementation_imports.extend(
+                alias.name
+                for alias in node.names
+                if alias.name == "avibe_memory" or alias.name.startswith("avibe_memory.")
+            )
+
+    assert implementation_imports == []
+
+
+def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> None:
+    from core.memory_adapter import DisabledMemoryAdapter
+
+    controller = _build_controller_double()
+    controller.config.memory = MemoryConfig(enabled=False)
+    controller.memory_adapter = DisabledMemoryAdapter()
+    controller._create_memory_runtime = Mock(
+        side_effect=AssertionError("status must not construct Memory")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get("/internal/memory/status")
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "disabled"
+    assert response.json()["source"]["reason"] == "memory_disabled"
+    controller._create_memory_runtime.assert_not_called()
+
+
+def test_memory_status_unknown_failure_uses_stable_envelope() -> None:
+    controller = _build_controller_double()
+    controller.memory_status_payload = AsyncMock(
+        side_effect=RuntimeError("injected lifecycle failure")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get("/internal/memory/status")
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "memory_store_unavailable"}
+
+
+def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=RuntimeError("injected lifecycle failure")
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_code"),
+    [
+        ("MemoryImplementationUnavailableError", "memory_implementation_unavailable"),
+        ("MemoryImplementationIncompatibleError", "memory_implementation_incompatible"),
+    ],
+)
+def test_memory_projects_implementation_failure_uses_stable_error_envelope(
+    error_type: str,
+    expected_code: str,
+) -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import (
+        MemoryImplementationIncompatibleError,
+        MemoryImplementationUnavailableError,
+    )
+
+    error_class = {
+        "MemoryImplementationUnavailableError": MemoryImplementationUnavailableError,
+        "MemoryImplementationIncompatibleError": MemoryImplementationIncompatibleError,
+    }[error_type]
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_projects_payload = AsyncMock(side_effect=error_class("injected"))
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": expected_code}
+
+
+def test_memory_projects_implementation_failure_preserves_admitted_cli_session_boundary() -> None:
+    from core import internal_server as server
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_contract import MemoryImplementationUnavailableError
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller._memory_implementation_error = MemoryImplementationUnavailableError("injected")
+    controller._memory_scopes_by_session = {}
+    controller._memory_cli_facts_by_session = {}
+    controller._memory_implementation_cli_sessions = set()
+    controller._memory_admission = lambda: pytest.fail(
+        "implementation failure must be projected before admission imports"
+    )
+    controller._memory_turn_facts = lambda _context: pytest.fail(
+        "implementation failure must be projected before facts imports"
+    )
+    controller.memory_projects_payload = AsyncMock(
+        side_effect=MemoryImplementationUnavailableError("injected")
+    )
+
+    context = SimpleNamespace(
+        platform_specific={
+            "agent_session_target": {"id": "session-1"},
+        },
+        platform="avibe",
+    )
+    assert Controller.configure_memory_cli_session(
+        controller,
+        context,
+        admitted=True,
+    )
+    assert controller._memory_implementation_cli_sessions == {"session-1"}
+    app = server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.get(
+                "/internal/memory/projects",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": "memory_implementation_unavailable"}
+
+
+@pytest.mark.parametrize(
+    ("implementation_error", "expected_error"),
+    [
+        (MemoryImplementationUnavailableError("injected"), "memory_implementation_unavailable"),
+        (MemoryImplementationIncompatibleError("injected"), "memory_implementation_incompatible"),
+    ],
+)
+def test_memory_remember_implementation_failure_uses_stable_error_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+    implementation_error: BaseException,
+    expected_error: str,
+) -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
+    controller._memory_implementation_error = implementation_error
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.capture_memory = Mock(
+        side_effect=AssertionError(
+            "implementation failure must short-circuit before capture"
+        )
+    )
+    real_import = builtins.__import__
+
+    def fail_memory_type_import(name, *args, **kwargs):
+        if name == "avibe_memory" or name.startswith("avibe_memory."):
+            raise RuntimeError("optional implementation import failed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_memory_type_import)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/remember",
+                headers={CALLER_SESSION_HEADER: "session-1"},
+                json={"text": "remember this"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "failed", "error": expected_error}
+
+
+def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.install_memory_runtime = AsyncMock(return_value={"ok": True})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/install-runtime")
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    controller.install_memory_runtime.assert_awaited_once_with()
+
+
+def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
+    async def _exercise() -> None:
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={},
+        )
+
+        async def handler(received_context, _text):
+            assert "_turn_lifecycle_admission" not in (
+                received_context.platform_specific or {}
+            )
+
+        controller = _build_controller_double(handler=handler)
+        await controller.message_handler.handle_user_message(context, "hello")
+
+    asyncio.run(_exercise())
+
+
+def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> None:
+    controller = _build_controller_double()
+    captured = []
+
+    def _snapshot(_controller, *, ownership_candidate_run_ids=None):
+        captured.append(ownership_candidate_run_ids)
+        return {"ok": True, "agents": [], "owned_run_ids": []}
+
+    monkeypatch.setattr("core.services.running_agents.snapshot_running_agents", _snapshot)
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            valid = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": ["run-a", "run-b"]},
+            )
+            oversized = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": [f"run-{index}" for index in range(102)]},
+            )
+        return valid, oversized
+
+    valid, oversized = asyncio.run(_exercise())
+
+    assert valid.status_code == 200
+    assert oversized.status_code == 400
+    assert oversized.json()["error"] == "invalid_run_candidates"
+    assert captured == [["run-a", "run-b"]]
+
+
+def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.archive_session = AsyncMock(
+        return_value={"id": "ses-memory", "status": "archived"}
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session": {"id": "ses-memory", "status": "archived"},
+    }
+    # The UI transport waits without a reporting deadline so the controller can
+    # finish the terminal archive write. Memory flush is scheduled afterwards.
+    controller.archive_session.assert_awaited_once_with(
+        "ses-memory",
+        deadline_seconds=5.0,
+    )
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": " ses-memory"},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "principal_id": "u-untrusted"},
+    ],
+)
+def test_memory_archive_session_rejects_widened_or_invalid_payloads(
+    payload: dict[str, object],
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_session = AsyncMock(return_value={})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json=payload,
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.archive_session.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error,status_code,error_code",
+    [
+        (LookupError("missing"), 404, "session_not_found"),
+        (RuntimeError("failed"), 503, "session_archive_unavailable"),
+    ],
+)
+def test_memory_archive_session_returns_closed_failure_codes(
+    error: Exception,
+    status_code: int,
+    error_code: str,
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_session = AsyncMock(side_effect=error)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == status_code
+    assert response.json() == {"ok": False, "error": error_code}
+
+
+def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    calls: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def principal_for_user_key(self, user_key: str) -> str:
+            return {
+                "avibe:local": "u-local-principal",
+                "avibe:remote:subject-2": "u-remote-principal",
+            }[user_key]
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("processing-record", verified_user_key))
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+        async def failure_log_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("failures", verified_user_key))
+            return {"status": "ok", "items": [], "recovery": None}
+
+        async def maintenance_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("maintenance", verified_user_key))
+            return {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": True,
+                "clear_in_progress": None,
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str, user_key: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            composite = await client.get(
+                "/internal/memory/processing-record",
+                headers=headers(
+                    "/internal/memory/processing-record",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            local = await client.get(
+                "/internal/memory/failures",
+                headers=headers("/internal/memory/failures", "avibe:local"),
+            )
+            remote = await client.get(
+                "/internal/memory/maintenance",
+                headers=headers(
+                    "/internal/memory/maintenance",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            unsigned = await client.get("/internal/memory/failures")
+            return composite, local, remote, unsigned
+
+    composite, local, remote, unsigned = asyncio.run(_exercise())
+
+    assert composite.status_code == local.status_code == remote.status_code == unsigned.status_code == 200
+    assert "avibe:remote:subject-2" not in composite.text
+    assert "u-remote-principal" not in composite.text
+    assert calls == [
+        ("processing-record", "avibe:remote:subject-2"),
+        ("failures", "avibe:local"),
+        ("maintenance", "avibe:remote:subject-2"),
+        ("failures", None),
+    ]
+
+
+def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    captured: list[tuple] = []
+
+    class Runtime:
+        async def search_payload(
+            self,
+            query,
+            policy,
+            principal_id,
+            project_id,
+            *,
+            current_session_id=None,
+        ):
+            captured.append(
+                (query, policy, principal_id, project_id, current_session_id)
+            )
+            return {"status": "ok", "items": []}
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={
+                    "query": "connect the clues",
+                    "policy": {
+                        "mode": "agentic",
+                        "max_results": 8,
+                        "include_profile": True,
+                        "include_current_session": False,
+                        "timeout_seconds": 30,
+                        "max_model_calls": 2,
+                        "cost_budget_tokens": 32_000,
+                    },
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+    assert len(captured) == 1
+    query, policy, principal_id, project_id, current_session_id = captured[0]
+    assert query == "connect the clues"
+    assert policy.mode == "agentic"
+    assert policy.timeout_seconds == 30
+    assert principal_id == "u-11111111111111111111111111111111"
+    assert project_id == "default"
+    assert current_session_id == "ses-memory"
+
+
+def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch) -> None:
+    import builtins
+
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_search_payload = AsyncMock(
+        return_value={"status": "ok", "items": []}
+    )
+    app = internal_server.create_app(controller)
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "avibe_memory.types":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/search",
+                headers={CALLER_SESSION_HEADER: "ses-memory"},
+                json={"query": "connect the clues", "policy": {"mode": "keyword"}},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": []}
+
+
+def test_memory_list_accepts_everos_maximum_at_controller_boundary() -> None:
+    """MEMORY-LIST-009: the internal socket accepts the EverOS maximum."""
+
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        list_memory_projects=AsyncMock(return_value=("default", "notes")),
+        list_episodes_payload=AsyncMock(
+            return_value={"status": "ok", "items": [], "page": 2}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "notes", "page": 2, "limit": 100},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "items": [], "page": 2}
+    controller.memory_scope_for_cli_session.assert_called_once_with("ses-memory-list")
+    runtime.list_memory_projects.assert_awaited_once_with(
+        "u-11111111111111111111111111111111"
+    )
+    runtime.list_episodes_payload.assert_awaited_once_with(
+        "u-11111111111111111111111111111111",
+        "notes",
+        page=2,
+        page_size=100,
+    )
+
+
+def test_memory_list_reports_unavailable_store_before_named_project_validation() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        available=False,
+        list_memory_projects=AsyncMock(return_value=("default",)),
+        list_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "notes", "page": 1, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_store_unavailable",
+    }
+    runtime.list_memory_projects.assert_not_awaited()
+    runtime.list_episodes_payload.assert_not_awaited()
+
+
+def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(
+        list_all_episodes_payload=AsyncMock(),
+        list_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={"project": "all", "page": 1, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_all_episodes_payload.assert_not_awaited()
+    runtime.list_episodes_payload.assert_not_awaited()
+
+
+def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
+    """MEMORY-LIST-003, MEMORY-LIST-008."""
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        resolve_principal_for_user_key=AsyncMock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(
+            return_value={
+                "status": "ok",
+                "items": [],
+                "next_cursor": "next-token",
+            }
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    user_key = "avibe:remote:subject-list"
+
+    async def _exercise() -> httpx.Response:
+        path = "/internal/memory/list"
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={
+                    "project": "all",
+                    "cursor": "cursor-token",
+                    "limit": 7,
+                    "origin": "agent",
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["next_cursor"] == "next-token"
+    runtime.resolve_principal_for_user_key.assert_awaited_once_with(user_key)
+    runtime.list_all_episodes_payload.assert_awaited_once_with(
+        "u-22222222222222222222222222222222",
+        cursor="cursor-token",
+        limit=7,
+        origin="agent",
+    )
+
+
+def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    runtime = SimpleNamespace(list_episodes_payload=AsyncMock())
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/memory/list",
+                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
+                json={
+                    "project": "default",
+                    "page": 1,
+                    "limit": 20,
+                    "origin": "agent",
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_episodes_payload.assert_not_awaited()
+
+
+def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        resolve_principal_for_user_key=AsyncMock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(
+            return_value={"status": "failed", "error": "memory_invalid_input"}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={"project": "all", "cursor": "malformed", "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+
+
+def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(
+        resolve_principal_for_user_key=AsyncMock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers={
+                    "content-type": "application/json",
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                content='{"project":"all","cursor":"\\ud800","limit":20}',
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    runtime.list_all_episodes_payload.assert_not_awaited()
+
+
+def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatch) -> None:
+    import builtins
+
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
+    runtime = SimpleNamespace(
+        resolve_principal_for_user_key=AsyncMock(
+            return_value="u-22222222222222222222222222222222"
+        ),
+        list_all_episodes_payload=AsyncMock(
+            return_value={"status": "ok", "items": [], "next_cursor": None}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/list"
+    user_key = "avibe:local"
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "avibe_memory.runtime":
+            raise RuntimeError("optional implementation initializer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+                json={"project": "all", "cursor": cursor, "limit": 20},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    runtime.list_all_episodes_payload.assert_awaited_once_with(
+        "u-22222222222222222222222222222222",
+        cursor=cursor,
+        limit=20,
+    )
+
+
+def test_memory_wake_uses_non_destructive_runtime_operation() -> None:
+    runtime = SimpleNamespace(
+        wake=AsyncMock(return_value={"ok": True, "state": "running"})
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/memory/wake", json={})
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "state": "running"}
+    runtime.wake.assert_awaited_once_with()
+
+
+def test_memory_wake_preserves_store_unavailable_outcome() -> None:
+    controller = _build_controller_double()
+    controller.wake_memory = AsyncMock(
+        side_effect=MemoryStoreUnavailableError(
+            "Disabled Memory cleanup is still in progress"
+        )
+    )
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/wake", json={})
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "ok": False,
+        "state": "degraded",
+        "error": "memory_store_unavailable",
+    }
+    controller.wake_memory.assert_awaited_once_with()
+
+
+def test_reconcile_memory_hot_applies_the_persisted_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config.v2_config import MemoryConfig, V2Config
+
+    memory = MemoryConfig(enabled=False)
+    monkeypatch.setattr(
+        V2Config,
+        "load",
+        classmethod(lambda cls: SimpleNamespace(memory=memory)),
+    )
+    controller = _build_controller_double()
+    controller.reconcile_memory = AsyncMock(
+        return_value={"ok": True, "state": "disabled"}
+    )
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/reconcile-memory", json={})
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "state": "disabled"}
+    controller.reconcile_memory.assert_awaited_once_with(memory)
+
+
+def test_memory_preflight_requires_signed_ui_operator() -> None:
+    controller = _build_controller_double()
+    controller.preflight_memory = AsyncMock()
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/memory/preflight", json={"memory": {}})
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 403
+    assert response.json() == {"ok": False, "error": "memory_access_denied"}
+    controller.preflight_memory.assert_not_awaited()
+
+
+def test_memory_preflight_uses_controller_lifecycle_when_runtime_is_disabled() -> None:
+    from config.v2_config import (
+        MemoryConfig,
+        MemoryEndpointConfig,
+        MemoryProcessingConfig,
+        memory_config_to_payload,
+    )
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/preflight"
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example/v1",
+                model="chat-model",
+                api_key="llm-secret",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embedding.example/v1",
+                model="embedding-model",
+                api_key="embedding-secret",
+            ),
+        ),
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.preflight_memory = AsyncMock(return_value={"ok": True})
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers=headers,
+                json={"memory": memory_config_to_payload(candidate, include_secrets=True)},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    controller.preflight_memory.assert_awaited_once_with(candidate)
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name", "operation"),
+    [
+        ("/internal/memory/repair", "repair_memory", "repair"),
+        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
+    ],
+)
+def test_memory_data_operations_require_signed_ui_operator(
+    path: str,
+    method_name: str,
+    operation: str,
+) -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER
+
+    secret = "test-memory-ui-secret"
+    controller = _build_controller_double()
+    handler = AsyncMock()
+    setattr(controller, method_name, handler)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unsigned = await client.post(
+                path,
+                json={"confirm_loss": True},
+            )
+            invalid = await client.post(
+                path,
+                json={"confirm_loss": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: "invalid-proof",
+                },
+            )
+        return unsigned, invalid
+
+    unsigned, invalid = asyncio.run(_exercise())
+    assert unsigned.status_code == invalid.status_code == 403
+    assert unsigned.json() == invalid.json() == {
+        "ok": False,
+        "operation": operation,
+        "error": "memory_access_denied",
+    }
+    handler.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name", "operation"),
+    [
+        ("/internal/memory/repair", "repair_memory", "repair"),
+        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
+    ],
+)
+def test_memory_data_operations_require_exact_loss_confirmation(
+    path: str,
+    method_name: str,
+    operation: str,
+) -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    controller = _build_controller_double()
+    handler = AsyncMock()
+    setattr(controller, method_name, handler)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> list[httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return [
+                await client.post(path, json=payload, headers=headers)
+                for payload in (
+                    {},
+                    {"confirm_loss": False},
+                    {"confirm": True},
+                    {"confirm_loss": True, "extra": True},
+                )
+            ]
+
+    responses = asyncio.run(_exercise())
+    for response in responses:
+        assert response.status_code == 400
+        assert response.json() == {
+            "ok": False,
+            "operation": operation,
+            "error": "memory_loss_confirmation_required",
+            "result": "unchanged",
+        }
+    handler.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("path", "method_name", "operation"),
+    [
+        ("/internal/memory/repair", "repair_memory", "repair"),
+        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
+    ],
+)
+def test_memory_data_operations_return_distinct_final_result(
+    path: str,
+    method_name: str,
+    operation: str,
+) -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    result = {
+        "ok": True,
+        "operation": operation,
+        "result": "completed",
+        "data_deleted": True,
+        "data_remaining": False,
+    }
+    controller = _build_controller_double()
+    handler = AsyncMock(return_value=result)
+    setattr(controller, method_name, handler)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json={"confirm_loss": True}, headers=headers)
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 200
+    assert response.json() == result
+    handler.assert_awaited_once_with(confirm_loss=True)
+
+
+def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
+    from config.v2_config import MemoryConfig, memory_config_to_payload
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/reconfigure"
+    candidate = MemoryConfig(enabled=False, mode="custom")
+    expected = MemoryConfig(enabled=False)
+    controller = _build_controller_double()
+    controller.reconfigure_memory = AsyncMock(
+        return_value={"ok": True, "operation": "reconfigure"}
+    )
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                headers=headers,
+                json={
+                    "confirm_loss": True,
+                    "memory": memory_config_to_payload(candidate, include_secrets=True),
+                    "expected_memory": memory_config_to_payload(
+                        expected,
+                        include_secrets=True,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    controller.reconfigure_memory.assert_awaited_once_with(
+        candidate,
+        expected_config=expected,
+        confirm_loss=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        ({"ok": True, "result": "completed", "health": {}}, 200),
+        (
+            {
+                "ok": False,
+                "error": "memory_repair_not_required",
+                "result": "unchanged",
+            },
+            409,
+        ),
+        (
+            {
+                "ok": False,
+                "error": "memory_repair_failed",
+                "result": "timed_out",
+            },
+            503,
+        ),
+    ],
+)
+def test_memory_repair_maps_controller_status(result: dict, expected_status: int) -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    controller = _build_controller_double()
+    controller.repair_memory = AsyncMock(return_value=result)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json={"confirm_loss": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == expected_status
+    assert response.json() == result
+
+
+def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise MemoryStoreUnavailableError("Memory store is unavailable")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "unavailable"}, "items": []},
+                "maintenance": {
+                    "source": {"status": "unavailable"},
+                    "can_clear": False,
+                    "clear_in_progress": None,
+                },
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert verified_user_keys == [user_key]
+
+
+def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise AssertionError("the socket route must not resolve Memory operators")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert verified_user_keys == [user_key]
+
+
+def test_native_processing_record_routes_authorize_the_selected_project() -> None:
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    principal_id = "u-11111111111111111111111111111111"
+    runtime = SimpleNamespace(
+        resolve_principal_for_user_key=AsyncMock(return_value=principal_id),
+        list_memory_projects=AsyncMock(return_value=("default", "notes")),
+        processing_record_entries_payload=AsyncMock(
+            return_value={"status": "ok", "entries": [], "next_cursor": None}
+        ),
+        processing_record_entry_payload=AsyncMock(
+            return_value={"status": "ok", "entry": {"memcell_id": "mc_1"}}
+        ),
+    )
+    controller = _build_controller_double()
+    controller.default_memory_project_id.return_value = "default"
+    controller.memory_runtime = runtime
+    secret = "test-memory-ui-secret"
+    user_key = "avibe:local"
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            list_path = "/internal/memory/processing-record/entries"
+            detail_path = "/internal/memory/processing-record/entry"
+            listed = await client.get(
+                f"{list_path}?project=notes&limit=17",
+                headers=headers(list_path),
+            )
+            detail = await client.get(
+                f"{detail_path}?memcell_id=mc_1&project=notes",
+                headers=headers(detail_path),
+            )
+            unknown = await client.get(
+                f"{list_path}?project=unknown&limit=17",
+                headers=headers(list_path),
+            )
+            return listed, detail, unknown
+
+    listed, detail, unknown = asyncio.run(_exercise())
+
+    assert listed.status_code == 200
+    assert detail.status_code == 200
+    assert unknown.status_code == 400
+    runtime.processing_record_entries_payload.assert_awaited_once_with(
+        principal_id, "notes", None, 17
+    )
+    runtime.processing_record_entry_payload.assert_awaited_once_with(
+        principal_id, "notes", "mc_1"
+    )
+    assert runtime.list_memory_projects.await_count == 3
+
+
+def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> None:
+    """Long capture work runs after the Controller pointer snapshot."""
+
+    from core.controller import Controller
+    from avibe_memory import CaptureAccepted
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    class Module:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def capture(self, _request):  # noqa: ANN001, ANN202
+            assert controller._memory_replacement_lock().locked() is False
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return CaptureAccepted()
+
+    module = Module()
+    runtime = SimpleNamespace(available=True, module=module)
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(
+        memory=SimpleNamespace(enabled=True),
+    )
+    controller.memory_runtime = runtime
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-" + "1" * 32,
+        "p-" + "2" * 32,
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/internal/memory/remember",
+                    json={"text": "remember this"},
+                    headers={CALLER_SESSION_HEADER: "session-1"},
+                )
+            )
+            await module.started.wait()
+            async with asyncio.timeout(0.1):
+                async with controller._memory_replacement_lock():
+                    assert controller.memory_runtime is runtime
+            module.release.set()
+            return await request
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    assert module.calls == 1
+
+
+def test_memory_remember_accepts_text_over_legacy_controller_limit() -> None:
+    """MEMORY-SEARCH-018: the internal socket delegates large remember text."""
+
+    from avibe_memory import CaptureAccepted
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
+
+    text = "remember this detail " * 300
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session.return_value = (
+        "u-11111111111111111111111111111111",
+        "default",
+    )
+    controller.memory_runtime = SimpleNamespace()
+    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/remember",
+                json={"text": text},
+                headers={CALLER_SESSION_HEADER: "session-1"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert len(text) > 4_000
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    request = controller.capture_memory.await_args.args[0]
+    assert request.text == text
 
 
 # ---------------------------------------------------------------------
@@ -381,8 +2206,12 @@ def test_health_endpoint_reports_the_controller_runtime_identity(monkeypatch):
     }
 
 
-def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
-    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+@pytest.mark.parametrize("env_value", [None, "1"])
+def test_model_hub_rpc_uses_controller_owned_service(monkeypatch, env_value):
+    if env_value is None:
+        monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", env_value)
     controller = _build_controller_double()
     controller.model_hub_service = MagicMock()
     controller.model_hub_service.list_sources.return_value = [{"id": "src_owned"}]
@@ -404,7 +2233,7 @@ def test_model_hub_rpc_uses_controller_owned_service(monkeypatch):
 
 
 def test_model_hub_rpc_is_stably_disabled_without_touching_service(monkeypatch):
-    monkeypatch.delenv("VIBE_MODEL_HUB_ENABLED", raising=False)
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
     controller = _build_controller_double()
     controller.model_hub_service = MagicMock()
     app = internal_server.create_app(controller)
@@ -426,6 +2255,58 @@ def test_model_hub_rpc_is_stably_disabled_without_touching_service(monkeypatch):
         "error": "feature_disabled",
     }
     assert controller.model_hub_service.mock_calls == []
+
+
+def test_model_hub_dependency_rpc_remains_available_when_feature_is_disabled(monkeypatch):
+    from core.handlers.model_hub.adapter import (
+        EngineEnsureResult,
+        EngineHealth,
+        EngineStatus,
+    )
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
+    controller = _build_controller_double()
+    controller.model_hub_service = None
+    controller.model_hub_engine_adapter = SimpleNamespace(
+        ensure_installed=AsyncMock(
+            return_value=EngineEnsureResult(
+                status=EngineStatus(
+                    health=EngineHealth.NOT_STARTED,
+                    installed_version="v7.2.149",
+                    verified=True,
+                    listen_host="127.0.0.1",
+                    listen_port=None,
+                    last_check_iso="2026-09-05T00:00:00Z",
+                    host_platform="linux-amd64",
+                ),
+                changed=True,
+            )
+        )
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                "/internal/model-hub",
+                json={
+                    "operation": "runtime_ensure_dependency",
+                    "payload": {"force": True, "offline": True},
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["enabled"] is False
+    assert result["changed"] is True
+    assert result["status"]["installed_version"] == "v7.2.149"
+    controller.model_hub_engine_adapter.ensure_installed.assert_awaited_once_with(
+        force=True,
+        offline=True,
+    )
 
 
 async def _publish_event_round_trip():
@@ -489,6 +2370,96 @@ def test_publish_event_endpoint_emits_allowlisted_bus_event():
     ]
 
 
+def test_internal_events_end_a_subscriber_whose_queue_overflowed(monkeypatch):
+    """The controller feed drops its reader rather than serving it a hole.
+
+    This is the first bounded queue on the controller → UI-server → browser
+    path, and a discard here is the most invisible of the three: the UI server's
+    broker never sees the event, so every id downstream stays contiguous and
+    every socket keeps heartbeating. Ending the stream is what turns the loss
+    into a signal -- the bridge reconnects, the reconnect flips
+    ``workbench.events.bridge.status``, and browsers reconcile once. Announcing
+    the hole down this same stream cannot work: the queue is still full, so the
+    next iteration finds another discard and announces again, starving the
+    payload frames the warning was about.
+    """
+
+    from core import inbox_events
+
+    subscriptions: list[tuple[int, asyncio.Queue]] = []
+    real_subscribe = inbox_events.bus.subscribe
+
+    def tracking_subscribe():
+        # The controller handshake carries no sub_id (the browser feed's does),
+        # so the test learns it the only other way available to a caller.
+        subscription = real_subscribe()
+        subscriptions.append(subscription)
+        return subscription
+
+    monkeypatch.setattr(inbox_events.bus, "subscribe", tracking_subscribe)
+    baseline_subscribers = inbox_events.bus.subscriber_count()
+
+    def decode(chunk) -> str:
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    async def collect_until_end() -> tuple[str, int, list[str], bool, int]:
+        app = internal_server.create_app(_build_controller_double())
+        route = next(
+            candidate
+            for candidate in app.routes
+            if getattr(candidate, "path", None) == "/internal/events"
+            and "GET" in (getattr(candidate, "methods", None) or set())
+        )
+        response = await route.endpoint()
+        iterator = response.body_iterator.__aiter__()
+        frames: list[str] = []
+        ended = False
+        try:
+            handshake = decode(await iterator.__anext__())
+            sub_id, queue = subscriptions[-1]
+            # Park the stream inside its read loop before overflowing the queue,
+            # so what this asserts is a discard the reader has to notice on a
+            # later iteration -- not one already covered by the handshake it
+            # just delivered.
+            pending = asyncio.create_task(iterator.__anext__())
+            await asyncio.sleep(0)
+
+            for index in range(queue.maxsize + 3):
+                inbox_events.bus.publish("runs.updated", {"run_id": f"run_{index}"})
+            # One yield runs the whole batch of ``call_soon_threadsafe``
+            # handoffs, so every discard has happened by the time the count is
+            # read.
+            await asyncio.sleep(0)
+            dropped = inbox_events.bus.dropped_count(sub_id)
+
+            # Bounded well below the ``maxsize`` frames still sitting in the
+            # queue: a stream that kept serving them would run out of the budget
+            # rather than end, which is the failure this asserts against.
+            for _ in range(5):
+                awaitable = pending if pending is not None else iterator.__anext__()
+                pending = None
+                try:
+                    frames.append(decode(await asyncio.wait_for(awaitable, timeout=2)))
+                except StopAsyncIteration:
+                    ended = True
+                    break
+        finally:
+            await iterator.aclose()
+        # Read after the generator has exited: its ``finally`` unsubscribes, and
+        # a subscription that no longer exists is owed nothing.
+        return handshake, dropped, frames, ended, inbox_events.bus.subscriber_count()
+
+    handshake, dropped, frames, ended, subscribers_after = asyncio.run(collect_until_end())
+
+    assert "event: connected" in handshake
+    assert dropped == 3
+    assert ended is True
+    # The queue still held ``maxsize`` events, so anything but a short tail here
+    # means the reader kept relaying frames across the gap.
+    assert len(frames) <= 1
+    assert subscribers_after == baseline_subscribers
+
+
 def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
     controller = _build_controller_double()
     calls = []
@@ -534,6 +2505,27 @@ def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
 
     assert resp.status_code == 500
     assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
+
+
+def test_invalidate_activity_streaming_endpoint_clears_controller_cache(monkeypatch):
+    controller = _build_controller_double()
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "core.message_mirror.reset_activity_flag_cache",
+        lambda: calls.append(True),
+    )
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/invalidate-activity-streaming")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert calls == [True]
 
 
 def test_reconcile_agent_backends_endpoint_calls_controller():
@@ -648,6 +2640,36 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
+
+
+def test_dispatch_context_does_not_restore_memory_admission_from_transient_payload(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_memory_classification",
+    )
+
+    _text, context = asyncio.run(
+        internal_server._build_dispatch_payload(
+            {
+                "session_id": session["id"],
+                "text": "remember this",
+                "author_id": "remote:authenticated",
+                "user_id": "remote:forged-memory-principal",
+                "message_kind": "original",
+                "memory_cli_admitted": True,
+                "is_ordinary_text": True,
+            }
+        )
+    )
+
+    assert context.user_id == "remote:authenticated"
+    assert context.message_kind == "original"
+    assert context.is_original_human_text is True
+    assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
@@ -899,7 +2921,9 @@ def test_dispatch_async_stop_receipt_waits_for_terminal_evidence(monkeypatch, tm
 
     started = asyncio.Event()
 
-    async def _never_settles(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _never_settles(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         # Model a long agent turn: the backend accepted the prompt but hasn't
         # produced its terminal result yet. dispatch_turn would normally hold on
         # ``await done.wait()`` with no timeout — emulate that by just sleeping so
@@ -1086,6 +3110,124 @@ def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp
             session_id=session["id"],
         )["messages"]
     assert transcript == []
+
+
+def test_dispatch_async_starts_authorized_remote_reservation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_dispatch_reservation",
+    )
+    _seed_remote_worker()
+    with engine.begin() as conn:
+        remote = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote reserved input",
+            metadata=_authorized_remote_message_metadata(),
+        )
+
+    controller = None
+
+    async def handler(context, _text):
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "remote reserved input",
+                    "user_message_id": remote["id"],
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["ok"] is True
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    with engine.connect() as conn:
+        stored = message_deliveries.get_delivery(conn, remote["id"])
+    assert stored is not None
+    assert stored["state"] == "accepted"
+
+
+def test_dispatch_async_restores_message_kind_from_reserved_delivery(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_durable_message_kind",
+    )
+    with engine.begin() as conn:
+        reserved = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="durable quick reply",
+            message_kind="quick_reply",
+        )
+
+    observed: list[MessageContext] = []
+    dispatch_kinds: list[object] = []
+    build_dispatch_payload = internal_server._build_dispatch_payload
+
+    async def observe_dispatch_payload(payload):
+        dispatch_kinds.append(payload.get("message_kind"))
+        return await build_dispatch_payload(payload)
+
+    monkeypatch.setattr(
+        internal_server,
+        "_build_dispatch_payload",
+        observe_dispatch_payload,
+    )
+    controller = None
+
+    async def handler(context, _text):
+        observed.append(context)
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "stale request text",
+                    "user_message_id": reserved["id"],
+                    "message_kind": "original",
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert dispatch_kinds == ["quick_reply"]
+    assert len(observed) == 1
+    assert observed[0].message_kind == "quick_reply"
+    assert observed[0].is_original_human_text is False
 
 
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
@@ -2225,7 +4367,12 @@ def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeyp
     assert seen_texts == ["first turn", "q1\nq2"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+            include_private_metadata=True,
+        )
     assert [m["text"] for m in transcript["messages"]] == ["first turn", "q1\nq2"]
     assert transcript["messages"][1]["author_id"] == "remote:user-a"
     assert transcript["messages"][1]["metadata"]["_web_push_user_key"] == "remote:user-a"
@@ -2259,41 +4406,77 @@ def test_cancel_resumes_the_oldest_queued_segment(monkeypatch, tmp_path):
     session_id = session["id"]
 
     started = asyncio.Event()
+    stop_requested = asyncio.Event()
+    terminal_ready = asyncio.Event()
+    queued_started = asyncio.Event()
+    tasks: list[asyncio.Task] = []
     seen: list[str] = []
 
     async def long_handler(ctx, text):
         _bind_test_native_start(engine, ctx)
+        tasks.append(asyncio.current_task())
         seen.append(text)
         if text == "first":
             started.set()
-            await asyncio.sleep(5)  # held until the test cancels it
+            await stop_requested.wait()
+            await terminal_ready.wait()
+            Controller.mark_turn_complete(controller, ctx, settled_by=SETTLED_BY_STOPPED)
         else:
-            controller.mark_turn_complete(ctx)
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+            Controller.mark_turn_complete(controller, ctx, settled_by=SETTLED_BY_TERMINAL_RESULT)
+            queued_started.set()
+
+    async def stop_backend(ctx):
+        assert ctx is app.state.in_flight_dispatches[session_id].context
+        stop_requested.set()
+        return True
 
     controller = _build_controller_double(handler=long_handler)
+    controller.command_handler.handle_stop = AsyncMock(side_effect=stop_backend)
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
     async def _go():
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            await client.post(
-                "/internal/dispatch_async",
-                json={
-                    "session_id": session_id,
-                    "text": "first",
-                    "user_message_id": first["id"],
-                },
-            )
-            await asyncio.wait_for(started.wait(), timeout=3)
-            # Queue a message while the turn runs, then Stop.
-            with engine.begin() as conn:
-                message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
-            await client.post(f"/internal/cancel/{session_id}")
-            for _ in range(300):
-                if seen == ["first", "q1"] and session_id not in app.state.in_flight_dispatches:
-                    break
-                await asyncio.sleep(0.02)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                response = await client.post(
+                    "/internal/dispatch_async",
+                    json={
+                        "session_id": session_id,
+                        "text": "first",
+                        "user_message_id": first["id"],
+                    },
+                )
+                assert response.status_code == 202
+                await asyncio.wait_for(started.wait(), timeout=3)
+                turn = app.state.in_flight_dispatches[session_id]
+                # A receipt alone cannot retire the active owner or start q1.
+                with engine.begin() as conn:
+                    message_deliveries.enqueue_queued(conn, scope_id=scope_id, session_id=session_id, text="q1")
+                response = await client.post(f"/internal/cancel/{session_id}")
+                assert response.status_code == 200
+                assert response.json()["status"] == "cancel_requested"
+                controller.command_handler.handle_stop.assert_awaited_once_with(turn.context)
+                assert stop_requested.is_set()
+                assert not turn.task.done()
+                assert app.state.in_flight_dispatches[session_id] is turn
+                assert seen == ["first"]
+
+                terminal_ready.set()
+                await asyncio.wait_for(asyncio.shield(turn.task), timeout=3)
+                await asyncio.wait_for(queued_started.wait(), timeout=3)
+                await asyncio.wait_for(asyncio.shield(tasks[-1]), timeout=3)
+                assert all(task.done() and not task.cancelled() for task in tasks)
+                assert session_id not in app.state.in_flight_dispatches
+                with engine.connect() as conn:
+                    stopped_turn = message_deliveries.get_turn(conn, turn.logical_turn_id)
+                assert stopped_turn["terminal_outcome"] == "canceled"
+        finally:
+            # Failure cleanup must not manufacture the completion asserted above.
+            pending = set(tasks) | {entry.task for entry in app.state.in_flight_dispatches.values()}
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     asyncio.run(_go())
     with engine.connect() as conn:
@@ -2381,6 +4564,44 @@ def test_cancel_returns_404_when_session_not_in_flight(tmp_path, monkeypatch):
     body = resp.json()
     assert body["ok"] is False
     assert body["code"] == "not_in_flight"
+
+
+def test_cancel_rejects_a_blank_explicit_run_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_blank_run_cancel",
+    )
+    session_id = session["id"]
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": "   "},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "code": "invalid_run_id",
+        "session_id": session_id,
+        "reason": "run_id_required",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
 
 
 def test_cancel_releases_stale_turn_when_backend_not_active(tmp_path, monkeypatch):
@@ -2521,16 +4742,10 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
         done_event = asyncio.Event()
         cleanup_started = asyncio.Event()
         allow_cleanup = asyncio.Event()
-        context = MessageContext(
-            user_id="U",
-            channel_id="C",
-            platform="avibe",
-            platform_specific={"agent_session_id": session_id},
-        )
 
         async def _stale_dispatch():
             controller.register_turn_sink(
-                controller._get_session_key(context),
+                resolve_turn_sink_key(controller, context),
                 on_chunk=AsyncMock(),
                 done_event=done_event,
                 turn_token="old-turn",
@@ -2540,14 +4755,20 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
             finally:
                 cleanup_started.set()
                 await allow_cleanup.wait()
-                controller.pop_turn_sink(controller._get_session_key(context), done_event)
+                controller.pop_turn_sink(resolve_turn_sink_key(controller, context), done_event)
 
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": session_id},
+        )
         task = asyncio.create_task(_stale_dispatch())
         for _ in range(200):
-            if controller.get_turn_sink("avibe::C") is not None:
+            if controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None:
                 break
             await asyncio.sleep(0.01)
-        assert controller.get_turn_sink("avibe::C") is not None
+        assert controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None
         app.state.in_flight_dispatches[session_id] = session_turns.Turn(
             task=task,
             context=context,
@@ -2573,7 +4794,7 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
     assert resp.status_code == 200
     assert resp.json()["status"] == "stale_released"
     assert task.cancelled()
-    assert controller.get_turn_sink("avibe::C") is None
+    assert controller.active_turn_sinks == {}
 
 
 def test_cancel_keeps_turn_when_backend_interrupt_failed(tmp_path, monkeypatch):
@@ -2957,7 +5178,7 @@ def test_dispatch_turn_registers_sink_for_dispatcher_hook():
     seen: dict = {}
 
     async def capture(ctx, text):
-        sink = controller.get_turn_sink(controller._get_session_key(ctx))
+        sink = controller.get_turn_sink(resolve_turn_sink_key(controller, ctx))
         seen["on_chunk"] = sink["on_chunk"] if sink else None
         # Release the dispatch the way a real result emit would.
         if sink:
@@ -2996,7 +5217,16 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     captured: dict = {}
     started = asyncio.Event()
 
-    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _fake_dispatch_turn(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        captured["lifecycle_snapshot"] = lifecycle_snapshot
         captured["source"] = source
         captured["on_chunk"] = on_chunk
         captured["text"] = text
@@ -3042,6 +5272,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
     events = asyncio.run(_go())
     assert captured["source"] == SOURCE_SCHEDULED, "scheduled run dispatches on the scheduler path"
+    assert captured["lifecycle_snapshot"] is None
     # A scheduled run passes the no-op chunk SINK (callable, NOT None) so dispatch_turn
     # HOLDS the turn open to its terminal result — same as a Chat turn — instead of an
     # async backend returning at prompt-submit and freeing the slot (Codex P2). The sink
@@ -3052,6 +5283,137 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     assert captured["in_flight_while_running"] is True, "registered in_flight (Stop works) while running"
     assert events == ["turn.start", "turn.end"], "publishes the session turn lifecycle on the bus"
     assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
+
+
+def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tmp_path):
+    """A create-per-run Run adopts its freshly reserved Session at admission."""
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_create_per_run_delivery",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="fresh session prompt",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    assert request_store.claim(run.id) is not None
+
+    started = asyncio.Event()
+
+    async def _fake_dispatch_turn(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
+        started.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-create-per-run:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-create-per-run",
+        },
+    )
+
+    async def _go():
+        result = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            ctx,
+            "fresh session prompt",
+            delivery_intent="queue",
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        return result
+
+    result = asyncio.run(_go())
+
+    assert result.delivery_owner_transferred is True
+    stored = request_store.get_run(run.id)
+    assert stored is not None
+    assert stored["session_id"] == session_id
+    assert stored["delivery_id"]
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "queue",
+        "status": "claimed",
+        "target_was_busy": False,
+    }
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert delivery is not None
+    assert delivery["session_id"] == session_id
+
+    unbound_existing = request_store.enqueue_definition_run(
+        definition_id="scheduled-existing",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not adopt",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    bound_create_per_run = request_store.enqueue_definition_run(
+        definition_id="scheduled-bound-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not rebind",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    with engine.begin() as conn:
+        other_session = sessions_service.create_session(
+            conn,
+            scope_id=session["scope_id"],
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        other_delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=other_session["id"],
+            text="foreign delivery",
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            unbound_existing.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            bound_create_per_run.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
 
 
 def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch, tmp_path):
@@ -3132,8 +5494,8 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert ("queue.updated", {"session_id": session_id}) in published
 
 
-def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, tmp_path):
-    """HFR-430: send-now persists first, then steers the exact FIFO head."""
+def test_agent_run_send_now_steers_its_content_without_promoting_fifo(monkeypatch, tmp_path):
+    """HFR-430: content-bearing send-now is P1 for that exact content."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3176,7 +5538,9 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
     original_started = asyncio.Event()
     seen: list[tuple[str, str]] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append((text, source))
         if text == "original work":
             _bind_test_native_start(engine, ctx)
@@ -3205,6 +5569,13 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
             )
             assert response.status_code == 202
             await asyncio.wait_for(original_started.wait(), timeout=3)
+            with engine.begin() as conn:
+                message_deliveries.enqueue_queued(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    text="older queued input",
+                )
             context = MessageContext(
                 user_id="workbench",
                 channel_id=session_id,
@@ -3240,20 +5611,23 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
     )
     controller.command_handler.handle_stop.assert_not_awaited()
     controller.session_turns._steer.assert_awaited_once()
+    assert controller.session_turns._steer.await_args.args[1].text == "apply the correction"
     assert seen == [("original work", SOURCE_HUMAN)]
     with engine.connect() as conn:
-        assert message_deliveries.list_queued(conn, session_id) == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "older queued input"
+        ]
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["metadata"]["delivery_outcome"] == {
-        "intent": "send_now",
+        "intent": "steer",
         "status": "accepted",
         "target_was_busy": True,
     }
 
 
-def test_agent_run_send_now_promotes_a_turn_started_during_admission(monkeypatch, tmp_path):
-    """A stale idle snapshot cannot downgrade explicit send-now into P3 queueing."""
+def test_agent_run_send_now_steers_a_turn_started_during_admission(monkeypatch, tmp_path):
+    """A stale idle snapshot cannot downgrade explicit P1 into P3 queueing."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3297,7 +5671,7 @@ def test_agent_run_send_now_promotes_a_turn_started_during_admission(monkeypatch
 
     async def _deliver_with_race(delivery_request, *, context=None):
         nonlocal inserted_racer
-        if delivery_request.admission_only and not inserted_racer:
+        if not inserted_racer:
             inserted_racer = True
             with engine.begin() as conn:
                 owner = _reserve_submission(
@@ -3451,14 +5825,14 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
     assert stored["delivery_id"] == queued[0]["id"]
     assert "workbench_queue_holds_run" not in stored["metadata"]
     assert stored["metadata"]["delivery_outcome"] == {
-        "intent": "send_now",
+        "intent": "steer",
         "status": "queued",
         "target_was_busy": True,
     }
 
 
-def test_agent_run_send_now_retry_promotes_its_persisted_queue_head(monkeypatch, tmp_path):
-    """A retry reuses the owned P3 Delivery instead of losing send-now intent."""
+def test_agent_run_send_now_retry_keeps_its_refused_p3_fallback_queued(monkeypatch, tmp_path):
+    """A retry does not promote a P1 Delivery after it has fallen back to P3."""
     from core.scheduled_tasks import TaskExecutionStore
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3512,13 +5886,96 @@ def test_agent_run_send_now_retry_promotes_its_persisted_queue_head(monkeypatch,
     first, second = asyncio.run(_go())
 
     assert first.delivery_status == "queued"
-    assert second.delivery_status == "accepted"
-    assert controller.session_turns._steer.await_count == 2
+    assert second.delivery_status == "queued"
+    assert controller.session_turns._steer.await_count == 1
     with engine.connect() as conn:
-        assert message_deliveries.list_queued(conn, session_id) == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "retry this correction"
+        ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["metadata"]["delivery_outcome"]["status"] == "accepted"
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "steer",
+        "status": "queued",
+        "target_was_busy": True,
+    }
+
+
+def test_legacy_send_now_re_admits_unattempted_p3_delivery(monkeypatch, tmp_path):
+    """An interrupted pre-cutover queue admission resumes as its own P1 content."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_legacy_send_now_re_admission",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        older = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="older queued work",
+        )
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="legacy exact content",
+        agent_name="worker",
+        delivery_intent="queue",
+    )
+    assert request_store.claim(request.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{request.id}",
+        platform_specific={
+            "task_execution_id": request.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        admitted = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="queue",
+        )
+        resumed = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+        return admitted, resumed
+
+    admitted, resumed = asyncio.run(_go())
+
+    assert admitted.delivery_status == "queued"
+    assert resumed.delivery_status == "accepted"
+    controller.session_turns._steer.assert_awaited_once()
+    with engine.connect() as conn:
+        queued = message_deliveries.list_queued(conn, session_id)
+        stored = request_store.get_run(request.id)
+        assert stored is not None
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert [row["id"] for row in queued] == [older["id"]]
+    assert delivery is not None
+    assert message_deliveries.delivery_has_history_event(
+        delivery,
+        kind="legacy_send_now_re_admission",
+    )
+    assert message_deliveries.delivery_has_history_event(delivery, kind="steer")
 
 
 def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
@@ -3574,7 +6031,9 @@ def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
     original_started = asyncio.Event()
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         _bind_test_native_start(engine, ctx)
         if text == "original work":
@@ -3662,7 +6121,7 @@ def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
         stored = request_store.get_run(request.id)
         assert stored is not None
         assert stored["metadata"]["delivery_outcome"] == {
-            "intent": "send_now",
+            "intent": "steer",
             "status": expected_status,
             "target_was_busy": True,
         }
@@ -3742,7 +6201,9 @@ def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner
 
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         return TurnDispatchOutcome(
             error=None,
@@ -3774,12 +6235,12 @@ def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner
         ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
     assert stored["metadata"]["delivery_outcome"]["status"] == "queued"
 
 
-def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatch, tmp_path):
-    """An idle backlog starts in FIFO order without a post-submit interrupt race."""
+def test_agent_run_send_now_on_an_idle_backlog_starts_its_own_content(monkeypatch, tmp_path):
+    """Content-bearing P1 starts itself and leaves an older P3 head queued."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -3822,7 +6283,9 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     assert request_store.claim(request.id) is not None
     seen: list[str] = []
 
-    async def _dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         seen.append(text)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
@@ -3856,16 +6319,16 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="enqueued",
+        route="ran",
         queue_persisted=True,
         target_was_busy=False,
-        delivery_status="queued",
+        delivery_status="claimed",
         delivery_owner_transferred=True,
     )
-    assert seen == ["older queued input"]
+    assert seen == ["new urgent input"]
     with engine.connect() as conn:
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
-            "new urgent input"
+            "older queued input"
         ]
     controller.command_handler.handle_stop.assert_not_awaited()
 
@@ -4111,7 +6574,9 @@ def test_idle_send_now_releases_hold_and_starts_the_exact_head(
     app = internal_server.create_app(controller)
     controller.emit_agent_message = AsyncMock()
 
-    async def _dispatch(ctrl, context, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _dispatch(
+        ctrl, context, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         assert text == "retry me later"
         _bind_test_native_start(engine, context)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -4382,7 +6847,16 @@ def test_scheduled_gate_retry_resumes_matching_reserved_delivery(monkeypatch, tm
     session_id = session["id"]
     dispatched: list[str] = []
 
-    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _accept_dispatch(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        del lifecycle_snapshot
         dispatched.append(text)
         _bind_test_native_start(engine, ctx)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -4529,6 +7003,91 @@ def test_scheduled_gate_retry_preserves_existing_delivery_owner(monkeypatch, tmp
     assert request_store.get_run(run.id)["status"] == "running"
 
 
+def test_scheduled_gate_cancellation_preserves_transferred_delivery_owner(
+    monkeypatch,
+    tmp_path,
+):
+    """A canceled executor cannot take a natively accepted steer back from Delivery."""
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _active_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_sched_canceled_handoff",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="steer while active",
+        agent_name="worker",
+    )
+    assert request_store.claim(run.id) is not None
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    native_write_started = asyncio.Event()
+    release_native_write = asyncio.Event()
+
+    async def _natively_accepted_delivery(request, *, context):
+        del request, context
+        native_write = asyncio.create_task(release_native_write.wait())
+        native_write_started.set()
+        try:
+            await asyncio.shield(native_write)
+        except asyncio.CancelledError:
+            # Match the shared steering boundary: native receipt is reconciled
+            # before cancellation propagates to durable admission.
+            await native_write
+            raise
+
+    monkeypatch.setattr(manager, "deliver", _natively_accepted_delivery)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{run.id}",
+        platform_specific={
+            "task_execution_id": run.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        submission = asyncio.create_task(
+            controller.session_turn_gate.submit_scheduled(
+                session_id,
+                context,
+                "steer while active",
+            )
+        )
+        await native_write_started.wait()
+        submission.cancel()
+        await asyncio.sleep(0)
+        assert not submission.done()
+        release_native_write.set()
+        return await submission
+
+    result = asyncio.run(_go())
+
+    assert result == session_turns.TurnSubmissionResult(
+        route="enqueued",
+        queue_persisted=True,
+        target_was_busy=True,
+        delivery_status="reserved",
+        delivery_owner_transferred=True,
+    )
+    stored = request_store.get_run(run.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["delivery_id"]
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert delivery is not None
+    assert delivery["state"] == "reserved"
+
+
 def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_path):
     """After ownership transfer, a pre-claim failure belongs to Delivery recovery."""
     from core.scheduled_tasks import TaskExecutionStore
@@ -4549,7 +7108,16 @@ def test_scheduled_send_now_recovers_transferred_reservation(monkeypatch, tmp_pa
     assert request_store.claim(run.id) is not None
     dispatched: list[str] = []
 
-    async def _accept_dispatch(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _accept_dispatch(
+        ctrl,
+        ctx,
+        text,
+        *,
+        source=SOURCE_HUMAN,
+        on_chunk=None,
+        lifecycle_snapshot=None,
+    ):
+        del lifecycle_snapshot
         dispatched.append(text)
         _bind_test_native_start(engine, ctx)
         return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
@@ -4641,16 +7209,27 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     session_id = session["id"]
 
     started = asyncio.Event()
+    stop_requested = asyncio.Event()
+    terminal_ready = asyncio.Event()
 
-    async def _long_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+    async def _long_dispatch_turn(
+        ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None, **_kwargs
+    ):
         _bind_test_native_start(engine, ctx)
         started.set()
-        await asyncio.sleep(5)  # held until the test cancels it
-        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+        await stop_requested.wait()
+        await terminal_ready.wait()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_STOPPED)
+
+    async def stop_backend(stop_context):
+        assert stop_context is app.state.in_flight_dispatches[session_id].context
+        stop_requested.set()
+        return True
 
     monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _long_dispatch_turn)
 
     controller = _build_controller_double()
+    controller.command_handler.handle_stop = AsyncMock(side_effect=stop_backend)
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
     ctx = MessageContext(user_id="workbench", channel_id=session_id, platform="avibe")
@@ -4658,15 +7237,37 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     async def _go():
         # Start the scheduled run in the background (it holds in_flight open).
         run = asyncio.create_task(controller.session_turn_gate.submit_scheduled(session_id, ctx, "scheduled run"))
-        await asyncio.wait_for(started.wait(), timeout=3)
-        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            resp = await client.post(f"/internal/cancel/{session_id}")
-        for _ in range(200):
-            if session_id not in app.state.in_flight_dispatches:
-                break
-            await asyncio.sleep(0.02)
-        run.cancel()
-        return resp
+        turn = None
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            turn = app.state.in_flight_dispatches[session_id]
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                resp = await client.post(f"/internal/cancel/{session_id}")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "cancel_requested"
+            controller.command_handler.handle_stop.assert_awaited_once_with(turn.context)
+            assert stop_requested.is_set()
+            assert not turn.task.done()
+            assert app.state.in_flight_dispatches[session_id] is turn
+
+            terminal_ready.set()
+            # Submission is admission, not completion: join the real dispatch too.
+            await asyncio.wait_for(asyncio.shield(turn.task), timeout=3)
+            await asyncio.wait_for(asyncio.shield(run), timeout=3)
+            assert turn.task.done() and not turn.task.cancelled()
+            assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
+            with engine.connect() as conn:
+                stopped_turn = message_deliveries.get_turn(conn, turn.logical_turn_id)
+            assert stopped_turn["terminal_outcome"] == "canceled"
+            return resp
+        finally:
+            pending = {run} | {entry.task for entry in app.state.in_flight_dispatches.values()}
+            if turn is not None:
+                pending.add(turn.task)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     resp = asyncio.run(_go())
     assert resp.status_code == 200
@@ -4675,6 +7276,888 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     # scheduled run's own context.
     controller.command_handler.handle_stop.assert_awaited_once()
     assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
+
+
+def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
+    """A Run accepted as one Turn participant cannot issue Session-wide Stop."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+    from storage.models import message_deliveries as delivery_rows
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_shared_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="steered participant",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(run.id) is not None
+
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        steer_id = message_deliveries.new_delivery_id()
+        values = dict(initial)
+        values.update(
+            id=steer_id,
+            priority="p1",
+            dedupe_key=None,
+            turn_role="steer",
+            turn_position=1,
+            submitted_at="2026-08-11T11:00:00Z",
+            updated_at="2026-08-11T11:00:00Z",
+            version=1,
+        )
+        conn.execute(delivery_rows.insert().values(**values))
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session_id,
+            delivery_id=steer_id,
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "run_is_steered_participant",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
+    saved = request_store.get_run(run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert saved["callback_completed_at"] is not None
+    assert request_store.list_pending_callbacks() == []
+
+
+def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
+    monkeypatch,
+    tmp_path,
+):
+    """A native steer in flight prevents the initial Run from stopping the Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_unresolved_steer_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="initial owner",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert turn is not None
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+        steer = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="second input already steering",
+        )
+        steer_id = str(steer["id"])
+        claimed = message_deliveries.open_steer_attempt(
+            conn,
+            steer["id"],
+            expected_version=int(steer["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+            expected_native_turn_id=str(turn["native_turn_id"]),
+        )
+        assert claimed is not None
+        assert claimed["state"] == "steering"
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "turn_has_other_participants",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        steer = message_deliveries.get_delivery(conn, steer_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
+    assert steer is not None
+    assert steer["state"] == "steering"
+
+
+def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):
+    """Canceling the owner Run cannot supersede another input's P0 replacement."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_replacement_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="initial owner",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert turn is not None
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+        replacement = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="replacement from another user",
+        )
+        successor_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=successor_turn_id,
+            session_id=session_id,
+            initial_delivery_id=str(replacement["id"]),
+            state="waiting",
+            backend="claude",
+        )
+        replacement = message_deliveries.cas_delivery(
+            conn,
+            str(replacement["id"]),
+            expected_version=int(replacement["version"]),
+            expected_states=("reserved",),
+            values={
+                "priority": "p0",
+                "state": "interrupt_waiting",
+                "turn_id": successor_turn_id,
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        )
+        assert replacement is not None
+        controlled = message_deliveries.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "interrupting",
+                "control_mode": "replace",
+                "control_attempt_id": message_deliveries.new_attempt_id(),
+                "control_expected_native_turn_id": turn["native_turn_id"],
+                "control_successor_delivery_id": replacement["id"],
+                "control_successor_turn_id": successor_turn_id,
+            },
+        )
+        assert controlled is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "turn_has_replacement_successor",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        successor = message_deliveries.get_turn(conn, successor_turn_id)
+        replacement = message_deliveries.get_delivery(conn, str(replacement["id"]))
+    assert turn is not None
+    assert turn["control_mode"] == "replace"
+    assert turn["control_successor_turn_id"] == successor_turn_id
+    assert successor is not None and successor["state"] == "waiting"
+    assert replacement is not None and replacement["state"] == "interrupt_waiting"
+
+
+def test_run_cancel_retires_its_own_in_flight_replacement(monkeypatch, tmp_path):
+    """Canceling a replacement Run cannot leave its waiting prompt activatable."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_replacement_owner_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    replacement_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="replacement from this Run",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(replacement_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        replacement = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="replacement from this Run",
+        )
+        replacement_id = str(replacement["id"])
+        successor_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=successor_turn_id,
+            session_id=session_id,
+            initial_delivery_id=replacement_id,
+            state="waiting",
+            backend="claude",
+        )
+        replacement = message_deliveries.cas_delivery(
+            conn,
+            replacement_id,
+            expected_version=int(replacement["version"]),
+            expected_states=("reserved",),
+            values={
+                "priority": "p0",
+                "state": "interrupt_waiting",
+                "turn_id": successor_turn_id,
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        )
+        assert replacement is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            replacement_run.id,
+            session_id=session_id,
+            delivery_id=replacement_id,
+        )
+        controlled = message_deliveries.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "interrupting",
+                "control_mode": "replace",
+                "control_attempt_id": message_deliveries.new_attempt_id(),
+                "control_expected_native_turn_id": turn["native_turn_id"],
+                "control_successor_delivery_id": replacement_id,
+                "control_successor_turn_id": successor_turn_id,
+            },
+        )
+        assert controlled is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": replacement_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "run_not_owned_by_turn",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(replacement_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        successor = message_deliveries.get_turn(conn, successor_turn_id)
+        replacement = message_deliveries.get_delivery(conn, replacement_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] == "interrupting"
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_successor_delivery_id"] is None
+    assert turn["control_successor_turn_id"] is None
+    assert successor is not None
+    assert successor["state"] == "terminal"
+    assert successor["terminal_outcome"] == "not_written"
+    assert replacement is not None
+    assert replacement["state"] == "retired"
+    assert replacement["turn_id"] is None
+
+
+def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):
+    """A claimed initial Run owns its starting Turn until native start resolves."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_starting_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="starting owner",
+        agent_name="worker",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="starting owner",
+        )
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            initial_delivery_id=str(delivery["id"]),
+            state="starting",
+            backend="claude",
+        )
+        claimed = message_deliveries.open_start_attempt(
+            conn,
+            str(delivery["id"]),
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+        assert claimed is not None and claimed["state"] == "claimed"
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=str(claimed["id"]),
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "cancel_requested",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        delivery = message_deliveries.get_delivery(conn, str(delivery["id"]))
+    assert turn is not None
+    assert turn["state"] == "starting"
+    assert turn["control_state"] == "pending"
+    assert turn["control_mode"] == "stop_only"
+    assert delivery is not None and delivery["state"] == "claimed"
+
+
+def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_path):
+    """Detaching one claimed Run replays every surviving batch participant."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_shared_starting_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    runs = [
+        request_store.enqueue_agent_run(
+            session_id=session["id"],
+            message=message,
+            agent_name="worker",
+        )
+        for message in ("canceled batch participant", "surviving batch participant")
+    ]
+    assert all(request_store.claim(run.id) is not None for run in runs)
+
+    with engine.begin() as conn:
+        deliveries = [
+            _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session["id"],
+                text=text,
+            )
+            for text in ("canceled batch participant", "surviving batch participant")
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            backend="claude",
+            deliveries=deliveries,
+            dispatch_text="canceled batch participant\n\nsurviving batch participant",
+        )
+        for run, delivery in zip(runs, claimed["deliveries"], strict=True):
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session["id"],
+                delivery_id=str(delivery["id"]),
+            )
+        assert message_deliveries.agent_run_exclusively_owns_turn(
+            conn,
+            run_id=runs[0].id,
+            turn_id=turn_id,
+        ) == (False, "turn_has_other_participants")
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    transport = httpx.ASGITransport(app=app)
+    dispatched: list[str] = []
+
+    async def _record_start(_session_id, _context, text, **_kwargs):
+        dispatched.append(text)
+
+    monkeypatch.setattr(manager, "_run", _record_start)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                f"/internal/cancel/{session['id']}",
+                params={"run_id": runs[0].id},
+            )
+        started_original = await manager._start_persisted_turn(
+            turn_id,
+            context=MessageContext(
+                user_id="workbench",
+                channel_id=session["id"],
+                platform="avibe",
+                platform_specific={"workbench_session_id": session["id"]},
+            ),
+        )
+        return response, started_original
+
+    response, started_original = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "run_detached"
+    assert started_original is False
+    assert dispatched == ["surviving batch participant"]
+    assert request_store.get_run(runs[0].id)["status"] == "canceled"
+    assert request_store.get_run(runs[1].id)["status"] == "running"
+    with engine.connect() as conn:
+        original = message_deliveries.get_turn(conn, turn_id)
+        canceled = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][0]["id"]),
+        )
+        surviving = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][1]["id"]),
+        )
+    assert original is not None and original["terminal_outcome"] == "not_written"
+    assert canceled is not None and canceled["state"] == "retired"
+    assert surviving is not None and surviving["state"] == "claimed"
+    assert surviving["turn_id"] != turn_id
+
+
+def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
+    """A stale observed Turn cannot detach a Run that owns the current Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_changed_turn_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recovered current owner",
+        agent_name="worker",
+    )
+    assert request_store.claim(owner_run.id) is not None
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=str(initial["id"]),
+        )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            return await controller.session_turns.deliver(
+                session_turns.DeliveryRequest(
+                    session_id=session_id,
+                    priority="p0",
+                    content=None,
+                    expected_turn_id="trn_recovered_predecessor",
+                    expected_exclusive_agent_run_id=owner_run.id,
+                ),
+                context=context,
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    result = asyncio.run(_go())
+
+    assert result.state == "waiting_terminal"
+    controller.command_handler.handle_stop.assert_awaited_once()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["control_state"] == "waiting_terminal"
+
+
+def test_run_cancel_without_an_active_turn_settles_atomically(monkeypatch, tmp_path):
+    """An orphaned live projection is canceled without inventing a Session Stop."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_ownerless_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session["id"],
+        message="orphaned live projection",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(run.id) is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session['id']}",
+                params={"run_id": run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session["id"],
+        "status": "run_detached",
+        "reason": "run_detached",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
+
+
+def test_run_cancel_retires_every_pre_native_delivery_atomically(monkeypatch, tmp_path):
+    """A canceled Run cannot leave any not-yet-written input eligible to dispatch."""
+
+    from core.inbox_events import bus
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+    from storage.delivery_states import RUN_CANCEL_RETIRE_STATES
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_pre_native_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    runs_and_deliveries: list[tuple[str, str]] = []
+    runs_by_state = []
+    for delivery_state in RUN_CANCEL_RETIRE_STATES:
+        run = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"cancel {delivery_state} input",
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        assert request_store.claim(run.id) is not None
+        runs_by_state.append((delivery_state, run))
+
+    with engine.begin() as conn:
+        for delivery_state, run in runs_by_state:
+            delivery = _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                text=f"cancel {delivery_state} input",
+            )
+            if delivery_state == "queued":
+                delivery = message_deliveries.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"state": "queued"},
+                )
+                assert delivery is not None
+            elif delivery_state == "pending_steer":
+                pending = message_deliveries.open_pending_steer_batch(
+                    conn,
+                    deliveries=[delivery],
+                    turn_id=turn_id,
+                    attempt_id=message_deliveries.new_attempt_id(),
+                )
+                assert len(pending) == 1
+                delivery = pending[0]
+            else:
+                assert delivery_state == "reserved"
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+            runs_and_deliveries.append((run.id, str(delivery["id"])))
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event, payload: published.append((event, payload)),
+    )
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return [
+                await client.post(
+                    f"/internal/cancel/{session_id}",
+                    params={"run_id": run_id},
+                )
+                for run_id, _delivery_id in runs_and_deliveries
+            ]
+
+    responses = asyncio.run(_go())
+
+    assert all(response.status_code == 200 for response in responses)
+    assert [response.json()["status"] for response in responses] == [
+        "run_detached"
+    ] * len(RUN_CANCEL_RETIRE_STATES)
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        retired = [
+            message_deliveries.get_delivery(conn, delivery_id)
+            for _run_id, delivery_id in runs_and_deliveries
+        ]
+    assert [row["state"] for row in retired] == [
+        "retired"
+    ] * len(RUN_CANCEL_RETIRE_STATES)
+    assert all(row["current_attempt_id"] is None for row in retired)
+    assert all(row["current_target_turn_id"] is None for row in retired)
+    for run_id, _delivery_id in runs_and_deliveries:
+        saved = request_store.get_run(run_id)
+        assert saved is not None
+        assert saved["status"] == "canceled"
+        assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
+    assert published.count(("queue.updated", {"session_id": session_id})) == len(
+        RUN_CANCEL_RETIRE_STATES
+    )
+
+
+def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_path):
+    """A Run remains allowed to stop the backend when it owns the whole Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_exclusive_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session["id"],
+        message="sole initial participant",
+        agent_name="worker",
+    )
+    assert request_store.claim(run.id) is not None
+
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session["id"],
+            delivery_id=initial["id"],
+        )
+        assert message_deliveries.agent_run_exclusively_owns_turn(
+            conn,
+            run_id=run.id,
+            turn_id=turn_id,
+        ) == (True, "exclusive_run_owner")
 
 
 # --- #84: scheduled provenance survives the merge-queue --------------------------
@@ -4788,6 +8271,106 @@ def _manager_accepting_runs():
     return manager, runs
 
 
+def test_flush_runs_authorized_remote_fifo_head(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_queue_retirement",
+    )
+    _seed_remote_worker()
+    with engine.begin() as conn:
+        remote = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote queued input",
+            metadata=_authorized_remote_message_metadata(),
+            author_id="remote-user",
+            message_kind="original",
+        )
+        local = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="local queued input",
+            author_id="local",
+            message_kind="original",
+        )
+
+    manager, runs = _manager_accepting_runs()
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+
+    assert [(text, source) for text, source, _context in runs] == [
+        ("remote queued input", SOURCE_HUMAN),
+    ]
+    with engine.connect() as conn:
+        remote_saved = message_deliveries.get_delivery(conn, remote["id"])
+        local_saved = message_deliveries.get_delivery(conn, local["id"])
+    assert remote_saved is not None
+    assert remote_saved["state"] == "accepted"
+    assert local_saved is not None
+    assert local_saved["state"] == "claimed"
+
+
+def test_claimed_authorized_remote_turn_reaches_native_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_claimed_turn",
+    )
+    _seed_remote_worker()
+    turn_id = message_deliveries.new_turn_id()
+    with engine.begin() as conn:
+        queued = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="claimed remote input",
+            metadata=_authorized_remote_message_metadata(),
+        )
+        row = message_deliveries.get_delivery(conn, queued["id"])
+        assert row is not None
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            backend="claude",
+            deliveries=[row],
+            dispatch_text="claimed remote input",
+        )
+
+    manager = session_turns.SessionTurnManager(
+        controller=types.SimpleNamespace(),
+        build_context=lambda sid: MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": sid},
+        ),
+    )
+
+    runs = []
+
+    async def capture_run(_session_id, _context, text, **_kwargs):
+        runs.append(text)
+
+    manager._run = capture_run
+    assert asyncio.run(manager._start_persisted_turn(turn_id)) is True
+    assert runs == ["claimed remote input"]
+
+    with engine.connect() as conn:
+        saved_turn = message_deliveries.get_turn(conn, turn_id)
+        saved_delivery = message_deliveries.get_delivery(conn, queued["id"])
+    assert saved_turn is not None
+    assert saved_turn["state"] == "starting"
+    assert saved_delivery is not None
+    assert saved_delivery["state"] == "claimed"
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
     """A queued scheduled run flushes as its OWN SOURCE_SCHEDULED turn with its
     delivery provenance restored — not merged into a plain user turn (#84)."""
@@ -5707,6 +9290,7 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
     controller = SimpleNamespace(
         session_turns=manager,
         _delivery_recovery_complete=recovery_complete,
+        skill_observability=SimpleNamespace(close=AsyncMock()),
     )
 
     class _Server:
@@ -5754,6 +9338,7 @@ def test_boot_publishes_app_then_waits_for_controller_recovery(
     asyncio.run(_run())
 
     assert calls == ["app", "serve", "close"]
+    controller.skill_observability.close.assert_awaited_once()
 
 
 def _seed_slack_dm_session(conn, tmp_path, *, dm_chat_id: str, user_id: str = "U_DM"):
@@ -5860,3 +9445,328 @@ def test_build_session_context_respects_explicit_channel_override(monkeypatch, t
     context = internal_server._build_session_context(session["id"], channel_id="D_EXPLICIT")
 
     assert context.channel_id == "D_EXPLICIT"
+
+
+def test_show_access_settings_read_returns_controller_snapshot(monkeypatch):
+    from core import show_pages
+
+    captured: list[str] = []
+
+    class _Store:
+        def get_access(self, page_id):
+            captured.append(page_id)
+            return show_pages.ShowAccess(
+                page_id=page_id,
+                access_mode="limited",
+                share_id="stable-link",
+                revision=7,
+                normalized_emails=("alice@example.com", "bob@example.com"),
+            )
+
+        def close(self):
+            captured.append("closed")
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/show-access/settings-read",
+                json={"page_id": "ses-show-access"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "limited",
+            "share_id": "stable-link",
+            "revision": 7,
+            "normalized_emails": ["alice@example.com", "bob@example.com"],
+            "entries": [
+                {
+                    "kind": "email",
+                    "value": "alice@example.com",
+                    "organization_id": None,
+                },
+                {
+                    "kind": "email",
+                    "value": "bob@example.com",
+                    "organization_id": None,
+                },
+            ],
+        }
+    }
+    assert captured == ["ses-show-access", "closed"]
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "error"),
+    [
+        (
+            "/internal/show-access/settings-read",
+            {"page_id": "ses-show-access", "extra": True},
+            "invalid_show_access_settings_request",
+        ),
+        (
+            "/internal/show-access/apply",
+            {
+                "page_id": "ses-show-access",
+                "expected_revision": True,
+                "target_access_mode": "limited",
+                "target_share_id": "stable-link",
+                "target_emails": ["guest@example.com"],
+            },
+            "invalid_show_access_apply_request",
+        ),
+    ],
+)
+def test_show_access_internal_routes_reject_malformed_payloads(path, payload, error):
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": error}
+
+
+@pytest.mark.parametrize("status", ["conflict", "share_id_taken"])
+def test_show_access_apply_preserves_atomic_result_status(monkeypatch, status):
+    from core import show_pages
+
+    captured: dict = {}
+
+    class _Store:
+        def apply_access(self, page_id, **kwargs):
+            captured.update(page_id=page_id, **kwargs)
+            return show_pages.ShowAccessApplyResult(
+                status=status,
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="public",
+                    share_id="current-link",
+                    revision=9,
+                    normalized_emails=(),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "page_id": "ses-show-access",
+        "expected_revision": 8,
+        "target_access_mode": "limited",
+        "target_share_id": "candidate-link",
+        "target_emails": ["guest@example.com"],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/show-access/apply", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": status,
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "public",
+            "share_id": "current-link",
+            "revision": 9,
+            "normalized_emails": [],
+            "entries": [],
+        },
+    }
+    assert captured == {
+        "page_id": "ses-show-access",
+        "expected_revision": 8,
+        "target_access_mode": "limited",
+        "target_share_id": "candidate-link",
+        "target_emails": ["guest@example.com"],
+    }
+
+
+def test_show_access_apply_writes_and_reads_group_and_organization_entries(monkeypatch):
+    from core import show_pages
+
+    captured: dict = {}
+
+    class _Store:
+        def apply_access(self, page_id, **kwargs):
+            captured.update(page_id=page_id, **kwargs)
+            return show_pages.ShowAccessApplyResult(
+                status="applied",
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="limited",
+                    share_id="stable-link",
+                    revision=2,
+                    entries=(
+                        show_pages.ShowAccessEntry("group", "group-7", "org-1"),
+                        show_pages.ShowAccessEntry("organization", "org-1", "org-1"),
+                    ),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "page_id": "ses-show-access",
+        "expected_revision": 1,
+        "target_access_mode": "limited",
+        "target_share_id": "stable-link",
+        "target_entries": [
+            {"kind": "group", "value": "group-7"},
+            {"kind": "organization", "value": "org-1"},
+        ],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/show-access/apply", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "applied",
+        "show_access": {
+            "page_id": "ses-show-access",
+            "access_mode": "limited",
+            "share_id": "stable-link",
+            "revision": 2,
+            "normalized_emails": [],
+            "entries": [
+                {"kind": "group", "value": "group-7", "organization_id": "org-1"},
+                {
+                    "kind": "organization",
+                    "value": "org-1",
+                    "organization_id": "org-1",
+                },
+            ],
+        },
+    }
+    assert captured["target_entries"] == payload["target_entries"]
+    assert "target_emails" not in captured
+
+
+def test_show_access_internal_identity_mismatch_fails_closed(monkeypatch):
+    from core import show_pages
+
+    class _Store:
+        def get_access(self, _page_id):
+            return show_pages.ShowAccess(
+                page_id="ses-other",
+                access_mode="limited",
+                share_id="secret-link",
+                revision=2,
+                normalized_emails=("secret@example.com",),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/internal/show-access/settings-read",
+                json={"page_id": "ses-show-access"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "ok": False,
+        "error": "show_access_internal_failure",
+    }
+    assert "secret@example.com" not in response.text
+
+
+def test_show_access_apply_serializes_controller_writes(monkeypatch):
+    from core import show_pages
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls: list[str] = []
+    calls_lock = threading.Lock()
+
+    class _Store:
+        def apply_access(self, page_id, **_kwargs):
+            with calls_lock:
+                calls.append(page_id)
+                call_number = len(calls)
+            if call_number == 1:
+                first_entered.set()
+                assert release_first.wait(timeout=2)
+            return show_pages.ShowAccessApplyResult(
+                status="no_change",
+                show_access=show_pages.ShowAccess(
+                    page_id=page_id,
+                    access_mode="private",
+                    share_id="stable-link",
+                    revision=0,
+                    normalized_emails=(),
+                ),
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(show_pages, "ShowPageStore", _Store)
+    app = internal_server.create_app(_build_controller_double())
+    payload = {
+        "expected_revision": 0,
+        "target_access_mode": "private",
+        "target_share_id": "stable-link",
+        "target_emails": [],
+    }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/internal/show-access/apply",
+                    json={"page_id": "ses-first", **payload},
+                )
+            )
+            assert await asyncio.to_thread(first_entered.wait, 2)
+            second = asyncio.create_task(
+                client.post(
+                    "/internal/show-access/apply",
+                    json={"page_id": "ses-second", **payload},
+                )
+            )
+            await asyncio.sleep(0.05)
+            with calls_lock:
+                assert calls == ["ses-first"]
+            release_first.set()
+            return await asyncio.gather(first, second)
+
+    responses = asyncio.run(_exercise())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert calls == ["ses-first", "ses-second"]

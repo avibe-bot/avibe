@@ -101,13 +101,21 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
+    normalized_help = " ".join(captured.out.split())
     assert "Pass either --shell '<command>' or a command after '--'." in captured.out
     assert "--lifetime-timeout" in captured.out
     assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
     assert "watches follow up in this conversation by default" in captured.out
     assert "Prefer --message or --message-file for follow-up instructions" in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
+    assert "an allowed `--retry-exit-code` keeps waiting" in captured.out
+    assert "A once Watch stops after its first event" in captured.out
+    assert "five-second safety delay" in captured.out
+    assert "automatically pause the Watch" in captured.out
+    assert "a once Watch ends and a forever Watch re-arms" in captured.out
+    assert "A once waiter that is still waiting must use a retry exit code" in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
+    assert "Use 0 for no per-cycle timeout" in normalized_help
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--post-to" not in captured.out
@@ -224,7 +232,10 @@ def test_watch_add_missing_command_is_structured_json() -> None:
     assert payload["help_command"] == "vibe watch add --help"
 
 
-def test_watch_add_rejects_lifetime_timeout_without_forever() -> None:
+def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
+    tmp_path: Path,
+    capsys,
+) -> None:
     args = _parse_watch_add(
         [
             "--session-key",
@@ -236,11 +247,25 @@ def test_watch_add_rejects_lifetime_timeout_without_forever() -> None:
         ]
     )
 
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *values, **kwargs: _startup_ok(
+                store, runtime_store, values[2]
+            ),
+        ),
+    ):
+        result = cli.cmd_watch_add(args)
 
-    assert result == 1
-    assert payload["code"] == "invalid_watch_lifetime_timeout"
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definition"]["mode"] == "once"
+    assert payload["definition"]["lifetime_timeout_seconds"] == 10
 
 
 def test_watch_add_rejects_missing_cwd() -> None:
@@ -424,7 +449,10 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert payload["definition"]["retry_exit_codes"] == [75]
 
 
-def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+def test_remote_editor_watch_add_starts_and_persists_authorization_context(
+    tmp_path: Path,
+    capsys,
+) -> None:
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
     store = ManagedWatchStore(store_path)
@@ -443,33 +471,48 @@ def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> No
         "AVIBE_CALLER_SOURCE": "agent_turn",
         "AVIBE_CALLER_BACKEND": "opencode",
         "AVIBE_NATIVE_SESSION_ID": "native-opencode-1",
+        "AVIBE_CALLER_REMOTE": "1",
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
+            {
+                "sub": "remote-editor",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+                "vibe_group_ids": [],
+                "claims_issued_at": 1_900_000_000,
+                "authorization_expires_at": 1_900_043_200,
+            }
+        ),
+        "AVIBE_CALLER_PLATFORM": "",
+        "AVIBE_CALLER_USER_ID": "",
+        "AVIBE_CALLER_CHANNEL_ID": "",
+        "AVIBE_CALLER_SESSION_KEY": "",
+        "AVIBE_CALLER_MESSAGE_ID": "",
+        "AVIBE_CALLER_WORKSPACE_ID": "",
     }
+
+    startup_calls: list[str] = []
+
+    def successful_startup(*args, **kwargs):
+        startup_calls.append(args[2])
+        return _startup_ok(store, runtime_store, args[2])
 
     with (
         patch.dict(os.environ, caller_env, clear=False),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
-        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=successful_startup),
     ):
         result = cli.cmd_watch_add(args)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    expected = {
-        "kind": "caller_context",
-        "caller": {
-            "session_id": "sesCaller",
-            "run_id": "runCaller",
-            "source": "agent_turn",
-            "backend": "opencode",
-            "native_session_id": "native-opencode-1",
-        },
-    }
-    assert payload["definition"]["metadata"]["created_by"] == expected
-    stored = ManagedWatchStore(store_path).get_watch(payload["definition"]["id"])
-    assert stored is not None
-    assert stored.metadata["created_by"] == expected
+    # Persisted for the deferred run, hidden from the projection it prints.
+    assert "resource_user_context" not in payload["definition"]["metadata"]
+    stored = ManagedWatchStore(store_path).list_watches()
+    assert len(stored) == 1
+    assert stored[0].metadata["resource_user_context"]["vibe_instance_role"] == "editor"
+    assert len(startup_calls) == 1
 
 
 def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -760,6 +803,59 @@ def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -
     assert payload["definition"]["mode"] == "forever"
     assert payload["definition"]["command"] == ["python3", "scripts/wait.py", "--build", "42"]
     assert payload["definition"]["retry_exit_codes"] == [1, 75]
+
+
+@pytest.mark.parametrize(
+    ("timeout_args", "expected_timeout"),
+    [
+        pytest.param([], 21600, id="omitted-default"),
+        pytest.param(["--timeout", "0"], 0, id="explicit-unlimited"),
+        pytest.param(["--timeout", "90.5"], 90.5, id="positive"),
+    ],
+)
+def test_watch_add_timeout_round_trips_through_persisted_read(
+    tmp_path: Path,
+    capsys,
+    timeout_args: list[str],
+    expected_timeout: float,
+) -> None:
+    store = ManagedWatchStore()
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    args = _parse_watch_add(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            *timeout_args,
+            "--shell",
+            "exit 75",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch(
+            "vibe.cli._wait_for_watch_startup",
+            side_effect=lambda *args, **kwargs: _startup_ok(
+                store, runtime_store, args[2]
+            ),
+        ),
+    ):
+        assert cli.cmd_watch_add(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    watch_id = payload["definition"]["id"]
+    reloaded_store = ManagedWatchStore()
+    try:
+        reloaded = reloaded_store.get_watch(watch_id)
+        assert reloaded is not None
+        assert reloaded.timeout_seconds == expected_timeout
+    finally:
+        if store.sqlite_backend is not None:
+            store.sqlite_backend.close()
+        if reloaded_store.sqlite_backend is not None:
+            reloaded_store.sqlite_backend.close()
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1282,6 +1378,39 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
     assert payload["definition"]["retry_exit_codes"] == [1, 75]
     assert payload["definition"]["retry_delay_seconds"] == 10
     assert payload["definition"]["shell_command"] == "python3 wait_deploy.py"
+
+
+def test_watch_update_accepts_zero_timeout(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Watch PR",
+        session_key="slack::channel::C123",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=21600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    args = _parse_watch_update([watch.id, "--timeout", "0"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_update(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["definition"]["timeout_seconds"] == 0
+    assert store.get_watch(watch.id).timeout_seconds == 0
 
 
 def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
@@ -1851,6 +1980,8 @@ def _no_caller_context(monkeypatch) -> None:
     same test would exercise a different path locally than in CI.
     """
     monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    monkeypatch.delenv("AVIBE_CALLER_REMOTE", raising=False)
+    monkeypatch.delenv("AVIBE_CALLER_RESOURCE_CONTEXT", raising=False)
 
 
 def _reserved_session_cli_db(tmp_path: Path):

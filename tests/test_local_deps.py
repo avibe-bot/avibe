@@ -13,13 +13,17 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import urllib.error
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from core import latest_version_cache
 from vibe import api
 
 
@@ -88,7 +92,7 @@ def _installable_avault_release(
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
-    def fake_candidate_cli_paths(binary: str):
+    def fake_candidate_cli_paths(binary: str, *, include_npm_global: bool = True):
         expanded = api.Path(api.os.path.expanduser(binary))
         has_path_separator = api.os.sep in binary or (api.os.altsep is not None and api.os.altsep in binary)
         if expanded.is_absolute() or has_path_separator:
@@ -192,6 +196,49 @@ def test_askill_install_command_does_not_persist_agent_cli_path(monkeypatch):
     assert config_loads == []
 
 
+def test_shared_install_runner_failures_have_structured_identity(monkeypatch):
+    class FailedPopen:
+        returncode = 17
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            return "", "installer stderr"
+
+    monkeypatch.setattr(api.subprocess, "Popen", FailedPopen)
+    failed = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert failed["reason"] == "askill_install_failed"
+    assert failed["exit_code"] == 17
+
+    class ErrorPopen:
+        def __init__(self, *args, **kwargs):
+            raise OSError("runner unavailable")
+
+    monkeypatch.setattr(api.subprocess, "Popen", ErrorPopen)
+    errored = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert errored["reason"] == "askill_install_error"
+    assert errored["error"] == "runner unavailable"
+
+    class TimedOutPopen:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise api.subprocess.TimeoutExpired(["bash"], timeout)
+            return "partial", ""
+
+    monkeypatch.setattr(api.subprocess, "Popen", TimedOutPopen)
+    monkeypatch.setattr(api, "signal_process_tree", lambda *args, **kwargs: None)
+    timed_out = api._run_install_command("askill", ["bash"], lambda value: value)
+    assert timed_out["reason"] == "askill_install_timeout"
+    assert timed_out["timeout_seconds"] == 300
+
+
 def test_install_askill_unsupported_without_curl(monkeypatch):
     # No curl/bash (e.g. Windows): no broken npm fallback — a clear manual
     # message pointing at askill.sh, and _run_install_command is never invoked.
@@ -200,6 +247,8 @@ def test_install_askill_unsupported_without_curl(monkeypatch):
     out = api.install_askill()
     assert out["ok"] is False
     assert "askill.sh" in out["message"]
+    assert out["reason"] == "askill_auto_install_unsupported"
+    assert out["required_tools"] == ["curl", "bash"]
 
 
 def test_install_askill_unsupported_on_windows_even_with_tools(monkeypatch):
@@ -211,6 +260,7 @@ def test_install_askill_unsupported_on_windows_even_with_tools(monkeypatch):
 
     assert out["ok"] is False
     assert "askill.sh" in out["message"]
+    assert out["reason"] == "askill_auto_install_unsupported"
 
 
 def test_ensure_askill_idempotent_when_present(monkeypatch):
@@ -243,6 +293,8 @@ def test_ensure_askill_install_not_discoverable_is_failure(monkeypatch):
     monkeypatch.setattr(api, "install_askill", lambda: {"ok": True})
     out = api.ensure_askill_installed()
     assert out["ok"] is False and out["installed"] is False and out["path"] is None
+    assert out["reason"] == "askill_install_path_missing"
+    assert out["expected_path"] == "askill"
 
 
 def test_ensure_askill_force_reinstalls_even_when_present(monkeypatch):
@@ -323,6 +375,8 @@ def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
 
     assert out["ok"] is False
     assert "no avault build for FreeBSD-riscv64" in out["message"]
+    assert out["reason"] == "avault_platform_unsupported"
+    assert out["platform"] == "FreeBSD-riscv64"
 
 
 def test_install_avault_force_keeps_existing_binary_on_unsupported_platform(monkeypatch):
@@ -430,7 +484,28 @@ def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
     installed = api.Path.home() / ".local" / "bin" / "avault"
     assert out["ok"] is False
     assert "checksum" in out["message"]
+    assert out["reason"] == "avault_checksum_mismatch"
+    assert out["expected_sha256"] == "0" * 64
+    assert len(out["actual_sha256"]) == 64
     assert not installed.exists()
+
+
+def test_install_avault_generic_failure_has_structured_identity(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: None)
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    monkeypatch.setattr(
+        api,
+        "_download_avault_release_file",
+        lambda _url: (_ for _ in ()).throw(ValueError("invalid manifest")),
+    )
+
+    out = api.install_avault()
+
+    assert out["ok"] is False
+    assert out["reason"] == "avault_install_failed"
+    assert out["error"] == "invalid manifest"
 
 
 def test_install_avault_is_idempotent_when_present(monkeypatch):
@@ -823,11 +898,331 @@ def test_reconcile_askill_auto_update_skips_when_disabled(monkeypatch):
     assert out == {"ok": True, "skipped": True, "reason": "askill_auto_update_disabled"}
 
 
+def test_refresh_askill_if_stale_does_not_run_the_installer_when_current(monkeypatch):
+    # The askill.sh installer re-downloads the CLI whenever it runs, so the
+    # shared currency owner must answer "already current" without invoking it.
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.14",
+            "status": "ready",
+            "path": "/x/askill",
+            "latest_version": "0.1.14",
+            "has_update": False,
+        },
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["ok"] is True
+    assert out["reason"] == "up_to_date"
+    assert "action" not in out
+
+
+def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch):
+    # The waste this closes: ``vibe runtime prepare`` is a fresh process on every
+    # install, upgrade, regression sync, and tenant update, and each one used to
+    # spend a GitHub request re-learning askill's newest release. That request
+    # comes out of the unauthenticated 60/hour/IP budget, and exhausting it makes
+    # the latest lookup fail, which makes prepare reinstall askill outright.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready"},
+    )
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not install"))
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+
+    assert len(probes) == 1
+
+
+def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
+    """An install is the one moment prepare runs most, and must not cost a probe.
+
+    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
+    publishes, so the entry that justified the install is exactly what the next
+    process needs: it compares a freshly measured local version against it and
+    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
+    this replaced had — would send every post-update ``runtime prepare`` back to
+    GitHub for a string already on disk.
+    """
+
+    installed = {"version": "0.1.13"}
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
+    )
+
+    def _install(force=False):
+        installed["version"] = "0.1.14"
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", _install)
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["action"] == "update"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    assert len(probes) == 1
+
+
+def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):
+    # ``VIBE_ASKILL_AUTO_UPDATE`` disables the update-checker cadence, not the
+    # lifecycle refresh that ``vibe runtime prepare`` performs; keeping the gate
+    # in the cadence wrapper is what lets both callers share one decision.
+    monkeypatch.setenv("VIBE_ASKILL_AUTO_UPDATE", "0")
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.13",
+            "status": "ready",
+            "latest_version": "0.1.14",
+            "has_update": True,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True]
+    assert out["action"] == "update"
+
+
+def test_refresh_avault_if_stale_does_not_force_when_the_pin_is_satisfied(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_VERSION)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not reinstall the pinned release"))
+
+    out = api.refresh_avault_if_stale()
+
+    assert out["ok"] is True
+    assert out["changed"] is False
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_upgrades_a_binary_below_the_pin(monkeypatch):
+    # Skipping the install is conditional on the pin, not unconditional: prepare
+    # still has to raise a stale managed binary on upgrade.
+    stale = api.AVAULT_P2_MIN_VERSION
+    assert api._version_at_least(api.AVAULT_VERSION, stale)
+    state = {"version": stale}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: state["version"])
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["version"] = api.AVAULT_VERSION
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def test_refresh_avault_if_stale_installs_when_missing(monkeypatch):
+    state = {"path": None}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: state["path"])
+    monkeypatch.setattr(api, "_probe_avault_version", lambda path: api.AVAULT_VERSION if path else None)
+    calls = []
+
+    def _install(force=False):
+        calls.append(force)
+        state["path"] = "/usr/local/bin/avault"
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+
+    out = api.refresh_avault_if_stale()
+
+    assert calls == [True]
+    assert out["ok"] is True
+    assert out["installed"] is True
+    assert out["version"] == api.AVAULT_VERSION
+
+
+def _stub_avault_install_state(monkeypatch, *, version, ready_floor):
+    """Answer every avault code path from one fake on-disk install."""
+    state = {"version": version, "installs": 0}
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: "/usr/local/bin/avault" if state["version"] else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda path: state["version"] if path else None)
+    monkeypatch.setattr(api, "_avault_ready_min_version", lambda: ready_floor)
+    monkeypatch.setattr(
+        api,
+        "_managed_avault_release_satisfies_ready_minimum",
+        lambda: api._version_at_least(api.AVAULT_VERSION, ready_floor),
+    )
+
+    def _install(force=False):
+        state["installs"] += 1
+        state["version"] = api.AVAULT_VERSION
+        return {"ok": True, "changed": True}
+
+    monkeypatch.setattr(api, "install_avault", _install)
+    return state
+
+
+@pytest.mark.parametrize(
+    "version, ready_floor",
+    [
+        (None, api.AVAULT_VERSION),
+        ("0.1.1", api.AVAULT_VERSION),
+        (api.AVAULT_VERSION, api.AVAULT_VERSION),
+        ("99.0.0", api.AVAULT_VERSION),
+        (api.AVAULT_VERSION, "99.0.0"),
+    ],
+)
+def test_refresh_avault_if_stale_never_answers_healthier_than_forcing(monkeypatch, version, ready_floor):
+    # The property the whole change rests on: skipping a redundant download may
+    # not change the verdict. Whatever ``ensure_avault_installed(force=True)``
+    # concludes about an install state, the currency path must conclude the same
+    # thing — it may only skip the reinstall. Being at the pin is not the whole
+    # of being ready: when the readiness floor is raised ahead of the published
+    # pin, a binary equal to the pin is still ``upgrade_required``, and only the
+    # forced path used to say so.
+    forced_state = _stub_avault_install_state(monkeypatch, version=version, ready_floor=ready_floor)
+    forced = api.ensure_avault_installed(force=True)
+
+    stale_state = _stub_avault_install_state(monkeypatch, version=version, ready_floor=ready_floor)
+    stale = api.refresh_avault_if_stale()
+
+    assert stale["ok"] == forced["ok"]
+    assert stale.get("status") == forced.get("status")
+    assert stale.get("reason") == forced.get("reason")
+    assert stale_state["installs"] <= forced_state["installs"]
+
+
+def test_refresh_askill_if_stale_repairs_an_unreadable_binary_without_the_latest_probe(monkeypatch):
+    # A binary that cannot report its version is broken, not current, and that
+    # verdict must not depend on the upstream probe answering: prepare used to
+    # force this install unconditionally, so gating the repair on a reachable
+    # latest would report a broken askill as ready during a network blip.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": None, "status": "unknown", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: None)
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True, "path": "/x/askill"},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True]
+    assert out["action"] == "refresh_unknown_version"
+
+
+# Strings a version probe can produce that no comparison can order: absent,
+# empty, a development build, a git description, a partial number. The point is
+# not the list — it is that each one makes `_compare_versions` answer False, the
+# same answer it gives for "already newest", which is how "cannot tell" used to
+# be read as "current".
+UNORDERABLE_VERSIONS = [None, "", "dev", "unknown", "askill", "g1a2b3c", "0.1.x"]
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_askill_status_calls_an_unorderable_version_unknown(monkeypatch, version):
+    # One field owns the fact, so prepare and the Dependencies page cannot
+    # disagree about whether a binary reporting `dev` is healthy.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+
+    assert api.askill_update_status()["status"] == "unknown"
+
+
+@pytest.mark.parametrize("version", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_repairs_an_unorderable_local_version(monkeypatch, version):
+    # `up_to_date` must be an affirmative verdict, never the branch everything
+    # unrecognised falls into. A version that cannot be ordered against the
+    # published one means unknown, and unknown gets the repair the forced path
+    # would have performed — asserted over the shapes a probe can produce rather
+    # than over the one the review happened to name.
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": version, "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: "0.1.14")
+    calls = []
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda force=False: calls.append(force) or {"ok": True, "installed": True, "changed": True},
+    )
+
+    out = api.refresh_askill_if_stale()
+
+    assert calls == [True], f"{version!r} is not a version we can trust as current"
+    assert out["action"] == "refresh_unknown_version"
+
+
+@pytest.mark.parametrize("latest", UNORDERABLE_VERSIONS)
+def test_refresh_askill_if_stale_needs_an_orderable_latest_to_claim_currency(monkeypatch, latest):
+    # The same rule on the upstream side: with nothing orderable to compare
+    # against, staleness is undecided. The owner reports that instead of
+    # currency, and each caller decides (prepare installs, the cadence skips).
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": "0.1.14", "status": "ready", "path": "/x/askill"},
+    )
+    monkeypatch.setattr(api, "_cached_latest_askill", lambda: latest)
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("the owner decides, it does not install here"))
+
+    out = api.refresh_askill_if_stale()
+
+    assert out["reason"] == "latest_unavailable"
+
+
 def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=True))),
+        classmethod(lambda _cls: SimpleNamespace(memory_required=True)),
     )
     monkeypatch.setattr(
         api,
@@ -851,41 +1246,104 @@ def test_dependencies_status_shape(monkeypatch):
 
     class _Mgr:
         def status(self):
-            return {"installed": True, "manifest": {"runtime_version": "1.4.0"}, "node_available": True, "node_version": "20.11"}
-
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-    import core.memory.artifact as memory_artifact
-
-    class _MemoryMgr:
-        def status(self):
             return {
-                "installed": False,
-                "status": "missing",
-                "manifest": {"everos_version": "1.2.1", "release_state": "unavailable"},
-                "reason": "memory_runtime_unpublished",
+                "install": {"state": "installed", "runtime_version": "1.4.0", "matches_manifest": True},
+                "manifest": {"runtime_version": "1.4.0"},
+                "node_available": True,
+                "node_version": "20.11",
             }
 
-    monkeypatch.setattr(memory_artifact, "get_memory_artifact_manager", lambda: _MemoryMgr())
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    monkeypatch.setattr(
+        api,
+        "_model_hub_engine_dependency_status",
+        lambda: {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": True,
+            "version": "v7.2.149",
+            "latest_version": "v7.2.149",
+            "has_update": False,
+            "status": "ready",
+            "action_class": "none",
+            "reason": None,
+            "download_error": None,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {
+                "id": "memory-package",
+                "kind": "runtime",
+                "required": True,
+                "installed": True,
+                "provider_count": 1,
+                "version": "1.2.3",
+                "latest_version": "1.2.3",
+                "has_update": False,
+                "status": "ready",
+                "readiness": "ready",
+                "reason": None,
+                "action_class": "none",
+                "warnings": [],
+            },
+            {
+                "id": "memory-runtime",
+                "kind": "runtime",
+                "required": True,
+                "installed": False,
+                "version": None,
+                "latest_version": "1.2.3",
+                "has_update": False,
+                "status": "missing",
+                "reason": "memory_runtime_unpublished",
+                "action_class": "repairable",
+                "release_state": "unavailable",
+                "download_error": None,
+            },
+        ),
+    )
     out = api.dependencies_status()
     assert out["ok"]
     assert out["reconciling"] is False
     assert out["reconciling_dependencies"] == []
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "avault", "show-runtime", "memory-runtime", "tmux", "node"]
+    assert list(by) == [
+        "askill",
+        "avault",
+        "show-runtime",
+        "model-hub-engine",
+        "memory-package",
+        "memory-runtime",
+        "tmux",
+        "node",
+    ]
     assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
     assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
     assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
+    assert by["show-runtime"]["latest_version"] == "1.4.0"
+    assert by["show-runtime"]["has_update"] is False
+    assert by["model-hub-engine"]["version"] == "v7.2.149"
+    assert by["model-hub-engine"]["latest_version"] == "v7.2.149"
+    assert by["model-hub-engine"]["status"] == "ready"
+    assert by["memory-package"]["readiness"] == "ready"
     assert by["memory-runtime"] == {
         "id": "memory-runtime",
         "kind": "runtime",
         "required": True,
         "installed": False,
-        "version": "1.2.1",
+        "version": None,
+        "latest_version": "1.2.3",
+        "has_update": False,
         "status": "missing",
         "reason": "memory_runtime_unpublished",
+        "action_class": "repairable",
         "release_state": "unavailable",
         "download_error": None,
     }
@@ -927,7 +1385,18 @@ def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
         lambda **_: {"installed": True, "version": "0.1.13", "status": "ready"},
     )
     monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.0.1", "status": "ready"})
-    monkeypatch.setattr(api.V2Config, "load", classmethod(lambda _cls: SimpleNamespace(memory=SimpleNamespace(enabled=False))))
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(
+            lambda _cls: SimpleNamespace(
+                memory_required=False,
+                memory=SimpleNamespace(enabled=False),
+                recovered_sections=(),
+                load_warnings=(),
+            )
+        ),
+    )
 
     import core.show_runtime as srt_mod
 
@@ -954,6 +1423,757 @@ def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("managed", "platform_supported", "expected"),
+    (
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.149",
+                "selected_version": "v7.2.149",
+                "matches_manifest": True,
+                "status": "ready",
+                "reason": None,
+            },
+            True,
+            ("ready", "none", False),
+            id="pinned-target-ready",
+        ),
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.105",
+                "selected_version": "v7.2.149",
+                "matches_manifest": False,
+                "status": "ready",
+                "reason": None,
+            },
+            True,
+            ("upgrade_required", "repairable", True),
+            id="older-avibe-pin-installed",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "missing",
+                "reason": None,
+            },
+            True,
+            ("missing", "repairable", False),
+            id="not-installed",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "missing",
+                "reason": "model_hub_engine_platform_unsupported",
+            },
+            False,
+            ("unsupported", "none", False),
+            id="unsupported-platform",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_install_inspection_failed",
+            },
+            True,
+            ("error", "repairable", False),
+            id="repairable-inspection-failure",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": "v7.2.149",
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_install_inspection_failed",
+            },
+            False,
+            ("unsupported", "none", False),
+            id="foreign-pointer-cannot-hide-unsupported-host",
+        ),
+        pytest.param(
+            {
+                "installed": True,
+                "version": "v7.2.105",
+                "selected_version": "v7.2.149",
+                "matches_manifest": False,
+                "status": "error",
+                "reason": "model_hub_engine_archive_download_failed",
+            },
+            True,
+            ("error", "repairable", True),
+            id="failed-upgrade-preserves-installed-version",
+        ),
+        pytest.param(
+            {
+                "installed": False,
+                "version": None,
+                "selected_version": None,
+                "matches_manifest": None,
+                "status": "error",
+                "reason": "model_hub_engine_manifest_invalid",
+            },
+            True,
+            ("error", "operator_only", False),
+            id="unresolved-target",
+        ),
+    ),
+)
+def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
+    monkeypatch,
+    managed,
+    platform_supported,
+    expected,
+):
+    class Manager:
+        def __init__(self, *, offline):
+            assert offline is True
+
+        def status(self):
+            return managed
+
+        def supports_host_platform(self):
+            return platform_supported
+
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    dependency = api._model_hub_engine_dependency_status()
+
+    status, action_class, has_update = expected
+    assert dependency["required"] is platform_supported
+    assert dependency["latest_version"] == managed["selected_version"]
+    assert dependency["status"] == status
+    assert dependency["action_class"] == action_class
+    assert dependency["has_update"] is has_update
+
+
+@pytest.mark.parametrize("locale", ("en", "zh"))
+def test_every_model_hub_dependency_failure_reason_is_localized(
+    tmp_path,
+    locale,
+):
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    translations = json.loads(
+        (Path("ui/src/i18n") / f"{locale}.json").read_text(encoding="utf-8")
+    )["errors"]
+    reasons = EngineRuntimeManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+    ).dependency_failure_reasons()
+
+    missing = sorted(reason for reason in reasons if not translations.get(reason))
+    assert missing == []
+
+
+def test_model_hub_engine_ensure_uses_direct_manager_without_a_controller(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    class Manager:
+        def __init__(self, *, offline):
+            calls.append(("manager", offline))
+
+        def ensure(self, *, force):
+            calls.append(("ensure", force))
+            return {"ok": True, "version": "v7.2.149"}
+
+    monkeypatch.setattr(
+        "vibe.internal_client.default_socket_path",
+        lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
+    )
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is True
+    assert calls == [("manager", None), ("ensure", True)]
+
+
+def test_model_hub_engine_ensure_uses_controller_for_a_live_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+    calls = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
+            return {
+                "changed": True,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                    "health": "not_started",
+                },
+            }
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True, offline=True)
+
+    assert result == {
+        "ok": True,
+        "installed": True,
+        "changed": True,
+        "version": "v7.2.149",
+        "status": {
+            "verified": True,
+            "installed_version": "v7.2.149",
+            "health": "not_started",
+        },
+        "reason": None,
+    }
+    assert calls == [(True, True)]
+
+
+@pytest.mark.parametrize("controller_error", ("feature_disabled", "source_not_found"))
+def test_model_hub_engine_ensure_does_not_bypass_a_live_older_controller(
+    monkeypatch,
+    tmp_path,
+    controller_error,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError(controller_error, status=404)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == controller_error
+
+
+def test_model_hub_engine_ensure_does_not_retry_a_controller_install_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError(
+                "engine_down",
+                status=503,
+                data={"reason": "model_hub_engine_archive_download_failed"},
+            )
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a failed download must not be repeated"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is False
+    assert result["reason"] == "model_hub_engine_archive_download_failed"
+
+
+def test_model_hub_engine_ensure_waits_for_a_starting_controller(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "controller.sock"
+    calls = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            calls.append((force, offline))
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        "vibe.internal_client.health_sync",
+        lambda path, **_kwargs: path.exists(),
+    )
+    monkeypatch.setattr(
+        api.time,
+        "sleep",
+        lambda _seconds: socket_path.touch(),
+    )
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert calls == [(False, False)]
+
+
+def test_model_hub_engine_ensure_waits_past_a_stale_socket(
+    monkeypatch,
+    tmp_path,
+):
+    socket_path = tmp_path / "stale-controller.sock"
+    socket_path.touch()
+    readiness = iter((False, True))
+    probes = []
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            return {
+                "changed": False,
+                "status": {
+                    "verified": True,
+                    "installed_version": "v7.2.149",
+                },
+            }
+
+    def probe(path, **_kwargs):
+        probes.append(path)
+        return next(readiness)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", probe)
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("the starting controller owns engine replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result["ok"] is True
+    assert probes == [socket_path, socket_path]
+
+
+def test_model_hub_engine_ensure_never_falls_back_while_controller_owns_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "missing-controller.sock"
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("engine_down", status=503)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS",
+        0,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a controller owner excludes direct replacement"),
+    )
+
+    result = api.ensure_model_hub_engine_installed(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_down"
+
+
+def test_model_hub_engine_ensure_treats_an_unsupported_host_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    class Manager:
+        def __init__(self, *, offline):
+            assert offline is None
+
+        def ensure(self, *, force):
+            assert force is False
+            return {
+                "ok": False,
+                "installed": False,
+                "changed": False,
+                "skipped": False,
+                "reason": "model_hub_engine_platform_unsupported",
+                "version": "v7.2.149",
+            }
+
+    monkeypatch.setattr(
+        "vibe.internal_client.default_socket_path",
+        lambda: tmp_path / "missing-controller.sock",
+    )
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: None,
+    )
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        Manager,
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "skipped": True,
+        "reason": "model_hub_engine_platform_unsupported",
+        "version": "v7.2.149",
+        "status": "unsupported",
+    }
+
+
+def test_model_hub_engine_ensure_treats_controller_unsupported_as_nonfatal(
+    monkeypatch,
+    tmp_path,
+):
+    from core.handlers.model_hub import ModelHubError
+
+    socket_path = tmp_path / "controller.sock"
+    socket_path.touch()
+
+    class Remote:
+        def ensure_runtime_dependency(self, *, force, offline):
+            raise ModelHubError("runtime_platform_unsupported", status=422)
+
+    monkeypatch.setattr("vibe.internal_client.default_socket_path", lambda: socket_path)
+    monkeypatch.setattr(
+        "vibe.runtime.resolve_service_owner_pid",
+        lambda *, include_starting: 314,
+    )
+    monkeypatch.setattr("vibe.internal_client.health_sync", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("vibe.model_hub_client.ModelHubRemoteService", Remote)
+    monkeypatch.setattr(
+        "vibe.model_hub_runtime.installer.EngineRuntimeManager",
+        lambda **_kwargs: pytest.fail("a live controller owns dependency admission"),
+    )
+
+    result = api.ensure_model_hub_engine_installed()
+
+    assert result == {
+        "ok": True,
+        "installed": False,
+        "changed": False,
+        "reason": "model_hub_engine_platform_unsupported",
+        "message": "modelHub.errors.runtime_platform_unsupported",
+        "skipped": True,
+        "status": "unsupported",
+    }
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected"),
+    (
+        pytest.param(
+            {
+                "provider": "manifest-cache",
+                "install": {"state": "installed", "runtime_version": "runtime-installed", "matches_manifest": False},
+                "manifest": {"runtime_version": "runtime-selected"},
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": "runtime-installed", "latest_version": "runtime-selected", "has_update": True},
+            id="stale-manifest-install",
+        ),
+        pytest.param(
+            {
+                "provider": "npm",
+                "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
+                "manifest": None,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": None, "latest_version": None, "has_update": False},
+            id="npm-not-comparable",
+        ),
+    ),
+)
+def test_dependencies_status_projects_show_runtime_identity_without_pairing(monkeypatch, runtime_status, expected):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.14", "latest_version": None, "has_update": False, "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace(memory_required=False, memory=SimpleNamespace(enabled=False))),
+    )
+
+    import core.show_runtime as show_runtime
+    import core.tmux_runtime as tmux_runtime
+
+    manager = Mock()
+    manager.status.return_value = runtime_status
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {"id": "memory-package", "status": "not_required"},
+            {"id": "memory-runtime", "status": "not_required"},
+        ),
+    )
+    monkeypatch.setattr(tmux_runtime, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+
+    entry = next(item for item in api.dependencies_status()["deps"] if item["id"] == "show-runtime")
+
+    assert entry["installed"] is True
+    assert entry["status"] == "ready"
+    assert {key: entry[key] for key in expected} == expected
+
+
+def _stub_dependency_status_neighbors(monkeypatch) -> None:
+    import core.tmux_runtime as tmux_runtime
+
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "installed": True,
+            "version": "0.1.14",
+            "latest_version": None,
+            "has_update": False,
+            "status": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (
+            {"id": "memory-package", "status": "not_required"},
+            {"id": "memory-runtime", "status": "not_required"},
+        ),
+    )
+    monkeypatch.setattr(
+        tmux_runtime,
+        "tmux_status",
+        lambda: {"installed": False, "version": None, "status": "missing"},
+    )
+
+
+def test_dependencies_status_preserves_show_runtime_inspection_failure(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    runtime_dir = tmp_path / "runtime"
+    pointer = runtime_dir / "prebuilt" / "current.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps(
+            {
+                "provider": "archive",
+                "runtime_id": "show-runtime",
+                "install_dir": str(runtime_dir / "prebuilt" / "versions" / "missing"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="archive",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    pointer_before = pointer.read_bytes()
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is None
+    assert entry["status"] == "error"
+    assert entry["action_class"] == "operator_only"
+    assert entry["reason"] == "runtime_install_inspection_failed"
+    assert entry["inspection_error"]["kind"] == "OSError"
+    repair = manager.repair()
+    assert repair["reason"] == "runtime_install_inspection_failed"
+    assert repair["repair_attempted"] is False
+    assert pointer.read_bytes() == pointer_before
+
+
+def test_dependencies_status_keeps_true_show_runtime_absence_installable(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "runtime.tgz",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is False
+    assert entry["status"] == "missing"
+    assert entry["action_class"] == "repairable"
+    assert entry["reason"] is None
+
+
+def test_dependencies_status_keeps_node_ready_for_explicit_runtime_config_failure(
+    monkeypatch,
+    tmp_path,
+):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda command: ["node"] if command == "node" else None,
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        command=str(tmp_path / "missing-runtime"),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    by_id = {item["id"]: item for item in api.dependencies_status()["deps"]}
+
+    assert by_id["show-runtime"]["installed"] is None
+    assert by_id["show-runtime"]["status"] == "error"
+    assert by_id["show-runtime"]["reason"] == "runtime_command_missing"
+    assert by_id["show-runtime"]["action_class"] == "operator_only"
+    assert by_id["node"]["installed"] is True
+    assert by_id["node"]["status"] == "ready"
+
+
+def test_show_runtime_status_does_not_hide_programming_defects(monkeypatch, tmp_path):
+    from core.show_runtime import ShowRuntimeManager
+
+    manager = ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(manager, "_status", lambda **_kwargs: (_ for _ in ()).throw(TypeError("bug")))
+
+    with pytest.raises(TypeError, match="bug"):
+        manager.status()
+
+
+def test_settings_and_doctor_consume_the_same_verified_repair_owner(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+    from vibe import cli
+
+    manager = show_runtime.ShowRuntimeManager(
+        command="/bin/echo",
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        auto_install=False,
+    )
+    verification_calls = []
+
+    def verify(command):
+        verification_calls.append(command)
+        return show_runtime.ShowRuntimeStartability.startable()
+
+    monkeypatch.setattr(manager, "_verify_startability", verify)
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    monkeypatch.setattr(show_runtime, "ShowRuntimeManager", lambda: manager)
+
+    settings = api._prepare_show_runtime_job()
+    doctor = cli._repair_show_runtime()
+
+    assert settings["outcome"] == "healthy"
+    assert settings["changed"] is False
+    assert doctor["status"] == "skipped"
+    assert verification_calls == [["/bin/echo"], ["/bin/echo"]]
+
+
+@pytest.mark.parametrize(
     ("runtime", "expected"),
     [
         ({"installed": False, "reason": "memory_runtime_platform_unsupported"}, "unsupported"),
@@ -964,6 +2184,529 @@ def test_dependencies_status_detects_reconciliation_during_probes(monkeypatch):
 )
 def test_memory_runtime_dependency_status_maps_closed_failures(runtime, expected) -> None:
     assert api._memory_runtime_dependency_status(runtime) == expected
+
+
+@pytest.mark.parametrize(
+    ("metadata", "status", "reason", "action_class"),
+    (
+        (api._MemoryPackageMetadata(0, None), "missing", "memory_package_missing", "repairable"),
+        (
+            api._MemoryPackageMetadata(2, None),
+            "error",
+            "memory_package_metadata_ambiguous",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(None, None),
+            "error",
+            "memory_package_metadata_unreadable",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(1, None),
+            "error",
+            "memory_package_metadata_unreadable",
+            "operator_only",
+        ),
+        (
+            api._MemoryPackageMetadata(1, "3.0.15"),
+            "error",
+            "memory_package_version_mismatch",
+            "repairable",
+        ),
+    ),
+)
+def test_required_memory_package_metadata_precedes_optional_imports(
+    monkeypatch,
+    metadata,
+    status,
+    reason,
+    action_class,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    probe = Mock(side_effect=AssertionError("metadata failure imported Memory runtime"))
+    artifact = Mock(side_effect=AssertionError("metadata failure imported Memory artifact"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", probe)
+    monkeypatch.setattr(api, "_memory_artifact_status", artifact)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert package["status"] == status
+    assert package["reason"] == reason
+    assert package["action_class"] == action_class
+    assert runtime["reason"] == reason
+    probe.assert_not_called()
+    artifact.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    (
+        "requirement",
+        "metadata",
+        "build_kind",
+        "current_version",
+        "probe_failure",
+        "artifact_imported",
+        "expected",
+    ),
+    (
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(1, "3.0.13"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_version_mismatch", "repairable"),
+            id="not-required-exposes-version-bootstrap",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(0, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("missing", "not_required", "memory_package_missing", "repairable"),
+            id="not-required-exposes-missing-bootstrap",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            True,
+            True,
+            ("not_required", "not_required", None, "repairable"),
+            id="not-required-exact-package-keeps-explicit-repair",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(None, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_unreadable", "operator_only"),
+            id="not-required-unreadable-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(2, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_required", "memory_package_metadata_ambiguous", "operator_only"),
+            id="not-required-ambiguous-metadata-stays-operator-only",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(False, "not_required"),
+            api._MemoryPackageMetadata(0, None),
+            "source",
+            "3.0.14",
+            False,
+            True,
+            ("not_required", "not_required", None, "none"),
+            id="not-required-source-stays-operator-owned",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("ready", "ready", None, "none"),
+            id="required-ready",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(0, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("missing", "not_ready", "memory_package_missing", "repairable"),
+            id="required-missing",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.13"),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_version_mismatch", "repairable"),
+            id="required-version-mismatch",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            True,
+            True,
+            ("error", "not_ready", "memory_package_runtime_unavailable", "repairable"),
+            id="required-runtime-probe-broken",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "package",
+            "3.0.14",
+            False,
+            False,
+            ("error", "not_ready", "memory_package_artifact_unavailable", "repairable"),
+            id="required-artifact-import-broken",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(None, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_metadata_unreadable", "operator_only"),
+            id="operator-only-unreadable-metadata",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(2, None),
+            "package",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_metadata_ambiguous", "operator_only"),
+            id="operator-only-duplicate-provider",
+        ),
+        pytest.param(
+            api._MemoryRequirementProjection(True, "required"),
+            api._MemoryPackageMetadata(1, "3.0.14"),
+            "source",
+            "3.0.14",
+            False,
+            True,
+            ("error", "not_ready", "memory_package_source_build", "operator_only"),
+            id="operator-only-source-deployment",
+        ),
+    ),
+)
+def test_memory_package_state_action_matrix(
+    monkeypatch,
+    requirement,
+    metadata,
+    build_kind,
+    current_version,
+    probe_failure,
+    artifact_imported,
+    expected,
+) -> None:
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: requirement)
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata)
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(
+        api,
+        "probe_memory_runtime_entrypoint",
+        Mock(side_effect=ImportError("broken entrypoint") if probe_failure else None),
+    )
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (
+            artifact_imported,
+            {"installed": True, "status": "ready", "matches_manifest": True},
+        ),
+    )
+
+    package, _runtime = api._memory_dependencies_status(offline=True)
+
+    assert (
+        package["status"],
+        package["readiness"],
+        package["reason"],
+        package["action_class"],
+    ) == expected
+
+
+def test_required_memory_package_probe_and_artifact_order_keeps_package_ready(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(
+        api,
+        "probe_memory_runtime_entrypoint",
+        lambda: events.append("runtime-probe"),
+    )
+
+    def artifact_status(*, offline: bool) -> tuple[bool, dict]:
+        assert offline is True
+        events.append("artifact-import-and-status")
+        return True, {
+            "installed": False,
+            "status": "error",
+            "reason": "memory_runtime_install_failed",
+        }
+
+    monkeypatch.setattr(api, "_memory_artifact_status", artifact_status)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert events == ["runtime-probe", "artifact-import-and-status"]
+    assert package["readiness"] == "ready"
+    assert package["reason"] is None
+    assert runtime["status"] == "error"
+    assert runtime["reason"] == "memory_runtime_install_failed"
+
+
+def test_memory_package_restart_failure_remains_explicitly_repairable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: True)
+    probe = Mock(side_effect=AssertionError("restart retry must not re-import the companion"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", probe)
+
+    package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert (package["status"], package["reason"], package["action_class"]) == (
+        "error",
+        "memory_package_restart_failed",
+        "repairable",
+    )
+    assert runtime["reason"] == "memory_package_restart_failed"
+    probe.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("build_kind", "current_version"),
+    (("source", "3.0.14"), ("package", "3.0.14")),
+)
+def test_mismatched_memory_runtime_keeps_repair_action_across_build_paths(
+    monkeypatch,
+    build_kind,
+    current_version,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind=build_kind))
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (
+            True,
+            {
+                "installed": True,
+                "status": "ready",
+                "matches_manifest": False,
+            },
+        ),
+    )
+
+    _package, runtime = api._memory_dependencies_status(offline=True)
+
+    assert runtime["has_update"] is True
+    assert runtime["action_class"] == "repairable"
+
+
+def test_required_memory_package_accepts_pep440_equivalent_versions(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_load_memory_requirement",
+        lambda: api._MemoryRequirementProjection(True, "required"),
+    )
+    monkeypatch.setattr(
+        api,
+        "_inspect_memory_package_metadata",
+        lambda: api._MemoryPackageMetadata(1, "3.0.14.0"),
+    )
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (True, {"installed": True, "status": "ready"}),
+    )
+
+    package, _runtime = api._memory_dependencies_status(offline=True)
+
+    assert package["readiness"] == "ready"
+    assert package["has_update"] is False
+
+
+def test_memory_package_metadata_enumerates_canonical_provider_set(
+    monkeypatch,
+) -> None:
+    import importlib.metadata
+
+    calls: list[str] = []
+    providers = (SimpleNamespace(version="3.0.14"), SimpleNamespace(version="3.0.14"))
+
+    def distributions(*, name: str):
+        calls.append(name)
+        return providers
+
+    monkeypatch.setattr(importlib.metadata, "distributions", distributions)
+
+    assert api._inspect_memory_package_metadata() == api._MemoryPackageMetadata(2, None)
+    assert calls == ["avibe-memory"]
+
+
+def test_missing_first_run_config_is_readable_not_required(monkeypatch) -> None:
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: (_ for _ in ()).throw(FileNotFoundError())),
+    )
+
+    requirement = api._load_memory_requirement()
+
+    assert requirement == api._MemoryRequirementProjection(False, "not_required")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("disabled", "safe-degraded-memory", "whole-config-failure"),
+)
+def test_memory_indep_021_status_import_fence(tmp_path, case) -> None:
+    script = r'''
+import importlib.abc
+import json
+import sys
+from types import SimpleNamespace
+
+from config import paths
+from config.v2_config import V2Config
+
+case = sys.argv[1]
+config_path = paths.get_config_path()
+config_path.parent.mkdir(parents=True, exist_ok=True)
+config = V2Config.default()
+config.save(config_path)
+if case == "safe-degraded-memory":
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["memory"]["recovery_intent"] = "invalid"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+elif case == "whole-config-failure":
+    config_path.write_text("{", encoding="utf-8")
+
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+
+class BlockMemoryImplementation(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "avibe_memory" or fullname.startswith("avibe_memory."):
+            raise AssertionError(f"optional implementation import: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockMemoryImplementation())
+from vibe import api
+
+metadata_calls = []
+
+def inspect_metadata():
+    metadata_calls.append(True)
+    return api._MemoryPackageMetadata(0, None)
+
+api._inspect_memory_package_metadata = inspect_metadata
+api._published_running_version = lambda: "3.0.14"
+api.get_build_identity = lambda: SimpleNamespace(kind="package")
+package, runtime = api._memory_dependencies_status(offline=True)
+if case == "whole-config-failure":
+    assert package["readiness"] == "memory_requirement_unreadable"
+    assert package["reason"] == "memory_requirement_unreadable"
+    assert package["action_class"] == "operator_only"
+    assert metadata_calls == []
+else:
+    assert package["readiness"] == "not_required"
+    assert package["status"] == "missing"
+    assert package["reason"] == "memory_package_missing"
+    assert package["action_class"] == "repairable"
+    assert runtime["status"] == "not_required"
+    assert metadata_calls == [True]
+    if case == "safe-degraded-memory":
+        assert package["warnings"]
+
+from vibe.upgrade import MemoryRequirementUnreadableError, configured_memory_enabled
+
+if case == "whole-config-failure":
+    try:
+        configured_memory_enabled()
+    except MemoryRequirementUnreadableError:
+        pass
+    else:
+        raise AssertionError("whole-config failure admitted package mutation")
+else:
+    assert configured_memory_enabled() is False
+
+assert not any(
+    name == "avibe_memory" or name.startswith("avibe_memory.")
+    for name in sys.modules
+)
+'''
+    env = {
+        **os.environ,
+        "AVIBE_HOME": str(tmp_path / case),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script, case],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_memory_runtime_dependency_job_uses_controller_lifecycle(monkeypatch):
@@ -1024,16 +2767,32 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
     class _Mgr:
         def status(self):
-            return {"installed": False, "manifest": None, "node_available": True, "node_supported": False, "node_version": "16.0"}
+            return {
+                "install": {"state": "absent"},
+                "manifest": None,
+                "node_available": True,
+                "node_supported": False,
+                "node_version": "16.0",
+            }
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
     by = {d["id"]: d for d in api.dependencies_status()["deps"]}
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
 
 
-def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(monkeypatch):
+def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
+    """MH-RUNTIME-008: startup converges CPA without changing run intent."""
+
     askill_calls = []
     avault_calls = []
+    model_hub_calls = []
+    memory_calls = []
+
+    def reconcile_memory_package():
+        memory_calls.append("reconcile")
+        return {"ok": True, "skipped": True, "reason": "memory_not_required"}
+
+    monkeypatch.setattr(api, "reconcile_memory_package_on_startup", reconcile_memory_package)
 
     def fake_ensure(force=False):
         askill_calls.append(force)
@@ -1046,6 +2805,12 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
         return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
 
     monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda *, force=False: model_hub_calls.append(force)
+        or {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"},
+    )
 
     import core.show_runtime as srt_mod
 
@@ -1054,18 +2819,26 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
             self.prepared = []
             self.auto_install = True
 
-        def status(self):
+        def status(self, *, offline=False):
+            assert offline is True
             return {
-                "installed": False,
-                "manifest": {"runtime_version": "1.4.0"},
                 "node_available": True,
                 "node_supported": True,
                 "node_version": "22.12.0",
             }
 
-        def prepare(self, *, force=False, startup=False):
-            self.prepared.append((force, startup))
-            return {"ok": True, "reason": None}
+        def prepare(self, *, force=False, automatic=False):
+            self.prepared.append((force, automatic))
+            return {
+                "policy": {"state": "allowed", "reason": None},
+                "install": {"state": "installed", "reason": None},
+                "runtime": {"state": "unchecked", "reason": None},
+                "status": {
+                    "node_available": True,
+                    "node_supported": True,
+                    "node_version": "22.12.0",
+                },
+            }
 
     manager = _Mgr()
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
@@ -1073,97 +2846,354 @@ def test_reconcile_startup_dependencies_installs_required_runtime_dependencies(m
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is True
+    assert memory_calls == ["reconcile"]
+    assert out["memory_package"]["reason"] == "memory_not_required"
     assert askill_calls == [False]
     assert avault_calls == [False]
+    assert model_hub_calls == [False]
+    assert out["model_hub_engine"]["version"] == "v7.2.149"
     assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"
-    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
+    assert out["show_runtime"]["ok"] is True
+    assert out["show_runtime"]["status"] == "pending_prewarm"
+    assert out["show_runtime"]["policy"]["state"] == "allowed"
+    assert out["show_runtime"]["install"]["state"] == "installed"
+    assert out["show_runtime"]["runtime"]["state"] == "unchecked"
 
 
-def test_reconcile_startup_dependencies_respects_show_runtime_auto_install_opt_out(monkeypatch):
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+def test_memory_indep_026_startup_repairs_required_missing_companion_once(monkeypatch):
+    """MEMORY-INDEP-026: a split-first startup converges through exact repair."""
 
-    import core.show_runtime as srt_mod
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (
+            {
+                "required": True,
+                "readiness": "not_ready",
+                "reason": "memory_package_missing",
+                "action_class": "repairable",
+            },
+            {},
+        ),
+    )
 
-    class _Mgr:
-        auto_install = False
+    def repair(*, automatic: bool = False) -> dict:
+        assert automatic is True
+        calls.append(True)
+        return {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+            "restart": {"job_id": "restart"},
+        }
 
-        def status(self):
-            return {
-                "installed": False,
-                "node_available": True,
-                "node_supported": True,
-                "node_version": "22.12.0",
-            }
+    monkeypatch.setattr(api, "_prepare_memory_package_job", repair)
 
-        def prepare(self, *, force=False, startup=False):
-            raise AssertionError("startup reconcile must honor the auto-install opt-out")
+    result = api.reconcile_memory_package_on_startup()
 
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-
-    out = api.reconcile_startup_dependencies()
-
-    assert out["show_runtime"] == {
-        "ok": False,
-        "status": "failed",
-        "reason": "runtime_auto_install_disabled",
+    assert calls == [True]
+    assert result == {
+        "ok": True,
+        "message": "memory_package_ready",
+        "reason": None,
+        "restarting": True,
+        "restart": {"job_id": "restart"},
     }
 
 
-def test_reconcile_startup_dependencies_does_not_reinstall_ready_show_runtime(monkeypatch):
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+def test_startup_memory_repair_continues_other_dependencies_before_service_restart(
+    monkeypatch,
+):
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": True,
+            "message": "memory_package_ready",
+            "reason": None,
+            "restarting": True,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: events.append("avault") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda **_kwargs: events.append("model-hub-engine") or {"ok": True},
+    )
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
 
     import core.show_runtime as srt_mod
 
     class _Mgr:
-        auto_install = True
-
-        def status(self):
+        def status(self, *, offline=False):
             return {
-                "installed": True,
-                "node_available": True,
-                "node_supported": True,
-                "node_version": "22.12.0",
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
             }
 
-        def prepare(self, *, force=False, startup=False):
-            raise AssertionError("ready runtime must not invoke its provider installer")
-
-    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
-
-    out = api.reconcile_startup_dependencies()
-
-    assert out["show_runtime"] == {"ok": True, "status": "ready", "reason": None}
-
-
-def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):
-    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
-
-    import core.show_runtime as srt_mod
-
-    class _Mgr:
-        def status(self):
-            return {"installed": False, "node_available": False, "node_version": None}
-
-        def prepare(self, *, force=False, startup=False):
+        def prepare(self, *, force=False, automatic=False):
             raise AssertionError("runtime must not prepare without Node")
 
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
 
+    result = api.reconcile_startup_dependencies()
+
+    assert events == ["askill", "avault", "model-hub-engine"]
+    assert result["memory_package"]["restarting"] is True
+    assert result["show_runtime"]["status"] == "failed"
+
+
+def test_memory_indep_028_startup_retries_after_restart_admission(monkeypatch):
+    """MEMORY-INDEP-028: restart admission cannot strand the companion."""
+
+    events: list[str] = []
+    memory_results = iter(
+        (
+            {
+                "ok": False,
+                "message": "memory_package_upgrade_busy",
+                "reason": "memory_package_upgrade_busy",
+            },
+            {
+                "ok": True,
+                "message": "memory_package_ready",
+                "reason": None,
+                "restarting": True,
+            },
+        )
+    )
+
+    def reconcile_memory_package() -> dict:
+        result = next(memory_results)
+        events.append(str(result["message"]))
+        return result
+
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        reconcile_memory_package,
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda **_kwargs: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda **_kwargs: events.append("avault") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda **_kwargs: events.append("model-hub-engine") or {"ok": True},
+    )
+    restart_pending = iter((True, False))
+    monkeypatch.setattr(api, "restart_is_pending", lambda: next(restart_pending))
+    monkeypatch.setattr(api.time, "sleep", lambda _seconds: events.append("wait"))
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == [
+        "memory_package_upgrade_busy",
+        "askill",
+        "avault",
+        "model-hub-engine",
+        "wait",
+        "memory_package_ready",
+    ]
+    assert result["memory_package"]["message"] == "memory_package_ready"
+
+
+def test_startup_memory_retry_stays_bounded_while_restart_remains_pending(
+    monkeypatch,
+):
+    busy = {
+        "ok": False,
+        "message": "memory_package_upgrade_busy",
+        "reason": "memory_package_upgrade_busy",
+    }
+    monotonic = iter((0.0, 0.0, 0.6))
+    sleeps: list[float] = []
+    monkeypatch.setattr(api, "restart_is_pending", lambda: True)
+    monkeypatch.setattr(api.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(api.time, "sleep", sleeps.append)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(api, "_STARTUP_MEMORY_PACKAGE_RETRY_INTERVAL_SECONDS", 0.25)
+    monkeypatch.setattr(
+        api,
+        "_reconcile_startup_memory_package_guarded",
+        lambda: pytest.fail("repair must wait until restart admission is released"),
+    )
+
+    result = api._retry_startup_memory_package_after_restart(busy)
+
+    assert result == busy
+    assert sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
+    "package",
+    (
+        {
+            "required": False,
+            "readiness": "not_required",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "ready",
+            "reason": None,
+            "action_class": "none",
+        },
+        {
+            "required": True,
+            "readiness": "not_ready",
+            "reason": "memory_package_source_build",
+            "action_class": "operator_only",
+        },
+    ),
+    ids=("disabled", "ready", "source"),
+)
+def test_startup_memory_package_reconcile_skips_nonrepairable_states(monkeypatch, package):
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda *, offline: (package, {}),
+    )
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda: pytest.fail("a non-repairable package state must not install"),
+    )
+
+    result = api.reconcile_memory_package_on_startup()
+
+    assert result["ok"] is True
+    assert result["skipped"] is True
+
+
+def test_startup_memory_repair_failure_keeps_other_dependency_reconcile_running(monkeypatch):
+    events: list[str] = []
+    monkeypatch.setattr(
+        api,
+        "reconcile_memory_package_on_startup",
+        lambda: {
+            "ok": False,
+            "message": "memory_package_install_failed",
+            "reason": "memory_package_install_failed",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_askill_installed",
+        lambda *, force: events.append("askill") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_avault_installed",
+        lambda *, force: events.append("avault") or {"ok": True},
+    )
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda *, force: events.append("model-hub-engine") or {"ok": True},
+    )
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self, *, offline=False):
+            return {"node_available": False, "node_supported": None, "node_version": None}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+
+    result = api.reconcile_startup_dependencies()
+
+    assert events == ["askill", "avault", "model-hub-engine"]
+    assert result["ok"] is False
+    assert result["memory_package"]["reason"] == "memory_package_install_failed"
+
+
+def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda force=False: {"ok": True, "installed": True},
+    )
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def __init__(self):
+            self.prepared = []
+
+        def status(self, *, offline=False):
+            assert offline is True
+            return {
+                "node_available": False,
+                "node_supported": None,
+                "node_version": None,
+            }
+
+        def prepare(self, *, force=False, automatic=False):
+            self.prepared.append((force, automatic))
+            pytest.fail("a missing prerequisite must not enter install admission")
+
+    manager = _Mgr()
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
+
     out = api.reconcile_startup_dependencies()
 
     assert out["ok"] is False
+    assert manager.prepared == []
     assert out["node"]["status"] == "missing"
-    assert out["show_runtime"] == {"ok": False, "status": "skipped", "reason": "runtime_node_missing"}
+    assert out["show_runtime"]["ok"] is False
+    assert out["show_runtime"]["status"] == "failed"
+    assert out["show_runtime"]["install"]["state"] == "failed"
+    assert out["show_runtime"]["install"]["reason"] == "runtime_node_missing"
 
 
 def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VIBE_STARTUP_DEPENDENCY_RECONCILE", "0")
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not reconcile"))
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: pytest.fail("should not reconcile"))
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda force=False: pytest.fail("should not reconcile"),
+    )
 
     out = api.reconcile_startup_dependencies()
 
@@ -1180,17 +3210,34 @@ def test_startup_show_page_prewarm_targets_recent_non_offline(monkeypatch, tmp_p
     try:
         store.ensure("ses-old")
         store.update_visibility("ses-public", "public")
+        limited = store.ensure("ses-limited")
+        result = store.apply_access(
+            "ses-limited",
+            expected_revision=limited.access_revision,
+            target_access_mode="limited",
+            target_share_id=limited.share_id,
+            target_emails=["viewer@example.com"],
+        )
+        assert result.status == "applied"
         store.update_visibility("ses-offline", "offline")
         store.ensure("ses-new")
     finally:
         store.close()
 
-    out = api.startup_show_page_prewarm_targets(limit=2)
+    out = api.startup_show_page_prewarm_targets(limit=3)
 
-    assert out["limit"] == 2
-    assert [page["session_id"] for page in out["pages"]] == ["ses-new", "ses-public"]
-    assert out["pages"][1]["visibility"] == "public"
-    assert out["pages"][1]["base_path"].startswith("/p/")
+    assert out["limit"] == 3
+    assert [page["session_id"] for page in out["pages"]] == [
+        "ses-new",
+        "ses-limited",
+        "ses-public",
+    ]
+    assert out["pages"][0]["context"] == "private"
+    assert out["pages"][1]["visibility"] == "limited"
+    assert out["pages"][1]["context"] == "private"
+    assert out["pages"][2]["visibility"] == "public"
+    assert out["pages"][2]["context"] == "shared"
+    assert all("base_path" not in page for page in out["pages"])
 
 
 def test_startup_show_page_prewarm_limit_env(monkeypatch):
@@ -1201,6 +3248,608 @@ def test_startup_show_page_prewarm_limit_env(monkeypatch):
     assert api.startup_show_page_prewarm_limit() == 10
 
 
+@pytest.mark.parametrize(
+    ("package", "expected_reason"),
+    (
+        pytest.param(
+            {
+                "required": False,
+                "provider_count": 0,
+                "version": None,
+                "reason": None,
+                "action_class": "none",
+            },
+            "memory_not_required",
+            id="not-required",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": None,
+                "version": None,
+                "reason": "memory_package_metadata_unreadable",
+                "action_class": "operator_only",
+            },
+            "memory_package_metadata_unreadable",
+            id="operator-only-metadata",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": 1,
+                "version": "3.0.14",
+                "reason": "memory_package_source_build",
+                "action_class": "operator_only",
+            },
+            "memory_package_source_build",
+            id="source-deployment",
+        ),
+        pytest.param(
+            {
+                "required": True,
+                "provider_count": 1,
+                "version": "3.0.14",
+                "reason": None,
+                "action_class": "none",
+            },
+            "memory_package_not_repairable",
+            id="already-ready",
+        ),
+    ),
+)
+def test_memory_package_server_admission_rejects_nonrepairable_rows(
+    monkeypatch,
+    package,
+    expected_reason,
+) -> None:
+    monkeypatch.setattr(
+        api,
+        "_memory_dependencies_status",
+        lambda **_: (package, {"id": "memory-runtime"}),
+    )
+
+    result = api.start_dependency_install_job("memory-package")
+
+    assert result == {
+        "ok": False,
+        "status": "rejected",
+        "message": expected_reason,
+        "output": None,
+        "reason": expected_reason,
+        "action_class": "operator_only",
+    }
+
+
+#: One running version, published two ways. `publish.yml` accepts official
+#: `vX.Y.ZrcN` tags and publishes them to PyPI, while a `gh-v*` build of the
+#: identical version is on no index at all — so the version string cannot pick
+#: the repair sources and only the recorded install origin can. Both rows use
+#: the same version deliberately.
+REPAIR_VERSION = "3.0.14rc8"
+RELEASE_CORE_URL = f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/avibe_os-{REPAIR_VERSION}-py3-none-any.whl"
+RELEASE_MEMORY_URL = (
+    f"https://github.com/avibe-bot/avibe/releases/download/gh-v{REPAIR_VERSION}/"
+    f"avibe_memory-{REPAIR_VERSION}-py3-none-any.whl"
+)
+INSTALL_ORIGIN_SOURCES = {
+    "index install": (None, None, None),
+    "release asset install": (RELEASE_CORE_URL, RELEASE_CORE_URL, RELEASE_MEMORY_URL),
+}
+
+
+@pytest.mark.parametrize(
+    ("origin", "core_spec", "memory_spec"),
+    list(INSTALL_ORIGIN_SOURCES.values()),
+    ids=list(INSTALL_ORIGIN_SOURCES),
+)
+def test_memory_package_dependency_job_targets_the_running_version_wherever_it_came_from(
+    monkeypatch,
+    origin: str | None,
+    core_spec: str | None,
+    memory_spec: str | None,
+) -> None:
+    current_version = REPAIR_VERSION
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
+    plan = SimpleNamespace(
+        command=["repair"],
+        activation=None,
+        method="pip",
+        preflight_error=None,
+    )
+    calls: dict[str, object] = {}
+    lock_events: list[str] = []
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: current_version)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    record_result = Mock()
+    monkeypatch.setattr(api, "_record_memory_package_repair_result", record_result)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+
+    class _Lock:
+        def __enter__(self):
+            lock_events.append("entered")
+
+        def __exit__(self, *_args):
+            lock_events.append("exited")
+
+    monkeypatch.setattr(api, "atomic_upgrade_lock", _Lock)
+
+    def build_plan(**kwargs):
+        lock_events.append("build")
+        calls["plan"] = kwargs
+        return plan
+
+    def execute_plan(actual, **kwargs):
+        lock_events.append("execute")
+        calls["execute"] = (actual, kwargs)
+        return subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr="")
+
+    monkeypatch.setattr(api, "build_upgrade_plan", build_plan)
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
+    def schedule_restart(**kwargs):
+        lock_events.append("restart")
+        calls["restart"] = kwargs
+        return {"job_id": "restart"}
+
+    monkeypatch.setattr(api, "schedule_restart", schedule_restart)
+
+    result = api._prepare_memory_package_job()
+
+    assert result["ok"] is True
+    assert result["message"] == "memory_package_ready"
+    assert calls["plan"] == {
+        "version": current_version,
+        "package_name": api.PACKAGE_NAME,
+        "memory_package": True,
+        "memory_version": current_version,
+        "vibe_path": "/bin/vibe",
+        "core_spec": core_spec,
+        "memory_spec": memory_spec,
+    }
+    assert calls["execute"] == (
+        plan,
+        {
+            "run": subprocess.run,
+            "capture_output": True,
+            "text": True,
+            "timeout": api.UPGRADE_INSTALL_TIMEOUT_SECONDS,
+            "cwd": "/safe",
+        },
+    )
+    assert calls["restart"] == {
+        "delay_seconds": 2.0,
+        "vibe_path": "/bin/vibe",
+        "trigger": "memory-package-repair",
+        "scope": "all",
+    }
+    assert result["restarting"] is True
+    assert result["restart"] == {"job_id": "restart"}
+    assert lock_events == ["entered", "build", "execute", "restart", "exited"]
+    record_result.assert_called_once_with(
+        current_version,
+        result="restart_scheduled",
+        reason=None,
+    )
+
+
+@pytest.mark.parametrize("tag,direct", [
+    (f"v{REPAIR_VERSION}", False),
+    ("v3.2.0a1", False),
+    ("v3.2.0b1", False),
+    ("v3.2.0rc1", False),
+    ("v3.2.0.dev0", False),
+    ("v3.2.0.dev1", False),
+    ("v3.2.0.post1", False),
+    (f"gh-v{REPAIR_VERSION}", True),
+    ("gh-v3.2.0.dev1", True),
+    ("gh-v03.02.00dev01", True),
+    ("v3.2.0.dev1", True),
+])
+def test_memory_indep_027_preview_repair_installs_the_release_that_published_it(
+    monkeypatch, tmp_path, tag, direct,
+) -> None:
+    """A core-only install converges from the corresponding GitHub Release.
+
+    MEMORY-INDEP-027 retains its preview-origin coverage. The PyPI-core case
+    additionally verifies the same consuming startup path without a direct URL.
+    """
+
+    from scripts.release_package_version import package_version_from_release_tag
+
+    current_version = package_version_from_release_tag(tag)
+    release = f"https://github.com/avibe-bot/avibe/releases/download/{tag}/"
+    origin = f"{release}avibe_os-{current_version}-py3-none-any.whl" if direct else None
+    calls: dict[str, object] = {}
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
+    monkeypatch.setattr("vibe.__version__", current_version)
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: tmp_path / "repair.json")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "_memory_package_restart_retry_required", lambda _version: False)
+    monkeypatch.setattr(api, "_record_memory_package_repair_result", Mock())
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "schedule_restart", lambda **_kwargs: {"job_id": "restart"})
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    # Resolve to the pip installer so the plan is built from this interpreter
+    # without consulting any uv tool environment on the host.
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **_kwargs: None)
+
+    def execute_plan(plan, **_kwargs):
+        calls["plan"] = plan
+        return subprocess.CompletedProcess(plan.command, 0, stdout="installed", stderr="")
+
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute_plan)
+
+    result = api._prepare_memory_package_job(automatic=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is True
+    plan = calls["plan"]
+    core_spec = origin or f"{api.PACKAGE_NAME}=={current_version}"
+    commands = [
+        command
+        for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
+        if command
+    ]
+    assert len(commands) >= 2, "the repair resolves the pair before it installs it"
+    for command in commands:
+        assert core_spec in command
+        assert f"avibe-memory @ {release}avibe_memory-{current_version}-py3-none-any.whl" in command
+        # Memory never falls back to an index, even when core uses one.
+        assert f"{api.MEMORY_PACKAGE_NAME}=={current_version}" not in command
+
+
+@pytest.mark.parametrize("version,origin,build_kind", [
+    ("3.2.0.dev1+local", None, "package"),
+    ("3.2.0+local", None, "package"),
+    ("invalid", None, "package"),
+    ("3.2.0.dev1", None, "source"),
+    ("3.2.0", None, "source"),
+    ("3.2.0.dev1+local", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl", "package"),
+    ("3.2.0.dev1", "https://github.com/avibe-bot/avibe/releases/download/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl", "source"),
+])
+def test_local_or_source_build_cannot_enter_memory_repair(
+    monkeypatch, tmp_path, version, origin, build_kind,
+):
+    monkeypatch.setattr("vibe.__version__", version)
+    monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _: origin)
+    monkeypatch.setattr(api, "_load_memory_requirement", lambda: api._MemoryRequirementProjection(True, "required"))
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: api._MemoryPackageMetadata(0, None))
+    monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    if build_kind == "source":
+        # An unreadable source marker must never become a package install.
+        monkeypatch.setenv("VIBE_BUILD_METADATA_PATH", str(tmp_path / "missing-source.json"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", Mock(side_effect=ImportError("missing")))
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    build = Mock(side_effect=AssertionError("operator-only build must not plan an install"))
+    monkeypatch.setattr(api, "build_upgrade_plan", build)
+    result = api._prepare_memory_package_job(automatic=True)
+    assert result["ok"] is False
+    assert result["action_class"] == "operator_only"
+    assert result["reason"] == (
+        "memory_package_source_build" if build_kind == "source" else "memory_package_unpublished_build"
+    )
+    build.assert_not_called()
+
+
+def test_memory_package_dependency_job_fails_closed_when_restart_cannot_be_scheduled(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    build_plan = Mock(
+        return_value=SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        )
+    )
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        build_plan,
+    )
+    execute_plan = Mock(
+        return_value=subprocess.CompletedProcess(
+            ["repair"], 0, stdout="installed", stderr=""
+        )
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        execute_plan,
+    )
+    schedule = Mock(side_effect=RuntimeError("restart unavailable"))
+    monkeypatch.setattr(api, "schedule_restart", schedule)
+
+    result = api._prepare_memory_package_job()
+
+    assert result == {
+        "ok": False,
+        "message": "memory_package_restart_failed",
+        "output": "installed",
+        "reason": "memory_package_restart_failed",
+        "restarting": False,
+    }
+    assert api._memory_package_restart_retry_required("3.0.14") is True
+
+    schedule.side_effect = None
+    schedule.return_value = {"job_id": "restart"}
+    retry = api._prepare_memory_package_job()
+
+    assert retry["ok"] is True
+    assert retry["restarting"] is True
+    assert build_plan.call_count == 1
+    assert execute_plan.call_count == 1
+    assert schedule.call_count == 2
+    assert api._memory_package_restart_retry_required("3.0.14") is False
+
+
+@pytest.mark.parametrize("outcome", ("success", "install", "timeout", "integrity", "activation", "restart"))
+def test_memory_repair_stages_activation_without_mutating_the_running_environment(
+    monkeypatch, tmp_path, outcome,
+) -> None:
+    from core.install_integrity import IntegrityResult
+    from vibe import upgrade
+
+    root = tmp_path / "generations"
+    live = tmp_path / "uv" / "tools" / "avibe-os"
+    live.mkdir(parents=True)
+    original = {"vibe": b"old launcher", "python": b"old interpreter", "api.py": b"old code"}
+    for name, content in original.items():
+        (live / name).write_bytes(content)
+    launcher = tmp_path / "bin" / "vibe"
+    launcher.parent.mkdir()
+    launcher.symlink_to(live / "vibe")
+    candidate = root / "new" / "bin" / "vibe"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_bytes(b"new launcher")
+    candidate.chmod(0o755)
+    candidate_python = candidate.with_name("python")
+    candidate_python.write_bytes(b"new interpreter")
+    candidate_python.chmod(0o755)
+    activation = upgrade.AtomicActivation(launcher, candidate)
+    plan = upgrade.UpgradePlan(["repair"], {}, "uv", activation=activation)
+
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(api, "release_asset_specs", lambda _: None)
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: tmp_path / "repair.json")
+    build = Mock(return_value=plan)
+    monkeypatch.setattr(api, "build_upgrade_plan", build)
+    execute = Mock(return_value=subprocess.CompletedProcess(["repair"], outcome == "install", "installed", ""))
+    if outcome == "timeout":
+        execute.side_effect = subprocess.TimeoutExpired(["repair"], 1)
+    monkeypatch.setattr(api, "execute_upgrade_plan", execute)
+    verify = Mock(return_value=IntegrityResult(outcome != "integrity", failures=("incomplete",) if outcome == "integrity" else ()))
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", verify)
+    monkeypatch.setattr(api, "verify_python_environment", Mock(side_effect=AssertionError("must verify candidate, not live interpreter")))
+    if outcome == "activation":
+        monkeypatch.setattr(upgrade, "_prepare_launcher_replacement", Mock(side_effect=PermissionError("launcher locked")))
+    restart = Mock(return_value={"job_id": "new-generation"})
+    if outcome == "restart":
+        restart.side_effect = RuntimeError("cannot spawn")
+    monkeypatch.setattr(api, "schedule_restart", restart)
+
+    result = api._prepare_memory_package_job()
+
+    assert {name: (live / name).read_bytes() for name in original} == original
+    assert result["ok"] is (outcome == "success")
+    activated = outcome in {"success", "restart"}
+    assert launcher.resolve() == (candidate if activated else live / "vibe")
+    assert candidate.exists() is activated
+    assert restart.call_count == int(activated)
+    if activated:
+        restart.assert_called_once_with(
+            delay_seconds=2.0, vibe_path=str(launcher), trigger="memory-package-repair",
+            scope="all", python_executable=str(candidate_python),
+        )
+    if outcome == "restart":
+        assert api._memory_package_restart_retry_required("3.0.14") is True
+        restart.side_effect = None
+        retried = api._prepare_memory_package_job()
+        assert retried["ok"] is True
+        assert build.call_count == execute.call_count == 1
+        assert restart.call_args.kwargs == {
+            "delay_seconds": 2.0, "vibe_path": str(launcher),
+            "trigger": "memory-package-repair", "scope": "all",
+        }
+        assert launcher.resolve() == candidate
+
+
+def test_memory_indep_026_auto_repair_persists_a_per_version_attempt_budget(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """MEMORY-INDEP-026: restart loops stop after the persisted attempt budget."""
+
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    installs: list[int] = []
+    restarts: list[int] = []
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+    monkeypatch.setattr(api, "atomic_upgrade_lock", nullcontext)
+    monkeypatch.setattr(api, "_memory_package_repair_rejection", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/bin/vibe")
+    monkeypatch.setattr(api, "get_safe_cwd", lambda: "/safe")
+    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **_kwargs: SimpleNamespace(
+            activation=None,
+            method="pip",
+            preflight_error=None,
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: installs.append(1)
+        or subprocess.CompletedProcess(["repair"], 0, stdout="installed", stderr=""),
+    )
+    monkeypatch.setattr(
+        api,
+        "verify_python_environment",
+        lambda _python: SimpleNamespace(ok=True, detail="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "schedule_restart",
+        lambda **_kwargs: restarts.append(1) or {"job_id": f"restart-{len(restarts)}"},
+    )
+
+    results = [api._prepare_memory_package_job(automatic=True) for _ in range(4)]
+
+    assert len(installs) == len(restarts) == api._MEMORY_PACKAGE_AUTO_REPAIR_MAX_ATTEMPTS
+    assert all(result.get("restarting") for result in results[:3])
+    assert results[3]["skipped"] is True
+    assert results[3]["reason"] == "memory_package_auto_repair_exhausted"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.14"
+    assert state["attempts"] == 3
+    assert state["result"] == "restart_scheduled"
+
+
+def test_memory_auto_repair_budget_resets_only_for_a_new_core_version(monkeypatch, tmp_path) -> None:
+    state_path = tmp_path / "memory-package-auto-repair.json"
+    monkeypatch.setattr(api, "_memory_package_auto_repair_state_path", lambda: state_path)
+
+    first = api._reserve_memory_package_auto_repair_attempt("3.0.14")
+    api._finish_memory_package_auto_repair_attempt(
+        "3.0.14",
+        first["token"],
+        result="failed",
+        reason="memory_package_install_failed",
+    )
+    second = api._reserve_memory_package_auto_repair_attempt("3.0.15")
+
+    assert first["attempts"] == 1
+    assert second["attempts"] == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["core_version"] == "3.0.15"
+    assert state["result"] == "running"
+
+
+def test_memory_package_reachability_disabled_enable_bootstrap_ready(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import time as _t
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    api.V2Config.default().save()
+    metadata = {"value": api._MemoryPackageMetadata(0, None)}
+    monkeypatch.setattr(api, "_inspect_memory_package_metadata", lambda: metadata["value"])
+    monkeypatch.setattr(api, "_published_running_version", lambda: "3.0.14")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "probe_memory_runtime_entrypoint", lambda: None)
+    monkeypatch.setattr(
+        api,
+        "_memory_artifact_status",
+        lambda **_: (True, {"installed": True, "status": "ready", "matches_manifest": True}),
+    )
+
+    disabled, _runtime = api._memory_dependencies_status(offline=True)
+    assert (disabled["required"], disabled["status"], disabled["action_class"]) == (
+        False,
+        "missing",
+        "repairable",
+    )
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda **_kwargs: pytest.fail("disabled startup must not auto-install"),
+    )
+    assert api.reconcile_memory_package_on_startup()["skipped"] is True
+
+    def bootstrap() -> dict:
+        metadata["value"] = api._MemoryPackageMetadata(1, "3.0.14")
+        return {"ok": True, "message": "memory_package_ready", "output": None}
+
+    monkeypatch.setattr(api, "_prepare_memory_package_job", bootstrap)
+    with api._AGENT_INSTALL_JOB_LOCK:
+        api._AGENT_INSTALL_JOBS.clear()
+        api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
+    started = api.start_dependency_install_job("memory-package")
+    result = started
+    for _ in range(100):
+        result = api.get_agent_install_job(started["job_id"], backend="memory-package")
+        if result.get("status") != "running":
+            break
+        _t.sleep(0.01)
+    assert result["status"] == "succeeded"
+
+    optional_ready, _runtime = api._memory_dependencies_status(offline=True)
+    assert (optional_ready["readiness"], optional_ready["action_class"]) == (
+        "not_required",
+        "repairable",
+    )
+    assert api._memory_package_repair_rejection(allow_optional=True) is None
+    monkeypatch.setattr(
+        api,
+        "_prepare_memory_package_job",
+        lambda **_kwargs: pytest.fail("disabled startup must remain a no-op"),
+    )
+    assert api.reconcile_memory_package_on_startup()["skipped"] is True
+
+    api.save_memory_config(
+        {
+            "enabled": True,
+            "mode": "custom",
+            "processing": {
+                "llm": {
+                    "base_url": "https://llm.example.test/v1",
+                    "model": "chat",
+                    "api_key": "test-key",
+                },
+                "embedding": {
+                    "base_url": "https://embedding.example.test/v1",
+                    "model": "embedding",
+                    "api_key": "test-key",
+                },
+            },
+        }
+    )
+    ready, _runtime = api._memory_dependencies_status(offline=True)
+    assert (ready["readiness"], ready["action_class"]) == (
+        "ready",
+        "none",
+    )
+
+
 def test_start_dependency_install_job_rejects_unknown():
     assert api.start_dependency_install_job("bogus")["ok"] is False
 
@@ -1209,17 +3858,16 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     import core.show_runtime as show_runtime
 
     manager = Mock()
-    manager.prepare.return_value = {
+    manager.repair.return_value = {
         "ok": False,
+        "outcome": "failed",
         "reason": "runtime_archive_download_failed",
-        "status": {
-            "download_error": {
-                "kind": "timeout",
-                "message": "Connection timed out",
-                "url": "https://example.test/runtime.tgz",
-                "retryable": True,
-                "attempts": 3,
-            }
+        "download_error": {
+            "kind": "timeout",
+            "message": "Connection timed out",
+            "url": "https://example.test/runtime.tgz",
+            "retryable": True,
+            "attempts": 3,
         },
     }
     monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
@@ -1230,6 +3878,44 @@ def test_prepare_show_runtime_job_surfaces_retry_diagnostics(monkeypatch):
     assert result["reason"] == "runtime_archive_download_failed"
     assert result["download_error"]["attempts"] == 3
     assert "after 3 attempts" in result["message"]
+
+
+def test_prepare_show_runtime_job_reports_failed_replacement_with_old_install(monkeypatch):
+    import core.show_runtime as show_runtime
+
+    manager = Mock()
+    manager.repair.return_value = {
+        "ok": False,
+        "outcome": "failed",
+        "reason": "runtime_archive_download_failed",
+        "installed": True,
+        "command": ["node", "runtime-cli.js"],
+    }
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    result = api._prepare_show_runtime_job()
+
+    assert result["ok"] is False
+    assert result["reason"] == "runtime_archive_download_failed"
+    assert "runtime_archive_download_failed" in result["message"]
+
+
+def test_prepare_show_runtime_job_reports_healthy_runtime_without_change(monkeypatch):
+    import core.show_runtime as show_runtime
+
+    manager = Mock()
+    manager.repair.return_value = {"ok": True, "outcome": "healthy"}
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    result = api._prepare_show_runtime_job()
+
+    assert result == {
+        "ok": True,
+        "message": "Show Runtime starts successfully; no repair is needed.",
+        "output": None,
+        "outcome": "healthy",
+        "changed": False,
+    }
 
 
 def test_start_dependency_install_job_runs_askill(monkeypatch):
@@ -1277,3 +3963,34 @@ def test_start_dependency_install_job_runs_avault(monkeypatch):
         _t.sleep(0.02)
     assert flag["called"] is True
     assert cur["status"] == "succeeded" and cur["ok"] is True
+
+
+def test_start_dependency_install_job_runs_model_hub_engine(monkeypatch):
+    import time as _t
+
+    calls = []
+
+    def fake_ensure(*, force=False):
+        calls.append(force)
+        return {
+            "ok": True,
+            "installed": True,
+            "changed": True,
+            "version": "v7.2.149",
+        }
+
+    monkeypatch.setattr(api, "ensure_model_hub_engine_installed", fake_ensure)
+    job = api.start_dependency_install_job("model-hub-engine")
+    cur = job
+    for _ in range(100):
+        cur = api.get_agent_install_job(
+            job["job_id"],
+            backend="model-hub-engine",
+        )
+        if cur.get("status") != "running":
+            break
+        _t.sleep(0.02)
+
+    assert calls == [True]
+    assert cur["status"] == "succeeded"
+    assert cur["version"] == "v7.2.149"

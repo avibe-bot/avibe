@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import tempfile
+from contextlib import ExitStack
+from dataclasses import replace
+from pathlib import Path
+
+from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +73,47 @@ try:
         return isinstance(data, dict) and data.get("type") == "rate_limit_event"
 
     class ClaudeSDKClient(_ClaudeSDKClient):
+        def _prepare_launch_settings(self) -> None:
+            if getattr(self, "_launch_settings", None) is not None:
+                return
+            raw = self.options.settings
+            if not raw or not raw.lstrip().startswith("{"):
+                return
+            settings = json.loads(raw)
+            if not settings.get("env"):
+                return
+            # SDK sandbox merging otherwise expands even a settings file back
+            # into argv. Merge here and pass only the private file's path.
+            if self.options.sandbox is not None:
+                settings["sandbox"] = self.options.sandbox
+            resources = ExitStack()
+            self._launch_settings = resources
+            directory = resources.enter_context(tempfile.TemporaryDirectory(prefix="avibe-claude-settings-"))
+            path = Path(directory) / "settings.json"
+            write_atomic(path, json.dumps(settings))
+            resources.callback(setattr, self, "options", self.options)
+            self.options = replace(self.options, settings=str(path), sandbox=None)
+
+        def _close_launch_settings(self) -> None:
+            resources = getattr(self, "_launch_settings", None)
+            if resources is not None:
+                self._launch_settings = None
+                resources.close()
+
+        async def connect(self, prompt=None) -> None:
+            try:
+                self._prepare_launch_settings()
+                await super().connect(prompt)
+            except BaseException:
+                self._close_launch_settings()
+                raise
+
+        async def disconnect(self) -> None:
+            try:
+                await super().disconnect()
+            finally:
+                self._close_launch_settings()
+
         async def receive_messages(self):
             """Receive all messages from Claude, tolerating non-fatal SDK event additions."""
             if not self._query:

@@ -54,6 +54,7 @@ import {
   voiceInsertionSnapshot,
   type VoiceInsertionSnapshot,
 } from '../../lib/voiceCleanup';
+import { isComposingKey } from '@/lib/imeComposition';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 export type AgentSearchResult = {
@@ -126,9 +127,9 @@ export interface MentionEditorProps {
 // Chip styling for the mention nodes inside the editor — Tailwind utilities that
 // mirror Badge's success (agent) / info (session) variants.
 const MENTION_THEME = {
-  '@': 'rounded-full border border-mint/40 bg-mint-soft px-1.5 py-px font-medium text-mint',
+  '@': 'rounded-full border border-mint/40 bg-mint-soft px-1.5 py-px font-medium text-mint-ink',
   '@Focused': 'ring-1 ring-mint/60',
-  '#': 'rounded-full border border-cyan/40 bg-cyan-soft px-1.5 py-px font-medium text-cyan',
+  '#': 'rounded-full border border-cyan/40 bg-cyan-soft px-1.5 py-px font-medium text-cyan-ink',
   '#Focused': 'ring-1 ring-cyan/60',
 };
 
@@ -385,7 +386,7 @@ function EnterSubmitPlugin({
         KEY_ENTER_COMMAND,
         (event: KeyboardEvent | null) => {
           if (!event || event.shiftKey) return false;
-          if (event.isComposing || event.keyCode === 229) return false;
+          if (isComposingKey(event)) return false;
           if (menuOpenRef.current || isSoftKeyboardOpen()) return false;
           event.preventDefault();
           onSubmit();
@@ -729,6 +730,7 @@ const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
     // composer to trigger, which our 5–8 item menus effectively never hit.
     <ul
       ref={ref}
+      data-mention-picker
       className="absolute left-0 z-50 mb-4 !bottom-full !top-auto max-h-64 min-w-[15rem] list-none overflow-y-auto overflow-x-hidden rounded-md border border-border bg-panel p-1 text-text shadow-md"
       {...props}
     >
@@ -748,7 +750,7 @@ const MentionMenuItem = forwardRef<HTMLLIElement, BeautifulMentionsMenuItemProps
         ref={ref}
         className={cn(
           'flex cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
-          selected ? 'bg-accent/10 text-accent' : 'text-text',
+          selected ? 'bg-accent/10 text-accent-ink' : 'text-text',
         )}
         {...props}
       >

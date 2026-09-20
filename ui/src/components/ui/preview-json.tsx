@@ -13,7 +13,10 @@ export default function PreviewJson({ value }: { value: object }) {
   return (
     <JsonView
       value={value}
-      style={resolvedTheme === 'light' ? githubLightTheme : githubDarkTheme}
+      style={{
+        ...(resolvedTheme === 'light' ? githubLightTheme : githubDarkTheme),
+        fontSize: 'var(--vr-fileview-font-size, 13px)',
+      }}
       collapsed={2}
       displayDataTypes={false}
       shortenTextAfterLength={0}

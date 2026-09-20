@@ -8,10 +8,7 @@ import {
   Cpu,
   Plus,
   Info,
-  KeyRound,
-  Pencil,
   RefreshCw,
-  RotateCcw,
   Save,
   Search,
   Server,
@@ -29,7 +26,7 @@ import { Checkbox } from '../../ui/checkbox';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
-import { BackendOAuthPanel } from '../BackendOAuthPanel';
+import { BackendConnectionForm } from './BackendConnectionForm';
 import { OpencodeProviderTestPanel } from '../OpencodeProviderTestPanel';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
 import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
@@ -45,6 +42,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { EFFORT_BY_BACKEND, sortEffortsByVocabulary } from '@/lib/effortOptions';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
 type CustomProviderAdapter = 'openai-compatible' | 'anthropic-compatible';
@@ -89,9 +87,14 @@ const SERVER_START_MAX_RETRIES = 5;
 const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
-const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-const defaultReasoningEfforts = () => [...REASONING_EFFORTS];
+// This form's save path is `_normalize_reasoning_variants` in
+// `vibe/opencode_config.py`, which accepts `none` plus the OpenCode family
+// fallback (`minimal`..`max`). `ultra` is in the unified vocabulary because
+// catalog rows declare it, but offering it here would send a value the
+// save path rejects. Checkboxes and the default-checked list are the same set.
+const OPENCODE_PROVIDER_EFFORTS = EFFORT_BY_BACKEND.opencode;
+const defaultReasoningEfforts = () => [...OPENCODE_PROVIDER_EFFORTS];
 
 const notifyOpenCodeModelOptionsChanged = () => {
   window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
@@ -469,63 +472,6 @@ export const OpencodeProviderConfig: React.FC<{
     }
   };
 
-  const onSaveProviderAuth = async (provider: OpencodeProvider) => {
-    const state = editByProvider[provider.id] || emptyEdit();
-    const key = state.apiKey.trim();
-    // Reject an empty key only when the provider has no saved
-    // credentials. For already-configured providers the UI hides the
-    // plaintext key behind a "Replace" pencil; the backend save
-    // endpoint reuses the on-disk key in that case so a base-URL-only
-    // edit can land without re-typing the secret. Without this branch
-    // a user with a saved key can never persist a relay-URL fix.
-    if (!key && !provider.configured) {
-      updateEdit(provider.id, {
-        error: t('settings.backends.opencodeProviderApiKeyRequired') as string,
-      });
-      return;
-    }
-    // The Base URL field is the only signal the form sends for the
-    // ``provider.<id>.options.baseURL`` override in ``opencode.json``.
-    // Forwarding the trimmed value verbatim — including the empty
-    // string for "clear" — is critical: if we dropped to ``undefined``
-    // for blanks, the server would interpret it as "leave unchanged"
-    // and a user who removed the value in the form would silently keep
-    // the old override on disk.
-    const baseUrl = state.baseUrl.trim();
-    if (provider.custom && !baseUrl) {
-      updateEdit(provider.id, {
-        error: t('settings.backends.opencodeProviderBaseUrlRequired') as string,
-      });
-      return;
-    }
-    updateEdit(provider.id, { saving: true, error: null });
-    try {
-      const result = await api.setOpencodeProviderAuth(provider.id, key, baseUrl);
-      if (!result.ok) {
-        updateEdit(provider.id, {
-          saving: false,
-          error: result.message || (t('settings.backends.opencodeProviderSaveFailed') as string),
-        });
-        return;
-      }
-      updateEdit(provider.id, {
-        saving: false,
-        apiKey: '',
-        editingKey: false,
-        error: null,
-      });
-      showToast(t('settings.backends.opencodeProviderSaved'), 'success');
-      notifyOpenCodeModelOptionsChanged();
-      if (!applyMutationCatalogRefresh(result)) {
-        await loadProviders();
-      }
-    } catch (e) {
-      updateEdit(provider.id, {
-        saving: false,
-        error: errorMessage(e) || (t('settings.backends.opencodeProviderSaveFailed') as string),
-      });
-    }
-  };
 
   const onRemoveProviderAuth = async (provider: OpencodeProvider) => {
     // Confirm copy matches what's actually about to be removed.
@@ -642,7 +588,7 @@ export const OpencodeProviderConfig: React.FC<{
     const next = current.reasoningEfforts.includes(effort)
       ? current.reasoningEfforts.filter((item) => item !== effort)
       : [...current.reasoningEfforts, effort];
-    updateEdit(providerId, { reasoningEfforts: next });
+    updateEdit(providerId, { reasoningEfforts: sortEffortsByVocabulary(next) });
   };
 
   // ---- Default-provider selection ----
@@ -782,7 +728,7 @@ export const OpencodeProviderConfig: React.FC<{
         description={t('settings.backends.opencodeDescription')}
         Icon={Terminal}
         iconTileClassName="bg-violet-soft"
-        iconClassName="text-violet"
+        iconClassName="text-violet-ink"
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
         extraSlot={
@@ -808,7 +754,7 @@ export const OpencodeProviderConfig: React.FC<{
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-11 shrink-0 items-center justify-center rounded-[10px] bg-cyan-soft">
-                <Server size={22} className="text-cyan" />
+                <Server size={22} className="text-cyan-ink" />
               </div>
               <div className="flex flex-col gap-0.5">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1001,7 +947,7 @@ export const OpencodeProviderConfig: React.FC<{
                     </div>
                   </div>
                   {customProviderDraft.error && (
-                    <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
+                    <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive-ink">
                       {customProviderDraft.error}
                     </div>
                   )}
@@ -1074,7 +1020,7 @@ export const OpencodeProviderConfig: React.FC<{
                       disabled={!providers || providers.length === 0}
                       className="justify-between gap-2 text-[12px]"
                     >
-                      <Star className="size-3.5 text-mint" />
+                      <Star className="size-3.5 text-mint-ink" />
                       <span className="text-muted">
                         {t('settings.backends.opencodeDefaultLabel')}:
                       </span>
@@ -1157,7 +1103,7 @@ export const OpencodeProviderConfig: React.FC<{
                                         {t('settings.backends.opencodeBadgeUnset')}
                                       </Badge>
                                     )}
-                                    {isCurrent && <Check className="size-3.5 text-mint" />}
+                                    {isCurrent && <Check className="size-3.5 text-mint-ink" />}
                                   </span>
                                 </Button>
                               </li>
@@ -1173,9 +1119,9 @@ export const OpencodeProviderConfig: React.FC<{
               {/* Server-starting / error banner. */}
               {providersError && (
                 <div className="flex items-start gap-2 rounded-lg border border-gold/30 bg-gold/[0.08] px-3 py-2.5">
-                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-gold" />
+                  <AlertCircle className="mt-0.5 size-3.5 shrink-0 text-gold-ink" />
                   <div className="flex flex-1 flex-col gap-1">
-                    <p className="text-[12px] font-medium text-gold">
+                    <p className="text-[12px] font-medium text-gold-ink">
                       {serverStartAttempts < SERVER_START_MAX_RETRIES
                         ? t('settings.backends.opencodeServerStarting')
                         : t('settings.backends.opencodeServerUnreachable')}
@@ -1196,7 +1142,7 @@ export const OpencodeProviderConfig: React.FC<{
               {/* Initial loading skeleton. */}
               {providersLoading && !providers && (
                 <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-6 text-center text-[12px] text-muted">
-                  <RefreshCw className="mx-auto mb-2 size-4 animate-spin text-cyan" />
+                  <RefreshCw className="mx-auto mb-2 size-4 animate-spin text-cyan-ink" />
                   {t('settings.backends.opencodeProvidersLoading')}
                 </div>
               )}
@@ -1230,7 +1176,7 @@ export const OpencodeProviderConfig: React.FC<{
                         key={provider.id}
                         className={clsx(
                           'flex flex-col rounded-lg border bg-surface transition-colors',
-                          expanded ? 'border-mint/40 shadow-[0_0_24px_-12px_rgba(91,255,160,0.6)]' : 'border-border hover:border-border-strong',
+                          expanded ? 'border-mint/40 shadow-glow-md-mint' : 'border-border hover:border-border-strong',
                           expanded && 'md:col-span-2'
                         )}
                       >
@@ -1297,7 +1243,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   size="xs"
                                   onClick={() => void onRemoveProviderAuth(provider)}
                                   disabled={edit.deletingProvider || edit.saving}
-                                  className="text-destructive"
+                                  className="text-destructive-ink"
                                 >
                                   {edit.deletingProvider ? (
                                     <RefreshCw className="size-3.5 animate-spin" />
@@ -1324,7 +1270,7 @@ export const OpencodeProviderConfig: React.FC<{
                                   size="xs"
                                   onClick={() => void onDeleteCustomProvider(provider)}
                                   disabled={edit.removing || edit.saving}
-                                  className="text-destructive"
+                                  className="text-destructive-ink"
                                 >
                                   {edit.removing ? (
                                     <RefreshCw className="size-3.5 animate-spin" />
@@ -1343,204 +1289,8 @@ export const OpencodeProviderConfig: React.FC<{
 
                             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                               <div className="flex flex-col gap-3">
-                                {provider.oauth_available && (
-                                  // In-card OAuth panel: reuses the
-                                  // same component Claude / Codex use,
-                                  // configured for OpenCode's
-                                  // per-provider HTTP flow. Drives the
-                                  // ``/api/backend/opencode/provider/<id>/auth/oauth/start``
-                                  // endpoint and polls for completion
-                                  // — no terminal commands required.
-                                  <BackendOAuthPanel
-                                    backend="opencode"
-                                    opencodeProviderId={provider.id}
-                                    signedIn={provider.configured}
-                                    title={t('settings.backends.opencodeProviderOauthPanelTitle', {
-                                      name: provider.name,
-                                    })}
-                                    subtitle={t('settings.backends.opencodeProviderOauthPanelSubtitle')}
-                                    hideRemove
-                                    onSuccess={() => {
-                                      notifyOpenCodeModelOptionsChanged();
-                                      // Refresh the providers list so
-                                      // the just-authorised provider
-                                      // flips to "configured" and the
-                                      // masked-key block (if any)
-                                      // appears.
-                                      void loadProviders();
-                                    }}
-                                  />
-                                )}
-
-                                <div className="flex flex-col gap-1.5">
-                                  <Label
-                                    htmlFor={`opencode-key-${provider.id}`}
-                                    className="text-[11px] font-medium uppercase text-muted"
-                                  >
-                                    {t('settings.backends.opencodeProviderApiKey')}
-                                  </Label>
-                                  {providerHasAuth(provider) && provider.api_key_masked && !edit.editingKey ? (
-                                    // Masked-preview affordance ported from
-                                    // the Claude / Codex pages: show the
-                                    // saved key as a read-only mono-typed
-                                    // value with a pencil to swap in a
-                                    // fresh one. Saves the user from
-                                    // re-typing the secret on baseURL-only
-                                    // edits.
-                                    <div className="flex items-center gap-2 rounded-md border border-border bg-foreground/[0.04] px-3 py-2">
-                                      <KeyRound className="size-4 shrink-0 text-muted" />
-                                      <code className="flex-1 truncate font-mono text-[12px] text-foreground">
-                                        {provider.api_key_masked}
-                                      </code>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="xs"
-                                        onClick={() =>
-                                          updateEdit(provider.id, {
-                                            editingKey: true,
-                                            apiKey: '',
-                                          })
-                                        }
-                                        disabled={edit.saving || edit.removing}
-                                      >
-                                        <Pencil className="size-3" />
-                                        {t('settings.backends.replaceApiKey')}
-                                      </Button>
-                                    </div>
-                                  ) : (
-                                    <div className="relative">
-                                      <KeyRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted" />
-                                      <Input
-                                        id={`opencode-key-${provider.id}`}
-                                        type="password"
-                                        autoComplete="off"
-                                        spellCheck={false}
-                                        placeholder={
-                                          providerHasAuth(provider)
-                                            ? (t(
-                                                'settings.backends.opencodeProviderApiKeyPlaceholderStored'
-                                              ) as string)
-                                            : (t(
-                                                'settings.backends.opencodeProviderApiKeyPlaceholder'
-                                              ) as string)
-                                        }
-                                        value={edit.apiKey}
-                                        onChange={(e) =>
-                                          updateEdit(provider.id, { apiKey: e.target.value })
-                                        }
-                                        className="pl-9 font-mono"
-                                        disabled={edit.saving}
-                                        autoFocus={edit.editingKey}
-                                      />
-                                    </div>
-                                  )}
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className="text-[11px] text-muted">
-                                      {providerHasAuth(provider)
-                                        ? t('settings.backends.opencodeProviderApiKeyStored')
-                                        : t('settings.backends.opencodeProviderApiKeyMissing')}
-                                    </p>
-                                    {providerHasAuth(provider) && edit.editingKey && (
-                                      <Button
-                                        type="button"
-                                        variant="link"
-                                        size="xs"
-                                        className="h-auto px-0 text-[11px] text-muted"
-                                        onClick={() =>
-                                          updateEdit(provider.id, {
-                                            editingKey: false,
-                                            apiKey: '',
-                                          })
-                                        }
-                                      >
-                                        {t('common.cancel')}
-                                      </Button>
-                                    )}
-                                  </div>
-                                </div>
-
-                                <div className="flex flex-col gap-1.5">
-                                  <Label
-                                    htmlFor={`opencode-base-url-${provider.id}`}
-                                    className="text-[11px] font-medium uppercase text-muted"
-                                  >
-                                    {t('settings.backends.opencodeProviderBaseUrl')}
-                                  </Label>
-                                  <div className="flex gap-2">
-                                    <Input
-                                      id={`opencode-base-url-${provider.id}`}
-                                      type="url"
-                                      autoComplete="off"
-                                      spellCheck={false}
-                                      placeholder={
-                                        t(
-                                          'settings.backends.opencodeProviderBaseUrlPlaceholder'
-                                        ) as string
-                                      }
-                                      value={edit.baseUrl}
-                                      onChange={(e) =>
-                                        updateEdit(provider.id, { baseUrl: e.target.value })
-                                      }
-                                      className="font-mono"
-                                      disabled={edit.saving}
-                                    />
-                                    <Button
-                                      type="button"
-                                      variant="secondary"
-                                      size="sm"
-                                      onClick={() => updateEdit(provider.id, { baseUrl: '' })}
-                                      disabled={!edit.baseUrl || edit.saving}
-                                    >
-                                      <RotateCcw className="size-3.5" />
-                                    </Button>
-                                  </div>
-                                  <p className="text-[11px] text-muted">
-                                    {t('settings.backends.opencodeProviderBaseUrlHint')}
-                                  </p>
-                                </div>
-
-                                {edit.error && (
-                                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
-                                    {edit.error}
-                                  </div>
-                                )}
-
-                                {(() => {
-                                  // Save button only renders when the
-                                  // user has something to commit:
-                                  // typed a fresh key, or modified
-                                  // the Base URL relative to what's
-                                  // saved on the provider. Mirrors
-                                  // the Claude / Codex dirty-state
-                                  // pattern — a permanent Save button
-                                  // is noisy and confusing.
-                                  const keyDirty = edit.apiKey.trim().length > 0;
-                                  const savedBase = (provider.base_url || '').trim();
-                                  const baseDirty = edit.baseUrl.trim() !== savedBase;
-                                  const dirty = keyDirty || baseDirty;
-                                  if (!dirty) return null;
-                                  return (
-                                    <div className="flex flex-wrap items-center justify-end gap-2">
-                                      <Button
-                                        type="button"
-                                        variant="brand"
-                                        size="sm"
-                                        onClick={() => void onSaveProviderAuth(provider)}
-                                        disabled={edit.saving}
-                                      >
-                                        {edit.saving ? (
-                                          <RefreshCw className="size-3.5 animate-spin" />
-                                        ) : (
-                                          <Save className="size-3.5" />
-                                        )}
-                                        {edit.saving
-                                          ? t('common.saving')
-                                          : t('settings.backends.opencodeProviderSave')}
-                                      </Button>
-                                    </div>
-                                  );
-                                })()}
+                                <BackendConnectionForm backend="opencode" provider={provider} connectionRevision={runtime.connectionRevision}
+                                  onConnected={async () => { notifyOpenCodeModelOptionsChanged(); await loadProviders(); }} />
 
                                 {/* Per-provider connectivity probe.
                                     Gated on ``configured`` because
@@ -1555,7 +1305,6 @@ export const OpencodeProviderConfig: React.FC<{
                                     providerId={provider.id}
                                     providerName={provider.name}
                                     models={provider.models}
-                                    defaultModel={provider.default_model}
                                   />
                                 )}
                               </div>
@@ -1613,7 +1362,7 @@ export const OpencodeProviderConfig: React.FC<{
                                       <span className="text-[11px] font-medium uppercase text-muted">
                                         {t('settings.backends.opencodeProviderModelReasoning')}
                                       </span>
-                                      {REASONING_EFFORTS.map((effort) => (
+                                      {OPENCODE_PROVIDER_EFFORTS.map((effort) => (
                                         <Button
                                           key={effort}
                                           type="button"
@@ -1674,16 +1423,6 @@ export const OpencodeProviderConfig: React.FC<{
                                                 {reasoningEfforts.join('/')}
                                               </span>
                                             )}
-                                            {provider.default_model === model && (
-                                              <Badge
-                                                variant="success"
-                                                className={entry?.user_managed ? undefined : 'ml-auto'}
-                                              >
-                                                {t(
-                                                  'settings.backends.opencodeProviderDefaultModel'
-                                                )}
-                                              </Badge>
-                                            )}
                                             {entry?.user_managed && (
                                               <Button
                                                 type="button"
@@ -1696,7 +1435,7 @@ export const OpencodeProviderConfig: React.FC<{
                                                 {edit.removingModelId === model ? (
                                                   <RefreshCw className="size-3 animate-spin" />
                                                 ) : (
-                                                  <Trash2 className="size-3 text-destructive" />
+                                                  <Trash2 className="size-3 text-destructive-ink" />
                                                 )}
                                               </Button>
                                             )}

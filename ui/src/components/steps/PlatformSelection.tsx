@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { platformText } from '@/lib/platforms';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { ArrowLeft, ArrowRight, Check, Circle, CircleCheckBig, ExternalLink, Loader2, Lock, Plus, Smartphone } from 'lucide-react';
@@ -86,6 +87,18 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
     initialPlatforms[0] || defaultCredentialPlatform
   );
   const [credentialDraft, setCredentialDraft] = useState<Record<string, any>>(() => buildInitialCredentialDraft(data));
+  // Mount-time snapshot of the draft: a section differs from it only when
+  // the USER typed into that platform's fields. Sections that match the
+  // initial draft were never edited and must not ride along in the step
+  // payload — resubmitting them would overwrite concurrent updates (e.g.
+  // a WeChat QR token acquired after bootstrap) with stale mount-time
+  // values inside the locked merge.
+  const initialDraftRef = useRef<Record<string, any>>(buildInitialCredentialDraft(data));
+  const dirtySections = Object.keys(credentialDraft).filter(
+    (key) =>
+      JSON.stringify((credentialDraft as Record<string, any>)[key]) !==
+      JSON.stringify(initialDraftRef.current[key])
+  );
   const [validating, setValidating] = useState(false);
   const [validationState, setValidationState] = useState<Record<string, ValidationState>>({});
 
@@ -126,9 +139,17 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
         enabled: normalized,
       },
     };
+    // Only user-dirty credential sections join the step payload; the
+    // untouched ones stay with their owners.
+    const dirtyPayload: Record<string, any> = {};
+    for (const key of dirtySections) {
+      dirtyPayload[key] = credentialDraft[key];
+    }
     const nextData = {
-      ...credentialDraft,
-      discord_client_id: credentialDraft.discord?.client_id || '',
+      ...dirtyPayload,
+      ...(dirtySections.includes('discord')
+        ? { discord_client_id: credentialDraft.discord?.client_id || '' }
+        : {}),
       ...selectionData,
     };
 
@@ -141,7 +162,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
   };
 
   const activeDescriptor = platformCatalog.find((item) => item.id === activeCredentialPlatform) || platformCatalog[0];
-  const activePlatformLabel = t(activeDescriptor?.title_key || `platform.${activeCredentialPlatform}.title`);
+  const activePlatformLabel = platformText(t, activeCredentialPlatform, 'title', activeDescriptor?.title_key);
   const activeCredential = credentialDraft[activeCredentialPlatform] || {};
   const currentValidationState = validationState[activeCredentialPlatform] || 'idle';
 
@@ -320,7 +341,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                 const option = platform.id;
                 const active = selected.includes(option);
                 const focused = activeCredentialPlatform === option;
-                const label = t(platform.title_key || `platform.${option}.title`);
+                const label = platformText(t, option, 'title', platform.title_key);
                 return (
                   <button
                     key={option}
@@ -340,7 +361,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                     )}
                   >
                     <span className="truncate">{label}</span>
-                    {active ? <Check className="size-3 text-mint" /> : <Plus className="size-3" />}
+                    {active ? <Check className="size-3 text-mint-ink" /> : <Plus className="size-3" />}
                   </button>
                 );
               })}
@@ -387,11 +408,11 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                       className={clsx(
                         'h-6 rounded-md border px-2.5 text-[10px] font-medium transition-colors',
                         activeCredentialPlatform === platform
-                          ? 'border-mint/40 bg-mint-soft text-mint'
+                          ? 'border-mint/40 bg-mint-soft text-mint-ink'
                           : 'border-border bg-surface-3 text-muted hover:border-border-strong'
                       )}
                     >
-                      {t(descriptor?.title_key || `platform.${platform}.title`)}
+                      {platformText(t, platform, 'title', descriptor?.title_key)}
                     </button>
                   );
                 })}
@@ -418,7 +439,7 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         className={clsx(
                           'flex size-4 shrink-0 items-center justify-center rounded-full border text-[9px] font-semibold',
                           index < 2 || currentValidationState === 'success'
-                            ? 'border-mint bg-mint text-background'
+                            ? 'border-mint bg-mint text-primary-foreground'
                             : 'border-border bg-background text-muted'
                         )}
                       >
@@ -471,8 +492,8 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                           className={clsx(
                             'mt-2 rounded-md border px-2.5 py-1.5 text-[10px]',
                             currentValidationState === 'success'
-                              ? 'border-mint/30 bg-mint-soft text-mint'
-                              : 'border-danger/30 bg-danger/10 text-danger'
+                              ? 'border-mint/30 bg-mint-soft text-mint-ink'
+                              : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                           )}
                         >
                           {currentValidationState === 'success' ? t('platform.validationSuccess') : t('platform.validationFailed')}
@@ -522,12 +543,12 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
               <p className="text-[13px] leading-[1.5] text-muted">{t('platform.workbenchDesc')}</p>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-cyan/30 bg-cyan/[0.08] px-3 py-2.5">
-              <Smartphone className="size-4 shrink-0 text-cyan" />
+              <Smartphone className="size-4 shrink-0 text-cyan-ink" />
               <span className="text-[12px] leading-[1.4] text-foreground">{t('platform.workbenchPwa')}</span>
             </div>
             <div className="mt-auto flex items-center gap-2">
-              <CircleCheckBig className="size-4 shrink-0 text-mint" />
-              <span className="text-[12px] font-semibold text-mint">{t('platform.workbenchAlwaysOn')}</span>
+              <CircleCheckBig className="size-4 shrink-0 text-mint-ink" />
+              <span className="text-[12px] font-semibold text-mint-ink">{t('platform.workbenchAlwaysOn')}</span>
             </div>
           </div>
 
@@ -576,12 +597,12 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
                         active ? 'font-bold text-foreground' : 'font-medium text-muted'
                       )}
                     >
-                      {t(platform.title_key || `platform.${option}.title`)}
+                      {platformText(t, option, 'title', platform.title_key)}
                     </span>
                     {/* Selection indicator on the phone row only; on sm+ the
                         mint border carries the selected state (design.pen). */}
                     {active ? (
-                      <CircleCheckBig className="ml-auto size-5 shrink-0 text-mint sm:hidden" strokeWidth={2.25} />
+                      <CircleCheckBig className="ml-auto size-5 shrink-0 text-mint-ink sm:hidden" strokeWidth={2.25} />
                     ) : (
                       <Circle className="ml-auto size-5 shrink-0 text-muted/40 sm:hidden" strokeWidth={2} />
                     )}

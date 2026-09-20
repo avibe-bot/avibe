@@ -1,0 +1,12 @@
+{
+  "linux_arm64_go": {
+    "version": "go1.26.4",
+    "url": "https://go.dev/dl/go1.26.4.linux-arm64.tar.gz",
+    "sha256": "ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768"
+  },
+  "linux_arm64_uv": {
+    "version": "0.9.8",
+    "url": "https://github.com/astral-sh/uv/releases/download/0.9.8/uv-aarch64-unknown-linux-gnu.tar.gz",
+    "sha256": "8dc203a27c99f721545adc531279f0486ea3deb77c951a051e6bb9ea1d588a71"
+  }
+}

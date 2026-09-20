@@ -23,6 +23,10 @@ from vibe.model_hub_runtime.state import EngineStateStore
 logger = logging.getLogger(__name__)
 
 
+MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
+_STARTUP_POLL_INTERVAL_SECONDS = 0.05
+
+
 class EngineUnavailableError(RuntimeError):
     """The Hub path is unavailable; callers may use explicitly configured Direct mode."""
 
@@ -41,7 +45,7 @@ class EngineSupervisor:
         *,
         installer: EngineRuntimeManager | Any | None = None,
         state_store: EngineStateStore | None = None,
-        startup_timeout: float = 10.0,
+        startup_timeout: float = MODEL_HUB_STARTUP_TIMEOUT_SECONDS,
         process_factory: Callable[..., subprocess.Popen[bytes]] = subprocess.Popen,
         port_allocator: Callable[[], int] | None = None,
     ) -> None:
@@ -55,6 +59,7 @@ class EngineSupervisor:
         self._connection: EngineConnection | None = None
         self._last_check: str | None = None
         self._start_attempted = False
+        self._health_failure_signature: tuple[str, str, int | None] | None = None
 
     def ensure_running(self) -> EngineConnection:
         with self._lock:
@@ -68,12 +73,24 @@ class EngineSupervisor:
         with self._lock:
             self._stop_locked()
 
+    def disable(self) -> None:
+        """Stop the managed engine and restore explicit lazy-start idleness."""
+        with self._lock:
+            self._stop_locked()
+            self._start_attempted = False
+
     def restart_if_running(self) -> None:
         with self._lock:
             if not self._is_running_locked():
                 return
             self._stop_locked()
             self._start_locked()
+
+    def note_installation_settled(self) -> None:
+        """Expose a newly verified binary as lazy-started, not previously down."""
+        with self._lock:
+            if not self._is_running_locked():
+                self._start_attempted = False
 
     def invalidate_configs(self) -> None:
         """Remove secret-bearing configs and recreate one only for a live engine."""
@@ -92,23 +109,51 @@ class EngineSupervisor:
         with self._lock:
             managed = self.installer.status()
             installed = bool(managed.get("installed"))
+            install_state_reader = getattr(self.installer, "install_state", None)
+            install_state = install_state_reader() if callable(install_state_reader) else None
             listening = None
             if self._is_running_locked() and self._connection is not None:
                 parsed_port = int(self._connection.base_url.rsplit(":", 1)[1])
                 listening = {"host": "127.0.0.1", "port": parsed_port}
                 health = "ok" if self._healthy_locked() else "degraded"
+            elif install_state and install_state.get("state") == "installing":
+                health = "installing"
+            elif (
+                not installed
+                and install_state
+                and install_state.get("state") == "not_installed"
+            ):
+                health = "not_installed"
             elif installed:
                 health = "down" if self._start_attempted else "not_started"
             else:
-                health = "down" if self._start_attempted else "not_installed"
+                # A missing or unverifiable binary remains installable even
+                # after an earlier start attempt exposed its absence.
+                health = "not_installed"
+            host_platform_reader = getattr(self.installer, "host_platform", None)
+            host_platform = (
+                host_platform_reader()
+                if callable(host_platform_reader)
+                else str(managed.get("platform") or "")
+            )
             return {
+                "host_platform": host_platform,
                 "manifest": self.installer.contract_manifest(),
                 "status": {
-                    "installed_version": managed.get("version") if installed else None,
-                    "verified": installed,
+                    "installed_version": (
+                        managed.get("version")
+                        if installed and health != "installing"
+                        else None
+                    ),
+                    "verified": installed and health != "installing",
                     "listening": listening,
                     "health": health,
                     "last_check": self._last_check,
+                    "error_key": (
+                        install_state.get("error_key")
+                        if health == "not_installed" and install_state
+                        else None
+                    ),
                 },
             }
 
@@ -124,15 +169,15 @@ class EngineSupervisor:
 
     def _start_locked(self) -> EngineConnection:
         self._start_attempted = True
-        install = self.installer.ensure()
-        if not install.get("ok"):
-            reason = str(install.get("reason") or "engine_install_failed")
+        managed = self.installer.status()
+        binary = self.installer.resolve_engine_path()
+        if binary is None:
+            reason = str(managed.get("reason") or "engine_not_installed")
             raise EngineUnavailableError("models.engine.install_failed", reason=reason)
-        binary = Path(str(install["path"]))
-        install_id = Path(str(install.get("install_dir") or binary.parent)).name
+        install_id = Path(str(managed.get("install_dir") or binary.parent)).name
         instance_dir, runtime_secrets = self.state_store.prepare_instance(
             install_id,
-            rotate=bool(install.get("changed")),
+            rotate=False,
         )
         port = self._port_allocator()
         config_path = instance_dir / "config.yaml"
@@ -165,29 +210,67 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        deadline = time.monotonic() + self.startup_timeout
-        client = EngineClient(connection, timeout=1.0)
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
+        started_at = time.monotonic()
+        deadline = started_at + self.startup_timeout
+        exit_code: int | None = None
+        while True:
+            exit_code = process.poll()
+            if exit_code is not None:
                 break
-            if client.health():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            client = EngineClient(connection, timeout=min(1.0, remaining / 2))
+            if self._check_health_locked(client):
                 try:
                     self.state_store.audit_auth_permissions()
                 except Exception as exc:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                logger.info("Model Hub engine started on 127.0.0.1 with managed version %s", install.get("version"))
+                logger.info(
+                    "Model Hub engine startup outcome=ready managed_version=%s "
+                    "elapsed_seconds=%.3f child_output_retained=false",
+                    managed.get("version"),
+                    time.monotonic() - started_at,
+                )
                 return connection
-            time.sleep(0.05)
+            time.sleep(min(_STARTUP_POLL_INTERVAL_SECONDS, max(0.0, deadline - time.monotonic())))
         self._stop_locked()
+        logger.warning(
+            "Model Hub engine startup outcome=%s managed_version=%s exit_code=%s "
+            "elapsed_seconds=%.3f readiness_budget_seconds=%.3f "
+            "child_output_retained=false",
+            "process_exit" if exit_code is not None else "timeout",
+            managed.get("version"),
+            exit_code,
+            time.monotonic() - started_at,
+            self.startup_timeout,
+        )
         raise EngineUnavailableError("models.engine.health_failed")
 
     def _healthy_locked(self) -> bool:
         if not self._is_running_locked() or self._connection is None:
             return False
-        healthy = EngineClient(self._connection, timeout=1.0).health()
+        return self._check_health_locked(EngineClient(self._connection, timeout=1.0))
+
+    def _check_health_locked(self, client: EngineClient) -> bool:
+        healthy = client.health()
         self._last_check = _utc_now()
+        failure = client.health_failure
+        if failure is not None:
+            signature = (failure.path, failure.reason, failure.http_status)
+            if signature != self._health_failure_signature:
+                logger.warning(
+                    "Model Hub engine health outcome=failed endpoint=%s reason=%s "
+                    "http_status=%s elapsed_seconds=%.3f",
+                    failure.path, failure.reason, failure.http_status, failure.elapsed_seconds,
+                )
+            self._health_failure_signature = signature
+        elif healthy:
+            if self._health_failure_signature is not None:
+                logger.info("Model Hub engine health outcome=recovered")
+            self._health_failure_signature = None
         return healthy
 
     def _is_running_locked(self) -> bool:
@@ -197,6 +280,7 @@ class EngineSupervisor:
         process = self._process
         self._process = None
         self._connection = None
+        self._health_failure_signature = None
         if process is None or process.poll() is not None:
             return
         signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")

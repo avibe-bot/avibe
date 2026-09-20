@@ -486,8 +486,13 @@ def test_claude_sdk_buffer_error_cleans_up_broken_session() -> None:
     handler = SessionHandler(controller)
     cleanup_calls = []
 
-    async def _cleanup_session(composite_key: str, *, current_receiver_task=None) -> None:
-        cleanup_calls.append((composite_key, current_receiver_task))
+    async def _cleanup_session(
+        composite_key: str,
+        *,
+        current_receiver_task=None,
+        reason=None,
+    ) -> None:
+        cleanup_calls.append((composite_key, current_receiver_task, reason))
 
     handler.cleanup_session = _cleanup_session
     context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
@@ -501,9 +506,10 @@ def test_claude_sdk_buffer_error_cleans_up_broken_session() -> None:
     )
 
     assert len(cleanup_calls) == 1
-    cleanup_key, cleanup_task = cleanup_calls[0]
+    cleanup_key, cleanup_task, cleanup_reason = cleanup_calls[0]
     assert cleanup_key == "slack_C123:/tmp/workdir"
     assert cleanup_task is not None
+    assert cleanup_reason == "connection_broken"
     assert len(controller.im_client.sent_messages) == 1
     _, message = controller.im_client.sent_messages[0]
     assert message == "ERR:Connection to Claude was lost. Please try your message again."
@@ -520,8 +526,14 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     )
     cleanup_calls = []
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
-        cleanup_calls.append((key, current_receiver_task))
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
+        cleanup_calls.append((key, current_receiver_task, reason))
 
     handler.cleanup_session = _cleanup_session
     context = MessageContext(user_id="U123", channel_id="C123", platform="slack")
@@ -537,6 +549,7 @@ def test_claude_terminated_process_cleans_up_and_reports_signal_diagnostic() -> 
     assert len(cleanup_calls) == 1
     assert cleanup_calls[0][0] == composite_key
     assert cleanup_calls[0][1] is not None
+    assert cleanup_calls[0][2] == "process_terminated"
     _, message = controller.im_client.sent_messages[0]
     assert message == (
         "ERR:Claude Code process terminated (SIGABRT (signal 6)); "
@@ -564,8 +577,14 @@ def test_service_initiated_teardown_signal_is_not_reported_as_session_error() ->
     composite_key = "slack_C123:/tmp/workdir"
     cleanup_calls = []
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
-        cleanup_calls.append(key)
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
+        cleanup_calls.append((key, reason))
 
     handler.cleanup_session = _cleanup_session
     handler._mark_claude_teardown_intentional(composite_key, None)
@@ -579,7 +598,7 @@ def test_service_initiated_teardown_signal_is_not_reported_as_session_error() ->
         )
     )
 
-    assert cleanup_calls == [composite_key]
+    assert cleanup_calls == [(composite_key, "intentional_teardown_signal")]
     assert controller.im_client.sent_messages == []
 
 
@@ -589,7 +608,13 @@ def test_teardown_intent_does_not_suppress_errors_from_the_next_generation() -> 
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -618,7 +643,13 @@ def test_unrelated_error_during_teardown_window_is_still_reported() -> None:
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -653,7 +684,13 @@ def test_client_teardown_marker_suppresses_signal_error_without_key_record() -> 
     )
     controller.claude_sessions[composite_key] = client
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -682,7 +719,13 @@ def test_teardown_containment_matches_colon_delimited_exit_code() -> None:
     handler = SessionHandler(controller)
     composite_key = "slack_C123:/tmp/workdir"
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session
@@ -741,7 +784,13 @@ def test_old_generation_teardown_is_contained_after_a_replacement_registers() ->
     )
     controller.claude_sessions[composite_key] = replacement
 
-    async def _cleanup_session(key: str, *, current_receiver_task=None, expected_client=None) -> None:
+    async def _cleanup_session(
+        key: str,
+        *,
+        current_receiver_task=None,
+        expected_client=None,
+        reason=None,
+    ) -> None:
         return None
 
     handler.cleanup_session = _cleanup_session

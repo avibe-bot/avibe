@@ -1,8 +1,11 @@
 import { useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { SquareTerminal } from 'lucide-react';
 
 import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
+import { useIsDesktop } from '../../lib/useIsDesktop';
+import { MobileAppHeader } from '../apps/MobileAppHeader';
 import { TerminalTabs } from './TerminalTabs';
 
 // A start directory handed to the terminal when navigating in from the File Browser on mobile
@@ -31,6 +34,8 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   // Still the ROUTE mount, so the first tab keeps its persistent reattachable session (unlike
   // `windowed`, whose tabs are ephemeral).
   const standalone = useStandaloneAppTab();
+  const isDesktop = useIsDesktop();
+  const mobileRoute = !windowed && !standalone && !isDesktop;
 
   if (windowed) {
     return (
@@ -44,6 +49,17 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
     return (
       <div className="flex h-full w-full overflow-hidden bg-surface">
         <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+      </div>
+    );
+  }
+
+  if (mobileRoute) {
+    return (
+      <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-surface pb-[env(safe-area-inset-bottom)]">
+        <MobileAppHeader title={t('apps.terminal.label')} icon={SquareTerminal} />
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
+        </div>
       </div>
     );
   }

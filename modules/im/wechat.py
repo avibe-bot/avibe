@@ -27,13 +27,18 @@ from .base import (
     InlineKeyboard,
     MessageContext,
 )
+from config.atomic_io import write_atomic
 from config.paths import get_state_dir
 from vibe.i18n import t as i18n_t
 from vibe.proxy import resolve_proxy
 from modules.im import wechat_api as _wechat_api_mod
 from modules.im import wechat_cdn as _wechat_cdn_mod
+from modules.im.message_facts import (
+    is_original_human_wechat_attachment,
+    is_original_human_wechat_text,
+    wechat_message_kind,
+)
 from modules.im.formatters.wechat_formatter import WeChatFormatter
-from modules.im.message_facts import is_ordinary_wechat_text
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +77,15 @@ def _get_updates_error_code(resp: Optional[Dict[str, Any]]) -> Any:
     return code if code not in (None, 0) else None
 
 
+def _require_outbound_recipient(context: MessageContext) -> str:
+    """Return the iLink recipient, or raise before an empty id can leave this process."""
+    raw = getattr(context, "user_id", None)
+    user_id = str(raw).strip() if raw is not None else ""
+    if not user_id:
+        raise ValueError("WeChat outbound send rejected: empty recipient user_id")
+    return user_id
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -83,6 +97,44 @@ _SHORT_RETRY_SECONDS = 2
 _LONG_RETRY_SECONDS = 30
 _MAX_CONSECUTIVE_FAILURES = 3
 _DEDUP_SET_MAX = 1000
+
+
+def _wechat_declared_size_exceeds(file_info: Dict[str, Any], max_bytes: int | None) -> bool:
+    if max_bytes is None:
+        return False
+    cdn_info = file_info.get("cdn_info")
+    cdn_info = cdn_info if isinstance(cdn_info, dict) else {}
+    wechat_item = file_info.get("wechat_item")
+    wechat_item = wechat_item if isinstance(wechat_item, dict) else {}
+    plaintext_values = (
+        file_info.get("size"),
+        cdn_info.get("file_size"),
+        wechat_item.get("len"),
+    )
+    ciphertext_values = (
+        cdn_info.get("file_size_ciphertext"),
+        wechat_item.get("file_size_ciphertext"),
+        wechat_item.get("mid_size"),
+        wechat_item.get("video_size"),
+    )
+    for value in plaintext_values:
+        size = _nonnegative_size(value)
+        if size is not None and size > max_bytes:
+            return True
+    ciphertext_limit = _wechat_cdn_mod.aes_ecb_padded_size(max_bytes)
+    for value in ciphertext_values:
+        size = _nonnegative_size(value)
+        if size is not None and size > ciphertext_limit:
+            return True
+    return False
+
+
+def _nonnegative_size(value: object) -> int | None:
+    try:
+        size = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return size if size >= 0 else None
 _DEDUP_CLEAN_INTERVAL_SECONDS = 300
 _SESSION_EXPIRED_ERRCODE = -14
 _CONTEXT_TOKEN_CACHE_VERSION = 1
@@ -274,8 +326,11 @@ class _WeChatCDN:
         cdn_base_url: str,
         file_info: Dict[str, Any],
         target_path: str,
+        max_bytes: Optional[int] = None,
+        timeout_seconds: int = 30,
         proxy: Optional[str] = None,
-    ) -> bool:
+        target_fd: Optional[int] = None,
+    ) -> FileDownloadResult:
         """Download and decrypt a CDN file to a local path."""
         cdn_info = file_info.get("cdn_info") or {}
         wechat_item = file_info.get("wechat_item") or {}
@@ -289,85 +344,55 @@ class _WeChatCDN:
                     aes_key_b64 = base64.b64encode(bytes.fromhex(item_aes_hex)).decode("ascii")
                 except ValueError:
                     logger.error("Invalid WeChat image aeskey hex for file %s", file_info.get("name", ""))
-                    return False
+                    return FileDownloadResult(False, "CDN download/decrypt failed")
 
         if not encrypted_query_param:
             logger.error("Missing encrypt_query_param for WeChat attachment: %s", file_info)
-            return False
+            return FileDownloadResult(False, "CDN download/decrypt failed")
 
         dest = Path(target_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        if target_fd is None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
 
         try:
             if aes_key_b64:
-                content = await _wechat_cdn_mod.download_and_decrypt(
+                await _wechat_cdn_mod.download_and_decrypt_to_path(
                     cdn_base_url,
                     encrypted_query_param,
                     aes_key_b64,
+                    dest,
+                    max_bytes=max_bytes,
+                    timeout_seconds=timeout_seconds,
+                    target_fd=target_fd,
                 )
             else:
-                content = await _wechat_cdn_mod.download_plain(
+                await _wechat_cdn_mod.download_plain_to_path(
                     cdn_base_url,
                     encrypted_query_param,
+                    dest,
+                    max_bytes=max_bytes,
+                    timeout_seconds=timeout_seconds,
+                    target_fd=target_fd,
                 )
-
-            dest.write_bytes(content)
-            return True
+            return FileDownloadResult(True)
+        except ValueError as exc:
+            if target_fd is None:
+                dest.unlink(missing_ok=True)
+            logger.warning("WeChat CDN download failed: %s", type(exc).__name__)
+            reason = (
+                "file_too_large"
+                if str(exc) == "Downloaded file exceeds max_bytes"
+                else None
+            )
+            return FileDownloadResult(False, "CDN download/decrypt failed", reason)
         except Exception as exc:
-            logger.error("CDN download error: %s", exc)
-            return False
+            if target_fd is None:
+                dest.unlink(missing_ok=True)
+            logger.warning("WeChat CDN download failed: %s", type(exc).__name__)
+            return FileDownloadResult(False, "CDN download/decrypt failed")
 
 
 wechat_cdn = _WeChatCDN()
-
-
-# ---------------------------------------------------------------------------
-# Auth manager (QR code login lifecycle)
-# ---------------------------------------------------------------------------
-
-
-class WeChatAuthManager:
-    """Manages QR code login flow and token refresh for iLink bots."""
-
-    def __init__(self) -> None:
-        self.login_url: Optional[str] = None
-        self.is_logged_in: bool = False
-
-    async def check_login_status(self, base_url: str, token: str) -> bool:
-        """Verify the bot token is valid and the session is active."""
-        try:
-            url = f"{base_url}/getLoginStatus"
-            payload = {"token": token}
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as session:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        return False
-                    data = await resp.json()
-                    self.is_logged_in = data.get("ret", -1) == 0
-                    return self.is_logged_in
-        except Exception as exc:
-            logger.warning("Login status check failed: %s", exc)
-            return False
-
-    async def request_qr_login(self, base_url: str, token: str) -> Optional[str]:
-        """Request a new QR code login URL."""
-        try:
-            url = f"{base_url}/getQRCode"
-            payload = {"token": token}
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as session:
-                async with session.post(url, json=payload) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.json()
-                    self.login_url = data.get("qr_url")
-                    return self.login_url
-        except Exception as exc:
-            logger.warning("QR login request failed: %s", exc)
-            return None
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +418,9 @@ class WeChatBot(BaseIMClient):
         # Context tokens per user (needed for replies)
         self._context_tokens: Dict[str, str] = {}
         self._context_token_observed_at: Dict[str, float] = {}
+        #: The token map as last successfully written to disk, so a save that
+        #: would change nothing can be skipped. See ``_save_context_tokens``.
+        self._persisted_context_tokens: Dict[str, str] = {}
         self._typing_tickets: Dict[tuple[str, str], str] = {}
 
         # getUpdates cursor
@@ -400,9 +428,6 @@ class WeChatBot(BaseIMClient):
         self._poll_timeout_ms: int = _POLL_TIMEOUT_MS
         self._session_expired_logged: bool = False
         self._connection_notified: bool = False
-
-        # Auth manager
-        self._auth_manager = WeChatAuthManager()
 
         # Injected collaborators (set by controller)
         self.settings_manager: Any = None
@@ -536,7 +561,7 @@ class WeChatBot(BaseIMClient):
         if not text:
             raise ValueError("WeChat send_message requires non-empty text")
 
-        user_id = context.user_id
+        user_id = _require_outbound_recipient(context)
         context_token = self._get_context_token(context)
 
         # Build TEXT item
@@ -666,7 +691,7 @@ class WeChatBot(BaseIMClient):
         context: MessageContext,
     ) -> bool:
         """Send a typing indicator (best-effort, don't block on errors)."""
-        user_id = context.user_id
+        user_id = _require_outbound_recipient(context)
         context_token = self._get_context_token(context)
         if not context_token:
             return False
@@ -692,7 +717,7 @@ class WeChatBot(BaseIMClient):
     async def clear_typing_indicator(self, context: MessageContext) -> bool:
         """Cancel the active typing indicator for the current WeChat DM."""
 
-        user_id = context.user_id
+        user_id = _require_outbound_recipient(context)
         context_token = self._get_context_token(context)
         if not context_token:
             return False
@@ -732,6 +757,7 @@ class WeChatBot(BaseIMClient):
         title: Optional[str] = None,
     ) -> str:
         """Upload a file via CDN and send it as a file message."""
+        user_id = _require_outbound_recipient(context)
         if self._is_video_file(file_path, title):
             return await self.upload_video_from_path(context, file_path, title=title)
 
@@ -739,7 +765,7 @@ class WeChatBot(BaseIMClient):
             self.config.base_url,
             self.config.bot_token,
             getattr(self.config, "cdn_base_url", self.config.base_url),
-            context.user_id,
+            user_id,
             file_path,
             proxy=self._proxy_url,
         )
@@ -747,7 +773,6 @@ class WeChatBot(BaseIMClient):
             logger.error("Failed to upload file to CDN: %s", file_path)
             return ""
 
-        user_id = context.user_id
         context_token = self._get_context_token(context)
         display_name = title or Path(file_path).name
 
@@ -791,6 +816,7 @@ class WeChatBot(BaseIMClient):
         title: Optional[str] = None,
     ) -> str:
         """Upload an image via CDN and send it as an image message."""
+        user_id = _require_outbound_recipient(context)
         if self._is_video_file(file_path, title):
             return await self.upload_video_from_path(context, file_path, title=title)
 
@@ -798,7 +824,7 @@ class WeChatBot(BaseIMClient):
             self.config.base_url,
             self.config.bot_token,
             getattr(self.config, "cdn_base_url", self.config.base_url),
-            context.user_id,
+            user_id,
             file_path,
             proxy=self._proxy_url,
         )
@@ -806,7 +832,6 @@ class WeChatBot(BaseIMClient):
             logger.error("Failed to upload image to CDN: %s", file_path)
             return ""
 
-        user_id = context.user_id
         context_token = self._get_context_token(context)
 
         item_list = [
@@ -849,11 +874,12 @@ class WeChatBot(BaseIMClient):
     ) -> str:
         """Upload a video via CDN and send it as a native video message."""
 
+        user_id = _require_outbound_recipient(context)
         cdn_meta = await wechat_cdn.upload_file_to_cdn(
             self.config.base_url,
             self.config.bot_token,
             getattr(self.config, "cdn_base_url", self.config.base_url),
-            context.user_id,
+            user_id,
             file_path,
             media_type=_wechat_api_mod.UPLOAD_MEDIA_VIDEO,
         )
@@ -861,7 +887,6 @@ class WeChatBot(BaseIMClient):
             logger.error("Failed to upload video to CDN: %s", file_path)
             return ""
 
-        user_id = context.user_id
         context_token = self._get_context_token(context)
         display_name = title or Path(file_path).name
 
@@ -904,30 +929,25 @@ class WeChatBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Download a CDN file to a local path."""
-        success = await wechat_cdn.download_and_decrypt(
+        if _wechat_declared_size_exceeds(file_info, max_bytes):
+            return FileDownloadResult(False, "File exceeds max_bytes", "file_too_large")
+        result = await wechat_cdn.download_and_decrypt(
             self.config.base_url,
             self.config.bot_token,
             getattr(self.config, "cdn_base_url", self.config.base_url),
             file_info,
             target_path,
+            max_bytes=max_bytes,
+            timeout_seconds=timeout_seconds,
             proxy=self._proxy_url,
+            target_fd=target_fd,
         )
-        if not success:
-            return FileDownloadResult(False, "CDN download/decrypt failed")
-
-        # Enforce max_bytes after download if specified
-        if max_bytes is not None:
-            dest = Path(target_path)
-            if dest.exists() and dest.stat().st_size > max_bytes:
-                dest.unlink(missing_ok=True)
-                return FileDownloadResult(
-                    False,
-                    f"File exceeds max_bytes ({max_bytes})",
-                )
-
-        return FileDownloadResult(True)
+        if isinstance(result, FileDownloadResult):
+            return result
+        return FileDownloadResult(bool(result), None if result else "CDN download/decrypt failed")
 
     async def download_file(
         self,
@@ -1024,64 +1044,57 @@ class WeChatBot(BaseIMClient):
 
         logger.info("Starting WeChat bot via iLink protocol...")
 
-        async def _start() -> None:
-            self._loop = asyncio.get_running_loop()
-            self._stop_event = asyncio.Event()
-
-            # Notify on_ready callback (starts UI server even without token)
-            if self._on_ready:
-                try:
-                    await self._on_ready()
-                except Exception as exc:
-                    logger.error("on_ready callback failed: %s", exc, exc_info=True)
-
-            if not self.config.bot_token:
-                logger.info("WeChat bot idling (no bot_token). Complete QR login via the Web UI to activate.")
-                await self._stop_event.wait()
-                return
-
-            # Load persisted sync buffer
-            self._load_sync_buf()
-            self._load_context_tokens()
-
-            # Check login status
-            logged_in = await self._auth_manager.check_login_status(
-                self.config.base_url,
-                self.config.bot_token,
-            )
-            if logged_in:
-                logger.info("WeChat bot session is active")
-            else:
-                logger.warning(
-                    "WeChat bot session is not active; messages may fail until the session is re-authenticated",
-                )
-
-            await self._notify_connection_state("start")
-
-            # Start poll loop as a background task
-            self._poll_task = asyncio.create_task(self._poll_loop())
-
-            logger.info("WeChat bot started, entering poll loop")
-
-            # Block until stop is signalled
-            await self._stop_event.wait()
-
-            # Cancel poll task on shutdown
-            if self._poll_task and not self._poll_task.done():
-                self._poll_task.cancel()
-                try:
-                    await self._poll_task
-                except asyncio.CancelledError:
-                    pass
-
-            await self._notify_connection_state("stop")
-
-            logger.info("WeChat bot stopped")
-
         try:
-            asyncio.run(_start())
+            asyncio.run(self._run_until_stopped())
         except KeyboardInterrupt:
             logger.info("WeChat bot shutting down (keyboard interrupt)...")
+
+    async def _run_until_stopped(self) -> None:
+        """Async startup + poll loop until ``stop()`` is signalled."""
+        self._loop = asyncio.get_running_loop()
+        self._stop_event = asyncio.Event()
+
+        # Notify on_ready callback (starts UI server even without token)
+        if self._on_ready:
+            try:
+                await self._on_ready()
+            except Exception as exc:
+                logger.error("on_ready callback failed: %s", exc, exc_info=True)
+
+        if not self.config.bot_token:
+            logger.info("WeChat bot idling (no bot_token). Complete QR login via the Web UI to activate.")
+            await self._stop_event.wait()
+            return
+
+        # Load persisted sync buffer
+        self._load_sync_buf()
+        self._load_context_tokens()
+
+        logger.info(
+            "WeChat bot starting poll loop; session health is reported by the first poll"
+        )
+
+        await self._notify_connection_state("start")
+
+        # Start poll loop as a background task
+        self._poll_task = asyncio.create_task(self._poll_loop())
+
+        logger.info("WeChat bot started, entering poll loop")
+
+        # Block until stop is signalled
+        await self._stop_event.wait()
+
+        # Cancel poll task on shutdown
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+
+        await self._notify_connection_state("stop")
+
+        logger.info("WeChat bot stopped")
 
     def stop(self) -> None:
         """Signal the bot to stop."""
@@ -1109,7 +1122,6 @@ class WeChatBot(BaseIMClient):
         return max(_MIN_POLL_TIMEOUT_MS, min(_MAX_POLL_TIMEOUT_MS, value))
 
     def _mark_session_expired(self, errcode: Any) -> None:
-        self._auth_manager.is_logged_in = False
         self._typing_tickets.clear()
         self._clear_context_tokens()
         if not self._session_expired_logged:
@@ -1120,7 +1132,6 @@ class WeChatBot(BaseIMClient):
             self._session_expired_logged = True
 
     def _mark_session_active(self) -> None:
-        self._auth_manager.is_logged_in = True
         self._session_expired_logged = False
 
     # ------------------------------------------------------------------
@@ -1342,7 +1353,9 @@ class WeChatBot(BaseIMClient):
 
         # Handle media attachments
         await self._process_media_items(msg, context)
-        context.is_ordinary_text = is_ordinary_wechat_text(msg, context.files)
+        context.is_original_human_text = is_original_human_wechat_text(msg, context.files)
+        context.is_original_human_attachment = is_original_human_wechat_attachment(msg, context.files)
+        context.message_kind = wechat_message_kind(msg, context.files)
 
         # Authorization check
         auth_result = self.check_authorization(
@@ -1633,12 +1646,37 @@ class WeChatBot(BaseIMClient):
 
             self._context_tokens.update(loaded_tokens)
             self._context_token_observed_at.update(loaded_observed_at)
+            # What we just read *is* what is on disk, so a restarted process
+            # seeing the same tokens again has nothing to write. Entries the
+            # loop above skipped are simply absent here, which only makes the
+            # next save happen — never makes a needed one be skipped.
+            self._persisted_context_tokens = dict(loaded_tokens)
             if loaded_tokens:
                 logger.info("Loaded persisted WeChat context tokens for %d user(s)", len(loaded_tokens))
         except Exception as exc:
             logger.warning("Failed to load WeChat context tokens: %s", exc)
 
     def _save_context_tokens(self) -> None:
+        """Persist the token map, but only when it differs from what is on disk.
+
+        This is reached from ``_process_inbound_message`` for every message
+        carrying a ``context_token``, on the single WeChat polling loop — and a
+        user's token is the same on message after message, so almost every one
+        of those calls used to rewrite a byte-identical document. That was
+        merely wasteful while the write was a bare temp-file rename; routing it
+        through ``write_atomic`` put two durability barriers in front of the
+        next message in the batch, which is a cost this cache has no use for.
+        It is re-learned from the next inbound message, so it never needed to
+        survive a power loss.
+
+        The comparison is against what was last *successfully written*, not
+        against the live map, so a failed write is retried on the next message
+        instead of being latched shut.
+        """
+
+        tokens = {user_id: token for user_id, token in self._context_tokens.items() if token}
+        if tokens == self._persisted_context_tokens:
+            return
         try:
             path = self._get_context_token_cache_path()
             payload = {
@@ -1648,22 +1686,14 @@ class WeChatBot(BaseIMClient):
                         "context_token": token,
                         "observed_at": self._context_token_observed_at.get(user_id, 0),
                     }
-                    for user_id, token in self._context_tokens.items()
-                    if token
+                    for user_id, token in tokens.items()
                 },
             }
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                dir=path.parent,
-                suffix=".tmp",
-                delete=False,
-                encoding="utf-8",
-            ) as handle:
-                json.dump(payload, handle, ensure_ascii=False)
-                temp_path = Path(handle.name)
-            temp_path.replace(path)
+            write_atomic(path, json.dumps(payload, ensure_ascii=False))
         except Exception as exc:
             logger.warning("Failed to save WeChat context tokens: %s", exc)
+            return
+        self._persisted_context_tokens = tokens
 
     def _remember_context_token(self, user_id: str, context_token: str) -> None:
         if not user_id or not context_token:

@@ -4,6 +4,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
+import { defaultActionShortcuts, formatActionShortcut } from '../../lib/actionShortcuts';
 import { ShowPageAnnotateControl } from './ShowPageAnnotateControl';
 
 const i18n = createInstance();
@@ -30,9 +31,16 @@ const renderCompact = (enabled: boolean) =>
 describe('ShowPageAnnotateControl compact presentation', () => {
   it.each([false, true])('keeps one title-bar button when enabled=%s', (enabled) => {
     const html = renderCompact(enabled);
+    const shortcut = formatActionShortcut(
+      defaultActionShortcuts().showPageAnnotation,
+      i18n.getFixedT('en'),
+    );
 
     expect(html.match(/<button/g)).toHaveLength(1);
     expect(html).toContain('aria-label="Annotate"');
+    expect(html).toContain(enabled
+      ? 'title="Annotate"'
+      : `title="Press ${shortcut} to enter annotation mode; press Esc to exit"`);
     expect(html).toContain('text-muted');
     expect(html).toContain('hover:text-foreground');
   });

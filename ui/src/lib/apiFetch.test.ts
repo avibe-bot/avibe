@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const remoteAuth = vi.hoisted(() => ({
   deferRemoteAuthRedirect: vi.fn(),
+  reportRemoteAuthorizationState: vi.fn(),
   remoteLoginPath: vi.fn((target: string) => `/auth/login?next=${encodeURIComponent(target)}`),
 }));
 
@@ -9,6 +10,9 @@ vi.mock('./remoteAuth', () => remoteAuth);
 
 import {
   apiFetch,
+  isApiFetchDeadlineAbort,
+  recoverRemoteAuthFromSessionProbe,
+  withApiDeadline,
 } from './apiFetch';
 
 describe('apiFetch remote auth recovery', () => {
@@ -25,37 +29,26 @@ describe('apiFetch remote auth recovery', () => {
     vi.clearAllMocks();
   });
 
-  it('hands an expired remote session to the PWA auth gate', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
-      ),
-    );
+  it.each([
+    'remote_access_login_required',
+    'remote_access_authorization_refresh_required',
+  ])(
+    'hands remote auth recovery error %s to the PWA auth gate',
+    async (error) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ error }, { status: 401 })),
+      );
 
-    const response = await apiFetch('/api/inbox');
+      const response = await apiFetch('/api/inbox');
 
-    expect(response.status).toBe(401);
-    await vi.waitFor(() => expect(remoteAuth.deferRemoteAuthRedirect).toHaveBeenCalledOnce());
-    expect(window.location.assign).not.toHaveBeenCalled();
-  });
-
-  it('uses the dedicated login endpoint outside an iOS standalone PWA', async () => {
-    remoteAuth.deferRemoteAuthRedirect.mockReturnValue(false);
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
-      ),
-    );
-
-    await apiFetch('/api/inbox');
-
-    await vi.waitFor(() => expect(window.location.assign).toHaveBeenCalledWith(
-      '/auth/login?next=%2Finbox%3Ffilter%3Dopen',
-    ));
-    expect(remoteAuth.remoteLoginPath).toHaveBeenCalledWith('/inbox?filter=open');
-  });
+      expect(response.status).toBe(401);
+      await vi.waitFor(() => expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith(
+        'login_required',
+      ));
+      expect(window.location.assign).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not start remote auth for an unrelated 401', async () => {
     vi.stubGlobal(
@@ -66,7 +59,7 @@ describe('apiFetch remote auth recovery', () => {
     await apiFetch('/api/inbox');
 
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
+    expect(remoteAuth.reportRemoteAuthorizationState).not.toHaveBeenCalled();
   });
 
   it('replays a rejected mutation with the cookie that replaced its header token', async () => {
@@ -245,6 +238,128 @@ describe('apiFetch remote auth recovery', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('aborts a deadline-bound request without a caller signal', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          expect(input).toBe('/api/models/sources');
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+
+    const request = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    const failure = request.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(issuedSignal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await failure;
+    expect(error).toMatchObject({ name: 'TimeoutError' });
+    expect(isApiFetchDeadlineAbort(error)).toBe(true);
+  });
+
+  it('lets a caller abort before the deadline', async () => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          issuedSignal = init?.signal ?? undefined;
+          issuedSignal?.addEventListener('abort', () => reject(issuedSignal?.reason), { once: true });
+        })),
+    );
+    const controller = new AbortController();
+    const callerReason = new DOMException('caller stopped waiting', 'TimeoutError');
+
+    const request = withApiDeadline(
+      1_000,
+      controller.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    const rejected = expect(request).rejects.toBe(callerReason);
+    controller.abort(callerReason);
+
+    await rejected;
+    expect(issuedSignal).not.toBe(controller.signal);
+    expect(issuedSignal?.reason).toBe(callerReason);
+    expect(isApiFetchDeadlineAbort(callerReason)).toBe(false);
+  });
+
+  it('fires the deadline while a shared CSRF fetch is in flight', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(Response.json({ csrf_token: 'fresh-token' }))
+      .mockResolvedValueOnce(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const stalled = withApiDeadline(
+      1_000,
+      undefined,
+      (signal) => apiFetch('/api/models/sources', { method: 'POST', signal }),
+    );
+    const rejected = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    await expect(apiFetch('/api/models/sources', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ['success', false, false],
+    ['throw', false, true],
+    ['success with a caller signal', true, false],
+    ['throw with a caller signal', true, true],
+  ])('disposes deadline resources after request %s', async (_label, withCaller, shouldThrow) => {
+    vi.useFakeTimers();
+    let issuedSignal: AbortSignal | undefined;
+    const fetchError = new Error('request failed');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        issuedSignal = init?.signal ?? undefined;
+        if (shouldThrow) throw fetchError;
+        return Response.json({ ok: true });
+      }),
+    );
+    const controller = withCaller ? new AbortController() : null;
+    const removeEventListener = controller
+      ? vi.spyOn(controller.signal, 'removeEventListener')
+      : null;
+
+    const request = withApiDeadline(
+      1_000,
+      controller?.signal,
+      (signal) => apiFetch('/api/models/sources', { signal }),
+    );
+    if (shouldThrow) {
+      await expect(request).rejects.toBe(fetchError);
+    } else {
+      await expect(request).resolves.toMatchObject({ status: 200 });
+    }
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(issuedSignal?.aborted).toBe(false);
+    if (controller) {
+      expect(issuedSignal).not.toBe(controller.signal);
+      expect(removeEventListener).toHaveBeenCalledWith('abort', expect.any(Function));
+      controller.abort(new DOMException('settled request', 'AbortError'));
+      expect(issuedSignal?.aborted).toBe(false);
+    }
+  });
+
   it('evicts a stalled shared CSRF fetch after a deadline-bound caller aborts', async () => {
     const fetchMock = vi.fn()
       .mockImplementationOnce(() => new Promise<Response>(() => undefined))
@@ -265,6 +380,32 @@ describe('apiFetch remote auth recovery', () => {
       status: 200,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('recovers from a successful session probe that requires authorization refresh', async () => {
+    await recoverRemoteAuthFromSessionProbe(Response.json({
+      remote: true,
+      authenticated: false,
+      authorization_refresh_required: true,
+    }));
+
+    expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith('login_required');
+    expect(window.location.assign).not.toHaveBeenCalled();
+  });
+
+  it('reports login-required responses to the shared recovery owner', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({ error: 'remote_access_login_required' }, { status: 401 }),
+      ),
+    );
+
+    await apiFetch('/api/inbox');
+
+    await vi.waitFor(() => expect(remoteAuth.reportRemoteAuthorizationState).toHaveBeenCalledWith(
+      'login_required',
+    ));
   });
 
   it('evicts a stalled shared CSRF refresh after a rejected mutation aborts', async () => {

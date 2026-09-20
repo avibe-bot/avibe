@@ -797,6 +797,483 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     assert "pr_status #153 open -> merged" in stdout.getvalue()
 
 
+def test_combined_ci_mode_supports_pinned_or_dynamic_current_head() -> None:
+    module = _load_module()
+
+    pinned = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert module._validate_ci_args(pinned) is None
+
+    dynamic = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI"]
+    )
+    assert module._validate_ci_args(dynamic) is None
+
+    missing_workflow = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature"]
+    )
+    assert "--workflow" in (module._validate_ci_args(missing_workflow) or "")
+
+    new_pr_mode = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--new-prs", "--sha", "abc123", "--workflow", "CI"]
+    )
+    assert "--new-prs" in (module._validate_ci_args(new_pr_mode) or "")
+
+
+def test_pr_only_watch_identity_keeps_the_legacy_material() -> None:
+    module = _load_module()
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    expected_material = json.dumps(
+        {
+            "mode": "pr",
+            "actionable_only": True,
+            "include_self_comments": False,
+            "ignore_authors": [],
+            "ignore_comment_patterns": [],
+        },
+        sort_keys=True,
+    )
+    expected = module.hashlib.sha256(
+        f"wait_pr/{module.STATE_FILE_VERSION}/{expected_material}".encode()
+    ).hexdigest()[:16]
+
+    assert module._watch_identity(args) == expected
+
+
+def test_combined_watch_identity_includes_ci_contract() -> None:
+    module = _load_module()
+    pr_only = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--actionable-only"]
+    )
+    combined = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--actionable-only",
+            "--sha",
+            "abc123",
+            "--workflow",
+            "CI",
+        ]
+    )
+
+    assert module._watch_identity(pr_only) != module._watch_identity(combined)
+
+
+def test_combined_watch_identity_includes_actions_page_limit() -> None:
+    module = _load_module()
+
+    def _identity(max_pages: str) -> str:
+        return module._watch_identity(
+            module._build_parser().parse_args(
+                [
+                    "--repo",
+                    "avibe-bot/avibe",
+                    "--pr",
+                    "153",
+                    "--sha",
+                    "abc123",
+                    "--workflow",
+                    "CI",
+                    "--max-pages",
+                    max_pages,
+                ]
+            )
+        )
+
+    assert _identity("1") != _identity("3")
+
+
+def test_combined_watch_migrates_identity_without_actions_page_limit(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        ["--repo", "avibe-bot/avibe", "--pr", "153", "--sha", "abc123", "--workflow", "CI"]
+    )
+    legacy_identity = module._watch_identity(args, include_ci_max_pages=False)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "abc123",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    assert legacy_identity in aliases
+
+
+def test_combined_watch_migrates_the_legacy_sha_identity(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    args = module._build_parser().parse_args(
+        [
+            "--repo",
+            "avibe-bot/avibe",
+            "--pr",
+            "153",
+            "--sha",
+            "new-sha",
+            "--branch",
+            "feature",
+            "--workflow",
+            "CI",
+        ]
+    )
+    legacy_identity = module._watch_identity(args, legacy_ci_sha="old-sha", include_ci_max_pages=False)
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "watch": legacy_identity,
+                "owner": "wat_123",
+                "head_sha": "old-sha",
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = module._watch_identity(args)
+    aliases = module._legacy_watch_identity_aliases(args, str(state_file))
+    saved = module._load_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+    )
+
+    assert saved["watch"] == legacy_identity
+    assert legacy_identity in aliases
+    module._write_state_file(
+        str(state_file),
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        watch_identity=identity,
+        watch_id="wat_123",
+        watch_identity_aliases=aliases,
+        head_sha="new-sha",
+        actions={"CI": []},
+    )
+    assert json.loads(state_file.read_text(encoding="utf-8"))["watch"] == identity
+
+
+def test_fresh_combined_baseline_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    state = _pr_state()
+    state["pull_request"]["head"] = {"sha": "new-sha"}
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(state, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert not state_file.exists()
+
+
+def test_resumed_combined_watch_rejects_a_stale_sha(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    baseline = _pr_state()
+    baseline["pull_request"]["head"] = {"sha": "new-sha"}
+    state_file.write_text(
+        json.dumps(
+            {
+                "version": module.STATE_FILE_VERSION,
+                "repo": "avibe-bot/avibe",
+                "pr": 153,
+                "review_cursor": 0,
+                "review_comment_cursor": 0,
+                "issue_comment_cursor": 0,
+                "reaction_cursor": 0,
+                "pr_status": "open",
+                "review_comment_since": "2026-08-04T09:00:00Z",
+                "issue_comment_since": "2026-08-04T09:00:00Z",
+                "viewer_login": "tester",
+                "token_fingerprint": module._token_fingerprint("token"),
+                **_complete_pr_baseline_fields(module, baseline),
+                "actions": {"CI": []},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_state = state_file.read_text(encoding="utf-8")
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", return_value=(baseline, 1)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login") as fake_login,
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "old-sha",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+            ],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 2
+    assert "does not match --sha old-sha" in stderr.getvalue()
+    assert stdout.getvalue() == ""
+    assert state_file.read_text(encoding="utf-8") == original_state
+    fake_login.assert_not_called()
+
+
+def test_combined_pr_waiter_reports_ci_completion(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert kwargs["ci_sha"] == "abc123"
+        assert kwargs["ci_workflows"] == ["CI"]
+        action = {
+            "id": 7,
+            "name": "CI",
+            "head_sha": "abc123",
+            "head_branch": "feature",
+            "status": "in_progress" if fetch_calls == 1 else "completed",
+            "conclusion": None if fetch_calls == 1 else "success",
+            "html_url": "https://github.com/example/actions/runs/7",
+        }
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "1",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    assert rc == 0
+    assert fetch_calls == 2
+    assert "GitHub Actions success for avibe-bot/avibe@abc123 on feature" in stdout.getvalue()
+    assert "CI: status=completed conclusion=success" in stdout.getvalue()
+
+
+def test_dynamic_combined_waiter_follows_the_current_pr_head(tmp_path) -> None:
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        assert kwargs["ci_sha"] is None
+        assert kwargs["ci_workflows"] == ["CI"]
+        head_sha = "old-head" if fetch_calls == 1 else "new-head"
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": head_sha}
+        state["actions"] = [
+            {
+                "id": fetch_calls,
+                "name": "CI",
+                "head_sha": head_sha,
+                "head_branch": "feature",
+                "status": "in_progress" if fetch_calls == 1 else "completed",
+                "conclusion": None if fetch_calls == 1 else "success",
+                "html_url": f"https://github.com/example/actions/runs/{fetch_calls}",
+            }
+        ]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--workflow",
+                "CI",
+                "--state-file",
+                str(state_file),
+                "--interval",
+                "1",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    assert fetch_calls == 2
+    assert "pr_head #153 old-head -> new-head" in output
+    assert "GitHub Actions success for avibe-bot/avibe@new-head" in output
+
+
+def test_combined_settle_does_not_report_a_stale_ci_success_after_a_rerun_starts() -> None:
+    module = _load_module()
+    fetch_calls = 0
+
+    def _fake_fetch_state(repo, pr_number, token, **kwargs):
+        nonlocal fetch_calls
+        fetch_calls += 1
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "abc123"}
+        if fetch_calls == 1:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+            }
+        elif fetch_calls == 2:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        else:
+            action = {
+                "id": 7,
+                "name": "CI",
+                "head_sha": "abc123",
+                "head_branch": "feature",
+                "status": "in_progress",
+                "conclusion": None,
+                "run_attempt": 2,
+            }
+            state["review_comments"] = [_review_comment(501)]
+        state["actions"] = [action]
+        return state, 2
+
+    stdout = io.StringIO()
+    with (
+        patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--sha",
+                "abc123",
+                "--branch",
+                "feature",
+                "--workflow",
+                "CI",
+                "--settle",
+                "1",
+                "--timeout",
+                "0",
+            ],
+        ),
+        redirect_stdout(stdout),
+    ):
+        rc = module.main()
+
+    output = stdout.getvalue()
+    assert rc == 0
+    assert fetch_calls == 5
+    assert "review_comment #501" in output
+    assert "GitHub Actions success" not in output
+
+
 def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     module = _load_module()
     fetch_calls: list[int | None] = []
@@ -924,7 +1401,7 @@ def test_main_stops_after_bounded_initial_pr_network_retries() -> None:
     ):
         rc = module.main()
 
-    assert rc == 1
+    assert rc == 75
     assert fetch.call_count == 3
     assert "failed after 3 attempts" in stderr.getvalue()
 
@@ -1069,6 +1546,25 @@ def test_main_retries_transient_authenticated_login_failure() -> None:
     assert rc == 0
     assert lookup.call_count == 2
     assert [call.args[0] for call in sleep.call_args_list] == [1.0]
+
+
+def test_main_stops_after_bounded_viewer_lookup_retries_with_retryable_exit_code() -> None:
+    module = _load_module()
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", side_effect=TimeoutError("temporary viewer timeout")) as lookup,
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll before viewer login")),
+        patch.object(module.time, "sleep", return_value=None),
+        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 75
+    assert lookup.call_count == 3
+    assert "GitHub viewer lookup failed" in stderr.getvalue()
 
 
 def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_cursor() -> None:
@@ -1544,6 +2040,138 @@ def test_fetch_state_narrows_comments_and_filters_reactions_server_side() -> Non
     assert "since=" not in issue_comments_url
     # Only the Codex pass reaction is ever reported, so the rest never travel.
     assert "content=%2B1" in reactions_url
+
+
+def test_fetch_state_includes_combined_actions_and_request_count() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+            ],
+        ) as fetch_pr,
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=(
+                [{"id": 7, "name": "CI", "head_sha": "abc123", "status": "in_progress"}],
+                2,
+            ),
+        ) as fetch_actions,
+    ):
+        state, request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+            ci_max_pages=4,
+        )
+
+    fetch_actions.assert_called_once_with(
+        "avibe-bot/avibe",
+        "token",
+        branch="feature",
+        head_sha="abc123",
+        max_pages=4,
+        cache=fetch_actions.call_args.kwargs["cache"],
+    )
+    assert state["actions"][0]["id"] == 7
+    assert request_count == 2 + 5 + 2
+    assert fetch_pr.call_count == 2
+
+
+def test_fetch_state_uses_the_observed_pr_head_for_dynamic_ci() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "current-head"}},
+                {"number": 153, "state": "open", "head": {"sha": "current-head"}},
+            ],
+        ),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(module, "fetch_workflow_runs", return_value=([], 1)) as fetch_actions,
+    ):
+        module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+        )
+
+    fetch_actions.assert_called_once_with(
+        "avibe-bot/avibe",
+        "token",
+        branch="feature",
+        head_sha="current-head",
+        max_pages=3,
+        cache=fetch_actions.call_args.kwargs["cache"],
+    )
+
+
+def test_fetch_state_rejects_dynamic_ci_when_pr_head_is_missing() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "github_get", return_value={"number": 153, "state": "open"}),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(module, "fetch_workflow_runs") as fetch_actions,
+        pytest.raises(
+            RuntimeError,
+            match="GitHub PR response has no head SHA for current-head CI monitoring",
+        ),
+    ):
+        module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_branch="feature",
+            ci_workflows=["CI"],
+        )
+
+    fetch_actions.assert_not_called()
+
+
+def test_fetch_state_discards_actions_when_pr_moves_during_fetch() -> None:
+    module = _load_module()
+    with (
+        patch.object(module, "list_paginated_with_count", return_value=([], 1)),
+        patch.object(module, "_fetch_review_threads", return_value=([], 1)),
+        patch.object(
+            module,
+            "github_get",
+            side_effect=[
+                {"number": 153, "state": "open", "head": {"sha": "abc123"}},
+                {"number": 153, "state": "open", "head": {"sha": "new-sha"}},
+            ],
+        ),
+        patch.object(
+            module,
+            "fetch_workflow_runs",
+            return_value=([{"id": 7, "name": "CI", "head_sha": "abc123", "status": "completed"}], 1),
+        ),
+    ):
+        state, _request_count = module._fetch_state(
+            "avibe-bot/avibe",
+            153,
+            "token",
+            ci_sha="abc123",
+            ci_workflows=["CI"],
+        )
+
+    assert state["pull_request"]["head"]["sha"] == "new-sha"
+    assert state["actions"] == []
 
 
 def test_fetch_state_omits_since_when_no_cursor_is_known() -> None:
@@ -3456,7 +4084,7 @@ def _managed_state(module, path, watch_id: str | None, **fields) -> None:
     )
 
 
-def _run_managed(module, state_file, fetch, *, delivery: str = ""):
+def _run_managed(module, state_file, fetch, *, delivery: str = "", extra_args=()):
     """One managed cycle over ``state_file``, told when this watch last delivered."""
 
     env = {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: delivery}
@@ -3468,7 +4096,16 @@ def _run_managed(module, state_file, fetch, *, delivery: str = ""):
         patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
-            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
+            [
+                "wait_pr.py",
+                "--repo",
+                "avibe-bot/avibe",
+                "--pr",
+                "153",
+                "--state-file",
+                str(state_file),
+                *extra_args,
+            ],
         ),
         redirect_stdout(stdout),
         patch("sys.stderr", io.StringIO()),
@@ -3548,6 +4185,867 @@ def test_a_managed_run_promotes_the_staged_cursors_once_the_report_was_delivered
     payload = json.loads(state_file.read_text(encoding="utf-8"))
     assert payload["review_comment_cursor"] == 501
     assert module.STAGED_KEY not in payload
+
+
+def test_dynamic_combined_cycles_report_activity_that_lands_during_the_follow_up(tmp_path) -> None:
+    """A forever re-arm keeps one baseline across CI and the later review.
+
+    The first cycle exits after CI succeeds. The review lands while its Agent
+    follow-up is running, before the next cycle starts. Reusing the same durable
+    state must compare that review with the pre-review snapshot instead of
+    baselining it away.
+    """
+
+    module = _load_module()
+    state_file = tmp_path / "pr-153-combined.json"
+    baseline = _pr_state()
+    baseline["pull_request"]["head"] = {"sha": "head-1"}
+    in_progress = {
+        "id": 7,
+        "name": "CI",
+        "head_sha": "head-1",
+        "head_branch": "feature",
+        "status": "in_progress",
+        "conclusion": None,
+    }
+    _managed_state(
+        module,
+        state_file,
+        "wat_9",
+        **_complete_pr_baseline_fields(module, baseline),
+        actions=module.normalize_selected_runs({"CI": [in_progress]}),
+    )
+
+    succeeded = {
+        **in_progress,
+        "status": "completed",
+        "conclusion": "success",
+        "html_url": "https://github.com/example/actions/runs/7",
+    }
+
+    def _fetch_ci(repo, pr_number, token, **kwargs):
+        state = _pr_state()
+        state["pull_request"]["head"] = {"sha": "head-1"}
+        state["actions"] = [succeeded]
+        return state, 2
+
+    rc, first_output, first_payload = _run_managed(
+        module,
+        state_file,
+        _fetch_ci,
+        delivery="delivery-1",
+        extra_args=("--workflow", "CI"),
+    )
+    assert rc == 0
+    assert "GitHub Actions success" in first_output
+    assert module.STAGED_KEY in first_payload
+
+    def _fetch_review(repo, pr_number, token, **kwargs):
+        state = _pr_state(
+            issue_comments=[
+                {
+                    "id": 601,
+                    "body": (
+                        "Codex Review: Didn't find any major issues.\n\n"
+                        "**Reviewed commit:** `head-1`"
+                    ),
+                    "user": {"login": "chatgpt-codex-connector[bot]"},
+                    "html_url": "https://github.com/example/repo/pull/153#issuecomment-601",
+                }
+            ]
+        )
+        state["pull_request"]["head"] = {"sha": "head-1"}
+        state["actions"] = [succeeded]
+        return state, 2
+
+    rc, second_output, second_payload = _run_managed(
+        module,
+        state_file,
+        _fetch_review,
+        delivery="delivery-2",
+        extra_args=("--workflow", "CI"),
+    )
+
+    assert rc == 0
+    assert "issue_comment #601" in second_output
+    assert "Didn't find any major issues" in second_output
+    assert second_payload["issue_comment_cursor"] == 0
+    assert second_payload[module.STAGED_KEY]["cursors"]["issue_comment_cursor"] == 601
+
+
+def _ci_run(run_id=7, *, attempt=1, workflow="CI", head="head-1", status="completed", conclusion="success"):
+    return {
+        "id": run_id,
+        "name": workflow,
+        "head_sha": head,
+        "head_branch": "feature",
+        "status": status,
+        "conclusion": conclusion,
+        "run_attempt": attempt,
+        "html_url": f"https://github.com/example/actions/runs/{run_id}",
+    }
+
+
+def _ci_state(*runs, head="head-1", comment=False):
+    state = _pr_state(review_comments=[_review_comment(501)] if comment else [])
+    state["pull_request"]["head"] = {"sha": head}
+    state["actions"] = list(runs)
+    return state
+
+
+def _seed_ci_state(module, path, *runs, workflows=("CI",), head="head-1", owner="wat_9"):
+    state = _ci_state(*runs, head=head)
+    _managed_state(
+        module,
+        path,
+        owner,
+        **_complete_pr_baseline_fields(module, state),
+        actions=module.normalize_selected_runs(
+            module.select_matching_runs(list(runs), workflows=list(workflows), branch="feature", head_sha=head)
+        ),
+    )
+
+
+def _ci_cycle(module, path, states, *, delivery="1", workflows=("CI",), settle=0, sha=None, extra_args=()):
+    """Use real cursor IO in tmp_path, fake GitHub, and a bounded virtual clock."""
+    clock = 0.0
+    polls = iter(states)
+    latest = states[-1]
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        nonlocal latest
+        latest = next(polls, latest)
+        return latest, 2
+
+    workflow_args = tuple(arg for workflow in workflows for arg in ("--workflow", workflow))
+    ci_args = ("--branch", "feature", *workflow_args) if workflows else ()
+    sha_args = ("--sha", sha) if sha is not None else ()
+    with (
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=sleep),
+    ):
+        return _run_managed(
+            module,
+            path,
+            fetch,
+            delivery=delivery,
+            extra_args=(
+                *ci_args, *sha_args, "--interval", "1", "--timeout", "100",
+                "--settle", str(settle), *extra_args,
+            ),
+        )
+
+
+@pytest.mark.parametrize("intermediate", ["missing", "nonterminal", "older-attempt", "partial"])
+def test_combined_ci_does_not_reannounce_observed_results_after_snapshot_regression(tmp_path, intermediate):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    first = _ci_run(attempt=2, conclusion="failure")
+    second = _ci_run(8)
+    _seed_ci_state(module, path, first, second)
+    regressed = {
+        "missing": _ci_state(),
+        "nonterminal": _ci_state(_ci_run(attempt=2, status="in_progress", conclusion=None), second),
+        "older-attempt": _ci_state(_ci_run(attempt=1, conclusion="failure"), second),
+        "partial": _ci_state(first),
+    }[intermediate]
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(first, second), regressed, _ci_state(first, second)]
+    )
+
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_remembers_a_result_across_pr_only_delivery_and_restart(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    run = _ci_run()
+    _seed_ci_state(module, path, run)
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(comment=True)])
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "GitHub Actions" not in output
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run, comment=True)], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("new_result", ["rerun", "new-run", "new-head", "conclusion"])
+def test_combined_ci_still_reports_new_terminal_results_and_acknowledges_once(tmp_path, new_result):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    new = {
+        "rerun": _ci_run(attempt=2),
+        "new-run": _ci_run(8),
+        "new-head": _ci_run(9, head="head-2"),
+        "conclusion": _ci_run(conclusion="failure"),
+    }[new_result]
+    state = _ci_state(old, new) if new_result == "new-run" else _ci_state(new, head=new["head_sha"])
+
+    rc, first_output, payload = _ci_cycle(module, path, [state])
+    assert rc == 0
+    assert "GitHub Actions" in first_output
+    assert payload[module.STAGED_KEY]["output"] == first_output.strip()
+    assert payload["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+    # Losing the acknowledgement must replay even when the API is unavailable.
+    def unavailable(*args, **kwargs):
+        raise AssertionError("replay must not reach GitHub")
+
+    rc, replay, _ = _run_managed(
+        module, path, unavailable, delivery="1", extra_args=("--branch", "feature", "--workflow", "CI")
+    )
+    assert rc == 0
+    assert replay == first_output
+
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_settle_drops_a_candidate_that_returns_to_the_reported_baseline(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(old), _ci_state(_ci_run(attempt=2)), _ci_state(old)], settle=1
+    )
+
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_waits_for_all_workflows_without_reannouncing_a_restored_one(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    ci = _ci_run()
+    security = _ci_run(8, workflow="Security Scan")
+    workflows = ("CI", "Security Scan")
+    _seed_ci_state(module, path, ci, security, workflows=workflows)
+
+    rc, output, _ = _ci_cycle(
+        module, path, [_ci_state(ci), _ci_state(ci, security)], workflows=workflows
+    )
+    assert rc == 124
+    assert output == ""
+
+    pending = _ci_run(attempt=2, status="in_progress", conclusion=None)
+    completed = _ci_run(attempt=2)
+    rc, output, _ = _ci_cycle(
+        module, path,
+        [_ci_state(pending, security), _ci_state(completed), _ci_state(completed, security)],
+        workflows=workflows,
+    )
+    assert rc == 0
+    assert "CI: status=completed" in output
+    assert "Security Scan: status=completed" in output
+
+
+@pytest.mark.parametrize("with_comment", [False, True])
+def test_combined_ci_settle_does_not_commit_a_terminal_subset_of_its_candidate(tmp_path, with_comment):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    failed = _ci_run(8, conclusion="failure")
+    succeeded = _ci_run(9)
+    _seed_ci_state(module, path, old)
+    candidate = _ci_state(old, failed, succeeded, comment=with_comment)
+    partial = _ci_state(old, succeeded, comment=with_comment)
+
+    rc, output, payload = _ci_cycle(
+        module, path, [_ci_state(old), candidate, partial], settle=1
+    )
+    assert rc == (0 if with_comment else 124)
+    assert "GitHub Actions" not in output
+    fields = payload[module.STAGED_KEY]["cursors"] if with_comment else payload
+    assert fields["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+    # Remember the missing failed run across a restart, including a PR-only ack.
+    rc, output, _ = _ci_cycle(module, path, [partial], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+    # The candidate was withdrawn, so the full result must still be delivered.
+    rc, output, payload = _ci_cycle(module, path, [candidate], delivery="2")
+    assert rc == 0
+    assert "GitHub Actions failure" in output
+    assert "actions/runs/8" in output
+    assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs(
+        {"CI": [old, failed, succeeded]}
+    )
+
+
+def test_combined_ci_run_order_and_timestamp_changes_are_not_events(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    first = _ci_run()
+    second = _ci_run(8)
+    _seed_ci_state(module, path, first, second)
+    first["run_started_at"] = "2026-01-02T00:00:00Z"
+    second["run_started_at"] = "2026-01-01T00:00:00Z"
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(second, first)])
+    assert rc == 124
+    assert output == ""
+
+
+def test_combined_ci_new_head_does_not_inherit_old_known_runs_or_lose_completion(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"))
+    pending = _ci_run(9, head="head-2", status="in_progress", conclusion=None)
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(pending, head="head-2")])
+    assert rc == 0
+    assert "pr_head" in output
+    assert "GitHub Actions" not in output
+
+    completed = _ci_run(9, head="head-2")
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(completed, head="head-2")], delivery="2")
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert "actions/runs/7" not in output
+
+
+def test_combined_ci_settle_fetch_failure_retains_the_report_and_its_snapshot(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old, new = _ci_run(), _ci_run(attempt=2)
+    _seed_ci_state(module, path, old)
+    error = urllib.error.HTTPError("https://api.github.com/example", 503, "Unavailable", hdrs=None, fp=None)
+    polls = iter([(_ci_state(new), 2), error])
+
+    def fetch(*args, **kwargs):
+        value = next(polls)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    with patch.object(module.time, "sleep", return_value=None):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=("--branch", "feature", "--workflow", "CI", "--settle", "1", "--timeout", "0"),
+        )
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert payload["actions"] == module.normalize_selected_runs({"CI": [old]})
+    assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [new]})
+
+
+def test_combined_ci_pinned_sha_case_does_not_start_a_new_epoch(tmp_path):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    run = _ci_run(head="abc123")
+    _seed_ci_state(module, path, run, head="abc123")
+
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run, head="abc123")], sha="ABC123")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("with_comment", [False, True])
+def test_explicit_pr_replay_does_not_replay_unrelated_completed_ci(with_comment):
+    module = _load_module()
+    state = _ci_state(_ci_run(), comment=with_comment)
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
+             "--since-review-comment-id", "0", "--timeout", "1"],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        rc = module.main()
+    assert rc == (0 if with_comment else 124)
+    assert "GitHub Actions" not in stdout.getvalue()
+    assert ("review_comment #501" in stdout.getvalue()) == with_comment
+
+
+@pytest.mark.parametrize("mode", ["catch-up", "pr-replay", "catch-up-pr-replay", "monitor"])
+@pytest.mark.parametrize("inventory_present", [False, True])
+@pytest.mark.parametrize("stale_kind", ["missing-run", "higher-attempt"])
+@pytest.mark.parametrize("initial_terminal", [False, True])
+def test_explicit_replay_resets_ci_inventory_but_ordinary_resume_retains_it(
+    tmp_path, mode, inventory_present, stale_kind, initial_terminal,
+):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    old = _ci_run()
+    stale = (
+        [old, _ci_run(8, conclusion="failure")]
+        if stale_kind == "missing-run" else [_ci_run(attempt=9, conclusion="failure")]
+    )
+    _seed_ci_state(module, path, *([old] if inventory_present else stale))
+    if inventory_present:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        saved[module.ACTIONS_OBSERVED_KEY] = module.normalize_selected_runs({"CI": stale})
+        path.write_text(json.dumps(saved), encoding="utf-8")
+
+    current = old if initial_terminal else _ci_run(status="in_progress", conclusion=None)
+    state = _ci_state(current, comment=True)
+    flags = {
+        "catch-up": ("--catch-up",),
+        "pr-replay": ("--since-review-comment-id", "0"),
+        "catch-up-pr-replay": ("--catch-up", "--since-review-comment-id", "0"),
+        "monitor": (),
+    }[mode]
+    rc, first_output, payload = _ci_cycle(module, path, [state], extra_args=flags)
+    assert rc == 0
+    assert "review_comment #501" in first_output
+    assert ("GitHub Actions success" in first_output) == ("--catch-up" in flags and initial_terminal)
+    expected_inventory = module._observe_actions(
+        module.normalize_selected_runs({"CI": stale}) if mode == "monitor" else {},
+        module.normalize_selected_runs({"CI": [current]}),
+        "head-1",
+    )
+    assert payload[module.STAGED_KEY]["cursors"][module.ACTIONS_OBSERVED_KEY] == expected_inventory
+
+    # Explicit reset flags must not supersede an undelivered transaction.
+    def unavailable(*args, **kwargs):
+        raise AssertionError("pending replay must not reach GitHub")
+
+    rc, replay, _ = _run_managed(
+        module, path, unavailable, delivery="1",
+        extra_args=("--branch", "feature", "--workflow", "CI", *flags),
+    )
+    assert rc == 0
+    assert replay == first_output
+
+    # A normal restart adopts the reset inventory and remains quiet on the
+    # initial state. A genuinely new CI result then reports exactly once.
+    rc, output, _ = _ci_cycle(module, path, [state], delivery="2")
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(old, _ci_run(9), comment=True)
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == (124 if mode == "monitor" else 0)
+    assert ("GitHub Actions success" in output) == (mode != "monitor")
+    assert "review_comment #501" not in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="3")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--since-review-id", "0"),
+        ("--since-review-comment-id", "0"),
+        ("--since-issue-comment-id", "0"),
+        ("--since-reaction-id", "0"),
+        ("--since-pr-status", "open"),
+        ("--catch-up",),
+    ],
+)
+def test_explicit_replay_with_empty_ci_baselines_quietly_then_tracks_new_observations(tmp_path, flags):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"))
+    rc, output, payload = _ci_cycle(module, path, [_ci_state()], extra_args=flags)
+    assert rc == 124
+    assert output == ""
+    assert payload["actions"] == {"CI": []}
+    assert payload[module.ACTIONS_OBSERVED_KEY] == {"CI": []}
+
+    succeeded, pending = _ci_run(9), _ci_run(10, status="in_progress", conclusion=None)
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(succeeded, pending), _ci_state(succeeded)])
+    assert rc == 124
+    assert output == ""
+    # Reset is an initialization boundary, not permission to forget runs
+    # observed afterwards, including across a normal restart.
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(succeeded)])
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(succeeded, _ci_run(10))
+    rc, output, _ = _ci_cycle(module, path, [complete])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("inventory_present", [False, True])
+@pytest.mark.parametrize("stale_kind", ["missing-run", "higher-attempt"])
+def test_partial_manual_initialization_resets_observation_with_its_ci_baseline(
+    tmp_path, inventory_present, stale_kind,
+):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    current = _ci_run()
+    stale = _ci_run(8, conclusion="failure") if stale_kind == "missing-run" else _ci_run(attempt=9)
+    _seed_ci_state(module, path, stale, owner=None)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    del saved["review_cursor"]
+    if inventory_present:
+        saved[module.ACTIONS_OBSERVED_KEY] = saved["actions"]
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    state = _ci_state(current, comment=True)
+    stdout = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature",
+             "--workflow", "CI", "--state-file", str(path), "--timeout", "1"],
+        ),
+        redirect_stdout(stdout),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        assert module.main() == 124
+    assert stdout.getvalue() == ""
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = module.normalize_selected_runs({"CI": [current]})
+    assert saved["actions"] == expected
+    assert saved[module.ACTIONS_OBSERVED_KEY] == expected
+    rc, output, _ = _ci_cycle(module, path, [state])
+    assert rc == 124
+    assert output == ""
+    complete = _ci_state(_ci_run(attempt=2), comment=True)
+    rc, output, _ = _ci_cycle(module, path, [complete])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+    assert "review_comment #501" not in output
+    rc, output, _ = _ci_cycle(module, path, [complete], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("head", ["head-1", "head-2"])
+def test_explicit_seed_replaces_an_ownerless_actions_baseline_with_current_state(tmp_path, head):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    _seed_ci_state(module, path, _ci_run(conclusion="failure"), owner=None)
+    current = _ci_run(8, head=head)
+    state = _ci_state(current, head=head)
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
+        patch.object(module, "_fetch_state", return_value=(state, 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature",
+             "--workflow", "CI", "--state-file", str(path), "--seed-state"],
+        ),
+        patch("sys.stdout", io.StringIO()),
+        patch("sys.stderr", io.StringIO()),
+    ):
+        assert module.main() == 0
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    expected = module.normalize_selected_runs({"CI": [current]})
+    assert saved["actions"] == expected
+    assert saved[module.ACTIONS_OBSERVED_KEY] == expected
+    rc, output, _ = _ci_cycle(module, path, [state])
+    assert rc == 124
+    assert output == ""
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(current, _ci_run(9, head=head), head=head)])
+    assert rc == 0
+    assert "GitHub Actions success" in output
+
+
+@pytest.mark.parametrize("with_ci", [False, True])
+def test_settle_preserves_detected_pr_activity_when_later_polls_omit_it(tmp_path, with_ci):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    first = _ci_state(_ci_run(attempt=2), comment=True)
+    quiet = _ci_state(old)
+    calls = 0
+    clock = 0.0
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (first if calls == 1 else quiet), 2
+
+    ci_args = ("--branch", "feature", "--workflow", "CI") if with_ci else ()
+    with (
+        patch.object(module.time, "sleep", side_effect=sleep),
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+    ):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=(*ci_args, "--settle", "1", "--timeout", "100"),
+        )
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "GitHub Actions" not in output
+    assert payload[module.STAGED_KEY]["output"] == output.strip()
+    if with_ci:
+        assert payload[module.STAGED_KEY]["cursors"]["actions"] == module.normalize_selected_runs({"CI": [old]})
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+@pytest.mark.parametrize("ci_mode", ["off", "stable", "complete", "withdraw"])
+def test_settled_pr_report_keeps_its_snapshot_through_ack_and_restart(tmp_path, during_loop, ci_mode):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    first_run = {
+        "off": old,
+        "stable": old,
+        "complete": _ci_run(attempt=2, status="in_progress", conclusion=None),
+        "withdraw": _ci_run(attempt=2),
+    }[ci_mode]
+    final_run = _ci_run(attempt=2) if ci_mode == "complete" else old
+    first = _ci_state(first_run, comment=True)
+    quiet = _ci_state(final_run)
+    workflows = () if ci_mode == "off" else ("CI",)
+    states = [_ci_state(old), first, quiet] if during_loop else [first, quiet]
+
+    rc, output, payload = _ci_cycle(module, path, states, workflows=workflows, settle=1)
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert ("GitHub Actions" in output) == (ci_mode == "complete")
+    staged = payload[module.STAGED_KEY]["cursors"]
+    assert staged["snapshot"]["review_comments"] == module._normalized_pr_snapshot(first)["review_comments"]
+    assert staged["review_comment_fingerprints"] == module._fingerprint_map(first["review_comments"])
+
+    def unavailable(*args, **kwargs):
+        raise AssertionError("unacknowledged output must replay without polling")
+
+    ci_args = ("--branch", "feature", "--workflow", "CI") if workflows else ()
+    rc, replay, _ = _run_managed(module, path, unavailable, delivery="1", extra_args=ci_args)
+    assert rc == 0
+    assert replay == output
+
+    restored = _ci_state(final_run, comment=True)
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+    if ci_mode == "withdraw":
+        restored["actions"] = [_ci_run(attempt=2)]
+        rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+        assert rc == 0
+        assert "GitHub Actions success" in output
+        assert "GitHub PR activity" not in output
+        rc, output, _ = _ci_cycle(module, path, [restored], delivery="ci-ack", workflows=workflows)
+        assert rc == 124
+        assert output == ""
+
+    restored["review_comments"][0]["body"] = "A genuine edit after acknowledgement"
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="2", workflows=workflows)
+    assert rc == 0
+    assert "review_comment #501" in output
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+    restored["review_comments"] = []
+    restored["review_threads"] = [{"id": "thread-1", "isResolved": False}]
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="3", workflows=workflows)
+    assert rc == 0
+    assert "review_thread thread-1" in output
+    assert "501" not in json.loads(path.read_text())[module.STAGED_KEY]["cursors"]["snapshot"]["review_comments"]
+    rc, output, _ = _ci_cycle(module, path, [restored], delivery="4", workflows=workflows)
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+def test_settled_pr_fallback_does_not_attribute_current_ci_to_a_transient_head(tmp_path, during_loop):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    old = _ci_run()
+    _seed_ci_state(module, path, old)
+    transient = _ci_state(_ci_run(9, head="head-2"), head="head-2", comment=True)
+    quiet = _ci_state(old)
+    states = [_ci_state(old), transient, quiet] if during_loop else [transient, quiet]
+    rc, output, payload = _ci_cycle(module, path, states, settle=1)
+    assert rc == 0
+    assert "head-2" in output
+    assert "GitHub Actions" not in output
+    staged = payload[module.STAGED_KEY]["cursors"]
+    assert payload["head_sha"] == "head-1"
+    assert staged["head_sha"] == staged["snapshot"]["pull_request"]["head_sha"] == "head-2"
+    assert staged["actions"] == {"CI": []}
+    assert staged["actions_observed"]["CI"][0]["head_sha"] == "head-1"
+    rc, output, _ = _ci_cycle(module, path, [quiet], delivery="2")
+    assert rc == 0
+    assert "head-2 -> head-1" in output
+    assert "GitHub Actions success" in output
+    rc, output, _ = _ci_cycle(module, path, [quiet], delivery="3")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("during_loop", [False, True])
+def test_settled_pr_snapshot_survives_a_failed_repoll_and_ack(tmp_path, during_loop):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    run = _ci_run()
+    _seed_ci_state(module, path, run)
+    first = _ci_state(run, comment=True)
+    failure = urllib.error.URLError("synthetic settle failure")
+    states = [_ci_state(run), first, failure] if during_loop else [first, failure]
+    clock = 0.0
+
+    def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def fetch(*args, **kwargs):
+        item = states.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item, 2
+
+    with (
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=sleep),
+    ):
+        rc, output, payload = _run_managed(
+            module, path, fetch, delivery="1",
+            extra_args=("--workflow", "CI", "--branch", "feature", "--settle", "1", "--timeout", "100"),
+        )
+    assert rc == 0
+    assert "review_comment #501" in output
+    assert "501" in payload[module.STAGED_KEY]["cursors"]["snapshot"]["review_comments"]
+    rc, output, _ = _ci_cycle(module, path, [first], delivery="2")
+    assert rc == 124
+    assert output == ""
+
+
+@pytest.mark.parametrize("location", ["committed", "pending"])
+@pytest.mark.parametrize("key", ["actions", "actions_observed"])
+@pytest.mark.parametrize("bad_value", [
+    {"CI": [None]}, {"CI": ["invalid"]}, {"CI": [{"id": []}]},
+    {"CI": "not-a-list"}, None, [], {"CI": [{"id": 7, "run_attempt": []}]},
+])
+def test_malformed_saved_actions_fail_closed_without_overwriting_history(tmp_path, key, bad_value, location):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    _seed_ci_state(module, path, _ci_run())
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    if location == "pending":
+        saved[module.STAGED_KEY] = {
+            "delivered_after": "0",
+            "output": "an earlier report",
+            "cursors": {key: bad_value},
+        }
+    else:
+        saved[key] = bad_value
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    original = path.read_bytes()
+    stderr = io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "wat_9", module.LAST_DELIVERY_ENV: "1"}),
+        patch.object(module, "_fetch_state", return_value=(_ci_state(_ci_run()), 2)),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch("sys.argv", [
+            "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
+            "--branch", "feature", "--state-file", str(path), "--timeout", "0.001",
+        ]),
+        patch("sys.stderr", stderr),
+    ):
+        assert module.run_cli() == 1
+    assert key in stderr.getvalue()
+    assert "malformed" in stderr.getvalue()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("mode", ["resume", "catch-up", "pr-replay", "seed", "fresh-manual", "pr-only"])
+@pytest.mark.parametrize("key", ["actions", "actions_observed"])
+@pytest.mark.parametrize("location", ["committed", "pending-delivered", "pending-undelivered"])
+def test_corrupt_actions_cannot_be_bypassed_by_initialization_or_pending_replay(tmp_path, mode, key, location):
+    """Resetting valid history never authorizes overwriting unreadable evidence."""
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    _seed_ci_state(module, path, _ci_run(), owner=None)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    if mode in {"seed", "fresh-manual"}:
+        saved.pop("review_cursor")
+    malformed = {"CI": [None]}
+    if location == "committed":
+        saved[key] = malformed
+    else:
+        saved[module.STAGED_KEY] = {
+            "delivered_after": "1" if location == "pending-undelivered" else "0",
+            "output": "an earlier combined report",
+            "cursors": {key: malformed},
+        }
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    original = path.read_bytes()
+    flags = [] if mode == "pr-only" else ["--workflow", "CI", "--branch", "feature"]
+    flags += {
+        "resume": [],
+        "catch-up": ["--catch-up"],
+        "pr-replay": ["--since-review-comment-id", "0"],
+        "seed": ["--seed-state"],
+        "fresh-manual": [],
+        "pr-only": [],
+    }[mode]
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with (
+        patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: "1"}),
+        patch.object(module, "get_token", side_effect=AssertionError("must reject before authentication")),
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch("sys.argv", [
+            "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153",
+            "--state-file", str(path), *flags,
+        ]),
+        redirect_stdout(stdout),
+        patch("sys.stderr", stderr),
+    ):
+        assert module.run_cli() == 1
+    assert "malformed" in stderr.getvalue()
+    assert key in stderr.getvalue()
+    assert stdout.getvalue() == ""
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("attempt", ["missing", None])
+def test_valid_legacy_actions_and_partial_pending_remain_compatible(tmp_path, attempt):
+    module = _load_module()
+    path = tmp_path / "pr.json"
+    run = _ci_run(attempt=attempt)
+    if attempt == "missing":
+        run.pop("run_attempt")
+    _seed_ci_state(module, path, run)
+    saved = json.loads(path.read_text())
+    if attempt == "missing":
+        saved["actions"]["CI"][0].pop("run_attempt")
+    saved[module.STAGED_KEY] = {
+        "delivered_after": "0",
+        "output": "legacy partial transaction",
+        "cursors": {"review_comment_cursor": 500},
+    }
+    path.write_text(json.dumps(saved))
+    rc, output, _ = _ci_cycle(module, path, [_ci_state(run)], delivery="1")
+    assert rc == 124
+    assert output == ""
 
 
 def test_a_managed_run_reports_the_event_again_when_it_was_never_delivered(tmp_path) -> None:

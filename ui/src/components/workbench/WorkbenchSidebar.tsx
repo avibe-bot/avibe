@@ -1,6 +1,7 @@
+import type { TranslationKey } from '@/i18n/types';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   Archive,
@@ -26,16 +27,25 @@ import {
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
+import { useLatestRef } from '../../lib/useLatestRef';
+
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWorkbenchProjectsActions, useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { SessionPinAction } from './SessionPinAction';
-import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from './sessionRowLayout';
+import {
+  SESSION_ROW_INDENT_CLASS,
+  SESSION_ROW_MENU_POSITION_CLASS,
+  SESSION_STATUS_DOT_MOTION_CLASS,
+} from './sessionRowLayout';
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -43,10 +53,12 @@ import { Markdown } from '../ui/markdown';
 import { NewProjectDialog } from './NewProjectDialog';
 import { ProjectAgentsMdDialog } from './ProjectAgentsMdDialog';
 import { ProjectSettingsDialog } from './ProjectSettingsDialog';
+import { SortableProjectList, type ProjectDragHandle } from './SortableProjectList';
+import logoImg from '../../assets/logo.png';
 
 interface CapabilityNavItem {
   to: string;
-  i18nKey: string;
+  i18nKey: TranslationKey;
   icon: LucideIcon;
 }
 
@@ -59,6 +71,42 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
 
 const CAPS_COLLAPSED_KEY = 'vibe-remote:caps-collapsed';
 
+// One capability row, in the published v3.1.0 treatment: a 13px medium label
+// behind a 16px icon on a rounded-lg row, with mint reserved for the selected
+// state. The mint wash, hairline, and glow all resolve from theme tokens, so
+// Light and Dark each get their own value.
+const SidebarNavRow: React.FC<{
+  to: string;
+  end?: boolean;
+  icon: LucideIcon;
+  label: string;
+}> = ({ to, end, icon: Icon, label }) => (
+  <NavLink
+    to={to}
+    end={end}
+    className={({ isActive }) =>
+      clsx(
+        'group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
+        isActive
+          ? 'border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
+          : 'border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+      )
+    }
+  >
+    {({ isActive }) => (
+      <>
+        <Icon
+          className={clsx(
+            'size-4 shrink-0',
+            isActive ? 'text-mint-ink' : 'text-muted group-hover:text-foreground',
+          )}
+        />
+        <span className="truncate">{label}</span>
+      </>
+    )}
+  </NavLink>
+);
+
 // 360px floating popover that opens when the user hovers the Inbox entry.
 // Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
 // inbox" link. Pure presentational; data comes from <WorkbenchInboxProvider>.
@@ -67,6 +115,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession: Record<string, number>;
   unreadSessions: number;
   totalUnread: number;
+  canMarkRead: boolean;
   onItemClick: (session: InboxSession) => void;
   onMarkAllRead: () => void;
   onMouseEnter: () => void;
@@ -76,6 +125,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession,
   unreadSessions,
   totalUnread,
+  canMarkRead,
   onItemClick,
   onMarkAllRead,
   onMouseEnter,
@@ -109,7 +159,7 @@ const InboxHoverPopover: React.FC<{
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
           </div>
         </div>
-        <button
+        {canMarkRead && <button
           type="button"
           onClick={onMarkAllRead}
           disabled={totalUnread === 0}
@@ -121,7 +171,7 @@ const InboxHoverPopover: React.FC<{
           )}
         >
           {t('workbench.inbox.markAllRead')}
-        </button>
+        </button>}
       </div>
 
       {shown.length === 0 ? (
@@ -146,13 +196,13 @@ const InboxHoverPopover: React.FC<{
                 )}
               >
                 <div className="flex items-center gap-1.5 text-[10px]">
-                  <span className="truncate font-semibold text-cyan">{projectLabel}</span>
+                  <span className="truncate font-semibold text-cyan-ink">{projectLabel}</span>
                   <span className="text-muted">·</span>
                   <span className="flex-1 truncate font-semibold text-foreground">
                     {s.title?.trim() || s.session_id}
                   </span>
                   {s.replied && (
-                    <span className="shrink-0 font-semibold text-cyan" title={t('workbench.inbox.replied')}>
+                    <span className="shrink-0 font-semibold text-cyan-ink" title={t('workbench.inbox.replied')}>
                       ↩
                     </span>
                   )}
@@ -179,7 +229,7 @@ const InboxHoverPopover: React.FC<{
       <button
         type="button"
         onClick={() => navigate('/inbox')}
-        className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan hover:underline"
+        className="flex items-center justify-center gap-1.5 rounded-md pt-1 text-[11px] font-medium text-cyan-ink hover:underline"
       >
         {t('workbench.inbox.viewAll')}
         <ArrowRight className="size-3" />
@@ -191,9 +241,11 @@ const InboxHoverPopover: React.FC<{
 // Session status dot colours. Maps the agent-runtime status to the user's
 // gray / green / red: idle → muted (gray), running → mint (green) + glow,
 // failed → destructive (red) + glow. Tokens resolve from src/index.css.
+// Running also pulses — keyed on nothing but the status, so selection, unread
+// count, hover and focus cannot start or stop the motion.
 const STATUS_DOT_CLASS: Record<string, string> = {
-  running: 'bg-mint shadow-[0_0_6px_0_rgba(91,255,160,0.65)]',
-  failed: 'bg-destructive shadow-[0_0_6px_0_rgba(255,107,107,0.6)]',
+  running: `bg-mint shadow-glow-dot-mint ${SESSION_STATUS_DOT_MOTION_CLASS}`,
+  failed: 'bg-destructive shadow-glow-dot-destructive',
   idle: 'bg-muted',
 };
 
@@ -202,19 +254,24 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 // see sessionActions.tsx, which owns the items and the writes for every surface.
 // Rename is inline here: the commit calls the provider, whose session.activity
 // 'updated' event patches the title in this list, so no manual local patch.
-const SessionRow: React.FC<{
+// Exported for the row-level test: the rail's controls only exist when the row's
+// Popover can actually open, and that pairing is what a test has to hold onto.
+export const SessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
-}> = ({ projectId, session, unread }) => {
+  canChat: boolean;
+  canManageMetadata: boolean;
+}> = ({ projectId, session, unread, canChat, canManageMetadata }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { renameSession } = useWorkbenchProjectsTree();
+  const { renameSession } = useWorkbenchProjectsActions();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
+  const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
   const inputRef = useRef<HTMLInputElement | null>(null);
   // Guards a double commit: Enter (or click-away) commits, then the input
   // unmounts and its onBlur would fire commitRename again; Escape cancels and
@@ -223,6 +280,8 @@ const SessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
@@ -245,6 +304,8 @@ const SessionRow: React.FC<{
   }, [renaming]);
 
   const commitRename = async () => {
+    // Inerting the retained sidebar blurs its input; suspension is not a save.
+    if (!surfaceActiveRef.current) return;
     if (handledRef.current) return;
     handledRef.current = true;
     const trimmed = draft.trim();
@@ -265,7 +326,12 @@ const SessionRow: React.FC<{
 
   if (renaming) {
     return (
-      <div className="flex items-center gap-2 py-1.5 pl-[26px] pr-2.5">
+      <div
+        className={clsx(
+          'flex items-center gap-2 border-transparent py-1.5 pr-2.5',
+          SESSION_ROW_INDENT_CLASS,
+        )}
+      >
         <span
           className={clsx(
             'size-[5px] shrink-0 rounded-full',
@@ -291,19 +357,23 @@ const SessionRow: React.FC<{
   const displayName = session.title?.trim() || t('workbench.untitledSession');
   return (
     <>
-    <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+    <Popover open={canManageMetadata && menuOpen} onOpenChange={(open) => canManageMetadata && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
           onContextMenu={(e) => {
+            if (!canManageMetadata) return;
             e.preventDefault();
             setMenuOpen(true);
           }}
           className={clsx(
-            'group/sess relative flex items-center gap-2 rounded-md py-1.5 pl-[26px] text-left transition-[background-color,padding-right] duration-150 ease-out motion-reduce:transition-none',
-            sessionRowActionPaddingClass(menuOpen, session.pinned),
+            'group/sess relative flex items-center gap-2 rounded-md py-1.5 text-left transition-colors duration-150 ease-out motion-reduce:transition-none',
+            SESSION_ROW_INDENT_CLASS,
+            canManageMetadata ? 'pr-11' : 'pr-2.5',
+            // Only the accent's colour turns on with selection; its width is
+            // already reserved above, so the row's contents do not move.
             active
-              ? 'border-l-2 border-mint bg-mint-soft pl-[24px] font-semibold text-foreground'
-              : 'hover:bg-foreground/[0.04]',
+              ? 'border-mint bg-mint-soft font-semibold text-foreground'
+              : 'border-transparent hover:bg-foreground/[0.04]',
           )}
         >
           <button
@@ -327,25 +397,29 @@ const SessionRow: React.FC<{
               {displayName}
             </span>
             {unread > 0 && (
-              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
+              <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
                 {unread > 99 ? '99+' : unread}
               </span>
             )}
           </button>
-          {pinAction && (
-            <SessionPinAction
-              pinned={session.pinned}
-              pending={Boolean(pinAction.pending)}
-              pinLabel={t('workbench.sessionPin')}
-              unpinLabel={t('workbench.sessionUnpin')}
-              onToggle={pinAction.onSelect}
-            />
+          {canManageMetadata && (
+            <>
+              {pinAction && (
+                <SessionPinAction
+                  pinned={session.pinned}
+                  pending={Boolean(pinAction.pending)}
+                  pinLabel={t('workbench.sessionPin')}
+                  unpinLabel={t('workbench.sessionUnpin')}
+                  onToggle={pinAction.onSelect}
+                />
+              )}
+              <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
+                <PopoverTrigger asChild>
+                  <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
+                </PopoverTrigger>
+              </span>
+            </>
           )}
-          <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
-            <PopoverTrigger asChild>
-              <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
-            </PopoverTrigger>
-          </span>
         </div>
       </PopoverAnchor>
       <SessionActionMenuContent
@@ -373,8 +447,18 @@ const ProjectRow: React.FC<{
   onToggle: () => void;
   onCreateSession: () => void;
   creatingSession: boolean;
+  canChat: boolean;
+  canManageMetadata: boolean;
+  canManageProjects: boolean;
+  /** Whether the current runtime policy admits Project archiving. */
+  canArchive: boolean;
+  /** Whether the current runtime policy admits opening the Project in Editor. */
+  canOpenInEditor: boolean;
+  /** Whether the current runtime policy admits saving a Project's AGENTS.md. */
+  canEditAgentsMd: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
+  dragHandle?: ProjectDragHandle;
   onArchive: () => Promise<void>;
 }> = ({
   project,
@@ -387,8 +471,15 @@ const ProjectRow: React.FC<{
   onToggle,
   onCreateSession,
   creatingSession,
+  canChat,
+  canManageMetadata,
+  canManageProjects,
+  canArchive,
+  canOpenInEditor,
+  canEditAgentsMd,
   unreadBySession,
   onRename,
+  dragHandle,
   onArchive,
 }) => {
   const { t } = useTranslation();
@@ -396,6 +487,7 @@ const ProjectRow: React.FC<{
   const Chevron = expanded ? ChevronDown : ChevronRight;
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState(project.display_name);
+  const surfaceActiveRef = useLatestRef(useRouteSurfaceActive());
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
@@ -406,6 +498,8 @@ const ProjectRow: React.FC<{
   }, [renaming]);
 
   const commitRename = async () => {
+    // Inerting the retained sidebar blurs its input; suspension is not a save.
+    if (!surfaceActiveRef.current) return;
     const trimmed = renameDraft.trim();
     if (!trimmed || trimmed === project.display_name) {
       setRenaming(false);
@@ -423,7 +517,7 @@ const ProjectRow: React.FC<{
         title={project.folder_path}
         onContextMenu={(e) => {
           // Right-click opens the same menu as the ⋯ button (anchored to it).
-          if (renaming) return;
+          if (renaming || !canManageProjects) return;
           e.preventDefault();
           setMenuOpen(true);
         }}
@@ -453,15 +547,16 @@ const ProjectRow: React.FC<{
           </div>
         ) : (
           <button
+            {...dragHandle}
             type="button"
             onClick={onToggle}
-            className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+            className="project-drag-header flex min-w-0 flex-1 items-center gap-1.5 text-left"
           >
-            <Chevron className="size-3 shrink-0 text-muted" />
+            <Chevron className="project-drag-icon size-3 shrink-0 text-muted" />
             {expanded ? (
-              <FolderOpen className="size-3.5 shrink-0 text-muted" />
+              <FolderOpen className="project-drag-icon size-3.5 shrink-0 text-muted" />
             ) : (
-              <Folder className="size-3.5 shrink-0 text-muted" />
+              <Folder className="project-drag-icon size-3.5 shrink-0 text-muted" />
             )}
             <span className="flex-1 truncate text-[12px] font-medium text-foreground">
               {project.display_name}
@@ -470,7 +565,7 @@ const ProjectRow: React.FC<{
         )}
         {!renaming && (
           <>
-            <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+            {canManageProjects && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
               <PopoverTrigger asChild>
                 <button
                   type="button"
@@ -508,7 +603,7 @@ const ProjectRow: React.FC<{
                   <Settings2 className="size-3 text-muted" />
                   {t('workbench.projectSettings')}
                 </button>
-                {project.folder_path && (
+                {project.folder_path && canEditAgentsMd && (
                   <button
                     type="button"
                     onClick={() => {
@@ -521,7 +616,7 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectEditAgents')}
                   </button>
                 )}
-                {project.folder_path && (
+                {project.folder_path && canOpenInEditor && (
                   <button
                     type="button"
                     onClick={() => {
@@ -536,23 +631,25 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectOpenInEditor')}
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setMenuOpen(false);
-                    const ok = window.confirm(
-                      t('workbench.projectArchiveConfirm', { name: project.display_name }),
-                    );
-                    if (ok) await onArchive();
-                  }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
-                >
-                  <Archive className="size-3" />
-                  {t('workbench.projectArchive')}
-                </button>
+                {canArchive && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setMenuOpen(false);
+                      const ok = window.confirm(
+                        t('workbench.projectArchiveConfirm', { name: project.display_name }),
+                      );
+                      if (ok) await onArchive();
+                    }}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink-ink transition hover:bg-pink/[0.08]"
+                  >
+                    <Archive className="size-3" />
+                    {t('workbench.projectArchive')}
+                  </button>
+                )}
               </PopoverContent>
-            </Popover>
-            <button
+            </Popover>}
+            {canChat && <button
               type="button"
               aria-label={t('workbench.addSession')}
               onClick={onCreateSession}
@@ -564,7 +661,7 @@ const ProjectRow: React.FC<{
               )}
             >
               {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-            </button>
+            </button>}
           </>
         )}
       </div>
@@ -584,6 +681,8 @@ const ProjectRow: React.FC<{
                 projectId={project.id}
                 session={session}
                 unread={unreadBySession[session.id] || 0}
+                canChat={canChat}
+                canManageMetadata={canManageMetadata}
               />
             ))}
           {hasMore && (
@@ -600,16 +699,20 @@ const ProjectRow: React.FC<{
         </div>
       )}
 
-      <ProjectSettingsDialog
-        project={project}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
-      <ProjectAgentsMdDialog
-        project={project}
-        open={agentsMdOpen}
-        onClose={() => setAgentsMdOpen(false)}
-      />
+      {canManageProjects && (
+        <>
+          <ProjectSettingsDialog
+            project={project}
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+          />
+          <ProjectAgentsMdDialog
+            project={project}
+            open={agentsMdOpen}
+            onClose={() => setAgentsMdOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 };
@@ -617,8 +720,25 @@ const ProjectRow: React.FC<{
 export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOpenSearch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const surfaceActive = useRouteSurfaceActive();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
-  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
+  const {
+    capabilities,
+  } = useInstanceAuthorization();
+  const canUseApps = capabilities.can_chat;
+  const canManageProjects = capabilities.can_manage_projects;
+  const canChat = capabilities.can_chat;
+  const canCreateProject = canCreateLocalProject(capabilities);
+  const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
+    if (to === '/harness') return capabilities.can_chat;
+    if (to === '/agents') return capabilities.can_use_agents;
+    if (to === '/skills') return capabilities.can_use_skills;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets;
+    return false;
+  });
+  const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox({
+    feed: surfaceActive,
+  });
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
   // sidebar owns only its inbox popover + the New Project dialog trigger.
@@ -633,8 +753,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
     createSessionForProject,
     renameProject,
     archiveProject,
-    upsertProjectToTop,
-  } = useWorkbenchProjectsTree();
+    reorderProjects,
+    isReorderingProjects,
+  } = useWorkbenchProjectsTree({ active: surfaceActive });
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -703,42 +824,71 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   }, [totalUnread]);
 
   // Fill the sidebar column and cap its height so the project list (and only the
-  // project list) scrolls; Inbox + Capabilities stay pinned. The Inbox hover
-  // popover stays OUT of any overflow box below, so it is never clipped.
+  // project list) scrolls; the brand row, Inbox and Capabilities stay pinned. The
+  // Inbox hover popover stays OUT of any overflow box below, so it is never clipped.
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-      {/* Search moved to a compact icon in the Projects header (left of the add
-          button) to reclaim this full row for the Projects list. ⌘K still works. */}
-      {/* Inbox entry — hover opens the floating popover (portaled above the chat). */}
+      {/* Brand row — the whole brand opens the new-conversation home. The mark
+          keeps the published v3.1.0 chip treatment (32px, mint hairline over a
+          mint wash, resting glow that strengthens on hover) inside this sidebar's
+          own padding, so the adjustable width still governs the column. */}
+      <div className="flex shrink-0 items-center py-2">
+        <Link
+          to="/"
+          className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+        >
+          {/* Decorative: the link's accessible name is the localized brand text
+              beside it, so naming the image too would read the destination twice. */}
+          <img
+            src={logoImg}
+            alt=""
+            aria-hidden="true"
+            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
+          />
+          <div className="min-w-0 leading-tight">
+            <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
+            <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
+          </div>
+        </Link>
+      </div>
+
+      {/* Inbox entry — hover opens the floating popover (portaled above the chat).
+          Search is a compact icon in the Projects header below, so this row keeps
+          the full width the published design gives it. At zero unread there is no
+          badge node at all and the icon stays uncoloured; both reads come from the
+          same real counter. */}
       <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
         <PopoverAnchor asChild>
-          <div onMouseEnter={openPopover} onMouseLeave={queueClose}>
-        <NavLink
-          to="/inbox"
-          className={({ isActive }) =>
-            clsx(
-              'group flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-semibold transition-colors',
-              // Cyan active state per design.pen ze15A — mint is reserved
-              // for sessions / projects so the two reads stay distinct.
-              isActive
-                ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-[0_0_16px_-4px_rgba(63,224,229,0.5)]'
-                : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
-            )
-          }
-        >
-          {({ isActive }) => (
-            <>
-              <Inbox className={clsx('size-4', isActive ? 'text-cyan' : 'text-foreground')} />
-              <span className="flex-1">{t('workbench.nav.inbox')}</span>
-              {badge && (
-                <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-[#080812] shadow-[0_0_10px_-2px_rgba(63,224,229,0.7)]">
-                  {badge}
-                </span>
+          <div className="w-full" onMouseEnter={openPopover} onMouseLeave={queueClose}>
+            <NavLink
+              to="/inbox"
+              aria-label={t('workbench.nav.inbox')}
+              className={({ isActive }) =>
+                clsx(
+                  'group flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-semibold transition-colors',
+                  // Cyan active state per design.pen ze15A — mint is reserved
+                  // for sessions / projects so the two reads stay distinct.
+                  isActive
+                    ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
+                    : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
+                )
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  {/* Cyan is what unread means here, so the counter colours the
+                      icon on any route — not only while Inbox is the open one. */}
+                  <Inbox className={clsx('size-4', badge || isActive ? 'text-cyan-ink' : 'text-foreground')} />
+                  <span className="flex-1">{t('workbench.nav.inbox')}</span>
+                  {badge && (
+                    <span className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-cyan px-1.5 py-0.5 font-mono text-[9px] font-bold text-accent-foreground shadow-glow-xs-cyan">
+                      {badge}
+                    </span>
+                  )}
+                  <ChevronRight className="size-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+                </>
               )}
-              <ChevronRight className="size-3.5 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
-            </>
-          )}
-        </NavLink>
+            </NavLink>
           </div>
         </PopoverAnchor>
         <InboxHoverPopover
@@ -746,6 +896,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
           totalUnread={totalUnread}
+          canMarkRead={canChat}
           onItemClick={onItemClick}
           onMarkAllRead={onMarkAllRead}
           onMouseEnter={openPopover}
@@ -753,55 +904,37 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      <div className="flex flex-col gap-1.5">
+      {/* Capabilities — a collapsible group, so a long project list can reclaim
+          the rows. Only the destinations the current authorization admits are
+          rendered, and the header disappears with them. */}
+      {capabilityNav.length > 0 && <div className="flex shrink-0 flex-col gap-1.5">
         <button
           type="button"
           onClick={toggleCaps}
           aria-expanded={!capsCollapsed}
           className="group flex items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
         >
-          <span className="flex-1 text-left">{t('workbench.capabilitiesLabel')}</span>
+          <span className="flex-1 text-left">{t('nav.capabilities')}</span>
           <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', capsCollapsed && '-rotate-90')} />
         </button>
         {!capsCollapsed && (
           <nav className="flex flex-col gap-0.5">
-          {CAPABILITY_NAV.map(({ to, i18nKey, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                clsx(
-                  'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors',
-                  isActive
-                    ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
-                    : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon className={clsx('size-4', isActive ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
-                  <span>{t(i18nKey)}</span>
-                </>
-              )}
-            </NavLink>
-          ))}
+            {capabilityNav.map(({ to, i18nKey, icon }) => (
+              <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
+            ))}
           </nav>
         )}
-      </div>
+      </div>}
 
-      {/* Projects section — design.pen b8wX2. Header row carries the
-          "Projects" label on the left (matching the Capabilities label
-          style) and the 22x22 add button on the right. */}
+      {/* Projects section — the label on the left (matching the Capabilities
+          label style) and the borderless search + add icons grouped on the
+          right. Search sits immediately before add; ⌘K still opens the same
+          palette from anywhere. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center justify-between px-1">
           <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
             {t('workbench.projectsLabel')}
           </span>
-          {/* Borderless ghost icon buttons (design-system Button) — search +
-              add, grouped on the right. Search moved here from a full-width
-              row above to reclaim that space for the Projects list; ⌘K still
-              works. Both are roomy 28px tap targets. */}
           <div className="flex items-center gap-0.5">
             <Button
               type="button"
@@ -813,7 +946,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             >
               <Search className="size-4" />
             </Button>
-            <Button
+            {canCreateProject && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -822,7 +955,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={() => setShowNewProject(true)}
             >
               <FolderPlus className="size-4" />
-            </Button>
+            </Button>}
           </div>
         </div>
 
@@ -834,22 +967,28 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             </div>
           )}
           {projectsError && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[11px] text-destructive">
+            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[11px] text-destructive-ink">
               {t('workbench.projectsLoadError')}
             </div>
           )}
+          {/* True empty state e5Kplg — a real row, not a centered illustration. */}
           {projects !== null && projects.length === 0 && (
-            <div className="flex flex-col items-center gap-1.5 rounded-md border border-dashed border-border px-3 py-4 text-center">
-              <Folder className="size-4 text-muted" />
-              <div className="text-[11px] text-muted">{t('workbench.projectsEmpty')}</div>
+            <div className="flex items-center gap-[7px] rounded-md px-1.5 py-[7px]">
+              <FolderPlus className="size-[14px] shrink-0 text-muted" />
+              <span className="min-w-0 truncate text-[11px] text-muted">{t('workbench.projectsEmpty')}</span>
             </div>
           )}
-          {projects !== null &&
-            projects.map((project) => {
+          {projects !== null && <SortableProjectList
+            projects={projects}
+            disabled={!canManageProjects || isReorderingProjects}
+            onReorder={reorderProjects}
+          >
+            {(project, dragHandle) => {
               const state = sessionsOf(project.id);
               return (
                 <ProjectRow
                   key={project.id}
+                  dragHandle={dragHandle}
                   project={project}
                   expanded={isExpanded(project.id)}
                   sessions={state.sessions}
@@ -869,22 +1008,26 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
+                  canChat={canChat && project.capabilities.can_chat}
+                  canManageMetadata={canManageProjects || project.capabilities.can_chat}
+                  canManageProjects={canManageProjects}
+                  canArchive={canManageProjects}
+                  canOpenInEditor={canUseApps}
+                  canEditAgentsMd={canManageProjects}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
                 />
               );
-            })}
+            }}
+          </SortableProjectList>}
         </div>
       </div>
 
-      {showNewProject && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
-          onCreated={(project) => {
-            setShowNewProject(false);
-            upsertProjectToTop(project);
-          }}
+          onCreated={() => setShowNewProject(false)}
         />
       )}
     </div>

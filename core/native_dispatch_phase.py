@@ -9,14 +9,15 @@ DISPATCH_PHASE_KEY = "agent_dispatch_phase"
 DISPATCH_EVIDENCE_KEY = "agent_dispatch_evidence"
 DISPATCH_PHASE_PREWRITE = "prewrite"
 DISPATCH_PHASE_ATTEMPTING = "attempting"
+DISPATCH_PREWRITE_USER_STOP_KEY = "prewrite_user_stop"
 
 
 def set_dispatch_phase(
     context: Any,
     phase: str,
     *,
-    evidence: dict[str, str] | None = None,
-) -> dict[str, str]:
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload = dict(getattr(context, "platform_specific", None) or {})
     current = payload.get(DISPATCH_EVIDENCE_KEY)
     if evidence is None:
@@ -43,7 +44,50 @@ def backend_dispatch_attempted(context: Any) -> Optional[bool]:
     return None
 
 
+def mark_prewrite_user_stop(context: Any) -> None:
+    """Publish user-Stop intent to the adapter before canceling its task."""
+
+    payload = dict(getattr(context, "platform_specific", None) or {})
+    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
+    if not isinstance(evidence, dict):
+        evidence = {}
+        payload[DISPATCH_EVIDENCE_KEY] = evidence
+    context.platform_specific = payload
+    evidence[DISPATCH_PREWRITE_USER_STOP_KEY] = True
+
+
+def prewrite_user_stop_requested(context: Any) -> bool:
+    """Return whether the shared Turn owner canceled this prewrite task for Stop."""
+
+    payload = getattr(context, "platform_specific", None) or {}
+    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
+    return bool(
+        isinstance(evidence, dict)
+        and evidence.get(DISPATCH_PREWRITE_USER_STOP_KEY) is True
+    )
+
+
 def mark_backend_dispatch_attempted(context: Any) -> None:
     """Record the boundary immediately before an adapter's native write."""
 
     set_dispatch_phase(context, DISPATCH_PHASE_ATTEMPTING)
+
+
+def mark_prewrite_recovery_required(context: Any, reason: str) -> None:
+    """Retain a definitive startup failure for an explicit user retry."""
+
+    if backend_dispatch_attempted(context) is not False:
+        return
+    evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    evidence["failure"] = {"reason": reason, "requires_explicit_retry": True}
+
+
+def prewrite_failure_evidence(context: Any) -> dict[str, Any]:
+    """Copy adapter-owned failure evidence into the durable start receipt."""
+
+    if backend_dispatch_attempted(context) is not False:
+        return {}
+    payload = getattr(context, "platform_specific", None) or {}
+    evidence = payload.get(DISPATCH_EVIDENCE_KEY)
+    failure = evidence.get("failure") if isinstance(evidence, dict) else None
+    return dict(failure) if isinstance(failure, dict) else {}

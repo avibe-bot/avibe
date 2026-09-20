@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -5,6 +6,7 @@ import { Camera, Check, type LucideIcon, MessageSquarePlus, MousePointerClick, X
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { useActionShortcutLabel, useActionShortcuts } from '../../lib/actionShortcuts';
 import type { AnnotationMode, AnnotationState } from './useShowPageAnnotation';
 
 // Show Page annotation control rendered in the chat header (only in Show Page
@@ -26,8 +28,8 @@ import type { AnnotationMode, AnnotationState } from './useShowPageAnnotation';
 interface ModeDef {
   id: AnnotationMode;
   icon: LucideIcon;
-  labelKey: string;
-  descKey: string;
+  labelKey: TranslationKey;
+  descKey: TranslationKey;
 }
 
 const MODES: readonly ModeDef[] = [
@@ -75,6 +77,11 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
   ownerWindowId,
 }) => {
   const { t } = useTranslation();
+  const { showPageAnnotation: annotationShortcut } = useActionShortcuts();
+  const annotationShortcutLabel = useActionShortcutLabel(annotationShortcut);
+  const shortcutHint = t('chat.showPage.annotate.shortcutHint', {
+    shortcut: annotationShortcutLabel,
+  });
   const ready = state !== null;
   const available = state?.available === true;
   const enabled = state?.enabled === true;
@@ -148,17 +155,19 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
       {!compact && (
         <div className="hidden items-center md:flex">
           {enabled ? (
-            <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-[0_0_16px_-6px_rgba(91,255,160,0.5)]">
-              <button
+            <div className="flex h-7 items-center gap-0.5 rounded-lg border border-mint/40 bg-mint/[0.06] p-0.5 shadow-glow-sm-mint">
+              <Button
                 type="button"
+                variant="default"
+                size={null}
                 onClick={onDisable}
                 aria-label={offLabel}
                 title={offLabel}
                 aria-pressed
-                className="grid size-6 shrink-0 place-items-center rounded-[5px] bg-mint text-primary-foreground transition hover:brightness-110"
+                className="size-6 shrink-0 rounded-[5px]"
               >
                 <MessageSquarePlus className="size-3.5" />
-              </button>
+              </Button>
               <div
                 role="radiogroup"
                 aria-label={t('chat.showPage.annotate.modeTitle')}
@@ -176,7 +185,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                       className={clsx(
                         'flex h-6 items-center gap-1 rounded-[5px] px-2 text-[12px] transition-colors',
                         active
-                          ? 'bg-mint-soft font-bold text-mint'
+                          ? 'bg-mint-soft font-bold text-mint-ink'
                           : 'font-medium text-muted hover:text-foreground',
                       )}
                     >
@@ -195,7 +204,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
               className="size-7 shrink-0"
               onClick={() => onEnable()}
               aria-label={toggleLabel}
-              title={toggleLabel}
+              title={shortcutHint}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>
@@ -217,7 +226,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                   : 'size-7 shrink-0',
               )}
               aria-label={toggleLabel}
-              title={toggleLabel}
+              title={enabled ? toggleLabel : shortcutHint}
             >
               <MessageSquarePlus className="size-3.5" />
             </Button>
@@ -246,7 +255,7 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                     <span
                       className={clsx(
                         'grid size-8 shrink-0 place-items-center rounded-md',
-                        active ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.04] text-muted',
+                        active ? 'bg-mint-soft text-mint-ink' : 'bg-foreground/[0.04] text-muted',
                       )}
                     >
                       <Icon className="size-4" />
@@ -255,14 +264,14 @@ export const ShowPageAnnotateControl: React.FC<ShowPageAnnotateControlProps> = (
                       <span
                         className={clsx(
                           'block text-[13px]',
-                          active ? 'font-bold text-mint' : 'font-medium text-foreground',
+                          active ? 'font-bold text-mint-ink' : 'font-medium text-foreground',
                         )}
                       >
                         {t(labelKey)}
                       </span>
                       <span className="block text-[11px] text-muted">{t(descKey)}</span>
                     </span>
-                    {active && <Check className="size-4 shrink-0 text-mint" />}
+                    {active && <Check className="size-4 shrink-0 text-mint-ink" />}
                   </button>
                 );
               })}

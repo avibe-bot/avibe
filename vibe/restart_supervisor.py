@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import subprocess
@@ -9,16 +8,45 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs
 from vibe import runtime
-from vibe.upgrade import get_restart_command, get_restart_environment, get_restart_invocation_command, get_safe_cwd
+from vibe.upgrade import (
+    RestartState,
+    atomic_upgrade_lock,
+    get_restart_command,
+    get_restart_environment,
+    get_restart_invocation_command,
+    get_safe_cwd,
+)
 
 
 logger = logging.getLogger(__name__)
 _RESTART_LOG_RETENTION = 10
 _SERVICE_LOCK_RELEASE_TIMEOUT_SECONDS = 30.0
+
+
+class StartedRuntime(NamedTuple):
+    """The process IDs launched by a restart."""
+
+    service_pid: int
+    ui_pid: int | None
+
+
+def _live_ui_pid(candidate: object) -> int | None:
+    """The UI pid a `running` status may carry, or None.
+
+    Publishing the pid of a UI that has already exited makes the status file say
+    the Web UI is serving when nothing is listening, and every reader of that
+    file -- doctor, the dashboard, the CLI -- repeats it. Liveness is checked at
+    the moment of the claim rather than assumed from the moment of the spawn.
+    """
+
+    if not isinstance(candidate, int) or candidate <= 0:
+        return None
+    return candidate if runtime.pid_alive(candidate) else None
 
 
 def _now_iso() -> str:
@@ -147,7 +175,7 @@ def _fail(payload: dict, error: str, log, return_code: int, *, started_at: float
         durations = dict(payload.get("stage_durations") or {})
         durations["restart_total_seconds"] = _rounded_seconds(time.monotonic() - started_at)
         payload["stage_durations"] = durations
-    payload.update(ok=False, state="failed", error=error)
+    payload.update(ok=False, state=RestartState.FAILED.value, error=error)
     _write_status(payload)
     log.write(f"{_now_iso()} {error}\n")
     log.flush()
@@ -161,8 +189,12 @@ def _runtime_ready_for_config(config) -> bool:
     return bool(getattr(getattr(config, "slack", None), "bot_token", ""))
 
 
-def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
-    from core.memory.ui_access import generate_ui_read_secret, process_ui_read_secret
+def _start_runtime_processes(
+    start_ui: bool = True,
+) -> StartedRuntime:
+    """Start the service, and the UI when this job owns it."""
+
+    from vibe.memory_ui_access import generate_ui_read_secret, process_ui_read_secret
     from core.services import settings as settings_service
 
     paths.ensure_data_dirs()
@@ -198,15 +230,18 @@ def _start_runtime_processes(start_ui: bool = True) -> tuple[int, int | None]:
     else:
         ui_pid = preserved_ui_pid
 
-    if runtime.service_pid_recorded(service_pid):
-        runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
-    elif runtime.pid_alive(service_pid):
-        runtime.write_status("starting", "waiting for service process", service_pid, ui_pid)
+    # Provisional, and never "running": holding the lock is not having started, so
+    # this helper is not in a position to claim it. Both callers wait for the
+    # service's own report and promote the status themselves. Claiming it here
+    # published `running` to anyone reading the status file -- doctor, the Web UI --
+    # for a process still migrating, which is the same wrong answer one layer down.
+    if runtime.pid_alive(service_pid):
+        runtime.write_status("starting", "waiting for service to finish starting", service_pid, ui_pid)
     else:
         runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
         raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
 
-    return service_pid, ui_pid
+    return StartedRuntime(service_pid, ui_pid)
 
 
 def _stop_ui_for_restart() -> tuple[bool, dict[str, float | bool], float, int | None]:
@@ -285,6 +320,11 @@ def _run_restart_job(
         def mark_duration(name: str, started_at: float) -> float:
             return record_duration(name, _rounded_seconds(time.monotonic() - started_at))
 
+        def fail(error: str, return_code: int, *, started_at: float | None = None) -> int:
+            """Record a terminal restart failure for operator-visible retry."""
+
+            return _fail(payload, error, log, return_code, started_at=started_at)
+
         old_pid = _read_recorded_pid()
         payload = {
             "ok": None,
@@ -296,7 +336,7 @@ def _run_restart_job(
             # seeds with the spawned subprocess pid (this process is that pid).
             "supervisor_pid": os.getpid(),
             "supervisor_started_at": runtime.process_create_time(os.getpid()),
-            "state": "scheduled" if delay_seconds > 0 else "running",
+            "state": RestartState.SCHEDULED.value if delay_seconds > 0 else RestartState.RUNNING.value,
             "trigger": trigger,
             "delay_seconds": delay_seconds,
             "scope": scope,
@@ -315,7 +355,7 @@ def _run_restart_job(
             delay_started_at = time.monotonic()
             time.sleep(delay_seconds)
             mark_duration("delay_seconds_actual", delay_started_at)
-            payload["state"] = "running"
+            payload["state"] = RestartState.RUNNING.value
             _write_status(payload)
             write("restart job started after delay")
             restart_started_at = time.monotonic()
@@ -325,22 +365,20 @@ def _run_restart_job(
         try:
             ui_stopped, ui_timings, stop_ui_seconds, ui_pid, stopped, stop_service_seconds = _stop_runtime_for_restart(stop_ui=restart_ui)
         except Exception as exc:
-            return _fail(payload, f"stop runtime failed: {exc}", log, 2, started_at=restart_started_at)
+            return fail(f"stop runtime failed: {exc}", 2, started_at=restart_started_at)
         stage_durations.update(ui_timings)
         record_duration("stop_ui_total_seconds", stop_ui_seconds)
         record_duration("stop_service_seconds", stop_service_seconds)
         mark_duration("stop_runtime_seconds", stop_runtime_started_at)
         if restart_ui and ui_pid and ui_stopped is False and runtime.pid_alive(ui_pid):
-            return _fail(payload, f"UI pid {ui_pid} did not stop", log, 2, started_at=restart_started_at)
+            return fail(f"UI pid {ui_pid} did not stop", 2, started_at=restart_started_at)
         if stopped is False:
             remaining_service_pids = _remaining_service_pids_after_stop()
             if remaining_service_pids:
                 payload["remaining_service_pids"] = remaining_service_pids
                 pid_list = ",".join(str(pid) for pid in remaining_service_pids)
-                return _fail(
-                    payload,
+                return fail(
                     f"service stop failed; remaining service pid(s): {pid_list}",
-                    log,
                     2,
                     started_at=restart_started_at,
                 )
@@ -348,15 +386,16 @@ def _run_restart_job(
         wait_lock_release_started_at = time.monotonic()
         if not _wait_for_service_lock_release():
             mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
-            return _fail(payload, "service lock did not release after stopping runtime", log, 2, started_at=restart_started_at)
+            return fail("service lock did not release after stopping runtime", 2, started_at=restart_started_at)
         mark_duration("wait_service_lock_release_seconds", wait_lock_release_started_at)
 
         write("starting service")
         start_runtime_started_at = time.monotonic()
         try:
-            new_pid, ui_pid = _start_runtime_processes(start_ui=restart_ui)
+            started = _start_runtime_processes(start_ui=restart_ui)
+            new_pid, ui_pid = started.service_pid, started.ui_pid
         except Exception as exc:
-            return _fail(payload, f"start runtime failed: {exc}", log, 1, started_at=restart_started_at)
+            return fail(f"start runtime failed: {exc}", 1, started_at=restart_started_at)
         mark_duration("start_runtime_seconds", start_runtime_started_at)
 
         service_status = runtime.read_status()
@@ -364,30 +403,34 @@ def _run_restart_job(
             new_pid = _service_pid_from_status(_read_starting_service_status())
             service_status = runtime.read_status()
         if not new_pid or not runtime.pid_alive(new_pid):
-            return _fail(payload, "start runtime completed but service pid is not alive", log, 3, started_at=restart_started_at)
+            return fail("start runtime completed but service pid is not alive", 3, started_at=restart_started_at)
         if not runtime.service_pid_recorded(new_pid):
             write(f"start runtime returned while service pid={new_pid} is still acquiring its lock")
-            wait_lock_started_at = time.monotonic()
-            # Resolve the real lock holder: under a delegated user scope the
-            # returned pid may be a launcher that never records itself, so adopt
-            # the authoritative owner instead of waiting on a pid that can't win.
-            resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
-            if resolved_pid is None:
-                mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-                return _fail(
-                    payload,
-                    f"service pid {new_pid} did not acquire the service lock",
-                    log,
-                    3,
-                    started_at=restart_started_at,
-                )
-            new_pid = resolved_pid
+        wait_lock_started_at = time.monotonic()
+        # Asked unconditionally, and asked of the SERVICE rather than of the lock.
+        # Holding the lock was never the end of starting up -- the database is
+        # migrated and the controller built after it -- so a job that skipped this
+        # whenever the lock had already been taken was skipping it in exactly the
+        # case a bad migration produces: lock acquired, then dead, then a restart
+        # recorded as succeeded over an instance with nothing running.
+        # `wait_for_service_ready` also resolves the real holder, since under a
+        # delegated user scope the returned pid may be a launcher that never
+        # records itself.
+        resolved_pid = runtime.wait_for_service_ready(new_pid, timeout=runtime.SERVICE_SLOW_START_TIMEOUT_SECONDS)
+        if resolved_pid is None:
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
-            recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
-            runtime.write_status("running", f"pid={new_pid}", new_pid, recorded_ui_pid if isinstance(recorded_ui_pid, int) else None)
+            return fail(
+                f"service pid {new_pid} did not finish starting",
+                3,
+                started_at=restart_started_at,
+            )
+        new_pid = resolved_pid
+        mark_duration("wait_service_lock_seconds", wait_lock_started_at)
+        recorded_ui_pid = service_status.get("ui_pid") if service_status else ui_pid
+        runtime.write_status("running", f"pid={new_pid}", new_pid, _live_ui_pid(recorded_ui_pid))
 
         mark_duration("restart_total_seconds", restart_started_at)
-        payload.update(ok=True, state="succeeded", new_pid=new_pid, error=None)
+        payload.update(ok=True, state=RestartState.SUCCEEDED.value, new_pid=new_pid, error=None)
         _write_status(payload)
         write(f"restart job succeeded new_pid={new_pid}")
 
@@ -452,14 +495,44 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
     memory_ui_secret: str | None = None,
+    python_executable: str | None = None,
 ) -> dict:
-    from core.memory.ui_access import process_ui_read_secret
+    """Serialize restart seeding with staged install activation."""
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
+    with atomic_upgrade_lock():
+        return _schedule_restart_locked(
+            delay_seconds=delay_seconds,
+            vibe_path=vibe_path,
+            trigger=trigger,
+            scope=scope,
+            prepare_show_runtime=prepare_show_runtime,
+            memory_ui_secret=memory_ui_secret,
+            python_executable=python_executable,
+        )
+
+
+def _schedule_restart_locked(
+    *,
+    delay_seconds: float,
+    vibe_path: str | None,
+    trigger: str,
+    scope: str,
+    prepare_show_runtime: bool,
+    memory_ui_secret: str | None,
+    python_executable: str | None,
+) -> dict:
+    """Spawn the detached restart job while the caller owns activation."""
+    from vibe.memory_ui_access import process_ui_read_secret
+
+    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     job_id = uuid.uuid4().hex[:12]
-    invocation = get_restart_invocation_command(vibe_path=vibe_path)
+    invocation = (
+        [python_executable, "-c", "from vibe.cli import main; main()", "restart"]
+        if python_executable
+        else get_restart_invocation_command(vibe_path=vibe_path)
+    )
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [
         *(invocation or ["vibe"]),
         "__restart-supervisor",
@@ -472,6 +545,10 @@ def schedule_restart(
     if prepare_show_runtime:
         command.append("--prepare-show-runtime")
     env = get_restart_environment(vibe_path=vibe_path)
+    if python_executable:
+        env = dict(os.environ if env is None else env)
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
     log_path = _restart_log_path(job_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # Seed the status BEFORE spawning the job so the child's own writes (which set
@@ -483,7 +560,7 @@ def schedule_restart(
     payload = {
         "ok": None,
         "job_id": job_id,
-        "state": "scheduled",
+        "state": RestartState.SCHEDULED.value,
         "trigger": trigger,
         "scope": scope,
         "delay_seconds": delay_seconds,
@@ -506,7 +583,7 @@ def schedule_restart(
                 stderr=subprocess.STDOUT,
                 close_fds=True,
                 cwd=get_safe_cwd(),
-                env=runtime._memory_ui_child_env(
+                env=runtime.independent_process_env(
                     env,
                     memory_ui_secret=memory_ui_secret,
                 ),
@@ -518,7 +595,11 @@ def schedule_restart(
         # (bad cached vibe path, missing executable, permission/log-open error) no
         # child will ever overwrite it, leaving a permanently pending restart in
         # `vibe status`. Mark it failed before propagating.
-        payload.update(ok=False, state="failed", error=f"failed to spawn restart supervisor: {exc}")
+        payload.update(
+            ok=False,
+            state=RestartState.FAILED.value,
+            error=f"failed to spawn restart supervisor: {exc}",
+        )
         _write_status(payload)
         _prune_restart_logs()
         raise
@@ -530,7 +611,7 @@ def schedule_restart(
 
 
 def main(argv: list[str] | None = None) -> int:
-    from core.memory.ui_access import initialize_process_ui_read_secret
+    from vibe.memory_ui_access import initialize_process_ui_read_secret
 
     initialize_process_ui_read_secret()
     parser = argparse.ArgumentParser()
@@ -540,6 +621,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", default="all", choices=("all", "service"))
     parser.add_argument("--vibe-path")
     parser.add_argument("--prepare-show-runtime", action="store_true")
+    # A released scheduler can replace the package before launching this parser.
+    # Accept its retired rollback argv so the normal restart still runs, but do
+    # not carry any of these values into job state or behavior.
+    parser.add_argument("--rollback-to", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-package", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-package", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-version", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-python", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-main", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     return _run_restart_job(
         job_id=args.job_id,

@@ -1,0 +1,14 @@
+version: 1
+capability: memory_independence
+observations:
+  - id: OBS-MEMORY-INDEP-001
+    source: live_local_diagnosis
+    related_scenarios:
+      - MEMORY-INDEP-012
+    summary: A transient Memory processing fault and its recovery were delivered as direct messages to administrators on every configured IM transport.
+    previous_assumption: Installation-wide Memory health events should use the shared cross-platform administrator notification path.
+    observed_behavior: One fault cycle produced unsolicited pause and recovery messages in bound administrator conversations even though no capture was queued.
+    required_updates:
+      - keep durable fault classification and acknowledgement intact
+      - write fault and recovery events to the main service log
+      - never resolve administrator identities or invoke IM clients for Memory health events

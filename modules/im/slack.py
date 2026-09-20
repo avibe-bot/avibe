@@ -21,7 +21,12 @@ from .base import (
     InlineButton,
     FileAttachment,
 )
-from .message_facts import is_ordinary_slack_text
+from .message_facts import (
+    is_original_human_slack_attachment,
+    is_original_human_slack_text,
+    slack_message_kind,
+)
+from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import SlackFormatter
@@ -281,6 +286,9 @@ class SlackBot(BaseIMClient):
             message_id=context.message_id,
             platform_specific=context.platform_specific,
             files=context.files,
+            is_original_human_text=context.is_original_human_text,
+            is_original_human_attachment=context.is_original_human_attachment,
+            message_kind=context.message_kind,
         )
 
     def _ensure_clients(self):
@@ -1097,6 +1105,7 @@ class SlackBot(BaseIMClient):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         file_info = await self._resolve_downloadable_file_info(file_info)
         url = file_info.get("url_private_download") or file_info.get("url_private") or file_info.get("url")
@@ -1107,7 +1116,11 @@ class SlackBot(BaseIMClient):
         file_size = file_info.get("size")
         if max_bytes is not None and file_size and file_size > max_bytes:
             logger.warning(f"File too large ({file_size} bytes > {max_bytes}), skipping: {file_info.get('name')}")
-            return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+            return FileDownloadResult(
+                False,
+                f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                "file_too_large",
+            )
 
         try:
             headers = {"Authorization": f"Bearer {self.config.bot_token}"}
@@ -1121,10 +1134,14 @@ class SlackBot(BaseIMClient):
                     content_length = response.headers.get("Content-Length")
                     if max_bytes is not None and content_length and int(content_length) > max_bytes:
                         logger.warning(f"File too large ({content_length} bytes), skipping: {file_info.get('name')}")
-                        return FileDownloadResult(False, f"File exceeds the allowed size limit ({max_bytes} bytes)")
+                        return FileDownloadResult(
+                            False,
+                            f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                            "file_too_large",
+                        )
 
                     total_size = 0
-                    with open(target_path, "wb") as file_obj:
+                    with open_download_target(target_path, target_fd=target_fd) as file_obj:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             total_size += len(chunk)
                             if max_bytes is not None and total_size > max_bytes:
@@ -1132,7 +1149,9 @@ class SlackBot(BaseIMClient):
                                     f"File exceeds max size during download, aborting: {file_info.get('name')}"
                                 )
                                 return FileDownloadResult(
-                                    False, f"File exceeds the allowed size limit ({max_bytes} bytes)"
+                                    False,
+                                    f"File exceeds the allowed size limit ({max_bytes} bytes)",
+                                    "file_too_large",
                                 )
                             file_obj.write(chunk)
                     return FileDownloadResult(True)
@@ -1391,7 +1410,7 @@ class SlackBot(BaseIMClient):
         (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
         returns ``invalid_name``. Every emoji used as a reaction by the processing
         indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent,
-        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered.
+        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered, ⏹️ stopped, ⚠️ interrupted.
         """
         name = (emoji or "").strip()
         if name.startswith(":") and name.endswith(":") and len(name) > 2:
@@ -1407,6 +1426,12 @@ class SlackBot(BaseIMClient):
             "✍": "writing_hand",
             "🤔": "thinking_face",
             "🤷": "shrug",
+            # Terminal receipts. Both forms of each are listed because the
+            # constants carry U+FE0F and callers may strip it.
+            "⏹️": "black_square_for_stop",
+            "⏹": "black_square_for_stop",
+            "⚠️": "warning",
+            "⚠": "warning",
         }
         return aliases.get(name, name)
 
@@ -2079,7 +2104,16 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
-                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not has_shared_content,
+                is_original_human_text=is_original_human_slack_text(event, file_attachments) and not has_shared_content,
+                is_original_human_attachment=(
+                    is_original_human_slack_attachment(event, file_attachments)
+                    and not has_shared_content
+                ),
+                message_kind=slack_message_kind(
+                    event,
+                    file_attachments,
+                    shared=has_shared_content,
+                ),
             )
 
             if handled_bot_mention_in_message_event and self.settings_manager and thread_id:
@@ -2179,7 +2213,16 @@ class SlackBot(BaseIMClient):
                     "normalized_user_text": normalized_user_text,
                 },
                 files=file_attachments,
-                is_ordinary_text=is_ordinary_slack_text(event, file_attachments) and not bool(shared_text),
+                is_original_human_text=is_original_human_slack_text(event, file_attachments) and not bool(shared_text),
+                is_original_human_attachment=(
+                    is_original_human_slack_attachment(event, file_attachments)
+                    and not bool(shared_text)
+                ),
+                message_kind=slack_message_kind(
+                    event,
+                    file_attachments,
+                    shared=bool(shared_text),
+                ),
             )
 
             # Mark thread as active only when the mention carries actionable content.
@@ -2256,7 +2299,8 @@ class SlackBot(BaseIMClient):
                 "payload": payload,
                 "is_dm": is_dm,
             },
-            is_ordinary_text=True,
+            is_original_human_text=True,
+            message_kind="original",
         )
 
         # Send immediate acknowledgment to Slack
@@ -3383,39 +3427,6 @@ class SlackBot(BaseIMClient):
         except SlackApiError as e:
             logger.debug(f"Failed to update resume modal: {e}")
 
-    def _get_default_opencode_agent_name(self, opencode_agents: list) -> Optional[str]:
-        """Resolve the default OpenCode agent name."""
-        for agent in opencode_agents:
-            name = agent.get("name")
-            if name == "build":
-                return name
-        for agent in opencode_agents:
-            name = agent.get("name")
-            if name:
-                return name
-        return None
-
-    def _resolve_opencode_default_model(
-        self,
-        opencode_default_config: dict,
-        opencode_agents: list,
-        selected_agent: Optional[str],
-    ) -> Optional[str]:
-        """Resolve the default model for a selected OpenCode agent."""
-        agent_name = selected_agent or self._get_default_opencode_agent_name(opencode_agents)
-        if isinstance(opencode_default_config, dict):
-            agents_config = opencode_default_config.get("agent", {})
-            if isinstance(agents_config, dict) and agent_name:
-                agent_config = agents_config.get(agent_name, {})
-                if isinstance(agent_config, dict):
-                    model = agent_config.get("model")
-                    if isinstance(model, str) and model:
-                        return model
-            model = opencode_default_config.get("model")
-            if isinstance(model, str) and model:
-                return model
-        return None
-
     def _build_routing_modal_view(
         self,
         channel_id: str,
@@ -3537,11 +3548,6 @@ class SlackBot(BaseIMClient):
             else:
                 current_oc_reasoning = selected_opencode_reasoning
 
-            # Determine default agent/model from OpenCode config
-            default_model_str = self._resolve_opencode_default_model(
-                opencode_default_config, opencode_agents, current_oc_agent
-            )
-
             # Build agent options
             agent_options = [
                 {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
@@ -3574,14 +3580,12 @@ class SlackBot(BaseIMClient):
 
             # Build model options
             default_label = self._t("common.default")
-            if default_model_str:
-                default_label = f"{self._t('common.default')} - {default_model_str}"
             model_options = [{"text": {"type": "plain_text", "text": default_label}, "value": "__default__"}]
 
             # Add models from providers (sorted, filtered, truncated)
             preferred_providers = resolve_opencode_provider_preferences(
                 opencode_default_config,
-                current_oc_model or default_model_str,
+                current_oc_model,
             )
             allowed_providers = resolve_opencode_allowed_providers(
                 opencode_default_config,
@@ -3622,7 +3626,7 @@ class SlackBot(BaseIMClient):
             }
 
             # Build reasoning effort options dynamically based on model variants
-            target_model = current_oc_model or default_model_str
+            target_model = current_oc_model
 
             reasoning_model_key = target_model or "__default__"
             reasoning_action_id = (

@@ -287,3 +287,41 @@ observations:
       belongs to the Turn and waiter health belongs to the waiter. Linked Runs need
       only one Turn-scoped fallback when the primary backend notification cannot be
       acknowledged; downstream processing health must remain a separate projection.
+  - id: HFR-OBS-024
+    date: 2026-08-08
+    source: issue #953 Watch and Agent Run history
+    result: confirmed
+    detail: >-
+      A level-triggered forever Watch returned exit zero while the observed
+      condition remained true. The supervisor immediately re-ran the waiter after
+      every success and treated each identical level as a new event. In 18.139
+      seconds the one definition created 274 Agent Runs: 174 completed no-op Runs
+      and 100 more queued Runs. Queue coalescing cannot repair this because the
+      producer has already asserted 274 distinct events. The event lifecycle must
+      include its Agent follow-up, and the Watch owner must stop admitting events
+      when successful exits remain implausibly dense.
+  - id: HFR-OBS-025
+    date: 2026-08-12
+    source: Avibe 3.0.10 runtime evidence plus deterministic admission reproduction
+    result: confirmed
+    detail: >-
+      A create_per_run definition reserves its runtime Session after the Run row is
+      created. The first durable Delivery then tried to bind against that new Session,
+      but the Run still had an empty session_id and the strict equality guard rejected
+      the handoff before any backend started. The binding transaction must atomically
+      adopt the freshly reserved Session only for create_per_run rows; a Run already
+      bound to another Session must remain a hard refusal.
+  - id: HFR-OBS-026
+    date: 2026-09-16
+    source: issue 1995 and isolated file/SQLite shared-reader reproduction
+    result: confirmed
+    detail: >-
+      maybe_reload acknowledges cache freshness, not scheduler reconciliation.
+      An existing Watch can refresh the shared mirror before the scheduler scans,
+      leaving an enabled new Watch in every snapshot but never scheduled. Repeated
+      scans cannot recover when their reload result is used as the admission gate.
+      HFR-485 exercises real stores and worker-task ownership across both scheduler
+      paths; only external waiter execution is replaced by a blocking coroutine.
+      Prior reload and single-flight tests did not connect that reader ordering to
+      actual scheduling. Always reconciling the captured snapshot retains existing
+      worker identity and avoids adding a second change-acknowledgement mechanism.

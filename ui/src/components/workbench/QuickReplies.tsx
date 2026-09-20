@@ -61,7 +61,7 @@ export const QuickReplies: React.FC<{
             // goes mint; the others ride the base ``disabled:opacity-50`` to grey.
             className={clsx(
               'h-auto gap-1.5 whitespace-normal rounded-lg px-3 py-1.5 text-[13px] font-normal',
-              isChosen && 'border-mint/55 bg-mint/15 text-mint hover:bg-mint/15 disabled:opacity-100',
+              isChosen && 'border-mint/55 bg-mint/15 text-mint-ink hover:bg-mint/15 disabled:opacity-100',
             )}
           >
             {isChosen && <Check className="size-3.5" />}

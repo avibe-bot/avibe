@@ -103,18 +103,118 @@ vibe status
 }
 ```
 
+### `vibe skill`
+
+Avibe 为 Claude、Codex 和 OpenCode 提供统一的托管 Skill Catalog，并在由 Avibe
+发起的 Turn 中关闭各 backend 自带的 Skill Catalog。
+
+```bash
+vibe skill list [--page N]
+vibe skill load -- <name>
+```
+
+`list` 按稳定顺序输出当前可用的名称和描述，每页最多 25 个。第 1 页也会注入
+Agent 的 system prompt；如有更多 Skill，按输出中的命令查看下一页。`load` 只在
+`skill_content` 标签中输出所选 Skill 的正文。标签的 `directory` 属性是绝对路径，
+Agent 可以据此读取 `SKILL.md` 同目录下的 reference 或运行 script。
+
+Avibe 会直接发现现有 Skill，无需迁移：
+
+- 项目级：从工作目录到 Session 绑定的 Avibe 项目根目录逐层查找 `.agents/skills`、
+  `.codex/skills`、`.claude/skills` 和 `.opencode/skills`。该边界可以位于嵌套 Git
+  仓库之上；未绑定项目的独立命令则以遇到的第一个 Git 根目录为边界；
+- 全局：查找 `~/.agents/skills`、Codex 与 Claude 配置的 Skill 目录，以及
+  `XDG_CONFIG_HOME` 下的 OpenCode 目录和已启用的 Claude 插件 Skill 目录；
+- Avibe 内置 Skill，以及 Codex 自带的 system Skill。
+
+同名冲突时，内置 Skill 优先，其次是项目级，再次是全局。项目内更近的目录优先；
+同一层级依次为 `.agents`、`.codex`、`.claude`、`.opencode`。用户 Skill 优先于
+Codex 自带的默认项；已启用的 Claude 插件 Skill 排在四个静态用户目录之后，但同样
+优先于这些默认项。新的全局 Skill 默认安装到 `~/.agents/skills/<name>`，项目级 Skill
+安装到 `<project>/.agents/skills/<name>`。
+
+每次命令都会从磁盘重新解析，每个由 Avibe 发起的新 Turn 也会重新生成 Catalog。
+因此新增、修改或删除 Skill 后，已有 Session 无需重启 Avibe，也无需新建 Session；
+历史对话内容不会被重写。
+
+#### 本地 Skill 统计与隐私
+
+Skill 统计**默认开启**；升级后，若配置中没有
+`runtime.skill_observability_enabled`，也会采用开启状态。Avibe 在本地记录
+Catalog 提供情况及加载结果，用于未来的 Harness 优化；提供或加载过某个 Skill，
+并不能证明 Agent 遵循了它，也不能证明任务已经完成。
+
+记录包括 Skill 名称（含私有项目及全局 Skill）、来源类别、SHA-256 身份/描述/
+内容版本哈希、时间戳、加载结果、耗时、正文的字节数，以及可确认的 Session/
+项目/Turn、backend/platform 和 Avibe 版本关联。名称与 Session 关联仍可识别，
+哈希并不使这些统计成为匿名数据；无法确认的执行归属保持未知。统计保存在本地
+SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面板，也不
+上传云端。此功能不会额外保存 Skill 正文、描述、prompt、凭据或明文文件路径。
+正常向已配置的 Agent/model 提供所加载 Skill 的行为不变。
+
+若要停止新增记录，请在当前 Avibe 状态根目录下的 `config/config.json` 中，将
+`runtime.skill_observability_enabled` 设为 JSON 布尔值 `false`。显式配置了
+`AVIBE_HOME` 时，根目录为 `$AVIBE_HOME`；否则为 `$HOME/.avibe`（新目录不存在
+时兼容旧的 `$HOME/.vibe_remote`）。请把下面的字段合并到现有配置中，不要用
+这个片段覆盖整个文件：
+
+```json
+{
+  "runtime": {
+    "skill_observability_enabled": false
+  }
+}
+```
+
+记录器每次写入前都会重新读取此设置，无需重启。关闭统计不影响 Skill 发现或
+加载，也不会删除已有历史。若希望既不再记录，也不保留历史，请先关闭，再清除。
+
+### `vibe data skill-usage`
+
+仅限实例所有者使用的本地维护命令，返回 JSON 诊断信息，不是 Skill 热度排名。
+通过 `vibe data query` 读取这些统计也受相同的所有者权限限制。
+
+```bash
+vibe data skill-usage --json
+vibe data skill-usage --clear --yes --json
+```
+
+第一条命令返回 `enabled`、原始事件及每日统计行数、保留窗口、首次记录标记和
+`cleared_through`。关闭后应确认 `enabled` 为 `false`。清除命令必须同时提供
+`--clear` 和 `--yes`，仅删除 Skill 统计，保留对话及其他事件类型，并返回删除
+行数。清除水位会拒绝延迟到达的清除前记录。清除不会关闭统计：设置仍开启时，
+后续活动可以立即产生新记录。
+
+原始 Skill 事件的保留窗口为 90 天；每日统计保留含当天在内的 365 个 UTC 日期。
+每日统计仍关联 Session，并不是匿名的全局汇总。控制器运行期间会在后台分批清理，
+因此过期数据可能要等维护任务追上后才被删除。这些窗口不受 Skill 统计开关或
+工具 trace 保留开关影响。归档 Session 不删除其统计；物理清除 Session 会删除
+与它关联的 Skill 事件及每日统计。
+
+清除与保留清理都是逻辑删除，不代表安全擦除或保证释放磁盘空间；旧数据可能
+仍存在于 SQLite WAL、空闲页或备份中。恢复数据库备份也会恢复其中的历史统计
+及清除水位，必要时应在恢复后再次清除。此功能不会扫描或回填历史对话。
+
 ### `vibe memory`
 
-通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交需要记住的长期内容——既包括用户明确要求保存的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
+通过现有 mode-0600 控制器 socket 读取当前范围内的本地记忆，或提交内容进行尽力而为的进程内捕获——既包括用户明确要求记住的内容，也包括 Agent 从对话以及在本机工作中主动提炼的结论（含在文件或工具输出中遇到的持久环境、账户事实）。接受请求不保证提供方投递或持久化。该命令不会启动服务，也没有清空、配置、导出或删除子命令。
 
-`status` 可在普通终端中使用。`profile`、`search` 和 `remember` 必须在 Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回 `memory_access_denied`。
+`status` 可在普通终端中使用。`profile`、`list`、`search` 和 `remember` 必须在
+Avibe 已注入当前 Session 上下文的合规 Agent shell 中运行；从普通终端运行会返回
+`memory_access_denied`。
 
 ```bash
 vibe memory status [--json]
 vibe memory profile [--json]
-vibe memory search <查询> [--limit 1..20] [--json]
-vibe memory remember <文本> [--json]
+vibe memory list [--project <slug>] [--page N] [--limit 1..100] [--json]
+vibe memory search <查询> [--project <slug>] [--limit 1..100] [--json]
+vibe memory remember <文本> [--project <slug>] [--json]
 ```
+
+`list` 按时间倒序返回有效且已处理的事件。页码严格采用 EverOS 从 1 开始的语义，每页
+默认 20 条；JSON 会包含每条事件的不透明 entry id。Agent CLI 只接受 `default` 或目录中
+已有的具名项目，`--project all` 仅供设置页使用。该命令用于显式检查，不会加入注入的
+个人记忆 prompt。
 
 ### `vibe doctor`
 
@@ -135,6 +235,7 @@ vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
 vibe doctor repair git-runtime --yes
+vibe doctor repair model-hub-engine --yes
 vibe doctor repair show-runtime --yes
 vibe doctor repair tmux --yes
 ```
@@ -145,7 +246,7 @@ vibe doctor repair tmux --yes
 - Agent CLI 可用性（Claude Code、OpenCode、Codex）
 - runtime home 迁移状态
 - runtime 进程、安装来源和重启元数据状态
-- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Show Runtime、tmux 和 Node.js
+- 通过统一依赖诊断组检查 askill、avault、Git Runtime、Model Hub 引擎（CPA）、Show Runtime、tmux 和 Node.js
 - `vibe doctor --deep` 还会在不下载正文的情况下探测缺失依赖的精确地址
 - 托管下载会对临时 HTTP、DNS、超时和连接故障执行有界退避重试
 
@@ -156,6 +257,10 @@ vibe doctor repair tmux --yes
 ```bash
 vibe remote
 ```
+
+在 Organization 的保守发布版本中，远程工作台仍可用于 Organization 管理，以及按权限
+查看 Project、Session、消息和历史记录。Agent 对话与运行控制、Harness 定义修改与自主执行、
+终端和文件操作仅允许可信本机调用；如需执行这些操作，请在运行 Avibe 的机器上打开。
 
 **流程：**
 - CLI 会先解释远程访问的作用，不会一上来就要求输入配对码。
@@ -297,11 +402,11 @@ vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --me
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把新的 Agent Run
-以 P3 持久化，再通过 P1 提升精确的 FIFO 队头。活动 Turn 存在时，队头会 steering
-进同一个 backend native Turn；Session 空闲时则正常启动。新消息不会越过更早的
-排队工作。`vibe session send-now` 执行相同的精确队头提升，但不会新增消息。
-两种形式都不会调用 Stop；过期或被拒绝的 steering 会保持持久化排队。
+`--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
+语义：新消息会 steering 进活动 native Turn，Session 空闲时立即启动；只有明确
+拒绝后才回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
+P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队头会被拒绝，而不会改为
+提升下一条；两个命令都不会调用 Stop。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。
@@ -369,6 +474,8 @@ watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-sessi
 `--same-scope` 和 `--scope-id` 语义；`--create-session-per-run`
 只属于 `vibe task` 和 `vibe watch` 这类 stored definitions。需要可管理、可暂停、可查看的
 后台等待任务时，优先使用 `vibe watch`，不要随手起 `nohup`。
+`--timeout` 默认是 21600 秒；显式传入 `--timeout 0` 会关闭单次 cycle 的
+超时限制，任何正数值都会原样持久化。
 
 ### `vibe version`
 
@@ -511,10 +618,11 @@ Web UI (`http://127.0.0.1:5123`) 提供相同的控制功能：
 | 变量 | 说明 |
 |------|------|
 | `OPENCODE_PORT` | 覆盖 OpenCode 服务器端口（默认：4096） |
-| `AVIBE_ALLOW_NATIVE_BACKGROUND_TOOLS` | 设为任意非空值可关闭「把后端自带的、仅存活于会话内的后台工具（后台子 Agent、自调度唤醒、非持久化的会话内 cron、原生 workflow）导向 Harness」的策略——之所以有该策略，是因为 Agent 进程退出后这些工具的结果会丢失。关闭后的实际影响取决于后端：使用较新 SDK 的 Claude 会话会拒绝上述全部四种；SDK 不支持按参数拦截的 Claude 会话只能按工具名匹配，因此仅拒绝 `Workflow`；Codex 与 OpenCode 完全没有拦截，只靠注入的提示词引导。设置该变量只会改变注入提示词中关于「是否拦截」的描述，并静默后台 shell 的提示；提示词仍然会引导 Agent 优先使用 `vibe agent run` / `vibe task add` / `vibe watch add`，这在任何情况下都是推荐做法。 |
 
 ## 另请参阅
 
 - [Slack 配置指南](SLACK_SETUP_ZH.md)
 - [Telegram 配置指南](TELEGRAM_SETUP_ZH.md)
 - [Codex 配置指南](CODEX_SETUP.md)
+
+Memory 画像开关关闭后会保留既有画像和普通搜索，但暂停画像读取及自动画像处理；重新开启即可恢复。

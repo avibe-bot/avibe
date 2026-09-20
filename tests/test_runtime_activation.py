@@ -272,13 +272,110 @@ def test_opencode_binding_resolver_returns_pre_prompt_shared_generation() -> Non
             workdir="/other",
         )
 
-    assert server.retire_activation(True)
+    assert server.retire_activation(True, False)
     replacement = opencode.runtime_activation_identity_for_request(SimpleNamespace())
     late_prompt_commit = registry.commit_if_current(identity, lambda: "accepted")
 
     assert replacement is not None and replacement != identity
     assert late_prompt_commit == RuntimeActivationCommit(admitted=False)
     assert registry.is_current(replacement)
+
+
+def test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner() -> None:
+    """MH-RUNTIME-007: a claimed pre-native Turn cannot block its overlay change."""
+
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+        def runtime_has_active_turns(self) -> bool:
+            return False
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=False,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=False,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert server.retire_activation(False, False)
+    assert not registry.is_current(identity)
+
+
+def test_opencode_overlay_restart_preserves_native_active_owner() -> None:
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+        def runtime_has_active_turns(self) -> bool:
+            return False
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=True,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=True,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert not server.retire_activation(False, False)
+    assert registry.is_current(identity)
+
+
+def test_mh_runtime_007_opencode_overlay_restart_ignores_drained_durable_active_turn() -> None:
+    """MH-RUNTIME-007: a stale durable Turn cannot outvote the server drain."""
+
+    registry = RuntimeActivationRegistry()
+
+    class _Server:
+        base_url = "http://127.0.0.1:4096"
+
+        def set_runtime_activation_retire(self, callback) -> None:
+            self.retire_activation = callback
+
+        def runtime_has_active_turns(self) -> bool:
+            raise AssertionError("explicit drain must not reread PID turn metadata")
+
+    server = _Server()
+    opencode = object.__new__(OpenCodeAgent)
+    opencode.controller = SimpleNamespace(runtime_activation=registry)
+    opencode.runtime_ownership_snapshots = lambda: (
+        SimpleNamespace(
+            blocks_reclamation=True,
+            blocks_transport_replacement=True,
+            blocks_transport_replacement_after_turn_drain=False,
+            has_active_turn_evidence=True,
+        ),
+    )
+
+    identity = opencode._attach_server_activation(server)
+
+    assert identity is not None
+    assert server.retire_activation(False, True)
+    assert not registry.is_current(identity)
 
 
 def test_session_binding_lookup_failure_is_not_resource_absence() -> None:

@@ -12,6 +12,7 @@ from core.delivery_evidence import (
     ACK_EVIDENCE_RECEIPT,
     DeliveryEvidence,
 )
+from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from vibe.message_types import spec_for
 
@@ -128,6 +129,39 @@ def _failure_texts(backend_name: str, diagnostic: Any, display_text: Any) -> tup
     return error, visible
 
 
+def _model_hub_failure_text(
+    controller: Any, context: Any, request: Any, backend: str
+) -> str | None:
+    """Render exact live Hub evidence, never parse a native exception wrapper.
+
+    The registry owns ambiguity, pending-request, and Stop guards. Without that
+    evidence the original backend error remains authoritative; an earlier source
+    outage must not disguise an unrelated native/tool failure.
+    """
+
+    from core.handlers.model_hub.provenance import (
+        TurnOutcomeProjectionInput,
+        render_turn_outcome_copy,
+    )
+
+    gateway = getattr(controller, "model_hub_turn_gateway", None)
+    registry = getattr(gateway, "correlation", None)
+    project = getattr(registry, "terminal_projection", None)
+    if not callable(project):
+        return None
+    for source in (getattr(request, "context", None), context):
+        payload = getattr(source, "platform_specific", None) or {}
+        turn_id = payload.get("turn_token")
+        if not isinstance(turn_id, str) or not turn_id.strip():
+            continue
+        projection = project(turn_id.strip(), backend=backend)
+        if not isinstance(projection, TurnOutcomeProjectionInput):
+            continue
+        language = str(getattr(getattr(controller, "config", None), "language", "en") or "en")
+        return render_turn_outcome_copy(projection, language)
+    return None
+
+
 def backend_failure_notification_output(
     context: Any,
     backend: str,
@@ -164,6 +198,68 @@ def backend_failure_notification_output(
     )
 
 
+def _acknowledges_target(
+    context: Any,
+    evidence: str | None,
+) -> bool:
+    if evidence == ACK_EVIDENCE_RECEIPT:
+        return True
+    target_platform = getattr(routed_delivery_context(context), "platform", None)
+    return (
+        evidence == ACK_EVIDENCE_DELIVERY_ONLY
+        and bool(target_platform)
+        and target_platform != "avibe"
+    )
+
+
+def terminal_backend_failure_output(
+    context: Any,
+    *,
+    request: Any = None,
+    output: MessageOutput | None = None,
+    failure_id: str | None = None,
+    delivery: DeliveryEvidence | None = None,
+) -> MessageOutput:
+    """Attach one monotonic Turn failure-delivery contract to a terminal output.
+
+    Some failures use the ordinary ``notify`` dispatcher while others need a
+    specialized visible path, such as an OAuth recovery button. Both must settle
+    with the same evidence contract or a later Harness Run cannot distinguish an
+    error the user already saw from an error that still needs a fallback notice.
+    """
+
+    terminal = _terminal_output(request, output)
+    if not (_turn_failure_identity(context, request) or _harness_run_identity(context, request)):
+        return terminal
+
+    metadata = dict(terminal.metadata)
+    existing = metadata.get("turn_failure_notification")
+    existing_notification = dict(existing) if isinstance(existing, dict) else {}
+    identity = str(existing_notification.get("failure_id") or "").strip()
+    if not identity:
+        identity = _failure_identity(context, request, failure_id)
+
+    incoming_ack = delivery.ack_evidence if delivery is not None else None
+    existing_ack = str(existing_notification.get("ack_evidence") or "").strip() or None
+    ack_priority = {None: 0, ACK_EVIDENCE_DELIVERY_ONLY: 1, ACK_EVIDENCE_RECEIPT: 2}
+    ack_evidence = (
+        incoming_ack
+        if ack_priority.get(incoming_ack, 1 if incoming_ack else 0)
+        > ack_priority.get(existing_ack, 1 if existing_ack else 0)
+        else existing_ack
+    )
+    existing_notification.update(
+        {
+            "failure_id": identity,
+            "ack_evidence": ack_evidence,
+            "delivered": bool(existing_notification.get("delivered"))
+            or _acknowledges_target(context, ack_evidence),
+        }
+    )
+    metadata["turn_failure_notification"] = existing_notification
+    return replace(terminal, metadata=metadata)
+
+
 async def emit_replayed_backend_failure(
     controller: Any,
     context: Any,
@@ -171,6 +267,7 @@ async def emit_replayed_backend_failure(
     diagnostic: str,
     *,
     failure_id: str,
+    turn_id: str | None = None,
     display_text: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> None:
@@ -209,6 +306,11 @@ async def emit_replayed_backend_failure(
 
     ``delivery`` is filled in with what the notify attempt actually proved; the
     drain acks its durable notice on that evidence, never on a clean return.
+
+    ``turn_id`` is the durable notice's failed Turn, supplied only when the
+    delivery target is that Run's own Session. It is message provenance, never a
+    live context token. Unlinked and cross-Session reports remain informational;
+    all replays stay outside foreground Activity even when Retry is available.
     """
 
     backend_name = str(backend or "backend").strip() or "backend"
@@ -221,6 +323,9 @@ async def emit_replayed_backend_failure(
         backend_name,
         failure_id=failure_id,
         failure_id_authoritative=True,
+        output=MessageOutput(
+            metadata={"turn_id": str(turn_id or "").strip() or None, "replayed": True},
+        ),
     )
     # ``delivery`` is passed ONLY when a caller asked for it: controller-like objects
     # that implement ``emit_agent_message`` without the keyword must keep working.
@@ -258,16 +363,21 @@ async def emit_backend_failure(
     auth recovery supplied that immediate notification.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
-    proved. Harness supplies an evidence object automatically because linked Runs
-    owe a durable fallback; other callers opt in when they need the same proof. A
-    clean return alone is not enough to distinguish a delivered message from a lost
-    one.
+    proved. A durable Turn or legacy Harness Run supplies an evidence object
+    automatically so Runs attached after settlement inherit the same proof. A clean
+    return alone is not enough to distinguish a delivered message from a lost one.
     """
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
+    hub_visible = _model_hub_failure_text(controller, context, request, backend_name)
+    if hub_visible is not None:
+        visible = hub_visible
     terminal = _terminal_output(request, output)
     harness_run_id = _harness_run_identity(context, request)
+    owns_failure_contract = bool(
+        _turn_failure_identity(context, request) or harness_run_id
+    )
     notification = backend_failure_notification_output(
         context,
         backend_name,
@@ -277,46 +387,17 @@ async def emit_backend_failure(
     )
     notification_identity = str(notification.metadata.get("failure_id") or "").strip()
     live_delivery = delivery
-    if harness_run_id and live_delivery is None:
+    if owns_failure_contract and live_delivery is None:
         live_delivery = DeliveryEvidence()
 
-    platform_specific = getattr(context, "platform_specific", None) or {}
-    delivery_override = (
-        platform_specific.get("delivery_override")
-        if isinstance(platform_specific, dict)
-        else None
-    )
-    target_platform = str(
-        (
-            delivery_override.get("platform")
-            if isinstance(delivery_override, dict)
-            else None
-        )
-        or getattr(context, "platform", "")
-        or ""
-    ).strip()
-
-    def notification_acknowledged() -> bool:
-        if live_delivery is None:
-            return False
-        evidence = live_delivery.ack_evidence
-        if evidence == ACK_EVIDENCE_RECEIPT:
-            return True
-        return (
-            evidence == ACK_EVIDENCE_DELIVERY_ONLY
-            and target_platform != "avibe"
-        )
-
     async def settle_terminal_failure() -> None:
-        terminal_output = terminal
-        if harness_run_id:
-            metadata = dict(terminal.metadata)
-            metadata["turn_failure_notification"] = {
-                "failure_id": notification_identity,
-                "ack_evidence": live_delivery.ack_evidence if live_delivery else None,
-                "delivered": notification_acknowledged(),
-            }
-            terminal_output = replace(terminal, metadata=metadata)
+        terminal_output = terminal_backend_failure_output(
+            context,
+            request=request,
+            output=terminal,
+            failure_id=notification_identity,
+            delivery=live_delivery,
+        )
         await controller.emit_agent_message(
             context,
             "result",
@@ -354,9 +435,9 @@ async def emit_backend_failure(
         if handled_auth:
             return True
 
-    # ``delivery`` is passed only when the emitter supports it. Harness creates the
-    # object automatically, but controller-like test and integration doubles with
-    # the legacy signature must keep working.
+    # ``delivery`` is passed only when the emitter supports it. Durable Turn and
+    # Harness contexts create the object automatically, but controller-like test
+    # and integration doubles with the legacy signature must keep working.
     notify_kwargs: dict[str, Any] = {"output": notification}
     if live_delivery is not None:
         emit = controller.emit_agent_message

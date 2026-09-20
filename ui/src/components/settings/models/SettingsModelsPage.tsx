@@ -1,636 +1,1515 @@
-// Model-centric settings surface. The page reads model chains from the server,
-// hosts shared source repair journeys, and serializes Agent writes by backend.
 import * as React from 'react';
-import { CheckCircle2, ListFilter, LoaderCircle, Play, TriangleAlert } from 'lucide-react';
+import { Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
-import { SettingsPageShell } from '../SettingsPageShell';
-import { SourcesCard } from './SourcesCard';
-import { AgentCard } from './AgentCard';
-import { MigrationBanner } from './MigrationBanner';
-import { RecentSwitchesCard } from './RecentSwitchesCard';
-import { SourceOrderDrawer } from './SourceOrderDrawer';
-import { AdvancedRow } from './AdvancedRow';
+import { cn } from '@/lib/utils';
+import { ToggleSwitch } from '../SettingsPrimitives';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
-import { RepairJourney, type RepairTarget } from './RepairJourney';
+import { EnableGatewayDialog } from './EnableGatewayDialog';
+import { GatewayModule } from './GatewayModule';
+import { InstallGatewayDialog } from './InstallGatewayDialog';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { RecentSwitchesCard } from './RecentSwitchesCard';
+import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
+import { routeChainMatchesAttempt } from './routeChainDraft';
+import { SourceDetailPanel } from './SourceDetailPanel';
+import { SourceMutationReport } from './SourceMutationReport';
+import { SourceOrderDrawer } from './SourceOrderDrawer';
+import { SourcesCard } from './SourcesCard';
+import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { focusModelHubProjection } from './modelHubFocus';
+import { buildSupplyRelations } from './supplyRelations';
 import {
-  agentsWithEcho,
-  createLatestAsyncAuthority,
-  createPendingWrites,
-  mapWithConcurrency,
-  sourcesWithEcho,
-} from './asyncLifetime';
+  emptySuspendedRouteAttempts,
+  holdSuspendedRouteAttempt,
+  releaseSuspendedRouteAttempt,
+} from './suspendedRouteAttempts';
+import { SupplyGraph, SupplyLegend } from './SupplyGraph';
+import { UsageTab } from './UsageTab';
+import './modelHubSurface.css';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
+import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
+import { modelsApi, type SourceCreated } from './modelsApi';
+import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import {
-  emptyFeed,
-  feedAfterHeadRead,
-  feedAfterTailRead,
-  feedTailCursor,
-  type EventFeed,
-} from './eventFeed';
-import { AddCustomModelDialog } from './menus/AddCustomModelDialog';
-import { OpenCodeMenuDrawer } from './menus/OpenCodeMenuDrawer';
-import { modelsApi } from './modelsApi';
-import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
-import { connectOutcome, isSupplyWarning } from './sufficiency';
+  readSurfaceLanding,
+  sourceMutationLanding,
+  type PresentSourceMutationCommit,
+  type SourceMutationLanding,
+  type SourceMutationLandingReads,
+  type SourceMutationSettlement,
+  type TrackSourceMutation,
+} from './mutationSettlement';
+import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
-  manualModelSources,
-  modelChainKey,
-  modelChainRequests,
-  modelIssueCount,
-  routableMappings,
-  type ModelChainIndex,
-} from './modelRows';
-import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
-
-const ModelStatusButton: React.FC<{ issueCount: number; active: boolean; onClick: () => void }> = ({
-  issueCount,
-  active,
-  onClick,
-}) => {
-  const { t } = useTranslation();
-  const healthy = issueCount === 0;
-  const Icon = healthy ? CheckCircle2 : TriangleAlert;
-  return (
-    <Button
-      variant={healthy ? 'secondary' : 'outline'}
-      size="sm"
-      className={healthy ? 'h-9 text-mint' : 'h-9 border-destructive/35 text-destructive'}
-      onClick={onClick}
-      aria-pressed={active}
-    >
-      <Icon className="size-3.5" />
-      {healthy ? t('settings.models.status.allHealthy') : t('settings.models.status.needsAction', { count: issueCount })}
-      {!healthy && <ListFilter className="size-3.5" />}
-    </Button>
-  );
-};
-
-export const RuntimeNotStartedAction: React.FC<{
-  starting: boolean;
-  showIdleCopy?: boolean;
-  onStart: () => void;
-}> = ({
-  starting,
-  showIdleCopy = true,
-  onStart,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 text-[13px] text-muted sm:max-w-none">
-      {showIdleCopy && <span>{t('settings.models.runtime.notStarted')}</span>}
-      <Button variant="secondary" size="xs" onClick={onStart} disabled={starting}>
-        {starting ? <LoaderCircle className="animate-spin" /> : <Play />}
-        {t(starting ? 'settings.models.runtime.starting' : 'settings.models.runtime.startNow')}
-      </Button>
-    </div>
-  );
-};
-
-export const ModelsPageActions: React.FC<{
-  runtimeHealth: RuntimeDependency['status']['health'] | null;
-  runtimeRecoveryPending?: boolean;
-  startingRuntime: boolean;
-  issueCount: number;
-  issuesOnly: boolean;
-  onStartRuntime: () => void;
-  onFocusIssues: () => void;
-}> = ({
-  runtimeHealth,
-  runtimeRecoveryPending = false,
-  startingRuntime,
-  issueCount,
-  issuesOnly,
-  onStartRuntime,
-  onFocusIssues,
-}) => {
-  const runtimeNotStarted = runtimeHealth === 'not_started';
-  const runtimeStartable = runtimeRecoveryPending
-    || runtimeNotStarted
-    || runtimeHealth === 'not_installed'
-    || runtimeHealth === 'down'
-    || runtimeHealth === 'degraded';
-  if (!runtimeStartable) {
-    return <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />;
-  }
-  return (
-    <div className="flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 sm:max-w-none">
-      {issueCount > 0 && (
-        <ModelStatusButton issueCount={issueCount} active={issuesOnly} onClick={onFocusIssues} />
-      )}
-      <RuntimeNotStartedAction
-        starting={startingRuntime}
-        showIdleCopy={runtimeNotStarted}
-        onStart={onStartRuntime}
-      />
-    </div>
-  );
-};
+  beginRegionRead,
+  failRegionRead,
+  foldRegionRead,
+  degradedRegion,
+  loadingRegion,
+  readRegion,
+  readyRegion,
+  settleRegionRead,
+  unreadRegion,
+  type RegionRead,
+} from './regionRead';
+import { freshRuntimeProjection, pollRuntimeStatus, runtimeCanAttemptInstall, runtimeIsRunning, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
+import { useSourceMutationReport } from './useSourceMutationReport';
+import { handOffProviderTab } from './providerTab';
+import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
+import { VendorGlyph } from './vendorGlyph';
+import { backendVisual } from './vendorMeta';
+import { USAGE_DEFAULT_WINDOW_DAYS, type AgentBackend, type AgentSupply, type ResolutionEvent, type RuntimeDependency, type Source, type UsageSummary } from './types';
+import type { UsageWindowOption } from './usageProjection';
 
 const CHAIN_READ_CONCURRENCY = 6;
+const EVENT_PAGE = 20;
+// Frame 13's rows, derived from the one subscription-vendor vocabulary rather
+// than restated here. `subscriptionOptions.ts` owns which vendors are offered and
+// what custody each has, so this menu cannot drift out of the same order the
+// dialog's chooser reads.
+const SUBSCRIPTION_PICKER_OPTIONS = SUBSCRIPTION_MENU_ROWS;
+type SubscriptionPickerVendor = (typeof SUBSCRIPTION_PICKER_OPTIONS)[number]['vendor'];
 
-const readModelChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => {
-  const reads = await mapWithConcurrency(
-    modelChainRequests(agents),
+const readChainRequests = async (requests: readonly ModelChainRequest[]): Promise<ModelChainIndex> => Object.fromEntries(
+  await mapWithConcurrency(
+    requests,
     CHAIN_READ_CONCURRENCY,
     async ({ backend, modelId }) => {
       const key = modelChainKey(backend, modelId);
       try {
-        return [key, { kind: 'ready' as const, chain: await modelsApi.getAgentChain(backend, modelId) }] as const;
+        return [key, readyRegion(await modelsApi.getAgentChain(backend, modelId))] as const;
       } catch {
-        return [key, { kind: 'error' as const }] as const;
+        return [key, unreadRegion()] as const;
       }
     },
+  ),
+);
+
+const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => {
+  const requests = modelChainRequests([agent]);
+  try {
+    const chains = new Map(
+      (await modelsApi.getAgentChains(agent.backend)).map((chain) => [chain.model_id, chain]),
+    );
+    return Object.fromEntries(requests.map(({ backend, modelId }) => {
+      const chain = chains.get(modelId);
+      return [
+        modelChainKey(backend, modelId),
+        chain?.backend === backend ? readyRegion(chain) : unreadRegion(),
+      ];
+    }));
+  } catch {
+    return Object.fromEntries(requests.map(({ backend, modelId }) => [
+      modelChainKey(backend, modelId),
+      unreadRegion(),
+    ]));
+  }
+};
+
+const readExactAgentChain = async (
+  agent: AgentSupply,
+  modelId: string,
+): Promise<ModelChainIndex> => ({
+  [modelChainKey(agent.backend, modelId)]: readyRegion(
+    await modelsApi.getAgentChain(agent.backend, modelId),
+  ),
+});
+
+const settleAgentChainIndex = (
+  previous: ModelChainIndex,
+  agent: AgentSupply,
+  incoming: ModelChainIndex,
+): ModelChainIndex => {
+  const prefix = `${agent.backend}\u0000`;
+  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
+  for (const [key, read] of Object.entries(incoming)) {
+    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
+  }
+  return next;
+};
+
+const settleExactAgentChain = (
+  previous: ModelChainIndex,
+  incoming: ModelChainIndex,
+): ModelChainIndex => {
+  const next = { ...previous };
+  for (const [key, read] of Object.entries(incoming)) {
+    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
+  }
+  return next;
+};
+
+const beginAgentChainIndex = (
+  previous: ModelChainIndex,
+  agent: AgentSupply,
+): ModelChainIndex => {
+  const prefix = `${agent.backend}\u0000`;
+  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
+  for (const { backend, modelId } of modelChainRequests([agent])) {
+    const key = modelChainKey(backend, modelId);
+    next[key] = beginRegionRead(previous[key] ?? loadingRegion());
+  }
+  return next;
+};
+
+type ChainAuthorityLanding =
+  | { scope: 'backend'; agent: AgentSupply; chains: ModelChainIndex }
+  | { scope: 'models'; chains: ModelChainIndex };
+
+type AuthorizedSurfaceLanding = {
+  landing: SourceMutationLandingReads;
+  sourceSnapshot: number;
+};
+
+export const RuntimePill: React.FC<{
+  read: RegionRead<RuntimeDependency>;
+  starting: boolean;
+  stopping?: boolean;
+  directCount?: number;
+}> = ({ read, starting, stopping = false, directCount }) => {
+  const { t } = useTranslation();
+  const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
+    loading: () => null,
+    ready: (runtime) => ({ runtime, authoritative: true }),
+    unread: () => null,
+    degraded: (runtime) => ({ runtime, authoritative: false }),
+  });
+  if (!projection) {
+    const key = read.kind === 'loading' ? 'starting' : 'unread';
+    return <span className={cn('model-hub-runtime-pill', read.kind !== 'loading' && 'model-hub-runtime-pill--error')}><span className="model-hub-runtime-dot" />{read.kind === 'loading' && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</span>;
+  }
+  const { runtime, authoritative } = projection;
+  const health = runtime.status.health;
+  const unread = read.kind === 'degraded' && read.cause === 'read_failed';
+  const canInstall = health === 'not_installed' && runtimeCanAttemptInstall(runtime);
+  const allDirect = authoritative && !starting && !stopping && health === 'ok' && directCount !== undefined && directCount > 0;
+  const key = unread
+    ? 'unread'
+    : stopping
+    ? 'stopping'
+    : starting
+    ? 'starting'
+    : health === 'installing'
+      ? 'starting'
+    : runtime.enabled && !runtimeIsRunning(runtime)
+      ? 'unavailable'
+    : health === 'ok'
+      ? allDirect ? 'allDirect' : 'running'
+        : health === 'degraded'
+          ? 'degraded'
+        : health === 'down'
+          ? 'stopped'
+          : health === 'not_started'
+            ? 'notStarted'
+            : canInstall
+              ? 'notInstalled'
+              : 'unsupported';
+  const className = cn(
+    'model-hub-runtime-pill',
+    (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
+    allDirect && 'model-hub-runtime-pill--direct',
   );
-  return Object.fromEntries(reads);
+  return <span className={className}><span className="model-hub-runtime-dot" />{(starting || stopping || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</span>;
 };
 
-const readModelSurface = async (): Promise<[Source[], AgentSupply[], ModelChainIndex]> => {
-  const [sources, agents] = await Promise.all([modelsApi.listSources(), modelsApi.listAgents()]);
-  return [sources, agents, await readModelChains(agents)];
+const RuntimeClosedState: React.FC<{
+  read: RegionRead<RuntimeDependency>;
+  runtime: RuntimeDependency | null;
+  starting: boolean;
+  stopping: boolean;
+}> = ({ read, runtime, starting, stopping }) => {
+  const { t } = useTranslation();
+  const health = runtime?.status.health ?? null;
+  const key = stopping
+    ? 'stopping'
+    : starting
+      ? 'starting'
+      : read.kind === 'unread'
+        ? 'unread'
+        : health === 'installing'
+          ? 'installing'
+          : runtime?.enabled && health !== null && !runtimeIsRunning(runtime)
+            ? 'enabledDown'
+          : health === 'not_installed' && runtime?.manifest.resolution === 'unsupported'
+            ? 'unsupported'
+            : health === 'not_installed'
+              ? 'notInstalled'
+              : health === 'down'
+                ? 'down'
+                : 'off';
+  const busy = starting || stopping || health === 'installing';
+  return (
+    <section className="model-hub-runtime-closed" aria-live="polite">
+      <span className="model-hub-runtime-closed-icon" aria-hidden="true">
+        {busy ? <LoaderCircle className="animate-spin" /> : <Power />}
+      </span>
+      <h2>{t(`settings.models.shell.closed.${key}.title`)}</h2>
+      <p>{t(`settings.models.shell.closed.${key}.body`)}</p>
+    </section>
+  );
 };
 
-type ModelSurfaceLanding =
-  | {
-      kind: 'surface';
-      sources: Source[];
-      agents: AgentSupply[];
-      events: ResolutionEvent[] | null;
-      chains: ModelChainIndex;
-    }
-  | { kind: 'source'; source: Source };
+const ModelHubShell: React.FC<{ actions?: React.ReactNode; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, children, rootRef }) => {
+  const { t } = useTranslation();
+  return (
+    <div ref={rootRef} className="model-hub-shell">
+      <header className="model-hub-shell-head">
+        <span className="flex items-center gap-[9px]">
+          <h1>{t('settings.models.shell.title')}</h1>
+          <ModelHubInfoHint
+            label={t('settings.models.shell.modelsInfo.label')}
+            content={t('settings.models.shell.modelsInfo.body')}
+            className="model-hub-shell-info"
+          />
+        </span>
+        {actions}
+      </header>
+      {children}
+    </div>
+  );
+};
 
-// 最近切换 is a cursor feed, not a fixed window: `/events` pages with `before`,
-// so 「查看全部」 over one fetched page could never reach row 21. One page size for
-// the first read and every 加载更早 read after it.
-const EVENT_PAGE = 20;
+type HubTab = 'sources' | 'usage' | 'logs';
+
+const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
+  const { t } = useTranslation();
+  return (
+    <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
+      {(['sources', 'usage', 'logs'] as const).map((id) => (
+        <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
+          {id === 'sources' ? <Route className="size-3.5" /> : id === 'usage' ? <Gauge className="size-3.5" /> : <ScrollText className="size-3.5" />}
+          {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : id}`)}
+        </button>
+      ))}
+    </div>
+  );
+};
+
+const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSupply) => void }> = ({ agents, onSwitch }) => {
+  const { t } = useTranslation();
+  if (agents.length === 0) {
+    return <section className="model-hub-direct-empty"><h2>{t('settings.models.direct.empty.title')}</h2><p>{t('settings.models.direct.empty.body')}</p><span>{t('settings.models.direct.empty.install')}</span></section>;
+  }
+  return (
+    <div className="model-hub-direct">
+      <div className="model-hub-direct-grid grid">
+        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+          <div className="model-hub-direct-head flex items-center gap-3 border-b border-border px-5 py-3">
+            <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
+          </div>
+          <div className="model-hub-direct-content flex flex-col">
+            {agents.map((agent) => {
+              const { Icon } = backendVisual(agent.backend);
+              return (
+                <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap">
+                  <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
+                  <span className="model-hub-direct-backend-copy">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
+                      <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
+                    </span>
+                    <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>
+                  </span>
+                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)}>{t('settings.models.direct.action.switchToGateway')}</Button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+        <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
+          <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
+          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex items-start gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span className="model-hub-direct-benefit-copy"><span className="model-hub-direct-benefit-title-row flex items-center gap-1.5"><span className="text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span></span><span className="model-hub-direct-benefit-detail">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
+        </section>
+      </div>
+      <p className="model-hub-direct-note flex items-center justify-center border text-center text-[11.5px]">{t('settings.models.direct.note.perBackend')}</p>
+    </div>
+  );
+};
+
+const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
+  const { t } = useTranslation();
+  if (count === 0) return null;
+  return <span className="model-hub-takeover-pill"><span className="model-hub-runtime-dot" />{t('settings.models.takeover.pill', { count })}</span>;
+};
 
 export const SettingsModelsPage: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-
-  const [sources, setSources] = React.useState<Source[]>([]);
-  const [agents, setAgents] = React.useState<AgentSupply[]>([]);
-  const [chains, setChains] = React.useState<ModelChainIndex>({});
-  // Rows and end-of-feed as ONE value: every read moves both, and the transition
-  // that moved only the rows is what made 加载更早 lie. `EventFeed` owns the rules.
-  const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
+  /** The catalog's 「Add models」 action reads the candidates endpoint, which
+   *  names Sources — so it is offered on the same capability that lets a role
+   *  administer this instance's Agents, and read here rather than in the dialog
+   *  because the page is where this surface's authorization already lands. */
+  const { capabilities } = useInstanceAuthorization();
+  const [sourcesRead, setSourcesRead] = React.useState<RegionRead<Source[]>>(loadingRegion);
+  const [supplyRead, setSupplyRead] = React.useState<RegionRead<AgentSupply[]>>(loadingRegion);
+  const [chainsRead, setChainsRead] = React.useState<RegionRead<ModelChainIndex>>(loadingRegion);
+  const [runtimeRead, setRuntimeRead] = React.useState<RegionRead<RuntimeDependency>>(loadingRegion);
+  const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
-  const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
+  const [tab, setTab] = React.useState<HubTab>('sources');
+  const [usageRead, setUsageRead] = React.useState<RegionRead<UsageSummary>>(loadingRegion);
+  const [usageWindow, setUsageWindow] = React.useState<UsageWindowOption>(USAGE_DEFAULT_WINDOW_DAYS);
   const [startingRuntime, setStartingRuntime] = React.useState(false);
+  const [stoppingRuntime, setStoppingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
-  const [loading, setLoading] = React.useState(true);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
-  const [connecting, setConnecting] = React.useState<string | null>(null);
-  const [refreshingSourceId, setRefreshingSourceId] = React.useState<string | null>(null);
-  const [issuesOnly, setIssuesOnly] = React.useState(false);
-  const agentSectionRef = React.useRef<HTMLDivElement>(null);
-
+  const [installOpen, setInstallOpen] = React.useState(false);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
-  const [oauthVendor, setOauthVendor] = React.useState<string | null>(null);
-  // The row + remedy a repair journey is running for. Holds the SOURCE OBJECT, not
-  // its id, on purpose: a re-auth's first act is to change that row, so a live
-  // lookup would rewrite the dialog's own subject mid-flow (RepairJourney.tsx).
-  const [repairTarget, setRepairTarget] = React.useState<RepairTarget | null>(null);
-  // Which backend's 模型菜单 / 来源顺序 drawer is open. Tracked by backend id (not
-  // the agent object) so a background refresh keeps feeding the drawer the
-  // freshest agent.
-  const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
+  const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
+  const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
+  // The source a re-login is FOR, held as the snapshot `OAuthConnectDialog`
+  // documents its `reauth` prop to be: a native re-auth writes 需处理 onto the row
+  // before the login starts, so re-reading the live row mid-flow would rewrite
+  // the dialog's own subject. Separate from `subscriptionVendor` because the two
+  // journeys start from different surfaces — this one from the source detail,
+  // which replaces the overview that holds 添加订阅 — and only the create path
+  // owns the success-landing timer and reconcile flag below.
+  const [reauthSource, setReauthSource] = React.useState<Source | null>(null);
+  const subscriptionTriggerRef = React.useRef<HTMLButtonElement>(null);
+  const apiKeyTriggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const subscriptionAnchorRef = subscriptionTriggerRef as React.RefObject<HTMLButtonElement>;
+  const subscriptionPickerRefs = React.useRef<Partial<Record<SubscriptionPickerVendor, HTMLButtonElement | null>>>({});
+  const subscriptionPickerHandoffRef = React.useRef(false);
+  const subscriptionCloseTimer = React.useRef<number | null>(null);
+  // A successful OAuth terminal reports the same moved rows twice: first with
+  // the created source, then as the generic stale-row notification. The source
+  // callback owns the one full reconciliation; consume the trailing notification
+  // so it cannot launch a second refresh that overwrites a successful landing.
+  const subscriptionSuccessReconcileRef = React.useRef(false);
+  const sourceDetailHeadingRef = React.useRef<HTMLHeadingElement>(null);
+  const sourceDetailReturnFocusRef = React.useRef<(() => HTMLElement | null) | null>(null);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
-  const [customModelRequest, setCustomModelRequest] = React.useState<{
-    sourceId?: string;
-    backend?: AgentBackend;
-  } | null>(null);
-
-  // Which backends have a 来源顺序 write outstanding. Held HERE and not in the
-  // drawer that issues it, because the drawer does not outlive its own write:
-  // 完成, the close X, Escape and the overlay all stay live while the PUT and its
-  // read-back are in flight, and closing unmounts the drawer, so a flag inside it
-  // is re-created reading 「idle」 by the reopen — which is exactly when the
-  // hand-off below must still be shut. See `createPendingWrites`.
+  const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
+  const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
+  const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
+  const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
+  const [routeCommitBackend, setRouteCommitBackend] = React.useState<AgentBackend | null>(null);
+  const [suspendedRouteAttempts, setSuspendedRouteAttempts] = React.useState(
+    emptySuspendedRouteAttempts,
+  );
+  const suspendedHubFrontiersRef = React.useRef(new Map<AgentBackend, AgentSupply>());
+  const suspendedSourceBaselinesRef = React.useRef(
+    new Map<AgentBackend, RegionRead<Source[]>>(),
+  );
+  const suspendedChainBaselinesRef = React.useRef(
+    new Map<AgentBackend, RegionRead<ModelChainIndex>>(),
+  );
+  const [selectedSourceId, setSelectedSourceId] = React.useState<string | null>(null);
   const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
-  const agentsRef = React.useRef(agents);
-  React.useEffect(() => {
-    agentsRef.current = agents;
-  }, [agents]);
-
-  // Guards event-handler async writes (refresh / connect) from landing after
-  // the page unmounts — the whole class of stale-async writes the review flagged.
-  //
-  // The effect must re-arm the flag, not only clear it: an unmount-only cleanup
-  // makes the guard one-way, and StrictMode's mount → cleanup → mount leaves it
-  // false on a page that is very much alive. Every guarded write is then dropped
-  // in silence — 查看更多 sticks on 加载中… forever because the `finally` that
-  // clears it is guarded too. Found by clicking it in dev.
+  const [sourceIntentAuthority] = React.useState(createIntentAuthority);
+  const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
+  const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
+  const [presenceRefreshing, setPresenceRefreshing] = React.useState(false);
+  const sourceMutationReport = useSourceMutationReport();
+  const overviewRef = React.useRef<HTMLDivElement>(null);
+  const pageRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
+  const [sourceEntityAuthority] = React.useState(() => createLatestEntityAuthorityByKey(
+    (source: Source) => source.id,
+    (inventory) => {
+      if (aliveRef.current) setSourcesRead(readyRegion(inventory));
+    },
+  ));
+  const [sourceWriteRegistry] = React.useState(() => createPendingWrites(() => {}));
   React.useEffect(() => {
     aliveRef.current = true;
-    return () => {
-      aliveRef.current = false;
-    };
+    return () => { aliveRef.current = false; };
   }, []);
 
-  const runtimeHealth = runtime?.status.health ?? null;
+  const sources = foldRegionRead<Source[], Source[]>(sourcesRead, {
+    loading: () => [],
+    ready: (data) => data,
+    unread: () => [],
+    degraded: (staleData) => staleData,
+  });
+  const agents = foldRegionRead<AgentSupply[], AgentSupply[]>(supplyRead, {
+    loading: () => [],
+    ready: (data) => data,
+    unread: () => [],
+    degraded: (staleData) => staleData,
+  });
+  const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(chainsRead, {
+    loading: () => ({}),
+    ready: (data) => data,
+    unread: () => ({}),
+    degraded: () => ({}),
+  });
+  const runtime = freshRuntimeProjection(runtimeRead);
+  const retainedRuntime = foldRegionRead<RuntimeDependency, RuntimeDependency | null>(runtimeRead, {
+    loading: () => null,
+    ready: (data) => data,
+    unread: () => null,
+    degraded: (staleData) => staleData,
+  });
+  const feed = foldRegionRead<EventFeed, EventFeed>(eventsRead, {
+    loading: () => emptyFeed,
+    ready: (data) => data,
+    unread: () => emptyFeed,
+    degraded: (staleData) => staleData,
+  });
+  const runtimeHealth = retainedRuntime?.status.health ?? null;
+  const runtimeRunning = retainedRuntime !== null
+    && runtimeIsRunning(retainedRuntime)
+    && runtimeRead.kind !== 'unread';
+  const runtimeEnabled = retainedRuntime !== null
+    && (retainedRuntime.enabled ?? runtimeIsRunning(retainedRuntime))
+    && runtimeRead.kind !== 'unread';
+  const runtimeConfigurationVisible = (
+    runtimeRunning || (runtimeEnabled && runtimeHealth !== 'installing')
+  ) && !stoppingRuntime;
   React.useEffect(() => {
-    const runtimeCanRecover = runtimeRecoveryPending
+    const runtimeCanRecover = runtimeRead.kind === 'unread'
+      || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
+      || runtimeRecoveryPending
       || runtimeHealth === 'not_started'
       || runtimeHealth === 'not_installed'
+      || runtimeHealth === 'installing'
       || runtimeHealth === 'down'
       || runtimeHealth === 'degraded';
     if (!runtimeCanRecover || startingRuntime) return undefined;
     return pollRuntimeStatus(modelsApi, (nextRuntime) => {
       if (!aliveRef.current) return;
-      setRuntime(nextRuntime);
+      setRuntimeRead(readyRegion(nextRuntime));
       setRuntimeRecoveryPending(false);
     });
-  }, [runtimeHealth, runtimeRecoveryPending, startingRuntime]);
+  }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
-  // 最近切换 is re-read here with the rows, because the writes this refresh exists
-  // for are the writes that FILE events: a failing 试跑 cools its head down through
-  // `_cooldown`, which records the `cooldown` row that explains the state change
-  // the user is about to see. Fetched only at mount, the row changed and the line
-  // explaining it appeared nowhere until the page was reloaded — the explanation
-  // arriving later than the thing it explains.
-  // It rides along as an ANCILLARY leg, though — `null` when that one read failed.
-  // The feed explains the rows; it is not the rows. Letting it reject the whole
-  // `Promise.all` would mean a slow or broken `/events` holds back the repaired
-  // source state and the ● 当前 the user just changed, which is the opposite of
-  // this refresh's job. A feed left one write behind is not wrong, only not newer,
-  // and the next mutation or reload catches it up.
-  const [refreshAuthority] = React.useState(() =>
-    createLatestAsyncAuthority<ModelSurfaceLanding>(
-      (landing) => {
-        if (!aliveRef.current) return;
-        if (landing.kind === 'source') {
-          setSources((previous) => sourcesWithEcho(previous, landing.source));
-          return;
-        }
-        const { sources: nextSources, agents: nextAgents, events: headEvents, chains: nextChains } = landing;
-        setSources(nextSources);
-        setAgents(nextAgents);
-        agentsRef.current = nextAgents;
-        setChains(nextChains);
-        // Merged, not replaced: 加载更早 pages tail-ward, and a head re-read must
-        // not silently drop the rows it never asked for. See `feedAfterHeadRead`
-        // for the one case merging is wrong, and for what that costs 加载更早.
-        if (headEvents) setFeed((prev) => feedAfterHeadRead(prev, headEvents));
-      },
-    ),
-  );
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, ChainAuthorityLanding>((_backend, incoming) => {
+    if (!aliveRef.current) return;
+    setChainsRead((previous) => {
+      const current = foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      });
+      return readyRegion(incoming.scope === 'backend'
+        ? settleAgentChainIndex(current, incoming.agent, incoming.chains)
+        : settleExactAgentChain(current, incoming.chains));
+    });
+  }));
+
+  const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
+    setChainsRead((previous) => readyRegion(beginAgentChainIndex(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+      loading: () => ({}),
+      ready: (data) => data,
+      unread: () => ({}),
+      degraded: (staleData) => staleData,
+    }), agent)));
+    await chainReadAuthority.run(agent.backend, async () => ({
+      agent,
+      chains: await readAgentChains(agent),
+      scope: 'backend' as const,
+    }));
+  }, [chainReadAuthority]);
+
+  const refreshAffectedChains = React.useCallback(async (
+    requests: readonly ModelChainRequest[],
+  ): Promise<ModelChainIndex> => {
+    const byBackend = new Map<AgentBackend, ModelChainRequest[]>();
+    for (const request of requests) {
+      const backendRequests = byBackend.get(request.backend) ?? [];
+      backendRequests.push(request);
+      byBackend.set(request.backend, backendRequests);
+    }
+    const landings = await Promise.all([...byBackend].map(async ([backend, backendRequests]) => {
+      let incoming: ModelChainIndex = {};
+      const result = await chainReadAuthority.run(backend, async () => {
+        incoming = await readChainRequests(backendRequests);
+        return { scope: 'models' as const, chains: incoming };
+      });
+      return result === 'landed'
+        ? incoming
+        : Object.fromEntries(backendRequests.map(({ backend: requestBackend, modelId }) => [
+            modelChainKey(requestBackend, modelId),
+            unreadRegion(),
+          ]));
+    }));
+    return Object.assign({}, ...landings);
+  }, [chainReadAuthority]);
+
+  const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
+    const hubAgents = agentRows.filter((agent) => agent.mode === 'hub');
+    const suspendedBackends = new Set(suspendedRouteAttempts.keys());
+    const probeAgents = hubAgents.filter((agent) =>
+      !suspendedBackends.has(agent.backend)
+      && agent.backend !== routeCommitBackend);
+    const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
+    chainReadAuthority.invalidateExcept(activeBackends);
+    setChainsRead((previous) => readyRegion(Object.fromEntries(
+      Object.entries(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      })).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
+    )));
+    for (const agent of probeAgents) void refreshAgentChains(agent);
+  }, [chainReadAuthority, refreshAgentChains, routeCommitBackend, suspendedRouteAttempts]);
 
   React.useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    Promise.all([readModelSurface(), modelsApi.listEvents(EVENT_PAGE), modelsApi.getRuntimeStatus()])
-      .then(([[s, a, nextChains], e, r]) => {
-        if (cancelled) return;
-        setSources(s);
-        setAgents(a);
-        agentsRef.current = a;
-        setChains(nextChains);
-        // The first page is a tail read as much as a head one: it reaches the end
-        // of the feed exactly when it comes back short, and its cursor is `null`
-        // because it asked for the top. Applied to `prev` rather than to
-        // `emptyFeed` so the same 「still the feed I asked about?」 rule covers it.
-        setFeed((prev) => feedAfterTailRead(prev, e, EVENT_PAGE, null));
-        setRuntime(r);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setLoadError(err?.code || err?.message || 'load_failed');
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const refreshSourcesAgents = React.useCallback(async () => {
-    try {
-      await refreshAuthority.run(async () => {
-        const [[nextSources, nextAgents, nextChains], headEvents] = await Promise.all([
-          readModelSurface(),
-          modelsApi.listEvents(EVENT_PAGE).catch(() => null),
-        ]);
-        return {
-          kind: 'surface' as const,
-          sources: nextSources,
-          agents: nextAgents,
-          events: headEvents,
-          chains: nextChains,
-        };
-      });
-    } catch {
-      // A mutation may have succeeded server-side but the re-read failed — tell
-      // the user the view might be stale rather than silently swallowing it.
-      if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
+    const freshSupply = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
+    if (freshSupply) {
+      refreshAllAgentChains(freshSupply);
+      setSwitchFailures((previous) => new Set(
+        [...previous].filter((backend) => freshSupply.some((agent) => agent.backend === backend && agent.mode === 'hub')),
+      ));
     }
-  }, [refreshAuthority, showToast, t]);
+  }, [refreshAllAgentChains, supplyRead]);
+
+  const [eventReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<ResolutionEvent[]>>((incoming) => {
+    if (!aliveRef.current) return;
+    setEventsRead((previous) => {
+      if (incoming.kind !== 'ready') return failRegionRead(previous);
+      const previousFeed = foldRegionRead<EventFeed, EventFeed | undefined>(previous, {
+        loading: () => undefined,
+        ready: (data) => data,
+        unread: () => undefined,
+        degraded: (staleData) => staleData,
+      });
+      const freshEvents = foldRegionRead<ResolutionEvent[], ResolutionEvent[] | null>(incoming, {
+        loading: () => null,
+        ready: (data) => data,
+        unread: () => null,
+        degraded: () => null,
+      });
+      if (!freshEvents) return failRegionRead(previous);
+      return readyRegion(previousFeed
+        ? feedAfterHeadRead(previousFeed, freshEvents)
+        : feedAfterTailRead(emptyFeed, freshEvents, EVENT_PAGE, null));
+    });
+  }));
+
+  const [usageReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<UsageSummary>>((incoming) => {
+    if (!aliveRef.current) return;
+    setUsageRead((previous) => settleRegionRead(previous, incoming));
+  }));
+
+  const refreshUsage = React.useCallback(async (days: UsageWindowOption) => {
+    setUsageRead(beginRegionRead);
+    await usageReadAuthority.run(() => readRegion(() => modelsApi.getUsageSummary(days)));
+  }, [usageReadAuthority]);
 
   /**
-   * The one way an Agent write reports itself: hand back the row the server
-   * echoed, then re-read everything else the write moved.
+   * The usage report is read lazily, when the tab is opened.
    *
-   * Taking the echo is not an optimization of the re-read, it is the part that
-   * cannot fail. `refreshSourcesAgents` swallows a failed read into a toast and
-   * `refreshAuthority` drops a superseded one, so `await`ing it proves an attempt
-   * finished and never that the page caught up — and the drawers seed, diff and
-   * gate off these rows. `agentsWithEcho` explains why the echo is allowed to
-   * speak for one; the re-read still runs because the echo is one Agent and the
-   * write moved source rows, the other Agents and the feed too.
+   * It is deliberately NOT a first-paint region (see `firstPaintRegions.ts`,
+   * whose whitelist is a policy list of exactly the three reads the landing
+   * cannot be drawn without): a report nobody is looking at must not delay the
+   * surface that decides routing. Re-reading on every open is the point — the
+   * figure is live, and `beginRegionRead` keeps the previous one on screen while
+   * the new one lands, so returning to the tab never flashes empty. A window
+   * change is the same read with a different span, which is why one effect owns
+   * both.
    */
-  const agentSaved = React.useCallback(
-    (echoed: AgentSupply) => {
-      setAgents((prev) => {
-        const next = agentsWithEcho(prev, echoed);
-        agentsRef.current = next;
-        return next;
-      });
-      return refreshSourcesAgents();
-    },
-    [refreshSourcesAgents],
-  );
+  React.useEffect(() => {
+    if (tab !== 'usage') return;
+    void refreshUsage(usageWindow);
+  }, [tab, usageWindow, refreshUsage]);
 
-  const setModelRoute = React.useCallback(
-    (
-      backend: AgentBackend,
-      modelId: string,
-      targetModelId: string | null,
-      onCommitted: (before: AgentSupply, after: AgentSupply) => void,
-    ) => {
-      void agentWriteRegistry.track(backend, async () => {
-        const current = agentsRef.current.find((agent) => agent.backend === backend);
-        if (!current || current.menu_kind !== 'fixed') return;
-        const byModel = new Map(
-          routableMappings(current, sources).map((mapping) => [mapping.builtin_id, mapping]),
-        );
-        if (targetModelId) {
-          byModel.set(modelId, { builtin_id: modelId, target_model_id: targetModelId, enabled: true });
-        } else {
-          byModel.delete(modelId);
+  const retryUsage = React.useCallback(async () => {
+    await refreshUsage(usageWindow);
+  }, [refreshUsage, usageWindow]);
+
+  const refreshEventHead = React.useCallback(async () => {
+    setEventsRead(beginRegionRead);
+    await eventReadAuthority.run(async () => {
+      try {
+        return readyRegion(await modelsApi.listEvents(EVENT_PAGE));
+      } catch {
+        return unreadRegion<ResolutionEvent[]>();
+      }
+    });
+  }, [eventReadAuthority]);
+
+  React.useEffect(() => {
+    if (tab !== 'logs') return;
+    void refreshEventHead();
+  }, [refreshEventHead, tab]);
+
+  const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
+    if (!aliveRef.current) return;
+    const freshSources = foldRegionRead<Source[], Source[] | null>(landing.sources, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
+    if (freshSources) sourceEntityAuthority.settleSnapshot(sourceSnapshot, freshSources);
+    else setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
+    setSupplyRead((previous) => settleRegionRead(previous, landing.supply));
+    setRuntimeRead((previous) => {
+      const next = settleRegionRead(previous, landing.runtime);
+      if (next.kind === 'ready') setRuntimeRecoveryPending(false);
+      return next;
+    });
+    if (landing.supply.kind !== 'ready') setChainsRead(failRegionRead);
+  }));
+
+  const refresh = React.useCallback(async (
+    affectedChains: ModelChainRequest[] = [],
+  ): Promise<SourceMutationLanding> => {
+    const outcome: { landing: SourceMutationLandingReads | null } = { landing: null };
+    const result = await refreshAuthority.run(async () => {
+      const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
+      outcome.landing = await readSurfaceLanding({
+        sources: sourceCollectionReads.readValue,
+        supply: agentCollectionReads.readValue,
+        runtime: () => modelsApi.getRuntimeStatus(),
+        chains: refreshAffectedChains,
+      }, affectedChains);
+      return { landing: outcome.landing, sourceSnapshot };
+    });
+    const landing = sourceMutationLanding(
+      outcome.landing,
+      affectedChains,
+      aliveRef.current && result === 'landed',
+    );
+    if (aliveRef.current && result === 'landed' && landing.verdict === 'degraded') {
+      showToast(t('settings.models.toast.refreshFailed') as string, 'error');
+    }
+    return landing;
+  }, [agentCollectionReads, refreshAffectedChains, refreshAuthority, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
+
+  const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
+    let result!: T;
+    await sourceWriteRegistry.track(sourceId, async () => {
+      const current = sourceEntityAuthority.current(sourceId);
+      if (!current) throw new Error(`Source ${sourceId} is no longer available`);
+      const generation = sourceEntityAuthority.begin(sourceId);
+      let settled = false;
+      const finish = async (
+        apply: () => void,
+        affectedChains: ModelChainRequest[] = [],
+      ): Promise<SourceMutationLanding> => {
+        if (!settled) {
+          settled = true;
+          apply();
         }
+        return refresh(affectedChains);
+      };
+      const settlement: SourceMutationSettlement = {
+        source: async (echoed, scope) => finish(
+          () => { sourceEntityAuthority.settle(generation, echoed); },
+          scope?.affectedChains,
+        ),
+        gone: async (goneId, inventory, scope) => finish(() => {
+          if (inventory) {
+            sourceEntityAuthority.settleSnapshotEntries(
+              inventory.snapshot,
+              inventory.sources.filter((source) => source.id !== goneId),
+            );
+          }
+          if (goneId === sourceId) sourceEntityAuthority.settleRemoval(generation);
+        }, scope?.affectedChains),
+        unread: async (scope) => finish(
+          () => { sourceEntityAuthority.abandon(generation); },
+          scope?.affectedChains,
+        ),
+        release: () => {
+          if (settled) return;
+          settled = true;
+          sourceEntityAuthority.abandon(generation);
+        },
+        readInventory: async () => {
+          const snapshot = sourceEntityAuthority.beginSnapshot();
+          return { snapshot, sources: await sourceCollectionReads.readValue() };
+        },
+      };
+      try {
+        result = await work(current, settlement);
+      } finally {
+        settlement.release();
+      }
+    });
+    return result;
+  }, [refresh, sourceCollectionReads, sourceEntityAuthority, sourceWriteRegistry]);
+
+  const refreshAgentPresence = React.useCallback(async () => {
+    setPresenceRefreshing(true);
+    try {
+      const result = await agentCollectionReads.refresh();
+      if (!aliveRef.current || result.kind === 'stale') return;
+      setSupplyRead(readyRegion(result.value));
+    } finally {
+      if (aliveRef.current) setPresenceRefreshing(false);
+    }
+  }, [agentCollectionReads]);
+
+  React.useEffect(() => {
+    let current = true;
+    void refresh().then(() => {
+      if (!current) return;
+      void refreshAgentPresence().catch(() => {
+        // The fast snapshot remains authoritative if optional deep discovery fails.
+      });
+    });
+    return () => { current = false; };
+  }, [refresh, refreshAgentPresence]);
+
+  const retrySources = React.useCallback(async () => {
+    setSourcesRead(beginRegionRead);
+    await refresh();
+  }, [refresh]);
+
+  const retrySupply = React.useCallback(async () => {
+    if (presenceRefreshing) return;
+    try {
+      await refreshAgentPresence();
+    } catch {
+      if (aliveRef.current) setSupplyRead(failRegionRead);
+    }
+  }, [presenceRefreshing, refreshAgentPresence]);
+
+  const retryEvents = React.useCallback(async () => {
+    await refreshEventHead();
+  }, [refreshEventHead]);
+
+  const applyAgentEcho = React.useCallback((echoed: AgentSupply) => {
+    setSupplyRead((previous) => readyRegion(agentsWithEcho(foldRegionRead(previous, {
+      loading: () => [],
+      ready: (data) => data,
+      unread: () => [],
+      degraded: (staleData) => staleData,
+    }), echoed)));
+  }, []);
+  const agentSaved = React.useCallback(async (echoed: AgentSupply) => {
+    await convergeMutation({
+      entity: echoed,
+      applyEntity: applyAgentEcho,
+      reconcile: refresh,
+    });
+  }, [applyAgentEcho, refresh]);
+  const catalogSaved = React.useCallback(async (echoed: AgentSupply) => {
+    await agentSaved(echoed);
+    if (aliveRef.current) showToast(t('settings.models.gateway.catalog.saved') as string, 'success');
+  }, [agentSaved, showToast, t]);
+  const switchToDirect = (agent: AgentSupply) => {
+    setSwitchFailures((previous) => {
+      const next = new Set(previous);
+      next.delete(agent.backend);
+      return next;
+    });
+    void agentWriteRegistry.track(agent.backend, async () => {
+      try {
+        const echoed = await modelsApi.setAgentMode(agent.backend, 'direct');
+        setSwitchFailures((previous) => {
+          const next = new Set(previous);
+          next.delete(agent.backend);
+          return next;
+        });
+        setAdoptAgent(null);
+        await agentSaved(echoed);
+      } catch {
         try {
-          const echoed = await modelsApi.putMappings(backend, [...byModel.values()].filter((mapping) => mapping.enabled));
-          onCommitted(current, echoed);
-          await agentSaved(echoed);
+          const result = await agentCollectionReads.read();
+          if (result.kind === 'stale') return;
+          const authoritative = result.value;
+          setSupplyRead(readyRegion(authoritative));
+          const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
+          setSwitchFailures((previous) => {
+            const next = new Set(previous);
+            if (committed) next.delete(agent.backend);
+            else next.add(agent.backend);
+            return next;
+          });
         } catch {
-          showToast(t('settings.models.menus.saveFailed') as string, 'error');
+          setSwitchFailures((previous) => new Set(previous).add(agent.backend));
         }
-      });
-    },
-    [agentSaved, agentWriteRegistry, showToast, sources, t],
-  );
-
+      }
+    });
+  };
   const loadOlderEvents = React.useCallback(async () => {
-    const oldest = feedTailCursor(feed);
-    if (!oldest) return;
+    const cursor = feedTailCursor(feed);
+    if (!cursor) return;
     setLoadingEvents(true);
     try {
-      const page = await modelsApi.listEvents(EVENT_PAGE, oldest);
-      if (!aliveRef.current) return;
-      // Merged by id rather than concatenated: the feed grows at the head while
-      // we page from the tail, so an overlapping row is normal, not a bug. Same
-      // owner as the mount read, because reaching the end is the same question
-      // there; the head re-read has its own because merging is not always right.
-      //
-      // The cursor goes back in with the page: this request is a question about
-      // the rows below `oldest`, and a head re-read that REPLACED the feed while
-      // it was in flight left it about a feed that is no longer on screen.
-      setFeed((prev) => feedAfterTailRead(prev, page, EVENT_PAGE, oldest));
+      const events = await modelsApi.listEvents(EVENT_PAGE, cursor);
+      if (aliveRef.current) {
+        setEventsRead((previous) => readyRegion(feedAfterTailRead(foldRegionRead(previous, {
+          loading: () => emptyFeed,
+          ready: (data) => data,
+          unread: () => emptyFeed,
+          degraded: (staleData) => staleData,
+        }), events, EVENT_PAGE, cursor)));
+      }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     } finally {
       if (aliveRef.current) setLoadingEvents(false);
     }
   }, [feed, showToast, t]);
-
-  const openCustomModel = React.useCallback((sourceId?: string, backend?: AgentBackend) => {
-    const writableSources = manualModelSources(sources);
-    if (writableSources.length === 0) {
-      setApiKeyOpen(true);
-      return;
-    }
-    const requested = writableSources.find((source) => source.id === sourceId);
-    setCustomModelRequest({ sourceId: requested?.id, backend });
-  }, [sources]);
-
-  const connectHub = async (agent: AgentSupply) => {
-    setConnecting(agent.backend);
-    try {
-      // What the PATCH echo means is a rule, not an ad-hoc read of one field.
-      // `connectOutcome` combines mode and supply status so the copy never
-      // promises a Direct fallback the resolver does not perform.
-      const echoed = await modelsApi.setAgentMode(agent.backend, 'hub');
-      const outcome = connectOutcome(echoed, sources);
-      await agentSaved(echoed);
-      if (!aliveRef.current) return;
-      if (outcome === 'failed') {
-        showToast(t('settings.models.toast.connectFailed') as string, 'error');
-      } else if (isSupplyWarning(outcome)) {
-        showToast(t(`settings.models.supply.${outcome}`) as string, 'warning');
-      } else {
-        showToast(t('settings.models.toast.connected') as string, 'success');
-      }
-    } catch {
-      if (aliveRef.current) showToast(t('settings.models.toast.connectFailed') as string, 'error');
-    } finally {
-      if (aliveRef.current) setConnecting(null);
-    }
-  };
-
-  const refreshSource = async (source: Source) => {
-    if (refreshingSourceId !== null) return;
-    setRefreshingSourceId(source.id);
-    try {
-      // The mutation must fail outside the read authority: that authority
-      // intentionally suppresses stale read errors, while a discovery failure
-      // writes the source's error state and must always reach the honest toast.
-      const refreshed = await modelsApi.refreshSource(source.id);
-      await refreshAuthority.run(() =>
-        Promise.resolve({ kind: 'source' as const, source: refreshed.source }),
-      );
-      await refreshSourcesAgents();
-      if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.refreshed', { count: refreshed.discovered }) as string, 'success');
-      }
-    } catch {
-      if (!aliveRef.current) return;
-      await refreshSourcesAgents();
-      if (aliveRef.current) {
-        showToast(t('settings.models.sourceActions.refreshFailed') as string, 'error');
-      }
-    } finally {
-      if (aliveRef.current) setRefreshingSourceId(null);
-    }
-  };
-
-  // Resolve an open drawer's agent from live state so edits see fresh data.
-  const menuAgent = agents.find(
-    (agent) => agent.backend === menuBackend && !agentWrites.has(agent.backend),
-  ) ?? null;
-  // AC-7: the 来源顺序 drawer exists for Hub-mode backends only. Gating here as
-  // well as on the button means a mode flip while the drawer is open closes it,
-  // instead of leaving an editor open over an order nothing reads.
-  const orderAgent = agents.find((a) => a.backend === orderBackend && a.mode === 'hub') ?? null;
-
-  const issueCount = modelIssueCount(agents, chains, runtime);
-  const standardVendors = new Set(agents.flatMap((agent) => agent.standard_vendors ?? []));
-
-  React.useEffect(() => {
-    if (issueCount === 0) setIssuesOnly(false);
-  }, [issueCount]);
-
-  const focusIssues = () => {
-    if (issueCount > 0) setIssuesOnly((value) => !value);
-    else setIssuesOnly(false);
-    requestAnimationFrame(() => agentSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-  };
-
   const startRuntime = async () => {
+    if (startingRuntime || stoppingRuntime) return;
     setStartingRuntime(true);
-    setRuntimeRecoveryPending(false);
     try {
       const result = await startRuntimeWithStatusRefresh(modelsApi);
-      if (!aliveRef.current) return;
-      setRuntime(result.runtime);
+      setRuntimeRead((previous) => result.runtime === null
+        ? failRegionRead(previous)
+        : readyRegion(result.runtime));
       setRuntimeRecoveryPending(result.runtime === null);
       if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
     } finally {
-      if (aliveRef.current) setStartingRuntime(false);
+      setStartingRuntime(false);
     }
   };
+  const stopRuntime = async () => {
+    if (startingRuntime || stoppingRuntime) return;
+    setStoppingRuntime(true);
+    try {
+      const stopped = await modelsApi.stopRuntime();
+      setRuntimeRead(readyRegion(stopped));
+      setRuntimeRecoveryPending(false);
+      setSelectedSourceId(null);
+      setTab('sources');
+    } catch {
+      const observed = await modelsApi.getRuntimeStatus().catch(() => null);
+      setRuntimeRead((previous) => observed ? readyRegion(observed) : failRegionRead(previous));
+      showToast(t('settings.models.errors.stopFailed') as string, 'error');
+    } finally {
+      setStoppingRuntime(false);
+    }
+  };
+  const landingLoading = sourcesRead.kind === 'loading'
+    && supplyRead.kind === 'loading'
+    && runtimeRead.kind === 'loading';
+  const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
+  const installedAgents = agents.filter((agent) => agent.cli_present);
+  const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
+  const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
+  const stopBlocked = runtimeEnabled && (supplyRead.kind !== 'ready' || hubBackends.length > 0);
+  const runtimeSwitchUnsupported = !runtimeEnabled
+    && runtimeHealth === 'not_installed'
+    && retainedRuntime?.manifest.resolution === 'unsupported';
+  const runtimeSwitchDisabled = startingRuntime
+    || stoppingRuntime
+    || runtimeRead.kind !== 'ready'
+    || runtimeHealth === 'installing'
+    || runtimeSwitchUnsupported
+    || stopBlocked;
+  const runtimeSwitchLabel = stopBlocked
+    ? supplyRead.kind === 'ready'
+      ? t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
+      : t('settings.models.shell.toggle.stopUnavailable')
+    : runtimeEnabled
+      ? t('settings.models.shell.toggle.turnOff')
+      : t('settings.models.shell.toggle.turnOn');
+  const toggleRuntime = () => {
+    if (runtimeSwitchDisabled) return;
+    if (runtimeEnabled) {
+      void stopRuntime();
+    } else if (runtimeHealth === 'not_installed') {
+      setInstallOpen(true);
+    } else {
+      void startRuntime();
+    }
+  };
+  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyRead, {
+    loading: () => loadingRegion(),
+    ready: () => readyRegion(installedAgents),
+    unread: (retryable) => unreadRegion(retryable),
+    degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
+  });
+  type SourceDetailSelection = {
+    sourceId: string;
+    returnFocus: () => HTMLElement | null;
+  };
+  const applySourceDetailSelection = React.useCallback((selection: SourceDetailSelection | null) => {
+    if (selection) sourceDetailReturnFocusRef.current = selection.returnFocus;
+    setSelectedSourceId(selection?.sourceId ?? null);
+  }, []);
+  const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
+    sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
+  }, [applySourceDetailSelection, sourceIntentAuthority]);
+  /**
+   * A committed delete leaves the detail dialog with no entity to render, so the
+   * page closes it and returns the user to the list. It goes through
+   * `selectSource` rather than a panel-owned flag because selection is page
+   * state, and the same commit supersedes any older continuation still holding
+   * an intent to re-open this row.
+   *
+   * `sourceDetail.gone` stays for the case a close cannot cover: the source
+   * disappeared out of band — removed from another surface, or found missing by
+   * an edit or a refetch — with no delete of ours to close the dialog.
+   */
+  const presentSourceMutation = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
+    if (commit.action === 'delete') selectSource(null);
+    await sourceMutationReport.present(commit);
+  }, [selectSource, sourceMutationReport.present]);
+  const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
+  const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
+  const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
+  const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.mode === 'hub') ?? null;
+  const currentRouteAgent = routeTarget
+    ? installedAgents.find((agent) => agent.backend === routeTarget.agent.backend) ?? null
+    : null;
+  const routeSelection = routeTarget ? {
+    agent: currentRouteAgent ?? routeTarget.agent,
+    modelId: routeTarget.modelId,
+    read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
+    available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
+  } : null;
+  const focusRouteDestination = React.useCallback((target: NonNullable<typeof routeTarget>) => {
+    requestAnimationFrame(() => {
+      focusModelHubProjection({
+        root: pageRef.current,
+        activeTarget: target.opener,
+        backend: target.agent.backend,
+        modelId: target.modelId,
+      });
+    });
+  }, []);
+  const routeObserved = React.useCallback((next: RouteReport['chain']) => {
+    setChainsRead((previous) => readyRegion({
+      ...foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      }),
+      [modelChainKey(next.backend, next.model_id)]: readyRegion(next),
+    }));
+  }, []);
+  const readRouteAgents = React.useCallback(async (): Promise<RouteCollectionObservation<AgentSupply[]>> => {
+    const result = await agentCollectionReads.read();
+    if (result.kind === 'stale') throw new Error('route_agents_read_superseded');
+    return {
+      value: result.value,
+      install: () => setSupplyRead(readyRegion(result.value)),
+    };
+  }, [agentCollectionReads]);
+  const readRouteSources = React.useCallback(async (): Promise<RouteCollectionObservation<Source[]>> => {
+    const snapshot = sourceEntityAuthority.beginSnapshot();
+    const result = await sourceCollectionReads.read();
+    if (result.kind === 'stale') throw new Error('route_sources_read_superseded');
+    return {
+      value: result.value,
+      install: () => sourceEntityAuthority.settleSnapshot(snapshot, result.value),
+    };
+  }, [sourceCollectionReads, sourceEntityAuthority]);
+  const routeProjectionReconciler = React.useMemo(() => createRouteProjectionReconciler({
+    readAgents: readRouteAgents,
+    readSources: readRouteSources,
+    onFailure: (member) => {
+      if (member === 'agents') setSupplyRead(failRegionRead);
+      else setSourcesRead(failRegionRead);
+    },
+    onStatus: setRouteCommitStatus,
+  }), [readRouteAgents, readRouteSources]);
+  const routeCommitted = React.useCallback((result: RouteReport) => {
+    chainReadAuthority.invalidate(result.chain.backend);
+    routeObserved(result.chain);
+    setSuspendedRouteAttempts((attempts) =>
+      releaseSuspendedRouteAttempt(attempts, result.chain.backend),
+    );
+    suspendedHubFrontiersRef.current.delete(result.chain.backend);
+    suspendedSourceBaselinesRef.current.delete(result.chain.backend);
+    suspendedChainBaselinesRef.current.delete(result.chain.backend);
+    setRouteCommitBackend(result.chain.backend);
+    routeProjectionReconciler.start(result.chain.backend);
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler]);
+  React.useEffect(() => {
+    if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
+      setRouteCommitBackend(null);
+    }
+  }, [routeCommitStatus]);
+  const retryRouteCommit = React.useCallback(() => {
+    if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
+    routeProjectionReconciler.retry();
+  }, [routeCommitStatus, routeProjectionReconciler]);
+  const routeCommitReconciliation = React.useMemo<RouteCommitReconciliation | null>(() => routeCommitStatus ? ({
+    pending: routeCommitStatus.pending,
+    failed: routeCommitStatus.failed.size > 0,
+    retry: retryRouteCommit,
+  }) : null, [retryRouteCommit, routeCommitStatus]);
+  React.useEffect(() => {
+    const heldBackends = new Set(suspendedRouteAttempts.keys());
+    for (const backend of suspendedHubFrontiersRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedHubFrontiersRef.current.delete(backend);
+    }
+    for (const backend of suspendedSourceBaselinesRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedSourceBaselinesRef.current.delete(backend);
+    }
+    for (const backend of suspendedChainBaselinesRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedChainBaselinesRef.current.delete(backend);
+    }
+    const freshAgents = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
+    for (const held of suspendedRouteAttempts.values()) {
+      const freshAgent = freshAgents?.find((row) => row.backend === held.backend) ?? null;
+      if (!freshAgent || freshAgent.mode !== 'hub') {
+        suspendedHubFrontiersRef.current.delete(held.backend);
+        suspendedSourceBaselinesRef.current.set(held.backend, sourcesRead);
+        continue;
+      }
+      if (sourcesRead === suspendedSourceBaselinesRef.current.get(held.backend) || sourcesRead.kind !== 'ready') continue;
+      if (suspendedHubFrontiersRef.current.get(held.backend) === freshAgent) continue;
+      suspendedHubFrontiersRef.current.set(held.backend, freshAgent);
+      suspendedChainBaselinesRef.current.set(held.backend, chainsRead);
+      void (async () => {
+        try {
+          await chainReadAuthority.run(held.backend, async () => ({
+            chains: await readExactAgentChain(freshAgent, held.modelId),
+            scope: 'models' as const,
+          }));
+          if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
+        } catch {
+          if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
+          setChainsRead((previous) => readyRegion({
+            ...foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+              loading: () => ({}),
+              ready: (data) => data,
+              unread: () => ({}),
+              degraded: (staleData) => staleData,
+            }),
+            [modelChainKey(held.backend, held.modelId)]: unreadRegion(),
+          }));
+        }
+      })();
+    }
+  }, [chainReadAuthority, chainsRead, sourcesRead, supplyRead, suspendedRouteAttempts]);
+  React.useEffect(() => {
+    for (const held of suspendedRouteAttempts.values()) {
+      if (!suspendedHubFrontiersRef.current.has(held.backend) || chainsRead === suspendedChainBaselinesRef.current.get(held.backend)) continue;
+      const observed = foldRegionRead(chainsRead, {
+        loading: () => null,
+        ready: (index) => foldRegionRead(index[modelChainKey(held.backend, held.modelId)] ?? unreadRegion(), {
+          loading: () => null,
+          ready: (data) => data,
+          unread: () => null,
+          degraded: () => null,
+        }),
+        unread: () => null,
+        degraded: () => null,
+      });
+      if (observed && routeChainMatchesAttempt(observed, held)) {
+        routeCommitted({ chain: observed, removed_hops: null, interrupted: null });
+      }
+    }
+  }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
+  const supplyRelations = React.useMemo(() => buildSupplyRelations(installedAgents, sources, chains, runtime), [chains, installedAgents, runtime, sources]);
+  /** The Sources this page has read, by id — for the surfaces that show a hop and
+   *  have to name whose it is. Only what was read: an id no Source answers for is
+   *  left unnamed rather than rendered raw. */
+  const sourceNames = React.useMemo(
+    () => Object.fromEntries(sources.map((source) => [source.id, source.display_name])),
+    [sources],
+  );
+  const takeoverCount = React.useMemo(() => new Set(
+    supplyRelations.filter(({ kind }) => kind === 'takeover').map(({ backend }) => backend),
+  ).size, [supplyRelations]);
+  const sourceAdded = async (created: SourceCreated) => {
+    await convergeMutation({
+      entity: created,
+      applyEntity: (answer) => {
+        sourceEntityAuthority.landLatest(answer.source);
+      },
+      intent: {
+        authority: sourceIntentAuthority,
+        apply: () => {
+          setApiKeyOpen(false);
+          applySourceDetailSelection({
+            sourceId: created.source.id,
+            returnFocus: () => apiKeyTriggerRef.current,
+          });
+        },
+      },
+      reconcile: refresh,
+    });
+  };
+  const subscriptionAdded = React.useCallback((source?: Source) => {
+    if (!source) {
+      if (subscriptionSuccessReconcileRef.current) {
+        subscriptionSuccessReconcileRef.current = false;
+        return;
+      }
+      void refresh();
+      return;
+    }
+    // Keep the success panel as the only active dialog until its handoff timer
+    // closes it. The provider dialog then opens and owns its normal autofocus.
+    sourceEntityAuthority.landLatest(source);
+    selectSource({
+      sourceId: source.id,
+      returnFocus: () => subscriptionTriggerRef.current,
+    });
+    subscriptionSuccessReconcileRef.current = true;
+    void refresh();
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+    subscriptionCloseTimer.current = window.setTimeout(() => {
+      subscriptionCloseTimer.current = null;
+      setSubscriptionVendor(null);
+    }, 1400);
+  }, [refresh, selectSource, sourceEntityAuthority]);
+  const closeSubscription = React.useCallback(() => {
+    if (subscriptionCloseTimer.current !== null) {
+      window.clearTimeout(subscriptionCloseTimer.current);
+      subscriptionCloseTimer.current = null;
+    }
+    setSubscriptionVendor(null);
+    window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+  }, []);
+  /**
+   * A re-login's whole obligation to this page: re-read everything.
+   *
+   * Not `subscriptionAdded`, even though the reauth journey also calls back with
+   * no source. That callback's no-source branch can be CONSUMED by the create
+   * path's success flag, and a reauth has no success landing to coalesce with —
+   * it terminates on the row it started from. And the read has to be the wide
+   * one: `_materialize_reauth` can leave other agents without a source, so
+   * `/agents` and the chains behind it are stale too, not just this row.
+   */
+  const sourceReauthed = React.useCallback(() => { void refresh(); }, [refresh]);
+  const closeReauth = React.useCallback(() => {
+    setReauthSource(null);
+    // Back to the detail heading rather than to the button that opened this: a
+    // repair that worked unmounts that button (the row is no longer stopped), and
+    // Radix would restore focus to a node that is gone — i.e. to <body>.
+    window.setTimeout(() => sourceDetailHeadingRef.current?.focus(), 0);
+  }, []);
+  const closeSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerOpen(false);
+  }, []);
+  const focusSubscriptionPickerOption = React.useCallback((index: number) => {
+    const bounded = Math.max(0, Math.min(index, SUBSCRIPTION_PICKER_OPTIONS.length - 1));
+    setSubscriptionPickerIndex(bounded);
+    const { vendor } = SUBSCRIPTION_PICKER_OPTIONS[bounded];
+    subscriptionPickerRefs.current[vendor]?.focus();
+  }, []);
+  const openSubscriptionPicker = React.useCallback(() => {
+    subscriptionPickerHandoffRef.current = false;
+    setSubscriptionPickerIndex(0);
+    setSubscriptionPickerOpen(true);
+  }, []);
+  const toggleSubscriptionPicker = React.useCallback(() => {
+    if (subscriptionPickerOpen) closeSubscriptionPicker();
+    else openSubscriptionPicker();
+  }, [closeSubscriptionPicker, openSubscriptionPicker, subscriptionPickerOpen]);
+  React.useEffect(() => () => {
+    if (subscriptionCloseTimer.current !== null) window.clearTimeout(subscriptionCloseTimer.current);
+  }, []);
 
   return (
-    <SettingsPageShell
-      activeTab="models"
-      title={t('settings.models.title')}
-      subtitle={t('settings.models.subtitle')}
-      actions={
-        !loading && !loadError ? (
-          <ModelsPageActions
-            runtimeHealth={runtimeHealth}
-            runtimeRecoveryPending={runtimeRecoveryPending}
-            startingRuntime={startingRuntime}
-            issueCount={issueCount}
-            issuesOnly={issuesOnly}
-            onStartRuntime={() => void startRuntime()}
-            onFocusIssues={focusIssues}
-          />
-        ) : undefined
-      }
+    <ModelHubShell
+      rootRef={pageRef}
+      actions={!landingLoading
+        ? <span className="flex items-center gap-2">
+              <RuntimePill
+                read={runtimeRead}
+                starting={startingRuntime}
+                stopping={stoppingRuntime}
+                directCount={directEmpty ? installedAgents.length : undefined}
+              />
+              {runtimeConfigurationVisible && !directEmpty && <TakeoverPill count={takeoverCount} />}
+              {runtimeConfigurationVisible && <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                disabled={presenceRefreshing}
+                aria-label={t('settings.models.direct.action.refreshAgents')}
+                title={t('settings.models.direct.action.refreshAgents')}
+                onClick={() => void retrySupply()}
+              ><RefreshCw aria-hidden className={cn('size-3.5', presenceRefreshing && 'animate-spin')} /></Button>}
+              <span title={runtimeSwitchLabel}>
+                <ToggleSwitch
+                  enabled={runtimeEnabled}
+                  disabled={runtimeSwitchDisabled}
+                  label={runtimeSwitchLabel}
+                  onClick={toggleRuntime}
+                />
+              </span>
+            </span>
+        : undefined}
     >
-      {loading ? (
-        <div className="text-[13px] text-muted">{t('common.loading')}</div>
-      ) : loadError ? (
-        <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
-          <span>{t('settings.models.loadError', { detail: loadError })}</span>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-5">
-          <MigrationBanner onApplied={() => void refreshSourcesAgents()} />
-          <div ref={agentSectionRef} className="scroll-mt-6">
-            <AgentCard
-              agents={agents}
-              sources={sources}
-              chains={chains}
-              runtime={runtime}
-              issuesOnly={issuesOnly}
-              pendingBackends={agentWrites}
-              onConnectHub={(agent) => void connectHub(agent)}
-              onOpenOrder={(agent) => setOrderBackend(agent.backend)}
-              onOpenModels={(agent) => {
-                if (!agentWrites.has(agent.backend)) setMenuBackend(agent.backend);
-              }}
-              onSetRoute={setModelRoute}
-              onAddModel={(backend) => openCustomModel(undefined, backend)}
-              onRepair={(source, kind) => setRepairTarget({ source, kind })}
-              onRetest={(source) => void refreshSource(source)}
-              retestingSourceId={refreshingSourceId}
-              onProbeSettled={() => void refreshSourcesAgents()}
-              connectingBackend={connecting}
-            />
-          </div>
-          <SourcesCard
-            sources={sources}
-            onConnectClaude={() => setOauthVendor('anthropic')}
-            onConnectChatGPT={() => setOauthVendor('openai')}
-            onAddApiKey={() => setApiKeyOpen(true)}
-            onSourceChanged={() => void refreshSourcesAgents()}
-            onRefreshSource={(source) => void refreshSource(source)}
-            refreshingSourceId={refreshingSourceId}
-            onRepair={(source, kind) => setRepairTarget({ source, kind })}
-            onAddModel={(source) => openCustomModel(source.id)}
-          />
-          <RecentSwitchesCard
-            events={feed.events}
-            sources={sources}
-            hasMore={!feed.exhausted}
-            loadingMore={loadingEvents}
-            onLoadMore={loadOlderEvents}
-          />
-          <AdvancedRow />
-        </div>
-      )}
-
-      <AddApiKeyDialog open={apiKeyOpen} onClose={() => setApiKeyOpen(false)} onAdded={() => void refreshSourcesAgents()} />
-      <OAuthConnectDialog
-        open={oauthVendor !== null}
-        vendor={oauthVendor ?? 'anthropic'}
-        onClose={() => setOauthVendor(null)}
-        onConnected={() => void refreshSourcesAgents()}
+      {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
+        : !runtimeConfigurationVisible
+          ? <RuntimeClosedState read={runtimeRead} runtime={retainedRuntime} starting={startingRuntime} stopping={stoppingRuntime} />
+          : <div className="space-y-[22px]">
+                  {/* The tab strip belongs to the Hub, not to the source
+                      inventory. Usage and switch history both outlive the Sources
+                      they name, so deleting the last Source may not remove the only
+                      route to either record. Frame 09 predates these tabs; it still
+                      owns the direct-only body of `sources`. */}
+                  <HubTabs tab={tab} onChange={setTab} />
+                  {tab === 'usage' ? <UsageTab usage={usageRead} windowDays={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
+                    : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
+                    : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
+                    : <div className="model-hub-overview">
+                    <div className="model-hub-overview-body">
+                      <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
+                        <Popover
+                          open={subscriptionPickerOpen}
+                          onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
+                        >
+                          <PopoverAnchor virtualRef={subscriptionAnchorRef} />
+                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <PopoverContent
+                            role="menu"
+                            aria-label={t('settings.models.upstream.addSubscription')}
+                            align="start"
+                            sideOffset={8}
+                            collisionPadding={12}
+                            className="flex w-[300px] max-w-[calc(100vw-24px)] flex-col gap-0.5 rounded-[10px] border-border-strong bg-surface p-1.5 text-foreground !shadow-[var(--model-hub-menu-shadow)]"
+                            onOpenAutoFocus={(event) => {
+                              event.preventDefault();
+                              window.requestAnimationFrame(() => {
+                                const { vendor } = SUBSCRIPTION_PICKER_OPTIONS[subscriptionPickerIndex];
+                                subscriptionPickerRefs.current[vendor]?.focus();
+                              });
+                            }}
+                            onCloseAutoFocus={(event) => {
+                              event.preventDefault();
+                              if (subscriptionPickerHandoffRef.current) {
+                                subscriptionPickerHandoffRef.current = false;
+                                return;
+                              }
+                              window.setTimeout(() => subscriptionTriggerRef.current?.focus(), 0);
+                            }}
+                            onInteractOutside={(event) => {
+                              if (subscriptionTriggerRef.current?.contains(event.target as Node)) event.preventDefault();
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(subscriptionPickerIndex + 1);
+                              } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(subscriptionPickerIndex - 1);
+                              } else if (event.key === 'Home') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(0);
+                              } else if (event.key === 'End') {
+                                event.preventDefault();
+                                focusSubscriptionPickerOption(SUBSCRIPTION_PICKER_OPTIONS.length - 1);
+                              }
+                            }}
+                          >
+                            {SUBSCRIPTION_PICKER_OPTIONS.map(({ vendor, recommendation }, index) => {
+                              const vendorLabel = t(`settings.models.subscriptionPicker.vendor.${vendor}`);
+                              // A hub-only vendor has no native channel to recommend against, so
+                              // it carries no badge rather than a 网关推荐 over its only custody.
+                              const recommendationLabel = recommendation
+                                ? t(`settings.models.subscriptionPicker.recommendation.${recommendation}`)
+                                : null;
+                              return (
+                                <Button
+                                  key={vendor}
+                                  ref={(node) => { subscriptionPickerRefs.current[vendor] = node; }}
+                                  type="button"
+                                  role="menuitem"
+                                  variant="ghost"
+                                  className={cn(
+                                    'model-hub-subscription-menu-row h-auto w-full min-w-0 justify-start gap-2 rounded-[7px] px-2.5 py-[9px] text-left focus-visible:ring-0 focus-visible:ring-offset-0',
+                                    subscriptionPickerIndex === index &&
+                                      'model-hub-subscription-menu-row--active',
+                                  )}
+                                  tabIndex={subscriptionPickerIndex === index ? 0 : -1}
+                                  onClick={() => {
+                                    subscriptionPickerHandoffRef.current = true;
+                                    // A hub-only vendor opens §1.4 straight into its flow — no
+                                    // chooser phase, so no 去登录 gesture inside the dialog to
+                                    // allocate the provider tab. This click is the journey's only
+                                    // gesture, exactly as the re-auth confirm is, so the tab is
+                                    // handed off here or the handoff is popup-blocked (PD-1).
+                                    if (!hasNativeSubscriptionCustody(vendor)) handOffProviderTab();
+                                    setSubscriptionPickerOpen(false);
+                                    setSubscriptionVendor(vendor);
+                                  }}
+                                >
+                                  <VendorGlyph vendor={vendor} />
+                                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold" title={vendorLabel}>{vendorLabel}</span>
+                                  {recommendationLabel && (
+                                    <Badge
+                                      variant="recommendation"
+                                      className={cn(
+                                        recommendation === 'native'
+                                          ? 'model-hub-accent-tile--mint model-hub-accent-ink--mint border-transparent'
+                                          : 'model-hub-accent-pill--neutral',
+                                      )}
+                                    >
+                                      {recommendationLabel}
+                                    </Badge>
+                                  )}
+                                </Button>
+                              );
+                            })}
+                          </PopoverContent>
+                        </Popover>
+                        <div className="hidden xl:block" aria-hidden="true" />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
+                      </div>
+                      <SupplyLegend relations={supplyRelations} />
+                    </div>
+                  </div>}
+                </div>}
+      {runtimeConfigurationVisible && <>
+      <Dialog open={sourceDetailOpen} onOpenChange={(open) => { if (!open) selectSource(null); }}>
+        <DialogContent
+          mobileSheetHeight="tall"
+          closeLabel={t('settings.models.sourceDetail.close') as string}
+          className="model-hub-source-dialog flex h-[min(624px,calc(100dvh-32px))] w-[min(720px,calc(100vw-32px))] max-w-[720px] flex-col gap-0 overflow-hidden rounded-[14px] border-border-strong bg-surface p-0 shadow-[var(--model-hub-dialog-shadow)] max-md:w-full max-md:max-w-none max-md:rounded-t-2xl"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            sourceDetailHeadingRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            const returnFocus = sourceDetailReturnFocusRef.current;
+            sourceDetailReturnFocusRef.current = null;
+            const target = returnFocus?.();
+            if (!target?.isConnected) return;
+            event.preventDefault();
+            target.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            // Radix observes Escape before React's row handlers; marked editors own it locally.
+            if (event.target instanceof Element && event.target.closest('[data-source-dialog-local-escape]')) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DialogTitle className="sr-only">{selectedSource?.display_name ?? t('settings.models.sourceDetail.gone')}</DialogTitle>
+          <DialogDescription className="sr-only">{t('settings.models.sourceDetail.footnote')}</DialogDescription>
+          {selectedSource
+            ? <SourceDetailPanel
+                key={selectedSource.id}
+                source={selectedSource}
+                activeBackends={activeBackends}
+                headingRef={sourceDetailHeadingRef}
+                trackMutation={trackSourceMutation(selectedSource.id)}
+                onReauth={setReauthSource}
+                onMutationCommitted={presentSourceMutation}
+              />
+            : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
+        </DialogContent>
+      </Dialog>
+      <SourceMutationReport
+        report={sourceMutationReport.report}
+        onComplete={() => { void sourceMutationReport.complete(); }}
+        onDismiss={sourceMutationReport.dismiss}
       />
-      <RepairJourney
-        target={repairTarget}
-        onClose={() => setRepairTarget(null)}
-        onChanged={() => void refreshSourcesAgents()}
-      />
-
-      {orderAgent && (
-        <SourceOrderDrawer
+      <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
+      {subscriptionVendor && (
+        <OAuthConnectDialog
           open
-          agent={orderAgent}
-          agents={agents}
+          vendor={subscriptionVendor}
           sources={sources}
-          onClose={() => setOrderBackend(null)}
-          // Returned, not discarded: the write stays marked pending for the whole
-          // of this, so the hand-off to the menu drawer cannot open mid-write. What
-          // makes the baseline it hands over CORRECT is the echo `agentSaved` takes
-          // — the re-read is allowed to fail here without leaving one behind.
-          onSaved={agentSaved}
-          orderWrite={{
-            pending: agentWrites.has(orderAgent.backend),
-            track: (work) => agentWriteRegistry.track(orderAgent.backend, work),
+          onClose={closeSubscription}
+          onConnected={subscriptionAdded}
+        />
+      )}
+      {reauthSource && (
+        <OAuthConnectDialog
+          open
+          vendor={reauthSource.vendor}
+          reauth={reauthSource}
+          sources={sources}
+          onClose={closeReauth}
+          onConnected={sourceReauthed}
+        />
+      )}
+      {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
+      {menuAgent && <BackendModelCatalogDialog open backend={menuAgent.backend} canReadSources={capabilities.can_manage_agents} sourceNames={sourceNames} onClose={() => setMenuBackend(null)} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
+      <RouteChainDialog
+        selection={routeSelection}
+        covered={orderBackend !== null}
+        onOpenDefaults={() => { if (routeTarget) setOrderBackend(routeTarget.agent.backend); }}
+        sources={sources}
+        onClose={() => {
+          const target = routeTarget;
+          setRouteTarget(null);
+          if (target) focusRouteDestination(target);
+        }}
+        onCommitted={routeCommitted}
+        commitReconciliation={routeCommitReconciliation}
+        onObserved={routeObserved}
+        readAgents={readRouteAgents}
+        readSources={readRouteSources}
+        onDirectMode={(attempt, observedAgent) => {
+          const landingBackend = attempt?.backend ?? routeTarget?.agent.backend;
+          if (landingBackend) {
+            suspendedSourceBaselinesRef.current.set(landingBackend, sourcesRead);
+            setSuspendedRouteAttempts((attempts) =>
+              attempt
+                ? holdSuspendedRouteAttempt(attempts, attempt)
+                : releaseSuspendedRouteAttempt(attempts, landingBackend),
+            );
+          }
+          const target = routeTarget;
+          setRouteTarget(null);
+          if (target) focusRouteDestination(target);
+          void (async () => {
+            let landing = observedAgent;
+            if (!landing) {
+              try {
+                const observation = await readRouteAgents();
+                observation.install();
+                landing = observation.value.find((row) => row.backend === landingBackend) ?? null;
+              } catch {
+                setSupplyRead(failRegionRead);
+                return;
+              }
+            }
+            if (landing?.mode !== 'hub') return;
+            try {
+              const sourceObservation = await readRouteSources();
+              sourceObservation.install();
+            } catch {
+              setSourcesRead(failRegionRead);
+            }
+          })();
+        }}
+      />
+      {adoptAgent && (
+        <EnableGatewayDialog
+          key={adoptAgent.backend}
+          agent={adoptAgent}
+          runtime={runtimeRead}
+          agentReads={agentCollectionReads}
+          onClose={() => setAdoptAgent(null)}
+          onAdopted={agentSaved}
+          onRuntime={(next) => {
+            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
+          }}
+          trackWrite={(work) => agentWriteRegistry.track(adoptAgent.backend, work)}
+        />
+      )}
+      </>}
+      {installOpen && retainedRuntime && (
+        <InstallGatewayDialog
+          runtime={retainedRuntime}
+          onClose={() => setInstallOpen(false)}
+          onRuntime={(next) => {
+            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
+            setRuntimeRecoveryPending(next === null);
           }}
         />
       )}
-
-      {menuAgent && menuAgent.menu_kind === 'open' ? (
-        <OpenCodeMenuDrawer
-          open
-          agent={menuAgent}
-          sources={sources}
-          onClose={() => setMenuBackend(null)}
-          onSaved={(echoed) => void agentSaved(echoed)}
-          // A custom model is a SOURCE write: it echoes the source, not the Agent.
-          onRefresh={() => void refreshSourcesAgents()}
-        />
-      ) : null}
-
-      <AddCustomModelDialog
-        open={customModelRequest !== null}
-        sources={sources}
-        standardVendors={standardVendors}
-        initialSourceId={customModelRequest?.sourceId}
-        showOpenCodeIdentifier={customModelRequest?.backend === 'opencode'}
-        onClose={() => setCustomModelRequest(null)}
-        onSaved={() => void refreshSourcesAgents()}
-      />
-    </SettingsPageShell>
+    </ModelHubShell>
   );
 };
 

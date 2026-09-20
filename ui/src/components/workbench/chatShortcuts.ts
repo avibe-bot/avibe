@@ -4,7 +4,10 @@ import { isApplePlatform } from '../../lib/platform';
 // apps/dockShortcuts.ts and apps/windowChords.ts) so the exactness of each chord
 // is unit-testable without a DOM.
 
-type ChordEvent = Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'code'>;
+type ChordEvent = Pick<
+  KeyboardEvent,
+  'altKey' | 'code' | 'ctrlKey' | 'defaultPrevented' | 'metaKey' | 'shiftKey'
+>;
 
 /**
  * ⌘⇧D / Ctrl+Shift+D — archive the session the user is reading.
@@ -44,7 +47,7 @@ export function inForegroundSurface(el: Element | null): boolean {
  * a read-only or still-loading chat never consumes the browser's ⌘⇧D either.
  */
 export function isArchiveSessionKeydown(event: ChordEvent, target: Element | null): boolean {
-  return isArchiveSessionChord(event) && !inForegroundSurface(target);
+  return !event.defaultPrevented && isArchiveSessionChord(event) && !inForegroundSurface(target);
 }
 
 /** Display label for the archive chord, shown as the menu row's hint badge. */

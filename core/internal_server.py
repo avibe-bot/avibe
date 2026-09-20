@@ -32,7 +32,6 @@ import logging
 import os
 import re
 import socket
-import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -45,45 +44,81 @@ from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from core import control_ipc
+from config.atomic_io import write_atomic
+from core.delivery_target import normalize_message_kind
+from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
+from vibe.memory_contract import (
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
+    MemoryStoreUnavailableError,
+)
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
 
 logger = logging.getLogger(__name__)
-_MEMORY_LOG_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
-_MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
-def _memory_log_list_query(request: Request) -> tuple[str | None, int]:
+def _memory_implementation_error_code(error: BaseException) -> str:
+    return (
+        "memory_implementation_incompatible"
+        if isinstance(error, MemoryImplementationIncompatibleError)
+        else "memory_implementation_unavailable"
+    )
+_PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+
+
+def _processing_record_list_query(
+    request: Request,
+) -> tuple[str | None, int, str | None]:
     items = list(request.query_params.multi_items())
     keys = [key for key, _value in items]
-    if any(key not in {"cursor", "limit"} for key in keys) or len(keys) != len(set(keys)):
-        raise ValueError("invalid memory log query")
+    if any(key not in {"cursor", "limit", "project"} for key in keys) or len(
+        keys
+    ) != len(set(keys)):
+        raise ValueError("invalid Processing Record query")
     values = dict(items)
     cursor = values.get("cursor")
-    if cursor is not None and _MEMORY_LOG_CURSOR_RE.fullmatch(cursor) is None:
-        raise ValueError("invalid memory log cursor")
+    if cursor is not None and _PROCESSING_RECORD_CURSOR_RE.fullmatch(cursor) is None:
+        raise ValueError("invalid Processing Record cursor")
     raw_limit = values.get("limit", "20")
     if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid memory log limit")
+        raise ValueError("invalid Processing Record limit")
     limit = int(raw_limit)
     if not 1 <= limit <= 50:
-        raise ValueError("invalid memory log limit")
-    return cursor, limit
+        raise ValueError("invalid Processing Record limit")
+    project = values.get("project")
+    if project is not None:
+        from vibe.memory_project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return cursor, limit, project
 
 
-def _memory_log_entry_query(request: Request) -> str:
+def _processing_record_entry_query(request: Request) -> tuple[str, str | None]:
     items = list(request.query_params.multi_items())
-    if len(items) != 1 or items[0][0] != "memcell_id":
-        raise ValueError("invalid memory log entry query")
-    memcell_id = items[0][1]
-    if _MEMORY_LOG_ENTRY_ID_RE.fullmatch(memcell_id) is None:
-        raise ValueError("invalid memory log entry id")
-    return memcell_id
+    keys = [key for key, _value in items]
+    if (
+        any(key not in {"memcell_id", "project"} for key in keys)
+        or len(keys) != len(set(keys))
+        or "memcell_id" not in keys
+    ):
+        raise ValueError("invalid Processing Record entry query")
+    values = dict(items)
+    memcell_id = values["memcell_id"]
+    if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
+        raise ValueError("invalid Processing Record entry id")
+    project = values.get("project")
+    if project is not None:
+        from vibe.memory_project_ids import parse_agent_search_project
+
+        project = parse_agent_search_project(project)
+    return memcell_id, project
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -92,6 +127,9 @@ def _create_controller_loop_server(config: Any) -> Any:
     import uvicorn
 
     class _ControllerLoopServer(uvicorn.Server):
+        # Uvicorn >= 0.29 wraps serve() in capture_signals(); older supported
+        # versions call install_signal_handlers() instead. The controller owns
+        # this process and its event loop, so both hooks must remain inert.
         def capture_signals(self):
             return contextlib.nullcontext()
 
@@ -129,11 +167,9 @@ def create_app(
 
     mark_controller_process()
     if memory_ui_secret is None:
-        from core.memory.ui_access import process_ui_read_secret
+        from vibe.memory_ui_access import process_ui_read_secret
 
         memory_ui_secret = process_ui_read_secret()
-    from core.memory.runtime import MemoryStoreUnavailableError
-
     app = FastAPI(
         title="avibe internal dispatch",
         docs_url=None,
@@ -170,6 +206,34 @@ def create_app(
             response = await call_next(request)
             response.headers[control_ipc.CONTROL_IPC_INSTANCE_HEADER] = instance_id
             return response
+    from core.skill_observability import SkillObservationRecorder
+
+    skill_recorder = SkillObservationRecorder()
+    controller.skill_observability = skill_recorder
+
+    @app.post("/internal/skill-observations", status_code=202)
+    async def _skill_observation(request: Request) -> Any:
+        from storage.skill_observability import ObservationError, utc_now, validate
+
+        # Bounded payloads contain descriptors only, never Skill bodies.
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 32 * 1024:
+                skill_recorder.counts["rejected"] += 1
+                raise HTTPException(status_code=413, detail="observation_too_large")
+        try:
+            event = validate(json.loads(body), now=utc_now())
+            if event["metadata"]["observation_channel"] != "avibe_cli":
+                raise ObservationError("runtime_observation_required")
+        except (ValueError, TypeError, RecursionError):
+            skill_recorder.counts["rejected"] += 1
+            raise HTTPException(status_code=400, detail="invalid_observation") from None
+        return {"status": skill_recorder.enqueue(event)}
+
+    @app.get("/internal/skill-observations/health")
+    async def _skill_observation_health() -> Any:
+        return skill_recorder.health()
 
     # In-flight ``dispatch_turn`` tasks per session, each a ``Turn`` holding the
     # task + the routing ``MessageContext`` the turn STARTED under. The cancel
@@ -199,6 +263,8 @@ def create_app(
     # ``manager.cancel`` / ``manager.send_now``), not in side sets here.
     in_flight = manager.in_flight
     app.state.in_flight_dispatches = in_flight
+    show_access_write_lock = asyncio.Lock()
+    app.state.show_access_write_lock = show_access_write_lock
 
     def _publish_scheduled_queue_growth(session_id: str, state: str) -> None:
         if state != "queued":
@@ -222,9 +288,9 @@ def create_app(
     ) -> Any:
         """Run a Harness input through the same durable owner as interactive Chat.
 
-        The explicit source intent decides whether it queues or steers. Send-now
-        persists the new input at P3, then promotes the exact FIFO head through
-        empty P1; it never stops the active Turn or jumps older queued work.
+        The explicit source intent decides whether this content queues or steers.
+        Content-bearing P1 targets this Delivery; content-free P1 promotion is
+        exposed separately through ``SessionTurnManager.send_now``.
         The submission remains a Delivery until exact native acceptance materializes
         the harness Message.
         """
@@ -233,6 +299,7 @@ def create_app(
             return submission.route
 
         from core.message_mirror import _scope_id_for_session
+        from core.message_priority import normalize_delivery_intent
         from core.session_turns import (
             DeliveryRequest,
             SCHEDULED_PROVENANCE_KEY,
@@ -260,6 +327,8 @@ def create_app(
         scope_id: str | None = None
         delivery_owner_transferred = False
         target_was_busy = False
+        legacy_send_now = str(delivery_intent or "").strip().lower() == "send_now"
+        delivery_intent = normalize_delivery_intent(delivery_intent)
         effective_delivery_intent = delivery_intent
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
@@ -328,10 +397,36 @@ def create_app(
                                 target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        if not (
-                            delivery_intent == "send_now"
+                        if (
+                            legacy_send_now
                             and existing_state == "queued"
+                            and existing.get("priority") == "p3"
+                            and message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="admission",
+                            )
+                            and not message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="steer",
+                            )
                         ):
+                            existing = message_deliveries.cas_delivery(
+                                conn,
+                                str(existing["id"]),
+                                expected_version=int(existing["version"]),
+                                expected_states=("queued",),
+                                values={"priority": "p1", "state": "reserved"},
+                                history_event={
+                                    "kind": "legacy_send_now_re_admission",
+                                    "from_priority": "p3",
+                                },
+                            )
+                            if existing is None:
+                                raise RuntimeError(
+                                    "legacy send-now Delivery re-admission lost"
+                                )
+                            delivery_owner_transferred = True
+                        else:
                             return TurnSubmissionResult(
                                 route=(
                                     "enqueued"
@@ -349,7 +444,6 @@ def create_app(
                                 delivery_status=existing_state,
                                 delivery_owner_transferred=True,
                             )
-                        delivery_owner_transferred = True
                 if not delivery_owner_transferred:
                     return "duplicate"
             if legacy_accepted:
@@ -368,16 +462,7 @@ def create_app(
                 persisted_intent = delivery_intent_for_priority(
                     delivery_request.priority
                 )
-                effective_delivery_intent = (
-                    "send_now"
-                    if delivery_intent == "send_now"
-                    and delivery_request.priority == "p3"
-                    else persisted_intent
-                )
-                delivery_request = replace(
-                    delivery_request,
-                    admission_only=effective_delivery_intent == "send_now",
-                )
+                effective_delivery_intent = persisted_intent
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
                 )
@@ -395,11 +480,7 @@ def create_app(
 
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
-                priority = (
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                )
+                priority = priority_for_delivery_intent(delivery_intent)
                 message_deliveries.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -417,6 +498,7 @@ def create_app(
                         message_type="harness",
                         text=text,
                         metadata={
+                            **dict(submission_spec.get("message_metadata") or {}),
                             SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
                                 context
                             )
@@ -463,11 +545,7 @@ def create_app(
 
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority=(
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                ),
+                priority=priority_for_delivery_intent(delivery_intent),
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
@@ -482,7 +560,6 @@ def create_app(
                     SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
                 },
                 native_message_id=native_message_id or None,
-                admission_only=delivery_intent == "send_now",
             )
 
         if context.platform_specific is None:
@@ -498,20 +575,8 @@ def create_app(
                 "author_name": delivery_request.author_name,
             }
         )
-        try:
-            result = await manager.deliver(
-                delivery_request,
-                context=context,
-            )
-        except Exception:
-            if not delivery_owner_transferred:
-                raise
-            logger.exception(
-                "Delivery admission deferred to recovery after Agent Run ownership "
-                "transfer: run=%s delivery=%s",
-                execution_id,
-                delivery_id,
-            )
+
+        def _defer_transferred_delivery() -> TurnSubmissionResult:
             delivery_status = "reserved"
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
@@ -550,26 +615,39 @@ def create_app(
                 delivery_status=delivery_status,
                 delivery_owner_transferred=True,
             )
-        delivery_state = str(result.state)
-        if effective_delivery_intent == "send_now":
-            with get_cached_sqlite_engine().connect() as conn:
-                admitted = message_deliveries.get_delivery(conn, delivery_id)
-                observed_head = message_deliveries.ordering_head(conn, session_id)
-            if (
-                admitted is not None
-                and admitted["state"] == "queued"
-                and observed_head is not None
-                and observed_head["state"] == "queued"
-            ):
-                await manager.send_now(
-                    session_id,
-                    expected_delivery_id=str(observed_head["id"]),
-                )
-                with get_cached_sqlite_engine().connect() as conn:
-                    latest = message_deliveries.get_delivery(conn, delivery_id)
-                if latest is not None:
-                    delivery_state = str(latest["state"])
 
+        try:
+            result = await manager.deliver(
+                delivery_request,
+                context=context,
+            )
+        except asyncio.CancelledError:
+            if not delivery_owner_transferred:
+                raise
+            # Once the Run points at this Delivery, the executor wrapper is no
+            # longer its lifecycle owner. In particular, cancellation can race
+            # a shielded native P1 write: the adapter may have accepted the
+            # steer even though admission has not projected that receipt yet.
+            # Leave the durable owner recoverable instead of letting the wrapper
+            # settle the Run before the native turn reaches terminal.
+            logger.warning(
+                "Delivery admission canceled after Agent Run ownership transfer; "
+                "deferring to recovery: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return _defer_transferred_delivery()
+        except Exception:
+            if not delivery_owner_transferred:
+                raise
+            logger.exception(
+                "Delivery admission deferred to recovery after Agent Run ownership "
+                "transfer: run=%s delivery=%s",
+                execution_id,
+                delivery_id,
+            )
+            return _defer_transferred_delivery()
+        delivery_state = str(result.state)
         route = "enqueued" if delivery_state in {
             "queued",
             "pending_steer",
@@ -582,39 +660,36 @@ def create_app(
             route=route,
             queue_persisted=True,
             target_was_busy=target_was_busy,
-            delivery_status=(
-                delivery_state if effective_delivery_intent == "send_now" else None
-            ),
+            delivery_status=delivery_state,
             delivery_owner_transferred=delivery_owner_transferred,
         )
         _publish_scheduled_queue_growth(session_id, delivery_state)
-        if effective_delivery_intent == "send_now":
+        if delivery_owner_transferred and execution_id:
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
                     recorded = record_agent_run_delivery_outcome_in_connection(
                         conn,
                         execution_id,
                         {
-                            "intent": "send_now",
+                            "intent": effective_delivery_intent,
                             "status": delivery_state,
                             "target_was_busy": submission.target_was_busy,
                         },
                     )
                 if not recorded:
                     logger.warning(
-                        "send-now Agent Run outcome lost its exact CAS after Delivery "
-                        "ownership transfer: run=%s delivery=%s",
+                        "Agent Run Delivery outcome lost its exact CAS after ownership "
+                        "transfer: run=%s delivery=%s",
                         execution_id,
                         delivery_id,
                     )
             except Exception:
                 logger.exception(
-                    "send-now Agent Run outcome persistence deferred after Delivery "
-                    "ownership transfer: run=%s delivery=%s",
+                    "Agent Run Delivery outcome persistence deferred after ownership "
+                    "transfer: run=%s delivery=%s",
                     execution_id,
                     delivery_id,
                 )
-            return submission
         return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")
@@ -626,6 +701,104 @@ def create_app(
         if runtime_id is not None:
             payload["desktop_runtime_id"] = runtime_id
         return payload
+
+    @app.post("/internal/show-access/settings-read")
+    async def _show_access_settings_read(request: Request) -> Any:
+        from core.show_pages import ShowPageError, ShowPageStore, show_access_payload
+
+        payload = await _safe_json(request)
+        if set(payload) != {"page_id"} or not isinstance(payload.get("page_id"), str):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_show_access_settings_request"},
+            )
+        page_id = payload["page_id"]
+
+        def _read() -> dict[str, Any]:
+            store = ShowPageStore()
+            try:
+                show_access = store.get_access(page_id)
+            finally:
+                store.close()
+            if show_access is None:
+                raise ShowPageError(
+                    "This session has no Show Page.",
+                    code="show_page_not_found",
+                )
+            if show_access.page_id != page_id:
+                raise RuntimeError("show_access_page_identity_mismatch")
+            return {"show_access": show_access_payload(show_access)}
+
+        try:
+            return await asyncio.to_thread(_read)
+        except ShowPageError as exc:
+            status = 404 if exc.code == "show_page_not_found" else 400
+            return JSONResponse(
+                status_code=status,
+                content={"ok": False, "error": exc.code},
+            )
+        except Exception:
+            logger.exception("internal ShowAccess settings read failed")
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "show_access_internal_failure"},
+            )
+
+    @app.post("/internal/show-access/apply")
+    async def _show_access_apply(request: Request) -> Any:
+        from core.show_pages import (
+            ShowPageError,
+            ShowPageStore,
+            parse_show_access_apply_request,
+            show_access_payload,
+        )
+
+        payload = await _safe_json(request)
+        parsed = parse_show_access_apply_request(payload)
+        if parsed is None:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_show_access_apply_request"},
+            )
+        page_id = parsed["page_id"]
+
+        def _apply() -> dict[str, Any]:
+            store = ShowPageStore()
+            try:
+                apply_kwargs = {
+                    "expected_revision": parsed["expected_revision"],
+                    "target_access_mode": parsed["target_access_mode"],
+                    "target_share_id": parsed["target_share_id"],
+                }
+                if "target_emails" in parsed:
+                    apply_kwargs["target_emails"] = parsed["target_emails"]
+                else:
+                    apply_kwargs["target_entries"] = parsed["target_entries"]
+                result = store.apply_access(page_id, **apply_kwargs)
+            finally:
+                store.close()
+            if result.show_access.page_id != page_id:
+                raise RuntimeError("show_access_page_identity_mismatch")
+            return {
+                "status": result.status,
+                "show_access": show_access_payload(result.show_access),
+            }
+
+        try:
+            async with show_access_write_lock:
+                return await asyncio.to_thread(_apply)
+        except ShowPageError as exc:
+            status = 404 if exc.code == "show_page_not_found" else 400
+            return JSONResponse(
+                status_code=status,
+                content={"ok": False, "error": exc.code},
+            )
+        except Exception:
+            logger.exception("internal ShowAccess apply failed")
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": "show_access_internal_failure"},
+            )
 
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
@@ -647,6 +820,28 @@ def create_app(
         from core.services.running_agents import snapshot_running_agents
 
         return await asyncio.to_thread(snapshot_running_agents, controller)
+
+    @app.post("/internal/running-agents/snapshot")
+    async def _running_agents_snapshot(request: Request) -> Any:
+        """Return live agents plus ownership for one bounded Run candidate set."""
+
+        from core.services.running_agents import (
+            HARNESS_OWNERSHIP_CANDIDATE_LIMIT,
+            snapshot_running_agents,
+        )
+
+        payload = await _safe_json(request)
+        run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
+        if not isinstance(run_ids, list) or len(run_ids) > HARNESS_OWNERSHIP_CANDIDATE_LIMIT:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_run_candidates"},
+            )
+        return await asyncio.to_thread(
+            snapshot_running_agents,
+            controller,
+            ownership_candidate_run_ids=run_ids,
+        )
 
     @app.post("/internal/running-agents/end")
     async def _running_agents_end(request: Request) -> Any:
@@ -749,7 +944,17 @@ def create_app(
                     "delivery_id": delivery_id,
                 },
             )
-        if delivery["state"] != "reserved":
+        from core.backend_failure_retry import retry_binding
+
+        failure_retry = retry_binding(delivery)
+        if delivery["state"] != "reserved" and not (
+            retry_binding(delivery, unclaimed_only=True) and delivery["state"] == "queued"
+        ):
+            if failure_retry and delivery["state"] == "retired":
+                return JSONResponse(
+                    status_code=409,
+                    content={"ok": False, "code": "retry_stale", "delivery_id": delivery_id},
+                )
             return JSONResponse(
                 status_code=202,
                 content={
@@ -778,6 +983,7 @@ def create_app(
             "metadata": dict(delivery_payload.get("metadata") or {}),
             "author_id": delivery_payload.get("author_id"),
             "author_name": delivery_payload.get("author_name"),
+            "message_kind": delivery_payload.get("message_kind"),
         }
         try:
             text, context = await _build_dispatch_payload(dispatch_payload)
@@ -807,6 +1013,11 @@ def create_app(
         )
         with get_cached_sqlite_engine().connect() as conn:
             settled = message_deliveries.get_delivery(conn, delivery_id)
+        if failure_retry and (settled or {}).get("state") == "retired":
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "code": "retry_stale", "delivery_id": delivery_id},
+            )
         return JSONResponse(
             status_code=202,
             content={
@@ -831,6 +1042,29 @@ def create_app(
         except Exception as exc:
             logger.exception("internal platform reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+    @app.post("/internal/invalidate-activity-streaming")
+    async def _invalidate_activity_streaming() -> Any:
+        """Drop the controller process's cached Agent Activity display flag."""
+        try:
+            from core.message_mirror import reset_activity_flag_cache
+
+            reset_activity_flag_cache()
+            return JSONResponse(status_code=200, content={"ok": True})
+        except Exception as exc:
+            logger.exception("internal Agent Activity cache invalidation failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+    @app.get("/internal/backend-application/{backend}")
+    async def _backend_application(backend: str) -> Any:
+        from modules.agents.catalog import AGENT_BACKENDS
+
+        if backend not in AGENT_BACKENDS:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "unsupported_backend"})
+        coordinator = getattr(controller, "backend_restart_coordinator", None)
+        if coordinator is None:
+            return JSONResponse(status_code=503, content={"ok": False, "error": "backend_runtime_unavailable"})
+        return {"ok": True, "controller_pid": os.getpid(), **coordinator.snapshot(backend)}
 
     @app.post("/internal/reconcile-agent-backends")
     async def _reconcile_agent_backends(request: Request) -> Any:
@@ -883,14 +1117,9 @@ def create_app(
         except Exception as exc:
             logger.exception("internal backend auth test failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
-    def _memory_runtime():
-        return getattr(controller, "memory_runtime", None)
-
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
-
-        from core.memory.artifact import MemoryRuntimeActivationError
 
         try:
             from config.v2_config import V2Config
@@ -898,71 +1127,313 @@ def create_app(
             config = await asyncio.to_thread(V2Config.load)
             result = await controller.reconcile_memory(config.memory)
             return JSONResponse(status_code=200, content=result)
-        except MemoryRuntimeActivationError:
-            # Only the runtime install/activation bridge earns the "install
-            # failed" message. Everything else reported it too, which sent an
-            # incident caused by a pause/probe timeout in the wrong direction.
-            logger.exception("internal memory runtime activation failed during reconcile")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_install_failed"})
-        except Exception:
-            logger.exception("internal memory reconcile failed")
-            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_reconcile_failed"})
-
-    @app.post("/internal/memory/restart")
-    async def _memory_restart() -> Any:
-        """Replace the live Memory sidecar through the Runtime lifecycle."""
-
-        runtime = _memory_runtime()
-        if runtime is None:
+        except ImportError:
             return JSONResponse(
                 status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing"},
+                content={"ok": False, "error": "memory_implementation_unavailable"},
+            )
+        except Exception as exc:
+            if type(exc).__name__ == "MemoryRuntimeActivationError":
+                logger.exception("internal memory runtime activation failed during reconcile")
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": "memory_runtime_install_failed"},
+                )
+            if isinstance(exc, (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError)):
+                return JSONResponse(
+                    status_code=503,
+                    content={"ok": False, "error": _memory_implementation_error_code(exc)},
+                )
+            logger.exception("internal memory reconcile failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_reconcile_failed"},
+            )
+
+    @app.post("/internal/memory/wake")
+    async def _memory_wake() -> Any:
+        """Non-destructively wake the existing admitted Memory root."""
+
+        try:
+            result = await controller.wake_memory()
+        except MemoryStoreUnavailableError:
+            result = {
+                "ok": False,
+                "state": "degraded",
+                "error": "memory_store_unavailable",
+            }
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            result = {"ok": False, "state": "degraded", "error": _memory_implementation_error_code(exc)}
+        except Exception:
+            logger.exception("internal memory wake failed")
+            result = {"ok": False, "state": "degraded", "error": "memory_wake_failed"}
+        status_code = 200 if result.get("ok") is True else (
+            409 if result.get("error") == "memory_operation_in_progress" else 503
+        )
+        return JSONResponse(status_code=status_code, content=result)
+
+    async def _confirmed_memory_data_operation(
+        request: Request,
+        *,
+        operation: str,
+    ) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "operation": operation, "error": "memory_access_denied"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm_loss": True}:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "operation": operation,
+                    "error": "memory_loss_confirmation_required",
+                    "result": "unchanged",
+                },
+            )
+        handler = (
+            getattr(controller, "repair_memory", None)
+            if operation == "repair"
+            else getattr(controller, "delete_memory_data", None)
+        )
+        if not callable(handler):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "operation": operation, "error": "memory_runtime_missing"},
             )
         try:
-            result = await runtime.restart()
-            return JSONResponse(status_code=200, content=result)
+            result = await handler(confirm_loss=True)
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            result = {
+                "ok": False,
+                "operation": operation,
+                "error": _memory_implementation_error_code(exc),
+                "result": "failed",
+            }
         except Exception:
-            logger.exception("internal memory restart failed")
+            logger.exception("internal Memory %s failed", operation)
+            result = {
+                "ok": False,
+                "operation": operation,
+                "error": f"memory_{operation}_failed",
+                "result": "failed",
+            }
+        if result.get("ok") is True:
+            status_code = 200
+        elif result.get("error") in {
+            "memory_operation_in_progress",
+            "memory_repair_not_required",
+        }:
+            status_code = 409
+        else:
+            status_code = 503
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.post("/internal/memory/repair")
+    async def _memory_repair(request: Request) -> Any:
+        return await _confirmed_memory_data_operation(request, operation="repair")
+
+    @app.post("/internal/memory/delete-data")
+    async def _memory_delete_data(request: Request) -> Any:
+        return await _confirmed_memory_data_operation(request, operation="delete_data")
+
+    @app.post("/internal/memory/reconfigure")
+    async def _memory_reconfigure(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
             return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_restart_failed"},
+                status_code=403,
+                content={"ok": False, "operation": "reconfigure", "error": "memory_access_denied"},
             )
+        payload = await _safe_json(request)
+        if not isinstance(payload, dict) or set(payload) != {
+            "confirm_loss",
+            "memory",
+            "expected_memory",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "operation": "reconfigure",
+                    "error": "memory_loss_confirmation_required",
+                },
+            )
+        if payload.get("confirm_loss") is not True:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "operation": "reconfigure",
+                    "error": "memory_loss_confirmation_required",
+                },
+            )
+        try:
+            from config.v2_config import memory_config_from_payload
+
+            candidate = memory_config_from_payload(payload["memory"])
+            expected = memory_config_from_payload(payload["expected_memory"])
+            result = await controller.reconfigure_memory(
+                candidate,
+                expected_config=expected,
+                confirm_loss=True,
+            )
+        except (TypeError, ValueError):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "operation": "reconfigure", "error": "memory_invalid_input"},
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            result = {
+                "ok": False,
+                "operation": "reconfigure",
+                "error": _memory_implementation_error_code(exc),
+            }
+        except Exception:
+            logger.exception("internal Memory reconfigure failed")
+            result = {
+                "ok": False,
+                "operation": "reconfigure",
+                "error": "memory_reconfigure_failed",
+            }
+        status_code = 200 if result.get("ok") is True else (
+            409 if result.get("error") == "memory_operation_in_progress" else 503
+        )
+        return JSONResponse(status_code=status_code, content=result)
 
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""
 
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
         try:
-            result = await runtime.install_artifact()
+            result = await controller.install_memory_runtime()
             return JSONResponse(status_code=200, content=result)
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "reason": _memory_implementation_error_code(exc)},
+            )
         except Exception:
             logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
-    def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
-        from core.memory.http_headers import CALLER_SESSION_HEADER
+    @app.post("/internal/memory/preflight")
+    async def _memory_preflight(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(status_code=403, content={"ok": False, "error": "memory_access_denied"})
+        payload = await _safe_json(request)
+        try:
+            from config.v2_config import memory_config_from_payload
+
+            config = memory_config_from_payload(payload.get("memory", payload) if isinstance(payload, dict) else {})
+            preflight = getattr(controller, "preflight_memory", None)
+            if not callable(preflight):
+                return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
+            return JSONResponse(status_code=200, content=await preflight(config))
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": _memory_implementation_error_code(exc)},
+            )
+        except Exception:
+            logger.exception("internal memory preflight failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_processing_failed"})
+
+    def _memory_cli_scope(request: Request, *, read_only: bool = False) -> tuple[str, str] | None:
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         if not session_id:
             return None
         resolve = getattr(controller, "memory_scope_for_cli_session", None)
+        if read_only:
+            resolve = getattr(controller, "memory_read_scope_for_cli_session", resolve)
         scope = resolve(session_id) if callable(resolve) else None
-        from core.memory.store import is_principal_id, is_project_id
+        if not bool(getattr(getattr(getattr(controller, "config", None), "memory", None), "enabled", False)):
+            return None
+        implementation_sessions = getattr(controller, "_memory_implementation_cli_sessions", None)
+        if (
+            getattr(controller, "_memory_implementation_error", None) is not None
+            and isinstance(implementation_sessions, set)
+            and session_id in implementation_sessions
+            and isinstance(scope, tuple)
+            and len(scope) == 2
+        ):
+            return scope
+        from vibe.memory_contract import is_memory_principal_id
+        from vibe.memory_project_ids import is_project_id
 
         if (
             isinstance(scope, tuple)
             and len(scope) == 2
-            and is_principal_id(scope[0])
+            and is_memory_principal_id(scope[0])
             and is_project_id(scope[1])
         ):
             return scope
         return None
 
+    @app.post("/internal/memory/archive-session")
+    async def _memory_archive_session(request: Request) -> Any:
+        """Archive one Workbench session through the controller-owned write."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"]
+            or payload["session_id"] != payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        archive_session = getattr(controller, "archive_session", None)
+        if not callable(archive_session):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        try:
+            session = await archive_session(
+                payload["session_id"],
+                deadline_seconds=5.0,
+            )
+        except LookupError:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "session_not_found"},
+            )
+        except PermissionError as error:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": getattr(error, "code", "forbidden"),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug(
+                "internal Workbench session archive failed for %s",
+                payload["session_id"],
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        if not isinstance(session, dict):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        return {"ok": True, "session": session}
+
     def _verified_memory_ui_user_key(request: Request) -> str | None:
-        from core.memory.http_headers import (
+        from vibe.memory_http_headers import (
             CALLER_SESSION_HEADER,
             MEMORY_USER_KEY_HEADER,
         )
@@ -975,7 +1446,7 @@ def create_app(
             or (user_key.startswith(remote_prefix) and len(user_key) > len(remote_prefix))
         ):
             return None
-        from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
+        from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, verify_ui_read_proof
 
         proof = str(request.headers.get(MEMORY_UI_PROOF_HEADER) or "").strip()
         if memory_ui_secret is None or not verify_ui_read_proof(
@@ -988,90 +1459,131 @@ def create_app(
             return None
         return user_key
 
-    def _memory_read_scope(request: Request) -> tuple[str, str] | None:
-        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    def _memory_read_owner(
+        request: Request,
+    ) -> tuple[str | None, tuple[str, str] | None] | None:
+        from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
 
         if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
             user_key = _verified_memory_ui_user_key(request)
             if user_key is None:
                 return None
-            runtime = _memory_runtime()
-            try:
-                principal_id = runtime.principal_for_user_key(user_key) if runtime is not None else None
-                resolve_project = getattr(controller, "default_memory_project_id", None)
-                project_id = resolve_project() if callable(resolve_project) else None
-                from core.memory.store import is_principal_id, is_project_id
-
-                if is_principal_id(principal_id) and is_project_id(project_id):
-                    return principal_id, project_id
-                return None
-            except MemoryStoreUnavailableError:
-                raise
-            except Exception as exc:
-                raise MemoryStoreUnavailableError("Memory store is unavailable") from exc
-        return _memory_cli_scope(request)
-
-    memory_admin_log_access = object()
-
-    def _memory_log_access(request: Request) -> object | tuple[str, str] | None:
-        from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-
-        if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
-            return (
-                memory_admin_log_access
-                if _verified_memory_ui_user_key(request) is not None
-                else None
-            )
-        return _memory_cli_scope(request)
+            return user_key, None
+        scope = _memory_cli_scope(request, read_only=True)
+        return (None, scope) if scope is not None else None
 
     @app.get("/internal/memory/status")
     async def _memory_status() -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.status_payload()
+            return await controller.memory_status_payload()
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_implementation_error_code(exc)})
         except Exception:
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
-    @app.get("/internal/memory/failures")
-    async def _memory_failures() -> Any:
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+    @app.get("/internal/memory/processing-record")
+    async def _memory_processing_record(request: Request) -> Any:
         try:
-            return await runtime.failure_log_payload()
+            return await controller.memory_processing_record_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except Exception:
+            logger.warning("internal memory Processing Record read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
+    @app.get("/internal/memory/failures")
+    async def _memory_failures(request: Request) -> Any:
+        try:
+            return await controller.memory_failure_log_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(status_code=503, content={"error": _memory_implementation_error_code(exc)})
         except Exception:
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
+    @app.get("/internal/memory/maintenance")
+    async def _memory_maintenance(request: Request) -> Any:
+        try:
+            return await controller.memory_maintenance_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except Exception:
+            logger.warning("internal memory maintenance read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
+        owner = _memory_read_owner(request)
+        if owner is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        verified_user_key, cli_scope = owner
         try:
-            scope = _memory_read_scope(request)
+            payload = await controller.memory_profile_payload(
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+            if isinstance(payload, dict) and payload.get("error") == "memory_disabled":
+                return JSONResponse(status_code=409, content=payload)
+            return payload
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if scope is None:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        try:
-            return await runtime.profile_payload(principal_id, project_id)
         except Exception:
             logger.warning("internal memory profile failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
 
-    @app.get("/internal/memory/log")
-    async def _memory_log(request: Request) -> Any:
+    @app.get("/internal/memory/processing-record/entries")
+    async def _memory_processing_record_entries(request: Request) -> Any:
         try:
-            cursor, limit = _memory_log_list_query(request)
-            access = _memory_log_access(request)
+            cursor, limit, requested_project = _processing_record_list_query(request)
+            owner = _memory_read_owner(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if owner is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        verified_user_key, cli_scope = owner
+        try:
+            return await controller.memory_processing_record_entries_payload(
+                cursor=cursor,
+                limit=limit,
+                project_id=requested_project,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -1082,44 +1594,46 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if access is None:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except PermissionError:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
-        try:
-            if access is memory_admin_log_access:
-                return await runtime.admin_log_entries_payload(cursor, limit)
-            principal_id, project_id = access
-            return await runtime.log_entries_payload(
-                principal_id,
-                project_id,
-                cursor,
-                limit,
-            )
-        except ValueError:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "failed", "error": "memory_invalid_input"},
-            )
         except Exception:
-            logger.warning("internal memory log failed")
+            logger.warning("internal native Processing Record list failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_processing_failed"},
             )
 
-    @app.get("/internal/memory/log/entry")
-    async def _memory_log_entry(request: Request) -> Any:
+    @app.get("/internal/memory/processing-record/entry")
+    async def _memory_processing_record_entry(request: Request) -> Any:
         try:
-            memcell_id = _memory_log_entry_query(request)
-            access = _memory_log_access(request)
+            memcell_id, requested_project = _processing_record_entry_query(request)
+            owner = _memory_read_owner(request)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if owner is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        verified_user_key, cli_scope = owner
+        try:
+            payload = await controller.memory_processing_record_entry_payload(
+                memcell_id=memcell_id,
+                project_id=requested_project,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
         except ValueError:
             return JSONResponse(
                 status_code=400,
@@ -1130,34 +1644,18 @@ def create_app(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if access is None:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except PermissionError:
             return JSONResponse(
                 status_code=403,
                 content={"status": "failed", "error": "memory_access_denied"},
             )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_runtime_missing"},
-            )
-        try:
-            if access is memory_admin_log_access:
-                payload = await runtime.admin_log_entry_payload(memcell_id)
-            else:
-                principal_id, project_id = access
-                payload = await runtime.log_entry_payload(
-                    principal_id,
-                    project_id,
-                    memcell_id,
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "failed", "error": "memory_invalid_input"},
-            )
         except Exception:
-            logger.warning("internal memory log entry failed")
+            logger.warning("internal native Processing Record detail failed")
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_processing_failed"},
@@ -1165,40 +1663,264 @@ def create_app(
         if payload.get("status") == "not_found":
             return JSONResponse(
                 status_code=404,
-                content={"status": "failed", "error": "memory_log_entry_not_found"},
+                content={
+                    "status": "failed",
+                    "error": "memory_processing_record_entry_not_found",
+                },
             )
         return payload
 
+    @app.get("/internal/memory/projects")
+    async def _memory_projects(request: Request) -> Any:
+        owner = _memory_read_owner(request)
+        if owner is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        verified_user_key, cli_scope = owner
+        try:
+            return await controller.memory_projects_payload(
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except MemoryStoreUnavailableError:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        except Exception:
+            logger.warning("internal memory project list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
+    @app.post("/internal/memory/delegated-owner")
+    async def _delegated_memory_owner(request: Request) -> Any:
+        from core.caller_context import verify_caller_session_proof
+        from storage.message_deliveries import current_delivery_memory_owner
+
+        body = await request.json()
+        session_id, proof = body.get("session_id"), body.get("proof")
+        if not isinstance(session_id, str) or not isinstance(proof, str):
+            return JSONResponse(status_code=403, content={"owner": None})
+        owner = current_delivery_memory_owner(session_id)
+        if not verify_caller_session_proof(session_id, proof, owner):
+            return JSONResponse(status_code=403, content={"owner": None})
+        return {"owner": owner}
+
     @app.post("/internal/memory/search")
     async def _memory_search(request: Request) -> Any:
+        owner = _memory_read_owner(request)
+        if owner is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        verified_user_key, cli_scope = owner
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or not {"query", "policy"}.issubset(payload)
+            or set(payload) - {"query", "policy", "project"}
+            or not isinstance(payload.get("query"), str)
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER, MEMORY_USER_KEY_HEADER
+        from vibe.memory_project_ids import (
+            omitted_project_to_default,
+            parse_agent_search_project,
+            parse_ui_search_project,
+        )
         try:
-            scope = _memory_read_scope(request)
+            from vibe.memory_contract import RecallPolicy
+
+            policy = RecallPolicy.from_payload(payload.get("policy"))
+            raw_project = omitted_project_to_default(payload.get("project"))
+            if str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip():
+                project_id = parse_ui_search_project(raw_project)
+            else:
+                project_id = parse_agent_search_project(raw_project)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except ImportError:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_implementation_unavailable"})
+        current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+        try:
+            return await controller.memory_search_payload(
+                query=payload["query"],
+                policy=policy,
+                project_id=project_id,
+                current_session_id=current_session_id,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+        except ValueError:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
                 content={"status": "failed", "error": "memory_store_unavailable"},
             )
-        if scope is None:
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except PermissionError:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        principal_id, project_id = scope
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != {"query", "limit"}
-            or not isinstance(payload.get("query"), str)
-        ):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        limit = payload.get("limit")
-        if not isinstance(limit, int) or isinstance(limit, bool):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        try:
-            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
+
+    @app.post("/internal/memory/list")
+    async def _memory_list(request: Request) -> Any:
+        owner = _memory_read_owner(request)
+        if owner is None:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        verified_user_key, cli_scope = owner
+        payload = await _safe_json(request)
+        if not isinstance(payload, dict) or set(payload) - {
+            "project",
+            "page",
+            "limit",
+            "cursor",
+            "origin",
+        }:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+        from vibe.memory_project_ids import (
+            MEMORY_SEARCH_ALL_PROJECTS,
+            omitted_project_to_default,
+            parse_agent_search_project,
+            parse_ui_search_project,
+        )
+        from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
+        from vibe.memory_contract import MAX_MEMORY_LIST_PAGE_SIZE
+        is_ui = bool(str(request.headers.get(MEMORY_USER_KEY_HEADER) or "").strip())
+        limit = payload.get("limit", 20)
+        origin = payload.get("origin", "user")
+        try:
+            raw_project = omitted_project_to_default(payload.get("project"))
+            project_id = (
+                parse_ui_search_project(raw_project)
+                if is_ui
+                else parse_agent_search_project(raw_project)
+            )
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_MEMORY_LIST_PAGE_SIZE
+            or origin not in ("user", "agent")
+            or ("origin" in payload and not is_ui)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        if project_id == MEMORY_SEARCH_ALL_PROJECTS:
+            cursor = payload.get("cursor")
+            page = None
+            try:
+                cursor_bytes = (
+                    len(cursor.encode("utf-8"))
+                    if isinstance(cursor, str)
+                    else None
+                )
+            except UnicodeEncodeError:
+                cursor_bytes = MEMORY_LIST_CURSOR_MAX_BYTES + 1
+            if (
+                "page" in payload
+                or (
+                    cursor is not None
+                    and (
+                        not isinstance(cursor, str)
+                        or not cursor
+                        or cursor_bytes is None
+                        or cursor_bytes > MEMORY_LIST_CURSOR_MAX_BYTES
+                    )
+                )
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+        else:
+            cursor = None
+            page = payload.get("page", 1)
+            if (
+                "cursor" in payload
+                or isinstance(page, bool)
+                or not isinstance(page, int)
+                or page < 1
+            ):
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "failed", "error": "memory_invalid_input"},
+                )
+        try:
+            result = await controller.memory_list_payload(
+                project_id=project_id,
+                page=page,
+                cursor=cursor,
+                limit=limit,
+                origin=origin if "origin" in payload else None,
+                verified_user_key=verified_user_key,
+                cli_scope=cli_scope,
+            )
+            if result == {
+                "status": "failed",
+                "error": "memory_invalid_input",
+            }:
+                return JSONResponse(status_code=400, content=result)
+            return result
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "failed", "error": "memory_invalid_input"},
+            )
+        except MemoryStoreUnavailableError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except PermissionError:
+            return JSONResponse(
+                status_code=403,
+                content={"status": "failed", "error": "memory_access_denied"},
+            )
+        except Exception:
+            logger.warning("internal memory list failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_processing_failed"},
+            )
 
     @app.post("/internal/memory/remember")
     async def _memory_remember(request: Request) -> Any:
@@ -1206,29 +1928,46 @@ def create_app(
         if scope is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         principal_id, project_id = scope
-        runtime = _memory_runtime()
-        module = getattr(runtime, "module", None) if runtime is not None else None
-        if module is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"text"}
+            or not {"text"}.issubset(payload)
+            or set(payload) - {"text", "project"}
             or not isinstance(payload.get("text"), str)
             or not payload["text"].strip()
-            or len(payload["text"]) > 4_000
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from vibe.memory_project_ids import omitted_project_to_default, parse_writable_memory_project
 
-        from core.memory import CaptureRequest
-        from core.memory.http_headers import CALLER_SESSION_HEADER
+        try:
+            project_id = parse_writable_memory_project(
+                omitted_project_to_default(payload.get("project"))
+            )
+        except ValueError:
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+
+        from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
         session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip()
         text = payload["text"]
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
-            receipt = await module.capture(
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
+            if isinstance(
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
+            ):
+                raise implementation_error
+            from avibe_memory import CaptureRequest
+
+            capture = getattr(controller, "capture_memory", None)
+            if not callable(capture):
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_runtime_missing"},
+                )
+            receipt = await capture(
                 CaptureRequest(
                     source_message_id=(
                         f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
@@ -1241,7 +1980,43 @@ def create_app(
                     occurred_at_ms=int(time.time() * 1000),
                 )
             )
+        except (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError) as exc:
+            logger.warning("internal memory remember failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": _memory_implementation_error_code(exc)},
+            )
+        except ImportError:
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
+            if isinstance(
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_implementation_error_code(implementation_error),
+                    },
+                )
+            logger.warning("internal memory remember implementation unavailable")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_implementation_unavailable"},
+            )
         except Exception:
+            implementation_error = getattr(controller, "_memory_implementation_error", None)
+            if isinstance(
+                implementation_error,
+                (MemoryImplementationUnavailableError, MemoryImplementationIncompatibleError),
+            ):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "failed",
+                        "error": _memory_implementation_error_code(implementation_error),
+                    },
+                )
             logger.warning("internal memory remember failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
         response: dict[str, Any] = {"status": receipt.status}
@@ -1253,50 +2028,44 @@ def create_app(
             response["error"] = error
         return response
 
-    @app.post("/internal/memory/clear")
-    async def _memory_clear(request: Request) -> Any:
-        if _verified_memory_ui_user_key(request) is None:
-            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        try:
-            return await runtime.clear()
-        except MemoryStoreUnavailableError:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "failed", "error": "memory_store_unavailable"},
-            )
-        except Exception:
-            logger.warning("internal memory clear failed")
-            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
 
         from config.v2_config import is_model_hub_enabled
-        from core.handlers.model_hub import ModelHubError
+        from core.handlers.model_hub import (
+            ModelHubError,
+            ensure_runtime_dependency,
+            runtime_dependency_payload,
+        )
         from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 
-        if not is_model_hub_enabled():
+        body = await _safe_json(request)
+        operation = body.get("operation") if isinstance(body, dict) else None
+        payload = body.get("payload") if isinstance(body, dict) else None
+        dependency_operation = operation == "runtime_ensure_dependency"
+        if not is_model_hub_enabled() and not dependency_operation:
             return JSONResponse(
                 status_code=404,
                 content={"ok": False, "contract_version": 1, "error": "feature_disabled"},
             )
-        body = await _safe_json(request)
-        operation = body.get("operation") if isinstance(body, dict) else None
-        payload = body.get("payload") if isinstance(body, dict) else None
         if not isinstance(operation, str) or not isinstance(payload, dict):
             return JSONResponse(status_code=400, content={"ok": False, "error": "discovery_failed"})
         service = getattr(controller, "model_hub_service", None)
-        if service is None:
+        adapter = getattr(controller, "model_hub_engine_adapter", None)
+        if service is None and (not dependency_operation or adapter is None):
             return JSONResponse(status_code=503, content={"ok": False, "error": "engine_down"})
         try:
-            result = await dispatch_model_hub_rpc(service, operation, payload)
+            if service is not None:
+                result = await dispatch_model_hub_rpc(service, operation, payload)
+            else:
+                ensured = await ensure_runtime_dependency(
+                    adapter,
+                    force=payload.get("force") is True,
+                    offline=payload.get("offline") is True,
+                )
+                result = runtime_dependency_payload(ensured, enabled=False)
         except ModelHubError as exc:
             response = {"ok": False, "error": exc.code}
             if exc.detail:
@@ -1317,19 +2086,41 @@ def create_app(
         from core.inbox_events import bus
 
         sub_id, queue = bus.subscribe()
+        # Baselined before the handshake below, because that yield reaches the
+        # bridge and a discard after it is a hole in what this feed promised.
+        last_dropped = bus.dropped_count(sub_id)
 
         async def _stream():
             try:
-                # A REAL ``connected`` event (not a ``:`` comment, which the
-                # internal_client parser swallows) so it flows bridge → broker →
-                # browser. The UI sidebar refetches on this, which reconciles
-                # agent-status dots after a CONTROLLER restart while the UI server
-                # + browser SSE stay up: only this bridge reconnects, so the
-                # browser's own ``connected`` never fires and the crash-recovery
-                # ``running → idle`` reset (broadcast to no subscriber) would
-                # otherwise be invisible until a manual reload (Codex P2).
+                # A REAL ``connected`` event, not a ``:`` comment, which the
+                # internal_client parser swallows: the bridge has to be able to
+                # observe this handshake. It consumes the frame rather than
+                # relaying it, and publishes the bridge-status transition that
+                # browsers actually key off. Either way the UI reconciles after a
+                # CONTROLLER restart that leaves the UI server + browser SSE up:
+                # only this bridge reconnects, so the browser's own ``connected``
+                # never fires and the crash-recovery ``running → idle`` reset
+                # (broadcast to no subscriber) would otherwise stay invisible
+                # until a manual reload (Codex P2).
                 yield _sse_event("connected", {})
                 while True:
+                    # Same rule as the UI server's browser feed: a subscriber
+                    # that lost an event is not a subscriber any more. Ending it
+                    # makes the bridge reconnect, and a reconnect flips the
+                    # bridge status, which is what tells browsers to reconcile.
+                    # Announcing the hole down this stream instead cannot work --
+                    # the queue is still full, so the next iteration finds
+                    # another discard and announces again. Checked before
+                    # ``get()`` so no event is relayed as if it followed the
+                    # previous one when it does not.
+                    dropped = bus.dropped_count(sub_id)
+                    if dropped > last_dropped:
+                        logger.warning(
+                            "internal events: ending subscriber %s after %s dropped event(s)",
+                            sub_id,
+                            dropped - last_dropped,
+                        )
+                        return
                     event_type, data = await queue.get()
                     yield _sse_event(event_type, data)
             finally:
@@ -1393,15 +2184,17 @@ def create_app(
         return {"ok": True, "queued": True}
 
     @app.post("/internal/cancel/{session_id}")
-    async def _cancel(session_id: str) -> Any:
+    async def _cancel(session_id: str, run_id: str | None = None) -> Any:
         """HTTP adapter: delegate Stop to the turn owner (FSM, Phase 1b) and map its
         result ``code`` to a status — ``not_in_flight`` -> 404, ``stop_failed`` ->
         409. ``session_id`` is the dispatch key the turn registered under, so the UI
         Stop button works with just the URL it already has."""
-        result = await manager.cancel(session_id)
+        result = await manager.cancel(session_id, agent_run_id=run_id)
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
+        if code == "invalid_run_id":
+            return JSONResponse(status_code=400, content=result)
         if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result
@@ -1468,25 +2261,28 @@ async def serve(
             "bearer_token": host.bearer_token,
         }
     app = create_app(controller, **app_kwargs)
-    recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
-    if recovery_complete is not None:
-        await recovery_complete.wait()
-    config = uvicorn.Config(
-        app,
-        log_config=None,
-        access_log=False,
-        loop="asyncio",
-        lifespan="off",
-    )
-    server = _create_controller_loop_server(config)
-
-    bound = host.bind()
+    skill_recorder = controller.skill_observability
     try:
-        host.publish(bound)
-        _write_internal_server_status("ready")
-        await server.serve(sockets=[bound.listener])
+        recovery_complete = getattr(controller, "_delivery_recovery_complete", None)
+        if recovery_complete is not None:
+            await recovery_complete.wait()
+        config = uvicorn.Config(
+            app,
+            log_config=None,
+            access_log=False,
+            loop="asyncio",
+            lifespan="off",
+        )
+        server = _create_controller_loop_server(config)
+        bound = host.bind()
+        try:
+            host.publish(bound)
+            _write_internal_server_status("ready")
+            await server.serve(sockets=[bound.listener])
+        finally:
+            host.cleanup(bound)
     finally:
-        host.cleanup(bound)
+        await skill_recorder.close()
 
 
 def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Path]:
@@ -1513,38 +2309,22 @@ def _write_internal_server_status(
 ) -> None:
     """Persist internal-server lifecycle state for the out-of-process CLI."""
 
-    target = paths.get_internal_server_status_path()
+    payload: dict[str, str] = {
+        "state": state,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if error is not None:
+        payload["error"] = error
+    if detail is not None:
+        payload["detail"] = detail
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "state": state,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-        if error is not None:
-            payload["error"] = error
-        if detail is not None:
-            payload["detail"] = detail
-        file_descriptor, temporary_name = tempfile.mkstemp(
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
+        # Compact: the CLI polls this, nobody reads it by eye. Losing the write is
+        # survivable — the status file is a courtesy to an out-of-process reader,
+        # not something the server's own lifecycle depends on.
+        write_atomic(
+            paths.get_internal_server_status_path(),
+            json.dumps(payload, separators=(",", ":")),
         )
-        temporary = Path(temporary_name)
-        try:
-            if hasattr(os, "fchmod"):
-                os.fchmod(file_descriptor, 0o600)
-            with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream, separators=(",", ":"))
-            file_descriptor = -1
-            os.replace(temporary, target)
-        except Exception:
-            if file_descriptor >= 0:
-                try:
-                    os.close(file_descriptor)
-                except OSError:
-                    pass
-            temporary.unlink(missing_ok=True)
-            raise
     except OSError:
         logger.warning("could not persist internal dispatch server status", exc_info=True)
 
@@ -1651,17 +2431,17 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
     context = await asyncio.to_thread(
         _build_session_context,
         session_id,
-        user_id=payload.get("user_id"),
+        user_id=payload.get("author_id"),
         channel_id=payload.get("channel_id"),
         platform=payload.get("platform"),
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
-        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
-        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     if context.platform_specific is None:
         context.platform_specific = {}
+    context.message_kind = normalize_message_kind(payload.get("message_kind"))
+    context.is_original_human_text = context.message_kind == "original"
     context.platform_specific.update(
         {
             "delivery_id": payload.get("user_message_id"),
@@ -1671,6 +2451,7 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
             "message_metadata": payload.get("metadata") or {},
             "author_id": payload.get("author_id"),
             "author_name": payload.get("author_name"),
+            "message_kind": context.message_kind,
         }
     )
     return text, context
@@ -1685,8 +2466,6 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
-    memory_cli_admitted: bool = False,
-    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Rebuild a Session's routing context from its durable scope and target.
 
@@ -1729,8 +2508,6 @@ def _build_session_context(
     }
     if resolved_platform == "avibe":
         platform_specific["workbench_session_id"] = session_id
-    if memory_cli_admitted:
-        platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
@@ -1763,7 +2540,6 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
-        is_ordinary_text=is_ordinary_text,
     )
 
 

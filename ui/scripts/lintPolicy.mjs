@@ -200,8 +200,13 @@ export const EXPECTED_POLICY = {
  * can fix: a symlinked *file* is linted and so is walked, a symlinked
  * *directory* is not descended into by either side. That also means the walk has
  * no cycle to guard against.
+ *
+ * ``extensions`` exists so a non-lint gate can measure a different domain over
+ * the same tree — ``scripts/validate-theme.mjs`` reads stylesheets too. It
+ * defaults to the lint domain, so the invariant this module is named for is
+ * unaffected: only a caller that asks for something else gets something else.
  */
-export function intendedFiles(root, { excluded = DEPENDENCY_ROOTS } = {}) {
+export function intendedFiles(root, { excluded = DEPENDENCY_ROOTS, extensions = INTENDED_EXTENSIONS } = {}) {
   const found = [];
 
   const walk = (dir) => {
@@ -209,7 +214,7 @@ export function intendedFiles(root, { excluded = DEPENDENCY_ROOTS } = {}) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!excluded.includes(entry.name)) walk(full);
-      } else if (INTENDED_EXTENSIONS.some((extension) => entry.name.endsWith(extension))) {
+      } else if (extensions.some((extension) => entry.name.endsWith(extension))) {
         found.push(path.relative(root, full).split(path.sep).join('/'));
       }
     }

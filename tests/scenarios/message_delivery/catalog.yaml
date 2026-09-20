@@ -14,6 +14,30 @@ status_legend:
   manual: currently validated only by human regression
   gap: not covered yet
 scenarios:
+  - id: MESSAGE-DELIVERY-031
+    name: Bounded prewrite retry retains FIFO input across restart until explicit recovery
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_prewrite_retry_budget_survives_restart_and_preserves_original_input
+  - id: MESSAGE-DELIVERY-032
+    name: Oversized Codex stdout frames preserve a non-reconnectable failure cause
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_codex_transport.py::CodexTransportHealthTests::test_oversized_stdout_fails_all_pending_requests_with_typed_cause
+  - id: MESSAGE-DELIVERY-033
+    name: Failure recovery cannot replace a Codex process owned by a live neighbour
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_codex_agent.py::CodexAgentHandleMessageTests::test_failure_replacement_respects_live_durable_and_unknown_ownership
+  - id: MESSAGE-DELIVERY-034
+    name: Excluded Codex resume responses preserve stored history and next-turn model context
+    status: partial
+    kind: regression
+    layer: contract
+    test: tests/test_codex_prompt_delivery_contract.py::test_excluded_resume_preserves_native_history_and_model_settings
   - id: MESSAGE-DELIVERY-001
     name: Scheduled result finalizes its delivery anchor
     status: covered
@@ -61,7 +85,7 @@ scenarios:
     status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_scheduled_tasks.py::test_one_terminal_turn_fans_out_each_accepted_run_callback_once
+    test: tests/test_scheduled_tasks.py::test_directed_run_and_callback_remain_distinct_while_target_busy
   - id: MESSAGE-DELIVERY-009
     name: P1 terminal race produces one accepted attachment or one P3 fallback owner
     status: covered
@@ -75,7 +99,7 @@ scenarios:
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_two_empty_p1_requests_claim_exact_same_head_only
   - id: MESSAGE-DELIVERY-011
-    name: Lost accepted steering receipt enters reconciliation without a second adapter call
+    name: Lost accepted steering receipt is retained as positive evidence and materialized without reconciliation
     status: covered
     kind: recovery
     layer: contract
@@ -140,6 +164,60 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_agent_steering.py::test_message_delivery_021_opencode_preserves_native_order_and_recovers_exact_part
+  - id: MESSAGE-DELIVERY-022
+    name: Stop retires a starting Turn that has not reached the native write boundary
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_stop_cancels_a_starting_turn_before_native_write
+  - id: MESSAGE-DELIVERY-023
+    name: Prewrite Stop releases its runtime gate before a same-runtime successor enters
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_agent_service.py::test_message_delivery_023_prewrite_stop_releases_gate_without_terminal_tidy
+  - id: MESSAGE-DELIVERY-024
+    name: Workbench reload keeps an active claimed input visible before native acceptance
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_ui_session_stream.py::test_message_delivery_024_claimed_active_input_survives_transcript_reload
+  - id: MESSAGE-DELIVERY-025
+    name: The send gesture cannot activate the newly rendered Stop control
+    status: covered
+    kind: regression
+    layer: contract
+    test: ui/src/components/workbench/Composer.attachmentRetry.test.tsx::MESSAGE-DELIVERY-025
+  - id: MESSAGE-DELIVERY-026
+    name: Failed-turn retry crosses Web and controller admission without replaying accepted work
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_web_controller_round_trip
+  - id: MESSAGE-DELIVERY-027
+    name: Concurrent failed-notice clicks share one durable continuation owner
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_concurrent_clicks_have_one_owner
+  - id: MESSAGE-DELIVERY-028
+    name: Deferred failed-turn retry cannot execute after newer work
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_failure_retry_queue_drain_rechecks_the_boundary
+  - id: MESSAGE-DELIVERY-029
+    name: Missing Claude transcript retains unwritten input until explicit recovery
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_claude_session_recovery.py::test_missing_session_queue_waits_for_explicit_recovery
+  - id: MESSAGE-DELIVERY-030
+    name: Restart interruption retains its failed Turn binding through delivery and one Web continuation
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_restart_notice_retries_through_web_and_controller
   - id: MESSAGE-DELIVERY-101
     name: Unresolved fallback-capable delivery fences only later FIFO submissions
     status: covered
@@ -224,5 +302,65 @@ scenarios:
     kind: regression
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_steer_acceptance_materializes_message_before_show_event_link
+  - id: MESSAGE-DELIVERY-311
+    name: Observation recovery materializes accepted steer evidence without another adapter call
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_observation_recovery_materializes_persisted_accepted_receipt_without_reconcile
+  - id: MESSAGE-DELIVERY-312
+    name: Unknown steer evidence remains unreplayed while reconciliation stays conservative
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_missing_restart_evidence_keeps_unknown_without_resteer
+  - id: MESSAGE-DELIVERY-313
+    name: Accepted attempt-batch recovery preserves merged materialization and Agent Run attachment
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment
+  - id: MESSAGE-DELIVERY-314
+    name: One callee terminal Turn callbacks each callback Session once
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_scheduled_tasks.py::test_one_terminal_turn_callbacks_once_per_callback_session
+  - id: MESSAGE-DELIVERY-315
+    name: Accepted delegated messages collapse by Turn while queued deliveries remain distinct
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_background_work_banner.py::test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries
+  - id: MESSAGE-DELIVERY-316
+    name: WeChat outbound send uses the hydrated platform author, not the Memory principal
+    status: covered
+    kind: regression
+    layer: scenario
+    test: tests/test_session_delivery_fsm.py::test_wechat_outbound_send_uses_hydrated_author_id
+  - id: MESSAGE-DELIVERY-317
+    name: Delivery metadata stays separate from canonical Message and Memory content
+    status: covered
+    kind: regression
+    layer: contract
+    test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_durable_input_keeps_canonical_text_for_memory_and_user_message
+  - id: MESSAGE-DELIVERY-318
+    name: Native dispatch samples Now after runtime preparation without rewriting user content
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_agent_steering.py::test_codex_start_renders_now_after_runtime_prompt_preparation
+  - id: MESSAGE-DELIVERY-319
+    name: Steering preparation failure preserves a definitively unwritten retryable batch
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_session_delivery_fsm.py::test_steering_preparation_failure_preserves_a_definitively_unwritten_batch
+  - id: MESSAGE-DELIVERY-320
+    name: Harness restart notices retain same-Session Retry without reviving historical work
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_harness_failure_retry.py::test_harness_restart_notice_retries_through_web_and_controller
 next_priority:
-  - MESSAGE-DELIVERY-311
+  - MESSAGE-DELIVERY-321

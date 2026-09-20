@@ -2,13 +2,16 @@ import * as React from 'react';
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { Check, Copy } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { ChatImage, LinkedImageContent, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
+import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
 import {
@@ -210,7 +213,10 @@ export const Markdown: React.FC<{
   // never reaches here to begin with — this is defence in depth + correctness for
   // the editor-preview caller that lacks that wrapper.)
   const remarkPlugins = React.useMemo(
-    () => (softBreaks ? [remarkGfm, remarkBreaks] : [remarkGfm]),
+    // CJK punctuation can touch emphasis markers without spaces between words.
+    () => (softBreaks
+      ? [remarkGfm, remarkCjkFriendly, remarkBreaks]
+      : [remarkGfm, remarkCjkFriendly]),
     [softBreaks],
   );
   const components = React.useMemo<Components>(
@@ -283,6 +289,17 @@ export const Markdown: React.FC<{
           );
         }
         if (!interactive) return <span>{children}</span>;
+        const chatPath = inAppChatPath(
+          url,
+          typeof window === 'undefined' ? null : window.location.href,
+        );
+        if (chatPath) {
+          return (
+            <Link to={chatPath}>
+              <LinkedImageProvider>{children}</LinkedImageProvider>
+            </Link>
+          );
+        }
         // Wrap children so a nested ChatImage (``[![](media)](href)``) renders
         // bare — without its own download anchor inside this one.
         return (

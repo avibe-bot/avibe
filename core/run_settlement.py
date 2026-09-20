@@ -380,7 +380,7 @@ _SWEEP_TURN = (
 )
 _SEND_NOW = (
     "tests/test_internal_server.py::"
-    "test_agent_run_send_now_steers_the_fifo_head_without_stopping"
+    "test_agent_run_send_now_steers_its_content_without_promoting_fifo"
 )
 _SEND_NOW_RESTART = (
     "tests/test_internal_server.py::"

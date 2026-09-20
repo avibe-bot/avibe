@@ -12,13 +12,16 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from config import paths
-from core.backend_failure import is_backend_failure_notification
+from vibe.authorization import (
+    AuthorizationContext,
+    require_instance_role,
+)
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
-from vibe.message_types import spec_for, types_with
+from vibe.message_types import activity_role_for, spec_for, types_with
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 # Turn settlement is read from ``session_turns`` below, so a reply-less completion
@@ -37,6 +40,7 @@ SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {
 ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 INPUT_TURN_MESSAGE_TYPES = tuple(message_type for _, message_type in INPUT_TURN_AUTHOR_TYPES)
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
+_DETACHED_COMPLETION_TYPES = types_with("detachedCompletion")
 _FORK_ANCHOR_TYPES = tuple(
     dict.fromkeys(
         (
@@ -122,13 +126,11 @@ class ForkSourceState:
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
     has_input_turn_after_anchor: bool = False
-    anchor_is_backend_failure: bool = False
+    anchor_activity_role: str = "none"
 
     @property
     def anchor_is_terminal_agent_output(self) -> bool:
-        return self.anchor_author == "agent" and (
-            self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES or self.anchor_is_backend_failure
-        )
+        return self.anchor_author == "agent" and self.anchor_activity_role == "terminal"
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,28 @@ class SourceMessageAnchor:
         return self.running_turn or is_input_turn(self.author, self.message_type)
 
 
+def _require_agent_selection(
+    conn: Any,
+    context: Any,
+    *,
+    agent_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+) -> None:
+    """Hold the Agent the fork will run as to the caller's selection authority."""
+
+    from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access
+
+    try:
+        ensure_agent_selection_access(
+            conn, agent_id=agent_id, agent_name=agent_name, user_context=context
+        )
+    except VibeAgentAccessError as exc:
+        raise SessionForkError(
+            "agent access is not permitted",
+            code="session_fork_agent_forbidden",
+        ) from exc
+
+
 def reserve_forked_session(
     *,
     source_session_id: str,
@@ -155,6 +179,7 @@ def reserve_forked_session(
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
     title_lang: str = "en",
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> SessionForkResult:
     """Copy an existing Agent Session row into a new pending fork target.
 
@@ -164,6 +189,8 @@ def reserve_forked_session(
     id stays empty until the backend adapter successfully forks the native
     session.
     """
+
+    context = require_instance_role(authorization_context, "editor")
 
     from sqlalchemy import select
 
@@ -183,6 +210,33 @@ def reserve_forked_session(
     try:
         with engine.begin() as conn:
             reserve_write_lock(conn)
+            if not context.is_instance_owner:
+                from storage import project_access_service
+
+                if not project_access_service.role_allows(
+                    project_access_service.get_effective_session_role(
+                        conn,
+                        context,
+                        source_session_id,
+                    ),
+                    "editor",
+                ):
+                    raise SessionForkError("source_not_found")
+                # A permitted source does not authorize an arbitrary
+                # destination: without this, a fork can place a copy of the
+                # transcript into a Project the caller cannot chat in. Same
+                # rule and same tier as an ordinary re-placement in
+                # ``workbench_sessions_service.update_workbench_session``, and
+                # it runs before any reserved row or native-fork metadata.
+                destination_scope_id = _clean_optional(scope_id) if scope_id is not None else None
+                if destination_scope_id and not context.can_manage_instance:
+                    destination_project_id = project_access_service.project_id_from_scope_id(
+                        destination_scope_id
+                    )
+                    if destination_project_id is None or not project_access_service.can_chat_project(
+                        conn, context, destination_project_id
+                    ):
+                        raise SessionForkError("destination_not_permitted")
             row = conn.execute(
                 select(agent_sessions).where(agent_sessions.c.id == str(source_session_id)).limit(1)
             ).mappings().first()
@@ -224,6 +278,12 @@ def reserve_forked_session(
                     )
                     effective_native_turn_started = True
             source_message_id = source_anchor.message_id
+            if agent_name:
+                # The fork will RUN AS this Agent, so selecting it needs use
+                # access to that exact resource — being enabled is not the same
+                # as being one this caller may select. Ordered after the source
+                # checks so an unreachable source still answers first.
+                _require_agent_selection(conn, context, agent_name=agent_name)
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
                 raise SessionForkError(
@@ -248,6 +308,16 @@ def reserve_forked_session(
                     raise SessionForkError(
                         "source session Agent backend does not match the session backend"
                     )
+                # Without an override the fork still runs as the source's Agent,
+                # so that inherited identity is selected authority too. Ordered
+                # after the unavailable and backend answers so their existing
+                # meaning is unchanged.
+                _require_agent_selection(
+                    conn,
+                    context,
+                    agent_id=inherited_agent["id"],
+                    agent_name=inherited_agent["name"],
+                )
 
             if override_agent is not None:
                 target_agent_id = override_agent.id
@@ -547,6 +617,23 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                         ),
                     ),
                     after_anchor,
+                    ~and_(
+                        messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.detached"),
+                            0,
+                        )
+                        == 1,
+                    ),
+                    ~and_(
+                        messages.c.type == "notify",
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.event"), ""
+                        ) == "backend_failure",
+                        func.coalesce(
+                            func.json_extract(messages.c.metadata_json, "$.replayed"), 0
+                        ) == 1,
+                    ),
                 )
                 .order_by(transcript_order_value().desc(), messages.c.id.desc())
                 .limit(1)
@@ -562,13 +649,11 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             )
             has_terminal_agent_output_after_anchor = (
                 latest_after_anchor_author == "agent"
-                and (
-                    latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
-                    or is_backend_failure_notification(
-                        latest_after_anchor_type,
-                        latest_after_anchor_metadata,
-                    )
+                and activity_role_for(
+                    latest_after_anchor_type,
+                    latest_after_anchor_metadata,
                 )
+                == "terminal"
             )
             has_input_turn_after_anchor = (
                 conn.execute(
@@ -595,8 +680,8 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
                 has_input_turn_after_anchor=has_input_turn_after_anchor,
-                anchor_is_backend_failure=is_backend_failure_notification(
-                    anchor["type"],
+                anchor_activity_role=activity_role_for(
+                    str(anchor["type"] or "").strip(),
                     _load_metadata(anchor["metadata_json"]),
                 ),
             )

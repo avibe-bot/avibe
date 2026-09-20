@@ -22,9 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.processing_indicator import (
     _ADMISSION_ACK_REGISTRY_LIMIT,
     ACK_REACTION_EMOJI,
+    INTERRUPTED_REACTION_EMOJI,
     NOT_DELIVERED_REACTION_EMOJI,
     QUEUED_REACTION_EMOJI,
     STEERED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
     UNCONFIRMED_REACTION_EMOJI,
     ProcessingIndicatorService,
 )
@@ -477,6 +479,37 @@ class ReceiptEmojiMappingTests(unittest.TestCase):
             with self.subTest(emoji=emoji):
                 normalized = TelegramBot._normalize_reaction_emoji(None, emoji)
                 self.assertIn(normalized, allowed)
+
+
+class TerminalReceiptEmojiMappingTests(unittest.TestCase):
+    """Terminal receipts must resolve to adapter-native reaction values."""
+
+    receipts = (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI)
+
+    def test_slack_maps_both_forms_to_short_names(self):
+        from modules.im.slack import SlackBot
+
+        expected = {
+            STOPPED_REACTION_EMOJI: "black_square_for_stop",
+            STOPPED_REACTION_EMOJI.replace("️", ""): "black_square_for_stop",
+            INTERRUPTED_REACTION_EMOJI: "warning",
+            INTERRUPTED_REACTION_EMOJI.replace("️", ""): "warning",
+        }
+        self.assertEqual(
+            {emoji: SlackBot._slack_reaction_name(emoji) for emoji in expected},
+            expected,
+        )
+
+    def test_telegram_maps_to_supported_distinct_reactions(self):
+        from modules.im.telegram import TelegramBot
+
+        self.assertEqual(
+            [
+                TelegramBot._normalize_reaction_emoji(None, emoji)
+                for emoji in self.receipts
+            ],
+            ["🙊", "😱"],
+        )
 
 
 class DeliveryAdmissionContractTests(unittest.TestCase):

@@ -1,4 +1,5 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import type { TranslationKey } from '@/i18n/types';
+import React, { useEffect, useState, useCallback, useLayoutEffect, useRef } from 'react';
 import {
   Check,
   ChevronLeft,
@@ -17,13 +18,15 @@ import {
   LayoutGrid,
   Monitor,
   RefreshCw,
-  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import { Button } from './button';
+import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { errorMessage } from '@/lib/errorMessage';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 
 interface DirectoryBrowserProps {
   /** Initial path to show when opening */
@@ -38,7 +41,7 @@ interface DirectoryBrowserProps {
 // and verifies each path exists). Well-known shortcuts get a localized label;
 // OS roots like /tmp, /data or a Windows drive are shown by their path. Both
 // label and icon are keyed off the backend's stable ``key``.
-const FAVORITE_I18N: Record<string, string> = {
+const FAVORITE_I18N: Record<string, TranslationKey> = {
   home: 'directoryBrowser.favoritesHome',
   desktop: 'directoryBrowser.favoritesDesktop',
   documents: 'directoryBrowser.favoritesDocuments',
@@ -80,6 +83,9 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const surfaceActive = useRouteSurfaceActive();
+  const foreground = useRef(surfaceActive);
+  useLayoutEffect(() => { foreground.current = surfaceActive; }, [surfaceActive]);
 
   const [currentPath, setCurrentPath] = useState('');
   // Resolved user home — captured on the first browse('~') response so the
@@ -109,6 +115,19 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const [pathInput, setPathInput] = useState('');
   const [pathError, setPathError] = useState<string | null>(null);
   const pathInputRef = useRef<HTMLInputElement | null>(null);
+  const pathEditRevision = useRef(0);
+  const pathSelection = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null);
+
+  const capturePathSelection = (input: HTMLInputElement) => {
+    // Text edits can move the caret without React firing onSelect. Capture
+    // both events, retaining the last foreground range through portal teardown.
+    if (!foreground.current || !input.isConnected || input.ownerDocument.activeElement !== input) return;
+    pathSelection.current = {
+      start: input.selectionStart ?? 0,
+      end: input.selectionEnd ?? 0,
+      direction: input.selectionDirection ?? 'none',
+    };
+  };
 
   // OS-appropriate quick-access shortcuts, resolved + existence-checked by the
   // backend (macOS Finder entries, Linux /tmp·/data·roots, Windows drives…).
@@ -118,43 +137,23 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const reqIdRef = useRef(0);
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
 
-  // Esc closes the picker, ⌘N opens the new-folder prompt — both familiar
-  // shortcuts from Finder.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        // Escape precedence: cancel an in-progress folder create, else revert
-        // manual path editing to the breadcrumb, else close the picker. Path
-        // editing must be handled here (not just in the input) because this
-        // window listener would otherwise close the whole picker on Esc.
-        if (creating) {
-          setCreating(false);
-          setNewFolderName('');
-          setCreateError(null);
-        } else if (pathEditing) {
-          setPathEditing(false);
-        } else {
-          onClose();
-        }
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n' && !creating) {
-        e.preventDefault();
-        setCreating(true);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [creating, pathEditing, onClose]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (!event.defaultPrevented && (event.metaKey || event.ctrlKey)
+      && event.key.toLowerCase() === 'n' && !creating) {
+      event.preventDefault();
+      setCreating(true);
+    }
+  });
 
   useEffect(() => {
-    if (creating) {
-      newFolderInputRef.current?.focus();
-    }
-  }, [creating]);
+    if (surfaceActive && creating) newFolderInputRef.current?.focus();
+  }, [creating, surfaceActive]);
 
   const fetchPath = useCallback(
     async (path: string, hidden?: boolean) => {
@@ -256,27 +255,48 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   }, [api]);
 
   useEffect(() => {
-    if (pathEditing) {
-      // Pre-fill with the current path so the user can edit it instead
-      // of typing from scratch — that's the common case.
-      setPathInput(currentPath);
-      setPathError(null);
+    if (pathEditing && foreground.current) {
       pathInputRef.current?.focus();
       pathInputRef.current?.select();
     }
-  }, [pathEditing, currentPath]);
+  }, [pathEditing]);
+
+  const togglePathEditing = () => {
+    if (!foreground.current) return;
+    pathEditRevision.current++;
+    if (!pathEditing) {
+      // Snapshot only when an edit begins. Later browse responses update the
+      // directory and history, not the user's unconfirmed text or selection.
+      setPathInput(currentPath);
+      setPathError(null);
+      pathSelection.current = null;
+    }
+    setPathEditing(!pathEditing);
+  };
+
+  const cancelPathEditing = () => {
+    pathEditRevision.current++;
+    setPathEditing(false);
+  };
 
   const submitManualPath = async () => {
+    if (!foreground.current) return;
     const target = pathInput.trim();
     if (!target) return;
+    const editRevision = pathEditRevision.current;
     setPathError(null);
-    const resolved = await fetchPath(target);
+    const request = fetchPath(target);
+    const requestId = reqIdRef.current;
+    const resolved = await request;
+    if (!mountedRef.current || reqIdRef.current !== requestId) return;
     if (resolved) {
       // Mirror `navigate` history bookkeeping so the back arrow works.
       setHistory((prev) => [...prev.slice(0, historyIndex + 1), resolved]);
       setHistoryIndex((prev) => prev + 1);
-      setPathEditing(false);
-    } else {
+      // A submitted target may resolve after the user starts another edit.
+      // Keep its navigation result without dismissing that newer draft.
+      if (pathEditRevision.current === editRevision) setPathEditing(false);
+    } else if (pathEditRevision.current === editRevision) {
       setPathError(t('directoryBrowser.pathNotFound'));
     }
   };
@@ -288,6 +308,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   };
 
   const submitNewFolder = async () => {
+    if (!foreground.current) return;
     const name = newFolderName.trim();
     if (!name) return;
     setCreateError(null);
@@ -338,46 +359,62 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
   const canBack = historyIndex > 0;
   const canForward = historyIndex < history.length - 1;
 
+  // Keep this owner (including unconfirmed inputs/history) mounted, while
+  // withdrawing the complete modal layer and its focus/pointer/scroll effects.
+  if (!surfaceActive) return null;
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('directoryBrowser.title')}
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[80vh] max-h-[720px] min-h-[560px] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-        onClick={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(open) => { if (!open && foreground.current) onClose(); }}>
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          if (!foreground.current) { event.preventDefault(); return; }
+          // The portal mounts after its retained owner's effects. Resume the
+          // editor here, without reinitializing or selecting its draft text.
+          const editor = creating ? newFolderInputRef.current : pathEditing ? pathInputRef.current : null;
+          if (editor) {
+            event.preventDefault();
+            editor.focus();
+            if (editor === pathInputRef.current && pathSelection.current) {
+              const { start, end, direction } = pathSelection.current;
+              editor.setSelectionRange(start, end, direction);
+            }
+          }
+        }}
+        onCloseAutoFocus={(event) => { if (!foreground.current) event.preventDefault(); }}
+        aria-describedby={undefined}
+        closeLabel={t('directoryBrowser.cancel')}
+        onEscapeKeyDown={(event) => {
+          if (creating || pathEditing) {
+            event.preventDefault();
+            setCreating(false);
+            setNewFolderName('');
+            setCreateError(null);
+            cancelPathEditing();
+          }
+        }}
+        className="flex h-[80dvh] max-h-[720px] min-h-0 w-full max-w-3xl flex-col gap-0 overflow-hidden rounded-2xl border-border-strong bg-surface p-0 max-md:h-[90dvh] max-md:p-0 max-md:pb-0"
       >
         {/* Traffic-light header */}
         <div className="flex items-center gap-3 border-b border-border bg-surface-2 px-4 py-3">
           <div className="flex items-center gap-2">
             <button
               type="button"
-              aria-label="Close"
+              aria-label={t('directoryBrowser.cancel')}
               onClick={onClose}
               className="size-3 rounded-full bg-[#FF5F57] transition hover:brightness-110"
             />
             <span className="size-3 rounded-full bg-[#FFBD2E]" />
             <span className="size-3 rounded-full bg-[#28C840]" />
           </div>
-          <div className="flex flex-1 items-center justify-center gap-2 text-[13px] font-semibold text-foreground">
-            <FolderOpen className="size-3.5 text-mint" />
+          <DialogTitle className="flex flex-1 items-center justify-center gap-2 pr-8 text-[13px] font-semibold text-foreground">
+            <FolderOpen className="size-3.5 text-mint-ink" />
             {t('directoryBrowser.title')}
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('directoryBrowser.cancel')}
-            className="text-muted transition hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
+          </DialogTitle>
+
         </div>
 
         {/* Toolbar — history arrows + breadcrumb + show-hidden + new-folder */}
-        <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
           <button
             type="button"
             onClick={goBack}
@@ -414,7 +451,12 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                   ref={pathInputRef}
                   type="text"
                   value={pathInput}
-                  onChange={(e) => setPathInput(e.target.value)}
+                  onChange={(event) => {
+                    capturePathSelection(event.currentTarget);
+                    pathEditRevision.current++;
+                    setPathInput(event.currentTarget.value);
+                  }}
+                  onSelect={(event) => capturePathSelection(event.currentTarget)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -429,15 +471,15 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                 <button
                   type="button"
                   onClick={submitManualPath}
-                  className="rounded px-2 py-0.5 text-[10px] font-semibold text-cyan hover:bg-foreground/[0.04]"
+                  className="rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-foreground/[0.04]"
                 >
                   {t('directoryBrowser.editPathDone')}
                 </button>
               </div>
-              {pathError && <div className="px-1 text-[10.5px] text-destructive">{pathError}</div>}
+              {pathError && <div className="px-1 text-[10.5px] text-destructive-ink">{pathError}</div>}
             </div>
           ) : (
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px]">
+            <div className="flex min-w-[100px] flex-1 items-center gap-1 overflow-x-auto rounded-md border border-border-strong bg-surface-2 px-2 py-1 font-mono text-[11px]">
               {breadcrumbs.map((crumb, i) => (
                 <React.Fragment key={`${crumb.path}-${i}`}>
                   {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
@@ -447,7 +489,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                     title={crumb.isHome ? homePath : undefined}
                     className={clsx(
                       'shrink-0 rounded px-1 py-0.5 transition hover:bg-foreground/[0.04]',
-                      i === breadcrumbs.length - 1 ? 'font-semibold text-cyan' : 'text-muted',
+                      i === breadcrumbs.length - 1 ? 'font-semibold text-cyan-ink' : 'text-muted',
                     )}
                   >
                     {crumb.label}
@@ -460,13 +502,13 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
 
           <button
             type="button"
-            onClick={() => setPathEditing((prev) => !prev)}
+            onClick={togglePathEditing}
             aria-label={t('directoryBrowser.editPath')}
             title={t('directoryBrowser.editPath')}
             className={clsx(
               'flex size-7 items-center justify-center rounded-md border transition',
               pathEditing
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border-strong text-muted hover:text-foreground',
             )}
           >
@@ -481,7 +523,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             className={clsx(
               'flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition',
               showHidden
-                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan'
+                ? 'border-cyan/40 bg-cyan/[0.08] text-cyan-ink'
                 : 'border-border-strong text-muted hover:text-foreground',
             )}
           >
@@ -534,7 +576,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
           {/* Folder list */}
           <div className="flex min-w-0 flex-1 flex-col overflow-y-auto px-2 py-2">
             {error && (
-              <div className="mx-2 mb-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive">
+              <div className="mx-2 mb-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-sm text-destructive-ink">
                 {error}
               </div>
             )}
@@ -555,8 +597,8 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                 onClick={() => navigate(dir.path)}
                 className="group flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-[13px] text-foreground transition hover:bg-foreground/[0.04]"
               >
-                <Folder className="size-4 shrink-0 text-gold group-hover:hidden" />
-                <FolderOpen className="hidden size-4 shrink-0 text-gold group-hover:block" />
+                <Folder className="size-4 shrink-0 text-gold-ink group-hover:hidden" />
+                <FolderOpen className="hidden size-4 shrink-0 text-gold-ink group-hover:block" />
                 <span className="truncate">{dir.name}</span>
               </button>
             ))}
@@ -572,7 +614,7 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
             {creating ? (
               <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-dashed border-border-strong bg-foreground/[0.03] px-3 py-2.5">
                 <div className="flex items-center gap-2">
-                  <FolderPlus className="size-4 shrink-0 text-mint" />
+                  <FolderPlus className="size-4 shrink-0 text-mint-ink" />
                   <input
                     ref={newFolderInputRef}
                     value={newFolderName}
@@ -594,21 +636,18 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
                   >
                     {t('directoryBrowser.cancel')}
                   </button>
-                  <button
+                  <Button
                     type="button"
+                    variant="default"
+                    size={null}
                     onClick={submitNewFolder}
                     disabled={!newFolderName.trim()}
-                    className={clsx(
-                      'rounded-md px-2.5 py-0.5 text-[11px] font-semibold transition',
-                      newFolderName.trim()
-                        ? 'bg-mint text-[#080812] hover:brightness-110'
-                        : 'bg-muted-soft text-muted',
-                    )}
+                    className="rounded-md px-2.5 py-0.5 text-[11px] font-semibold"
                   >
                     {t('directoryBrowser.newFolder')}
-                  </button>
+                  </Button>
                 </div>
-                {createError && <div className="pl-6 text-[11px] text-destructive">{createError}</div>}
+                {createError && <div className="pl-6 text-[11px] text-destructive-ink">{createError}</div>}
               </div>
             ) : (
               <button
@@ -635,22 +674,19 @@ export const DirectoryBrowser: React.FC<DirectoryBrowserProps> = ({
           >
             {t('directoryBrowser.cancel')}
           </button>
-          <button
+          <Button
             type="button"
+            variant="brand"
+            size={null}
             onClick={() => canConfirm && onSelect(currentPath)}
             disabled={!canConfirm}
-            className={clsx(
-              'flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold transition',
-              canConfirm
-                ? 'bg-mint text-[#080812] shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
-                : 'cursor-not-allowed bg-muted-soft text-muted',
-            )}
+            className="gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-semibold"
           >
             <Check className="size-3.5" />
             {t('directoryBrowser.select')}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };

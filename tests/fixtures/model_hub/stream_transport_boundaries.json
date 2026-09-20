@@ -1,0 +1,17 @@
+{
+  "source": "OpenAI Responses image events may carry Base64 strings with no documented event-size ceiling; response size is not a protocol validity rule",
+  "cases": [
+    {
+      "name": "large_buffered_json",
+      "stream": false,
+      "payload": "valid_large_json",
+      "expected_outcome": "success"
+    },
+    {
+      "name": "large_image_sse_frame",
+      "stream": true,
+      "payload": "response.image_generation_call.partial_image",
+      "expected_outcome": "success"
+    }
+  ]
+}

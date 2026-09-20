@@ -47,7 +47,7 @@ def test_cmd_vibe_marks_setup_when_no_enabled_platform_has_credentials(capsys) -
         patch("vibe.cli.runtime.stop_ui") as stop_ui,
         patch("vibe.cli.runtime.start_service", side_effect=partial(_start_process, 101)),
         patch("vibe.cli.runtime.start_ui", side_effect=partial(_start_process, 202)),
-        patch("vibe.cli.runtime.service_pid_recorded", return_value=True),
+        patch("vibe.cli.runtime.wait_for_service_ready", return_value=101),
         patch("vibe.cli.runtime.write_status"),
         patch("vibe.cli._write_status") as write_status,
     ):
@@ -72,7 +72,7 @@ def test_cmd_vibe_marks_starting_when_non_slack_platform_is_configured(capsys) -
         patch("vibe.cli.runtime.stop_ui") as stop_ui,
         patch("vibe.cli.runtime.start_service", side_effect=partial(_start_process, 101)),
         patch("vibe.cli.runtime.start_ui", side_effect=partial(_start_process, 202)),
-        patch("vibe.cli.runtime.service_pid_recorded", return_value=True),
+        patch("vibe.cli.runtime.wait_for_service_ready", return_value=101),
         patch("vibe.cli.runtime.write_status"),
         patch("vibe.cli._write_status") as write_status,
     ):

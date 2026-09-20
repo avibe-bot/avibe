@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,25 +13,30 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
-import { BackendIcon, EyebrowBadge, WizardCard } from '../visual';
+import { BackendIcon } from '../visual';
+import { AssistantRow } from '../onboarding/AssistantRow';
+import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
+import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
 import { BackendLifecycleChip } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
-import { BackendProviderConfig } from '../settings/providers/BackendProviderConfig';
+import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
+import type { BackendConnectionState } from '@/context/ApiContext';
+import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
-import { MigrationBanner } from '../settings/models/MigrationBanner';
+import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
 import { useModelHubCapability } from '../settings/models/useModelHubCapability';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 
 interface AgentDetectionProps {
   data: any;
-  onNext: (data: any) => void;
-  onBack?: () => void;
+  onNext: (data: any) => void | Promise<void>;
+  onBack?: (data?: { agents: Record<string, AgentState> }) => void;
   isPage?: boolean;
+  completionRecovery?: React.ReactNode;
   onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
 }
 
@@ -70,7 +75,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
 // the user enables what they have and installs anything missing.
-export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave }) => {
+export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
   const { t } = useTranslation();
   const api = useApi();
   const modelHubEnabled = useModelHubCapability();
@@ -82,30 +87,94 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   >({});
   const [expandedOutputs, setExpandedOutputs] = useState<Record<string, boolean>>({});
   // Which backend's "Configure provider" modal is open (wizard mode only).
-  const [providerModal, setProviderModal] = useState<string | null>(null);
-  // True while a provider-modal close is reloading config into ``agents``; the
-  // promise lets handlePrimaryAction wait for and fold in that reload.
+  const [providerModal, setProviderModal] = useState<{ backend: RuntimeBackendId; method: 'oauth' | 'api_key' } | null>(null);
+  const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
+  const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
+  const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
+  const [pendingWrites, setPendingWrites] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
+  const [entering, setEntering] = useState(false);
+  const [entryError, setEntryError] = useState('');
+  const connectionTokens = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const enableQueue = useRef(Promise.resolve());
+  const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  // One provider modal/reconciliation at a time; Configure and navigation stay
+  // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
-  const syncRef = useRef<Promise<Record<string, AgentState> | null> | null>(null);
+  const [detectingAgents, setDetectingAgents] = useState<Record<string, boolean>>({});
+  const [detectionErrors, setDetectionErrors] = useState<Record<string, string>>({});
+  const pendingInstalls = useRef(new Set<string>());
+  const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
+
+  const refreshConnection = useCallback(async (name: RuntimeBackendId, receiptError = '') => {
+    if (pendingEnable.current[name] !== undefined) return;
+    const intent = enableIntent.current[name];
+    const token = (connectionTokens.current[name] || 0) + 1;
+    connectionTokens.current[name] = token;
+    setConnectionPending((current) => ({ ...current, [name]: true }));
+    setConnectionErrors((current) => ({ ...current, [name]: receiptError }));
+    try {
+      const result = await api.getBackendConnection(name);
+      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
+      setConnections((current) => ({ ...current, [name]: result }));
+      setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+    } catch (error) {
+      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      setConnections((current) => ({ ...current, [name]: undefined }));
+      setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
+    } finally {
+      if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
+    }
+  }, [api, t]);
+  useEffect(() => {
+    if (!isPage) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
+    return () => { for (const name of ASSISTANT_ORDER) {
+      connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
+      enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
+    } };
+  }, [refreshConnection, isPage]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
   useEffect(() => {
-    detectAll();
+    if (isPage || !data.__onboardingDetected) void detectAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const detect = async (name: string, binary?: string) => {
-    const result = await api.detectCli(binary || name);
-    setAgents((prev) => ({
-      ...prev,
-      [name]: {
-        ...prev[name],
-        cli_path: result.path || prev[name].cli_path,
-        status: result.found ? 'ok' : 'missing',
-      },
-    }));
+    const token = (detectionTokens.current[name] || 0) + 1;
+    detectionTokens.current[name] = token;
+    setDetectingAgents((prev) => ({ ...prev, [name]: true }));
+    setDetectionErrors((prev) => ({ ...prev, [name]: '' }));
+    try {
+      const result = await api.detectCli(binary || name);
+      if (detectionTokens.current[name] !== token) return;
+      if (result.found) {
+        setInstallResults((prev) => {
+          if (!prev[name] || prev[name].ok) return prev;
+          const next = { ...prev };
+          delete next[name];
+          return next;
+        });
+      }
+      if (!isPage) void refreshConnection(name as RuntimeBackendId);
+      setAgents((prev) => ({
+        ...prev,
+        [name]: {
+          ...prev[name],
+          cli_path: result.path || prev[name].cli_path,
+          status: result.found ? 'ok' : 'missing',
+        },
+      }));
+    } catch (error) {
+      if (detectionTokens.current[name] !== token) return;
+      setDetectionErrors((prev) => ({ ...prev, [name]: String(error) }));
+      setAgents((prev) => ({ ...prev, [name]: { ...prev[name], status: 'unknown' } }));
+    } finally {
+      if (detectionTokens.current[name] === token) setDetectingAgents((prev) => ({ ...prev, [name]: false }));
+    }
   };
 
   const detectAll = async () => {
@@ -116,10 +185,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // made inside it (enabled / cli_path via useBackendRuntime) flow back into the
   // wizard's local ``agents`` state — otherwise handlePrimaryAction would save a
   // stale snapshot and clobber them. Then re-detect to refresh the status pill.
-  const syncBackendFromConfig = async (name: string): Promise<Record<string, AgentState> | null> => {
+  const syncBackendFromConfig = async (name: string) => {
     setSyncing(true);
     let cliPath = agents[name]?.cli_path;
-    let synced: Record<string, AgentState> | null = null;
     try {
       const config = await api.getConfig();
       const saved = config?.agents?.[name];
@@ -128,7 +196,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           cliPath = saved.cli_path;
         }
         // Spread the full persisted backend so provider-level fields the modal
-        // may have changed (e.g. opencode default_provider / default_model) are
+        // may have changed (e.g. opencode default_provider) are
         // refreshed too — not just enabled / cli_path.
         const merged: AgentState = {
           ...agents[name],
@@ -138,9 +206,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         // ``enabled`` is owned by the live card toggle, never this async sync's
         // snapshot: closing the provider modal kicks off this sync, but the user
         // may flip the toggle before it resolves. Apply the *live* enable state
-        // at both consumers — ``prev`` here, and the live ``agents`` in
-        // handlePrimaryAction — so a just-flipped toggle is never reverted.
-        synced = { [name]: merged };
+        // here so a just-flipped toggle is never reverted. Navigation consumes
+        // the live row after detection, never this pre-detection snapshot.
         setAgents((prev) => ({
           ...prev,
           [name]: { ...prev[name], ...merged, enabled: prev[name].enabled },
@@ -152,18 +219,39 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       setSyncing(false);
     }
-    return synced;
   };
 
   const toggle = (name: string, enabled: boolean) => {
-    setAgents((prev) => ({
-      ...prev,
-      [name]: { ...prev[name], enabled },
-    }));
+    setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
+    if (isPage) return;
+    const backend = name as RuntimeBackendId;
+    const intent = (enableIntent.current[backend] || 0) + 1;
+    enableIntent.current[backend] = intent;
+    pendingEnable.current[backend] = intent;
+    connectionTokens.current[backend] = (connectionTokens.current[backend] || 0) + 1;
+    setConnectionPending((current) => ({ ...current, [backend]: true }));
+    setConnections((current) => ({ ...current, [backend]: undefined }));
+    // Persist each queued intent, but only the latest intent may publish state.
+    enableQueue.current = enableQueue.current.then(async () => {
+      let receiptError = '';
+      try {
+        const saved = await api.mutateConfig([setConfigField(['agents', backend, 'enabled'], enabled)]);
+        const applied = saved?.agent_backend_runtime;
+        if (applied && !applied.hot_reconciled && !applied.restart_scheduled && !applied.apply_on_next_start) {
+          receiptError = applied.restart_error || applied.error || t('onboarding.connection.applyFailed');
+        }
+      } catch (error) { receiptError = String(error); }
+      if (enableIntent.current[backend] !== intent) return;
+      delete pendingEnable.current[backend];
+      // This uncached projection reads persisted enabled even after a rejected
+      // write. Apply failure cannot roll back config that was already committed.
+      await refreshConnection(backend, receiptError);
+    });
   };
 
   const installAgent = async (name: string) => {
-    if (isAnyInstalling) return;
+    if (pendingInstalls.current.has(name) || (isPage && isAnyInstalling)) return;
+    pendingInstalls.current.add(name);
 
     setInstallingAgents((prev) => ({ ...prev, [name]: true }));
     setInstallResults((prev) => ({ ...prev, [name]: { ok: false, message: '', output: null } }));
@@ -191,7 +279,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         [name]: { ok: false, message: String(e), output: null },
       }));
     } finally {
+      pendingInstalls.current.delete(name);
       setInstallingAgents((prev) => ({ ...prev, [name]: false }));
+      if (!isPage) void refreshConnection(name as RuntimeBackendId);
     }
   };
 
@@ -199,66 +289,26 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setExpandedOutputs((prev) => ({ ...prev, [name]: !prev[name] }));
   };
 
-  // Gate the wizard's Continue when OpenCode is enabled and ready but hasn't
-  // been granted ``permission: "allow"`` yet — without it every tool call
-  // silently waits for an approval prompt avibe can't answer, so the
-  // user must write it before proceeding. Fails open while the status is still
-  // unknown (statusLoaded false) so a transient probe error can't trap the
-  // user, and never gates the Settings page (isPage).
   const opencodeAgent = agents['opencode'];
-  const opencodeNeedsPermission =
-    !isPage &&
-    !!opencodeAgent?.enabled &&
-    opencodeAgent?.status === 'ok' &&
-    permission.statusLoaded &&
-    !permission.permissionAllowed;
-  const canContinue =
-    Object.values(agents).some((agent) => agent.enabled) && !opencodeNeedsPermission;
-
+  const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
+    && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
+    && !pendingWrites[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
+  const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
   const handlePrimaryAction = async () => {
-    // Wait for an in-flight provider-modal sync and fold its result into the
-    // snapshot we save, so a quick close-then-continue can't persist a stale
-    // ``agents`` object that reverts edits made inside the modal.
-    let mergedAgents = agents;
-    if (syncRef.current) {
-      try {
-        const synced = await syncRef.current;
-        if (synced) {
-          // Fold provider edits from the modal into the saved snapshot, but keep
-          // ``enabled`` from the live ``agents`` state — a toggle flipped after
-          // the sync started must win over the sync's stale snapshot.
-          mergedAgents = { ...agents };
-          for (const [backendName, syncedAgent] of Object.entries(synced)) {
-            mergedAgents[backendName] = {
-              ...syncedAgent,
-              enabled: agents[backendName]?.enabled ?? syncedAgent.enabled,
-            };
-          }
-        }
-      } catch {
-        // ignore — fall back to the current snapshot
-      }
-      syncRef.current = null;
-    }
-    const nextData = { agents: mergedAgents };
-    if (isPage && onSave) {
-      await onSave(nextData);
-      return;
-    }
-    onNext(nextData);
+    if (entering) return;
+    if (isPage && onSave) { await onSave({ agents }); return; }
+    setEntering(true); setEntryError('');
+    try {
+      await enableQueue.current;
+      await onNext({ agents, readyBackends });
+    } catch (error) { setEntryError(String(error)); }
+    finally { setEntering(false); }
   };
 
-  const enabledCount = Object.values(agents).filter((a) => a.enabled && a.status === 'ok').length;
 
   // Page mode keeps the existing settings shell — render the inner content only
-  const Inner = (
+  const Inner = isPage ? (
     <>
-      {/* Setup-wizard migration trigger (spec §5-03): offer to import pre-existing
-          native CLI configs into the Hub. Wizard-only — the Settings → Backends
-          page already surfaces this via BackendSupplyModeCard. Self-hides when
-          nothing is importable or the hub isn't reachable yet. */}
-      {!isPage && modelHubEnabled === true && <MigrationBanner />}
-
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-muted">
@@ -341,7 +391,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                         type="button"
                         variant="secondary"
                         size="sm"
-                        onClick={() => setProviderModal(name)}
+                        onClick={() => setProviderModal({ backend: name as RuntimeBackendId, method: 'oauth' })}
+                        disabled={syncing}
                       >
                         <Sliders className="size-3.5" />
                         {t('agentDetection.configureProvider')}
@@ -379,7 +430,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                       </Button>
                       {installResults[name]?.message && (
                         <span
-                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint' : 'text-danger')}
+                          className={clsx('text-[11px]', installResults[name].ok ? 'text-mint-ink' : 'text-destructive-ink')}
                         >
                           {installResults[name].message}
                         </span>
@@ -392,7 +443,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                   <div>
                     <button
                       onClick={() => toggleOutput(name)}
-                      className="inline-flex items-center gap-1 text-[11px] text-cyan transition hover:text-cyan/80"
+                      className="inline-flex items-center gap-1 text-[11px] text-cyan-ink transition hover:text-cyan-ink/80"
                     >
                       {expandedOutputs[name] ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                       {t('agentDetection.showOutput')}
@@ -409,47 +460,23 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           );
         })}
       </div>
-
-      {/* Wizard-mode provider config modal — reuses the same component tree as
-          the Settings route. Page mode navigates to the route instead (see the
-          Link above), so the dialog is wizard-only. */}
-      {!isPage && (
-        <Dialog
-          open={providerModal !== null}
-          onOpenChange={(open) => {
-            if (!open) {
-              const name = providerModal;
-              setProviderModal(null);
-              // Re-read config + re-detect so runtime edits (enabled / cli_path /
-              // provider defaults) and the status pill reflect whatever changed
-              // inside the modal. Keep the promise so Continue can await it.
-              if (name) syncRef.current = syncBackendFromConfig(name);
-              // The Configure-provider modal embeds its OWN useOpencodePermission
-              // instance, so a permission write inside it doesn't touch this
-              // wizard's gate/callout state. Re-read opencode.json so the gate
-              // clears and the callout hides once allow was granted in the modal.
-              if (name === 'opencode') void permission.refreshStatus();
-            }
-          }}
-        >
-          <DialogContent className="max-w-3xl">
-            <DialogHeader>
-              <DialogTitle>
-                {providerModal
-                  ? t('agentDetection.configureProviderTitle', { name: getBackendUiMeta(providerModal).label })
-                  : ''}
-              </DialogTitle>
-            </DialogHeader>
-            {providerModal && (
-              // Config saves reconcile a live controller at the shared API
-              // boundary and defer naturally when the controller is stopped.
-              <BackendProviderConfig backend={providerModal as RuntimeBackendId} hideEnableToggle />
-            )}
-          </DialogContent>
-        </Dialog>
-      )}
     </>
-  );
+  ) : null;
+
+  const providerDialog = !isPage && providerModal && <BackendConnectionDialog
+    key={`${providerModal.backend}:${providerModal.method}`} backend={providerModal.backend} method={providerModal.method}
+    onClose={() => {
+      const name = providerModal.backend;
+      setProviderModal(null);
+      void syncBackendFromConfig(name);
+      void refreshConnection(name);
+    }}
+    onWriteState={(pending) => {
+      const name = providerModal.backend;
+      setPendingWrites((current) => ({ ...current, [name]: pending }));
+      if (!pending) void refreshConnection(name);
+    }}
+    onConnected={async () => { await refreshConnection(providerModal.backend); }} />;
 
   if (isPage) {
     return (
@@ -465,62 +492,87 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }
 
   return (
-    <div className="flex w-full justify-center">
-      <WizardCard className="gap-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-2">
-            <EyebrowBadge tone="mint">{t('agentDetection.eyebrow')}</EyebrowBadge>
-            <h2 className="text-[28px] font-bold leading-tight tracking-[-0.4px] text-foreground">
-              {t('agentDetection.title')}
-            </h2>
-            <p className="max-w-[560px] text-[14px] leading-[1.55] text-muted">
-              {t('agentDetection.subtitle')}
-            </p>
-          </div>
-          <div className="flex items-center gap-2 rounded-full border border-border bg-foreground/[0.04] px-3 py-1.5">
-            <span className="font-mono text-[11px] font-bold uppercase tracking-[0.16em] text-mint">
-              {enabledCount} active
-            </span>
-          </div>
+    <div className="onboarding-setup">
+      <header className="onboarding-heading">
+        <h2>{t('onboarding.setup.title')}</h2>
+        <p>{t('onboarding.setup.subtitle')}</p>
+      </header>
+      {/* The stage both steps share, so the action below lands on the same
+          coordinates as the intro's — see `.onboarding-stage` in onboarding.css. */}
+      <div className="onboarding-stage">
+      <div className="onboarding-assistants">
+        {/* No section bar above the cards: the page heading already names the three,
+            and a second title here pushed them below the line the intro left them on.
+            Rescanning moved to the footer hint, which is where a person looks once the
+            cards have not told them what they expected. */}
+        {/* The intro's three tracks, reused rather than restated — see
+            `.onboarding-assistants-list` in onboarding.css. */}
+        <div className="onboarding-assistants-list">
+        {ASSISTANT_ORDER.map((name) => {
+          const agent = agents[name];
+          const result = installResults[name];
+          const error = detectionErrors[name] ? { message: detectionErrors[name] }
+            : result && !result.ok && result.message ? result : undefined;
+          return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
+            installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
+            onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
+            onConfigure={() => setProviderModal({ backend: name, method: 'oauth' })}
+            onAddKey={() => setProviderModal({ backend: name, method: 'api_key' })}
+            connection={!connectionErrors[name] && connections[name]?.ready ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key') : undefined}
+            connectionPending={connectionPending[name]}
+            connectionError={connectionErrors[name] || connections[name]?.message}
+            onRefreshConnection={() => void refreshConnection(name)}
+            configuringDisabled={syncing || pendingWrites[name] || !agent.enabled || agent.status !== 'ok'}
+            enabledControl={<label className="flex items-center gap-2 text-xs text-muted">
+              <input type="checkbox" className="size-3.5 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                checked={agent.enabled} onChange={(event) => toggle(name, event.target.checked)} />
+              {t('onboarding.setup.enabled')}
+            </label>}
+            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
+              readyLabel={t('onboarding.setup.installed')}
+              onOperationChange={(pending) => {
+                setPendingWrites((current) => ({ ...current, [name]: pending }));
+                if (!pending) void refreshConnection(name);
+              }}
+              onChanged={async (info) => {
+                const installedPath = info?.installedPath || agent.cli_path;
+                setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));
+                await detect(name, installedPath);
+              }} />}
+          />;
+        })}
         </div>
-
-        {Inner}
-
-        <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
-          {onBack ? (
-            <Button
-              type="button"
-              variant="secondary"
-              size="default"
-              onClick={onBack}
-              className="font-semibold"
-            >
-              <ArrowLeft size={14} strokeWidth={2.25} />
-              {t('common.back')}
-            </Button>
-          ) : (
-            <span />
-          )}
-          <div className="flex flex-1 flex-col items-end gap-1.5 sm:flex-none">
-            {opencodeNeedsPermission && (
-              <p className="text-right text-[12px] text-gold">
-                {t('agentDetection.permissionGateHint')}
-              </p>
-            )}
-            <Button
-              type="button"
-              variant="brand"
-              size="default"
-              onClick={() => void handlePrimaryAction()}
-              disabled={!canContinue || syncing}
-              className="w-full sm:w-auto"
-            >
-              {t('common.continue')}
-              <ArrowRight size={14} strokeWidth={2.25} />
-            </Button>
-          </div>
-        </div>
-      </WizardCard>
+      </div>
+      <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
+        permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
+        onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />
+      {/* Wizard-only: the offer to take over API keys already on this machine.
+          Settings → Backends reaches the same migration through
+          BackendSupplyModeCard, with its broader scope intact. Self-hides when
+          there is nothing importable or the gateway isn't reachable. */}
+      {modelHubEnabled === true && <ImportKeysNotice />}
+      </div>
+      {providerDialog}
+      {completionRecovery}
+      <div className="onboarding-setup-footer">
+        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
+          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
+          {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
+          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
+        </Button>
+        <p className="text-center text-xs text-muted">
+          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
+          {/* The whole-screen rescan, kept as part of the sentence that explains why a
+              card might not say what was expected rather than as a control competing
+              with the action above it. */}
+          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
+            <RefreshCw size={12} />{t('agentDetection.rescan')}
+          </Button>
+        </p>
+        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
+        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+      </div>
     </div>
   );
 };

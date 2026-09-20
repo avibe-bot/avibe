@@ -448,11 +448,11 @@ jobs:
           - arch: arm64
             platform: linux/arm64
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: git-source-patched
 
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130  # v3
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a  # v4
 
       - name: Build and verify static local-only Git
         shell: bash
@@ -582,7 +582,7 @@ jobs:
           - arch: arm64
             runner: macos-15
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: git-source-patched
 
@@ -711,7 +711,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: git-runtime-*
           path: dist
@@ -782,7 +782,7 @@ jobs:
 
       - name: Publish runtime release assets
         if: inputs.release_tag != ''
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228  # v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
         with:
           tag_name: ${{ inputs.release_tag }}
           name: "Avibe local-only Git runtime ${{ env.GIT_VERSION }} (build ${{ env.GIT_RELEASE_REVISION }})"

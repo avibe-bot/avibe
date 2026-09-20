@@ -6,7 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 
-from modules.agents.native_sessions.base import build_resume_preview, build_tail_preview
+from modules.agents.native_sessions.base import (
+    build_resume_preview,
+    build_tail_preview,
+    normalize_multiline_preview_text,
+    normalize_preview_text,
+    normalize_title_text,
+)
 from modules.agents.native_sessions import claude as claude_module
 from modules.agents.native_sessions.claude import ClaudeNativeSessionProvider, encode_project_path
 from modules.agents.native_sessions import codex as codex_module
@@ -268,6 +274,65 @@ def test_opencode_title_provider_uses_xdg_data_home(tmp_path: Path, monkeypatch)
     title = provider.get_title(native_session_id="ses_title", working_path="/repo")
     assert title is not None
     assert title.title == "Use XDG data home"
+
+
+def test_opencode_title_provider_derives_from_first_user_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "opencode.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("create table session (id text primary key, directory text, title text)")
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_default", "/repo", "New session - 2026-06-02T07:35:03.127Z"),
+        )
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_untitled", "/repo", ""),
+        )
+        conn.execute(
+            "insert into session (id, directory, title) values (?, ?, ?)",
+            ("ses_title", "/repo", "Implement session titles"),
+        )
+
+    provider = OpenCodeNativeSessionProvider(db_path=str(db_path))
+
+    for session_id in ("ses_default", "ses_untitled", "ses_missing_row"):
+        title = provider.get_title(
+            native_session_id=session_id,
+            working_path="/repo",
+            first_user_message="帮我修一下登录页面的报错",
+        )
+        assert title is not None
+        assert title.title == "帮我修一下登录页面的"
+        assert title.source == "derived_first_prompt"
+        assert title.confidence == "low"
+
+    backend_title = provider.get_title(
+        native_session_id="ses_title",
+        working_path="/repo",
+        first_user_message="帮我修一下登录页面的报错",
+    )
+    assert backend_title is not None
+    assert backend_title.title == "Implement session titles"
+    assert backend_title.source == "backend"
+    assert backend_title.confidence == "high"
+
+
+def test_opencode_title_provider_derives_without_db(tmp_path: Path) -> None:
+    provider = OpenCodeNativeSessionProvider(db_path=str(tmp_path / "missing.db"))
+
+    title = provider.get_title(
+        native_session_id="ses_any",
+        working_path="/repo",
+        first_user_message="排查标题回填",
+    )
+    assert title is not None
+    assert title.title == "排查标题回填"
+    assert title.source == "derived_first_prompt"
+
+    assert (
+        provider.get_title(native_session_id="ses_any", working_path="/repo", first_user_message="")
+        is None
+    )
 
 
 def test_codex_title_provider_reads_thread_title(tmp_path: Path) -> None:
@@ -559,10 +624,14 @@ def test_native_session_service_loads_default_providers_lazily(monkeypatch) -> N
 
 
 def test_native_session_lightweight_imports_do_not_require_sqlite() -> None:
-    """The agent-setup / command-handler / session-handler import path must NOT
+    """Scenario: MEMORY-INDEP-009.
+
+    The agent-setup / command-handler / session-handler import path must NOT
     transitively pull in sqlite: those modules only need the avibe-cloud URL
     availability helpers, which now live in the storage-free ``core.avibe_cloud``
-    (not ``core.show_pages``, which imports ``storage.db`` to back ``ShowPageStore``)."""
+    (not ``core.show_pages``, which imports ``storage.db`` to back
+    ``ShowPageStore``).
+    """
     repo_root = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = str(repo_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -584,6 +653,8 @@ for module_name in [
     "core.handlers.session_handler",
 ]:
     __import__(module_name)
+
+assert "core.session_turns" not in sys.modules
 """
 
     completed = subprocess.run(
@@ -605,3 +676,17 @@ def test_build_resume_preview_preserves_line_breaks() -> None:
     text = "第一段第一行\n第二行\n\n第三行\n---\n[button]"
 
     assert build_resume_preview(text, limit=200) == "第一段第一行\n第二行\n\n第三行"
+
+
+def test_native_session_previews_strip_unseparated_quick_replies() -> None:
+    text = "Done\n[A] | [B]"
+
+    assert normalize_preview_text(text) == "Done"
+    assert normalize_multiline_preview_text(text) == "Done"
+    assert build_tail_preview(text, limit=200) == "Done"
+
+
+def test_native_session_titles_preserve_button_like_user_prompt_content() -> None:
+    text = "Compare these values:\n[A] | [B]"
+
+    assert normalize_title_text(text) == "Compare these values: [A] | [B]"

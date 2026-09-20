@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -12,6 +14,8 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import message_deliveries as delivery_store
+from vibe.opencode_config import OPENCODE_REASONING_VARIANTS
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "modules" / "agents" / "opencode" / "server.py"
 
@@ -36,7 +40,36 @@ def _load_server_module():
 
 
 SERVER_MODULE = _load_server_module()
+OpenCodeManagedPolicyRefreshPendingError = (
+    SERVER_MODULE.OpenCodeManagedPolicyRefreshPendingError
+)
+OpenCodeModelHubOverlayRequiredError = (
+    SERVER_MODULE.OpenCodeModelHubOverlayRequiredError
+)
+OpenCodeRuntimeConfigInvalidError = SERVER_MODULE.OpenCodeRuntimeConfigInvalidError
 OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
+
+
+def _model_hub_overlay(path: str, model_id: str | None):
+    models = {} if model_id is None else {model_id: {"id": model_id}}
+    content = json.dumps(
+        {
+            "enabled_providers": ["avibe-openai"],
+            "provider": {
+                "avibe-openai": {
+                    "models": models,
+                }
+            }
+        },
+        sort_keys=True,
+    )
+    composed = SERVER_MODULE._managed_runtime_config_content(content)
+    return types.SimpleNamespace(
+        path=Path(path),
+        content_hash=hashlib.sha256(composed.encode()).hexdigest(),
+        content=content,
+        provider_ids=("avibe-openai",),
+    )
 
 
 class _FakeResponse:
@@ -119,6 +152,84 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from core.services.settings import default_config
+
+        config_home = self.enterContext(tempfile.TemporaryDirectory(prefix="opencode-server-test-"))
+        self.enterContext(patch.dict(os.environ, {"AVIBE_HOME": config_home}))
+        default_config().save()
+
+    def test_managed_runtime_config_accepts_jsonc_and_disables_native_skill(self):
+        content = SERVER_MODULE._managed_runtime_config_content(
+            b'''\xef\xbb\xbf{
+              // OpenCode accepts JSONC in this inherited override.
+              "permission": "ask",
+              "tools": {"bash": true,},
+            }'''
+        )
+
+        self.assertEqual(
+            json.loads(content),
+            {
+                "permission": {"*": "ask", "skill": "deny"},
+                "tools": {"bash": True, "skill": False},
+            },
+        )
+
+    def test_managed_runtime_config_uses_typed_validation_errors(self):
+        for content in ("{invalid", "[]", '{"permission":[]}'):
+            with self.subTest(content=content):
+                with self.assertRaises(OpenCodeRuntimeConfigInvalidError):
+                    SERVER_MODULE._managed_runtime_config_content(content)
+
+    async def test_start_server_reaps_a_live_process_after_cold_start_timeout(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        process = types.SimpleNamespace(pid=4321, returncode=None)
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._write_pid_file = Mock()  # type: ignore[method-assign]
+        manager._clear_pid_file = Mock()  # type: ignore[method-assign]
+        manager._apply_resource_governance = Mock()  # type: ignore[method-assign]
+        terminate = AsyncMock()
+        create_process = AsyncMock(return_value=process)
+        user_config = '{"permission":"ask"}'
+
+        with (
+            patch.object(
+                SERVER_MODULE.asyncio,
+                "create_subprocess_exec",
+                create_process,
+            ),
+            patch.object(SERVER_MODULE.asyncio, "sleep", AsyncMock()),
+            patch.object(SERVER_MODULE.time, "monotonic", side_effect=[0.0, 0.0, 61.0]),
+            patch.object(SERVER_MODULE, "server_environment", return_value={}),
+            patch.object(SERVER_MODULE, "terminate_process_tree", terminate),
+            patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": user_config, "AVIBE_OPENCODE_MODEL_HUB": "1"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "failed to start within 60s"):
+                await manager._start_server()
+
+        terminate.assert_awaited_once_with(
+            process,
+            SERVER_MODULE.logger,
+            "OpenCode server after startup timeout",
+            terminate_timeout=5,
+        )
+        self.assertEqual(manager._clear_pid_file.call_count, 2)
+        self.assertEqual(create_process.await_args.kwargs["env"]["AVIBE_OPENCODE_MODEL_HUB"], "0")
+        self.assertIsNone(manager._process)
+        self.assertIsNone(manager._process_loop)
+        self.assertEqual(
+            json.loads(create_process.await_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]),
+            {
+                "permission": {"*": "ask", "skill": "deny"},
+                "tools": {"skill": False},
+            },
+        )
+        self.assertEqual(
+            create_process.await_args.kwargs["env"]["OPENCODE_DISABLE_EXTERNAL_SKILLS"],
+            "1",
+        )
+
     def test_terminate_instance_sync_stops_unadopted_managed_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             pid_file = Path(tmp_dir) / "opencode_server.json"
@@ -178,6 +289,187 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "/tmp/a%2520b",
         )
 
+    async def test_user_catalog_projects_current_hub_models_before_overlay_start(self):
+        class _CatalogSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                return _FakeResponse(
+                    status=200,
+                    json_data={
+                        "providers": [
+                            {"id": "openai", "models": {"native-model": {}}},
+                        ],
+                        "default": {"openai": "native-model"},
+                    },
+                )
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._get_http_session = AsyncMock(return_value=_CatalogSession())  # type: ignore[method-assign]
+
+        models = await manager.get_available_models(
+            "/tmp/work",
+            model_hub_models={
+                "current-model": {
+                    "id": "current-model",
+                    "name": "Current model",
+                    "native_protocol": "openai_responses",
+                },
+            },
+        )
+
+        model_index = {row["id"]: row["models"] for row in models["providers"]}
+        self.assertEqual(set(model_index), {"openai", "avibe-openai"})
+        self.assertEqual(set(model_index["openai"]), {"native-model"})
+        self.assertEqual(
+            model_index["avibe-openai"]["current-model"],
+            {
+                "id": "current-model",
+                "name": "Current model",
+                "vibe_remote": {"model_hub_projected": True},
+            },
+        )
+
+    async def test_user_catalog_boundary_excludes_model_hub_runtime_provider(self):
+        runtime_ids = ("avibe-openai", "avibe-anthropic")
+        legacy_custom_id = "avibe-model-hub-fedcba9876543210fedcba98"
+
+        class _CatalogSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                if url.endswith("/config/providers"):
+                    payload = {
+                        "providers": [
+                            {
+                                "id": "avibe-openai",
+                                "models": {
+                                    "gpt-5": {
+                                        "id": "gpt-5",
+                                        "variants": {"high": {}},
+                                    },
+                                },
+                            },
+                            {
+                                "id": "avibe-anthropic",
+                                "models": {"claude-opus-5": {"id": "claude-opus-5"}},
+                            },
+                            {"id": legacy_custom_id, "models": {"relay-model": {}}},
+                            {"id": "custom", "models": {"native-model": {}}},
+                            {
+                                "id": "openai",
+                                "models": [
+                                    {"id": "gpt-4", "name": "GPT-4"},
+                                    {
+                                        "id": "gpt-5",
+                                        "name": "GPT-5",
+                                        "capabilities": {"tools": True},
+                                    },
+                                ],
+                            },
+                        ],
+                        "default": {
+                            "avibe-openai": "gpt-5",
+                            "avibe-anthropic": "claude-opus-5",
+                            legacy_custom_id: "relay-model",
+                            "openai": "gpt-5",
+                        },
+                    }
+                elif url.endswith("/provider"):
+                    payload = {
+                        "all": {
+                            "avibe-openai": {"id": "avibe-openai"},
+                            "avibe-anthropic": {"id": "avibe-anthropic"},
+                            legacy_custom_id: {"id": legacy_custom_id},
+                            "openai": {"id": "openai"},
+                        },
+                        "connected": [*runtime_ids, legacy_custom_id, "openai"],
+                    }
+                else:
+                    payload = {
+                        "model": "avibe-openai/gpt-5",
+                        "provider": {
+                            "avibe-openai": {"options": {"apiKey": "private"}},
+                            "avibe-anthropic": {"options": {"apiKey": "private"}},
+                            legacy_custom_id: {},
+                            "openai": {},
+                        },
+                    }
+                return _FakeResponse(status=200, json_data=payload)
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._model_hub_overlay_provider_ids = runtime_ids
+        session = _CatalogSession()
+        manager._get_http_session = AsyncMock(return_value=session)  # type: ignore[method-assign]
+        manager.ensure_running = AsyncMock()  # type: ignore[method-assign]
+
+        models = await manager.get_available_models(
+            "/tmp/work",
+            model_hub_models={
+                "gpt-5": {
+                    "id": "gpt-5",
+                    "native_protocol": "openai_responses",
+                    "variants": {"high": {}},
+                },
+                "claude-opus-5": {
+                    "id": "claude-opus-5",
+                    "native_protocol": "anthropic",
+                },
+            },
+        )
+        native_models = await manager.get_native_available_models("/tmp/work")
+        providers = await manager.get_providers()
+        config = await manager.get_default_config("/tmp/work")
+
+        self.assertEqual(
+            [row["id"] for row in models["providers"]],
+            [legacy_custom_id, "custom", "openai", *runtime_ids],
+        )
+        self.assertEqual(
+            models["default"],
+            {
+                legacy_custom_id: "relay-model",
+                "openai": "gpt-5",
+            },
+        )
+        self.assertEqual(set(providers["all"]), {legacy_custom_id, "openai"})
+        self.assertEqual(providers["connected"], [legacy_custom_id, "openai"])
+        self.assertNotIn("model", config)
+        self.assertEqual(set(config["provider"]), {legacy_custom_id, "openai"})
+        native_model_index = {
+            row["id"]: row["models"] for row in native_models["providers"]
+        }
+        self.assertEqual(set(native_model_index), {legacy_custom_id, "custom", "openai"})
+        self.assertEqual(
+            {entry["id"] for entry in native_model_index["openai"]},
+            {"gpt-4", "gpt-5"},
+        )
+        self.assertEqual(set(native_model_index["custom"]), {"native-model"})
+        public_models = {
+            row["id"]: row["models"] for row in models["providers"]
+        }
+        public_openai = {entry["id"]: entry for entry in public_models["openai"]}
+        self.assertEqual(set(public_openai), {"gpt-4", "gpt-5"})
+        self.assertEqual(public_openai["gpt-5"]["name"], "GPT-5")
+        self.assertEqual(
+            public_openai["gpt-5"]["capabilities"],
+            {"tools": True},
+        )
+        self.assertEqual(set(public_models["custom"]), {"native-model"})
+        self.assertEqual(
+            public_models["avibe-openai"]["gpt-5"],
+            {
+                "id": "gpt-5",
+                "variants": {"high": {}},
+                "vibe_remote": {"model_hub_projected": True},
+            },
+        )
+        self.assertEqual(
+            public_models["avibe-anthropic"]["claude-opus-5"],
+            {
+                "id": "claude-opus-5",
+                "vibe_remote": {"model_hub_projected": True},
+            },
+        )
+
     async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         restarted = []
@@ -186,7 +478,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock(side_effect=lambda: restarted.append(True))  # type: ignore[method-assign]
         manager._start_server = AsyncMock(side_effect=lambda: started.append(True))  # type: ignore[method-assign]
-        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID}  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID, "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION}  # type: ignore[method-assign]
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 
         with patch.object(
@@ -201,6 +493,191 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
+    async def test_hub_mode_refuses_unconfigured_launch_and_logs_once(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        config = SERVER_MODULE.V2Config.load()
+        config.model_hub.agents["opencode"].mode = "hub"
+        config.save()
+
+        with (
+            patch.dict(os.environ),
+            patch.object(SERVER_MODULE.logger, "error") as log_error,
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                side_effect=AssertionError("Hub refusal must precede server setup"),
+            ),
+        ):
+            os.environ.pop("VIBE_MODEL_HUB_ENABLED", None)
+            for _attempt in range(2):
+                with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                    await manager.ensure_running()
+
+        log_error.assert_called_once()
+        manager._start_server.assert_not_awaited()
+
+    async def test_ui_hub_mode_refuses_even_when_controller_overlay_is_running(self):
+        overlay = _model_hub_overlay("/tmp/opencode-overlay.json", "gpt-5")
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._model_hub_overlay_path = str(overlay.path)
+        manager._model_hub_overlay_hash = overlay.content_hash
+        manager._model_hub_overlay_content = SERVER_MODULE._managed_runtime_config_content(
+            overlay.content
+        )
+        manager._model_hub_overlay_provider_ids = overlay.provider_ids
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                return_value=types.SimpleNamespace(
+                    model_hub=types.SimpleNamespace(
+                        agents={
+                            "opencode": types.SimpleNamespace(mode="hub"),
+                        }
+                    )
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                side_effect=AssertionError("UI process must refuse before server setup"),
+            ),
+        ):
+            with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                await manager.ensure_running()
+
+        manager._start_server.assert_not_awaited()
+
+    async def test_launch_rechecks_mode_inside_lock_immediately_before_spawn(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        events = []
+        modes = iter((False, True))
+
+        def current_mode():
+            events.append(("mode", manager._get_lock().locked()))
+            return next(modes)
+
+        async def cleanup():
+            events.append(("cleanup", manager._get_lock().locked()))
+
+        manager._model_hub_mode_enabled = Mock(side_effect=current_mode)  # type: ignore[method-assign]
+        manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock(side_effect=cleanup)  # type: ignore[method-assign]
+        manager._is_port_available = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(
+                path=Path("/tmp/plugin.js"),
+                changed=False,
+            ),
+        ):
+            with self.assertRaises(OpenCodeModelHubOverlayRequiredError):
+                await manager.ensure_running()
+
+        self.assertEqual(
+            events,
+            [("mode", False), ("cleanup", True), ("mode", True)],
+        )
+        manager._start_server.assert_not_awaited()
+
+    async def test_controller_probe_prepares_overlay_before_launch(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(governor)
+        manager = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            resource_governor=governor,
+        )
+        overlay = _model_hub_overlay("/tmp/opencode-overlay.json", "gpt-5")
+        prepare_overlay = AsyncMock(return_value=overlay)
+        manager.set_model_hub_overlay_preparer(prepare_overlay)
+        manager._read_pid_file = Mock(return_value=None)  # type: ignore[method-assign]
+        manager._is_healthy = AsyncMock(side_effect=[False, False, True])  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._is_port_available = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._write_pid_file = Mock()  # type: ignore[method-assign]
+        manager._clear_pid_file = Mock()  # type: ignore[method-assign]
+        manager._observe_runtime_generation = Mock()  # type: ignore[method-assign]
+        launched = {}
+
+        async def create_subprocess_exec(*args, **kwargs):
+            launched["args"] = args
+            launched["env"] = kwargs["env"]
+            return types.SimpleNamespace(pid=4321, returncode=None)
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=True),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                return_value=types.SimpleNamespace(
+                    model_hub=types.SimpleNamespace(
+                        agents={
+                            "opencode": types.SimpleNamespace(mode="hub"),
+                        }
+                    )
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                return_value=types.SimpleNamespace(
+                    path=Path("/tmp/plugin.js"),
+                    changed=False,
+                ),
+            ),
+            patch.object(
+                SERVER_MODULE,
+                "server_environment",
+                return_value={},
+            ),
+            patch.object(
+                SERVER_MODULE.asyncio,
+                "create_subprocess_exec",
+                side_effect=create_subprocess_exec,
+            ),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        prepare_overlay.assert_awaited_once_with()
+        self.assertEqual(launched["env"]["OPENCODE_CONFIG"], str(overlay.path))
+        self.assertEqual(launched["env"]["AVIBE_OPENCODE_MODEL_HUB"], "1")
+        inline_config = json.loads(launched["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(
+            inline_config["provider"]["avibe-openai"]["models"],
+            {"gpt-5": {"id": "gpt-5"}},
+        )
+        self.assertEqual(manager._model_hub_overlay_reservations, {})
+
+    async def test_feature_gate_off_keeps_persisted_hub_in_direct_mode(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._ensure_running_with_current_overlay = AsyncMock(  # type: ignore[method-assign]
+            return_value="http://127.0.0.1:4096"
+        )
+
+        with (
+            patch.object(SERVER_MODULE, "is_model_hub_enabled", return_value=False),
+            patch.object(
+                SERVER_MODULE.V2Config,
+                "load",
+                side_effect=AssertionError("disabled Model Hub must not read its mode"),
+            ),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._ensure_running_with_current_overlay.assert_awaited_once_with()
+
     async def test_ensure_running_defers_plugin_restart_while_run_active(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._active_run_sessions.add("ses-active")
@@ -208,7 +685,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
-        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID}  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path(), "owner_pid": SERVER_MODULE._CURRENT_OWNER_PID, "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION}  # type: ignore[method-assign]
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 
         with patch.object(
@@ -246,6 +723,128 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
+    async def test_ensure_running_restarts_idle_adopted_server_with_stale_runtime_policy(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": [],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._restart_for_auth_refresh_locked.assert_awaited_once()
+        manager._start_server.assert_awaited_once()
+
+    async def test_ensure_running_reconciles_orphaned_adopted_run_before_policy_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._pid_file.write_text(
+                json.dumps(
+                    {
+                        "pid": 123,
+                        "port": 4096,
+                        "caller_context_path": manager._caller_context_path(),
+                        "active_run_sessions": ["ses-orphan"],
+                        "runtime_policy_revision": "previous-policy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager.set_active_poll_session_ids_provider(set)
+            manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+            manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+            manager._start_server = AsyncMock()  # type: ignore[method-assign]
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+            with patch.object(
+                SERVER_MODULE,
+                "ensure_plugin_installed",
+                return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+            ):
+                base_url = await manager.ensure_running()
+
+            self.assertEqual(base_url, "http://127.0.0.1:4096")
+            manager._restart_for_auth_refresh_locked.assert_awaited_once()
+            manager._start_server.assert_awaited_once()
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], [])
+
+    async def test_ensure_running_keeps_adopted_run_with_durable_poll(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager.set_active_poll_session_ids_provider(lambda: {"ses-active"})
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": ["ses-active"],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            with self.assertRaises(OpenCodeManagedPolicyRefreshPendingError):
+                await manager.ensure_running()
+
+        self.assertEqual(manager._active_run_sessions, {"ses-active"})
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+
+    async def test_ensure_running_keeps_adopted_run_when_poll_reconciliation_fails(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+        def unavailable_polls() -> set[str]:
+            raise OSError("sessions unavailable")
+
+        manager.set_active_poll_session_ids_provider(unavailable_polls)
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": manager._caller_context_path(),
+            "active_run_sessions": ["ses-unknown"],
+            "runtime_policy_revision": "previous-policy",
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            with self.assertRaises(OpenCodeManagedPolicyRefreshPendingError):
+                await manager.ensure_running()
+
+        self.assertEqual(manager._active_run_sessions, set())
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+
     async def test_ensure_running_defers_adopted_server_without_caller_context_env(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
@@ -260,7 +859,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "ensure_plugin_installed",
             return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
         ):
-            with self.assertRaisesRegex(RuntimeError, "adopted or active server"):
+            with self.assertRaisesRegex(
+                OpenCodeManagedPolicyRefreshPendingError,
+                "adopted or active server",
+            ):
                 await manager.ensure_running()
 
         manager._restart_for_auth_refresh_locked.assert_not_awaited()
@@ -288,6 +890,36 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._start_server.assert_not_awaited()
         self.assertTrue(manager._caller_context_plugin_refresh_pending)
 
+    async def test_ensure_running_preserves_an_adopted_absolute_caller_context_path(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        adopted_path = "/old-avibe-home/runtime/opencode_caller_context.json"
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+            "pid": 123,
+            "port": 4096,
+            "caller_context_path": adopted_path,
+            "active_run_sessions": ["ses-active"],
+            "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
+        }
+        manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+        manager._caller_context_path = lambda: "/new-avibe-home/runtime/opencode_caller_context.json"  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        self.assertEqual(manager.caller_context_binding_path(), Path(adopted_path))
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+        self.assertFalse(manager._caller_context_plugin_refresh_pending)
+
     async def test_mark_run_active_persists_pid_file_active_sessions(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -299,11 +931,70 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], ["ses-active"])
+            self.assertEqual(
+                payload["runtime_policy_revision"],
+                SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
+            )
 
             await manager.mark_run_inactive("ses-active")
 
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], [])
+
+    async def test_mark_run_inactive_preserves_active_state_when_pid_write_fails(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            await manager.mark_run_active("ses-active")
+
+            with patch.object(
+                Path,
+                "write_text",
+                side_effect=OSError("read-only pid file"),
+            ):
+                with self.assertRaisesRegex(OSError, "read-only pid file"):
+                    await manager.mark_run_inactive("ses-active")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-active"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], ["ses-active"])
+
+    async def test_mark_run_inactive_preserves_other_adopted_active_sessions(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            payload["active_run_sessions"] = ["ses-completed", "ses-other-platform"]
+            manager._pid_file.write_text(json.dumps(payload), encoding="utf-8")
+
+            await manager.mark_run_inactive("ses-completed")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-other-platform"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(payload["active_run_sessions"], ["ses-other-platform"])
+
+    async def test_mark_run_active_preserves_adopted_active_sessions(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
+            manager._write_pid_file(123)
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            payload["active_run_sessions"] = ["ses-other-platform"]
+            manager._pid_file.write_text(json.dumps(payload), encoding="utf-8")
+
+            await manager.mark_run_active("ses-new")
+
+            self.assertEqual(manager._active_run_sessions, {"ses-new", "ses-other-platform"})
+            payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["active_run_sessions"],
+                ["ses-new", "ses-other-platform"],
+            )
 
     async def test_cleanup_stale_managed_pid_does_not_inherit_caller_context_for_new_pid(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -318,8 +1009,9 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             *,
             caller_context_path=SERVER_MODULE._USE_CURRENT_CALLER_CONTEXT_PATH,
             owner_pid=SERVER_MODULE._CURRENT_OWNER_PID,
+            runtime_policy_revision=SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
         ):
-            writes.append((pid, caller_context_path, owner_pid))
+            writes.append((pid, caller_context_path, owner_pid, runtime_policy_revision))
             pid_info.clear()
             pid_info.update({"pid": pid, "port": 4096})
             if isinstance(caller_context_path, str) and caller_context_path:
@@ -329,7 +1021,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         await manager._cleanup_orphaned_managed_server()
 
-        self.assertEqual(writes, [(222, None, None)])
+        self.assertEqual(writes, [(222, None, None, None)])
         self.assertNotIn("caller_context_path", pid_info)
 
     async def test_ensure_running_rejects_unmanaged_healthy_server(self):
@@ -357,7 +1049,10 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         events = []
         manager._runtime_generation_token = (111, 1.0)
         manager.set_runtime_activation_retire(
-            lambda force: events.append(("retire", force)) or True
+            lambda force, native_turns_drained: events.append(
+                ("retire", force, native_turns_drained)
+            )
+            or True
         )
         manager._is_healthy = AsyncMock(return_value=False)  # type: ignore[method-assign]
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
@@ -373,14 +1068,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await manager.ensure_running()
 
-        self.assertEqual(events, [("retire", True), ("start", True)])
+        self.assertEqual(events, [("retire", True, False), ("start", True)])
 
     async def test_ensure_running_retires_generation_when_adopted_pid_changes(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         retired = []
         manager._runtime_generation_token = (111, 1.0)
         manager.set_runtime_activation_retire(
-            lambda force: retired.append(force) or True
+            lambda force, native_turns_drained: retired.append(
+                (force, native_turns_drained)
+            )
+            or True
         )
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
@@ -389,6 +1087,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "port": 4096,
             "started_at": 2.0,
             "caller_context_path": manager._caller_context_path(),
+            "runtime_policy_revision": SERVER_MODULE._MANAGED_RUNTIME_POLICY_REVISION,
         }
         manager._get_pid_command = lambda pid: "opencode serve --port=4096"  # type: ignore[method-assign]
 
@@ -399,7 +1098,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         ):
             await manager.ensure_running()
 
-        self.assertEqual(retired, [True])
+        self.assertEqual(retired, [(True, False)])
         self.assertEqual(manager._runtime_generation_token, (222, 2.0))
 
     async def test_prompt_async_percent_encodes_directory_header(self):
@@ -450,6 +1149,29 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             fake_session.gets[0]["headers"],
             {"x-opencode-directory": "/tmp/%E5%B0%8F%E8%AF%B4"},
         )
+
+    async def test_get_version_uses_health_endpoint(self):
+        class _HealthSession(_FakeSession):
+            def get(self, url, headers=None, timeout=None):
+                self.gets.append({"url": url, "headers": headers, "timeout": timeout})
+                return _FakeResponse(
+                    status=200,
+                    json_data={"healthy": True, "version": "1.18.5"},
+                )
+
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _HealthSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        with patch.object(SERVER_MODULE.aiohttp, "ClientTimeout", return_value=object()):
+            version = await manager.get_version()
+
+        self.assertEqual(version, "1.18.5")
+        self.assertEqual(fake_session.gets[0]["url"], "http://127.0.0.1:4096/global/health")
 
     async def test_prompt_async_includes_tools_when_provided(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
@@ -611,6 +1333,44 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                     "reasoningEffort": "high",
                 },
             )
+
+    async def test_explicit_subagent_model_is_independent_of_native_defaults(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        for native_model in (None, "openai/native-one", "anthropic/native-two"):
+            for declared in (None, "", "   ", {"id": "invalid"}, " provider/reviewer "):
+                with self.subTest(native_model=native_model, declared=declared):
+                    config = {
+                        "model": native_model,
+                        "agent": {
+                            "build": {"model": native_model},
+                            "reviewer": {"model": declared},
+                        },
+                    }
+                    with patch.object(manager, "_load_opencode_user_config", return_value=config):
+                        expected = (declared.strip() or None) if isinstance(declared, str) else None
+                        self.assertEqual(manager.get_explicit_subagent_model("reviewer"), expected)
+                        self.assertIsNone(manager.get_explicit_subagent_model("missing"))
+                        self.assertIsNone(manager.get_explicit_subagent_model(""))
+
+    async def test_agent_reasoning_effort_reads_back_every_savable_variant(self):
+        # A tier the save path can write must never be dropped here as unknown
+        # (#1840: catalog-declared `ultra` was rejected by both halves).
+        for effort in OPENCODE_REASONING_VARIANTS:
+            with self.subTest(effort=effort):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_home = Path(tmp_dir)
+                    config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+                    config_path.parent.mkdir(parents=True, exist_ok=True)
+                    config_path.write_text(
+                        json.dumps({"reasoningEffort": effort}),
+                        encoding="utf-8",
+                    )
+
+                    manager = OpenCodeServerManager(binary="opencode", port=4096)
+                    with patch("vibe.opencode_config.Path.home", return_value=tmp_home):
+                        resolved = manager.get_agent_reasoning_effort_from_config(None)
+
+                    self.assertEqual(resolved, effort)
 
     async def test_refresh_global_config_patches_live_server(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2342,6 +3102,182 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
 async def _async_none():
     return None
+
+
+def test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run():
+    """MH-RUNTIME-002: unchanged direct mode cannot head-of-line block another Session."""
+
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._active_run_sessions.add("sess-unrelated")
+    manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+        "pid": 321,
+        "port": 4096,
+        "active_run_sessions": ["sess-unrelated"],
+    }
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+
+    reservation = asyncio.run(
+        asyncio.wait_for(
+            manager.configure_model_hub_overlay(None),
+            timeout=0.1,
+        )
+    )
+    asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
+
+    assert manager._model_hub_overlay_path is None
+    assert manager._model_hub_overlay_hash is None
+    assert manager._model_hub_overlay_content is None
+    manager._is_healthy.assert_not_awaited()
+    manager._restart_for_auth_refresh_locked.assert_not_awaited()
+
+
+def test_changed_overlay_still_waits_for_active_run_before_restart():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._active_run_sessions.add("sess-active")
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
+
+    async def exercise():
+        configuring = asyncio.create_task(manager.configure_model_hub_overlay(overlay))
+        await asyncio.sleep(0.01)
+        assert not configuring.done()
+        manager._active_run_sessions.clear()
+        reservation = await asyncio.wait_for(configuring, timeout=0.2)
+        await manager.release_model_hub_overlay_reservation(reservation)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_path == str(overlay.path)
+    assert manager._model_hub_overlay_hash == overlay.content_hash
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
+def test_empty_model_hub_overlay_uses_the_normal_change_path():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = _model_hub_overlay("/tmp/empty-overlay.json", None)
+
+    reservation = asyncio.run(manager.configure_model_hub_overlay(overlay))
+    asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
+
+    assert json.loads(overlay.content)["provider"]["avibe-openai"]["models"] == {}
+    assert manager._model_hub_overlay_path == str(overlay.path)
+    assert manager._model_hub_overlay_hash == overlay.content_hash
+    manager._restart_for_auth_refresh_locked.assert_awaited_once_with(
+        native_turns_drained=True,
+    )
+
+
+def test_changed_overlay_passes_completed_persisted_drain_to_retirement():
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = "old-hash"
+    manager._model_hub_overlay_drain_timeout_seconds = 0
+    manager._read_pid_file = lambda: {  # type: ignore[method-assign]
+        "pid": 321,
+        "port": 4096,
+        "active_run_sessions": ["sess-stale"],
+    }
+    manager._pid_file_references_current_server = Mock(return_value=True)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
+
+    reservation = asyncio.run(manager.configure_model_hub_overlay(overlay))
+    asyncio.run(manager.release_model_hub_overlay_reservation(reservation))
+
+    manager._restart_for_auth_refresh_locked.assert_awaited_once_with(
+        native_turns_drained=True,
+    )
+
+
+def test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay():
+    """MH-RUNTIME-003: a queued change drains without old-overlay starvation."""
+
+    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
+    new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = old_overlay.content_hash
+    manager._active_run_sessions.add("sess-active")
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    async def exercise():
+        configuring = asyncio.create_task(
+            manager.configure_model_hub_overlay(new_overlay)
+        )
+        await asyncio.sleep(0.01)
+        matching_old_turn = asyncio.create_task(
+            manager.configure_model_hub_overlay(old_overlay)
+        )
+        await asyncio.sleep(0.01)
+        assert not matching_old_turn.done()
+        matching_old_turn.cancel()
+        await asyncio.gather(matching_old_turn, return_exceptions=True)
+        manager._active_run_sessions.clear()
+        reservation = await asyncio.wait_for(configuring, timeout=0.2)
+        await manager.release_model_hub_overlay_reservation(reservation)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_path == str(new_overlay.path)
+    assert manager._model_hub_overlay_hash == new_overlay.content_hash
+    assert manager._model_hub_overlay_transition is None
+    manager._restart_for_auth_refresh_locked.assert_awaited_once()
+
+
+def test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run():
+    """MH-RUNTIME-004: selection stays leased through active-run registration."""
+
+    old_overlay = _model_hub_overlay("/tmp/old-overlay.json", "old-model")
+    new_overlay = _model_hub_overlay("/tmp/new-overlay.json", "new-model")
+    manager = OpenCodeServerManager(binary="opencode", port=4096)
+    manager._model_hub_overlay_path = "/tmp/old-overlay.json"
+    manager._model_hub_overlay_hash = old_overlay.content_hash
+    manager._read_pid_file = lambda: {}  # type: ignore[method-assign]
+    manager._pid_file_references_current_server = Mock(return_value=False)  # type: ignore[method-assign]
+    manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+    async def exercise():
+        reservation = await manager.configure_model_hub_overlay(new_overlay)
+        reverting = asyncio.create_task(
+            manager.configure_model_hub_overlay(old_overlay)
+        )
+        await asyncio.sleep(0.01)
+        assert not reverting.done()
+
+        await manager.mark_run_active(
+            "sess-new",
+            overlay_reservation=reservation,
+        )
+        await asyncio.sleep(0.01)
+        assert not reverting.done()
+
+        await manager.mark_run_inactive("sess-new")
+        old_reservation = await asyncio.wait_for(reverting, timeout=0.2)
+        await manager.release_model_hub_overlay_reservation(old_reservation)
+
+    asyncio.run(exercise())
+
+    assert manager._model_hub_overlay_path == str(old_overlay.path)
+    assert manager._model_hub_overlay_hash == old_overlay.content_hash
+    assert manager._model_hub_overlay_reservations == {}
+    assert manager._active_run_sessions == set()
+    assert manager._restart_for_auth_refresh_locked.await_count == 2
 
 
 if __name__ == "__main__":

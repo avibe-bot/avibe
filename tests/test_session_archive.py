@@ -121,7 +121,13 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         _insert_run(conn, run_id="run_done", session_id=sid, status="succeeded")
         conn.execute(
             show_pages.insert().values(
-                session_id=sid, visibility="public", share_id="shareX", created_at=NOW, updated_at=NOW
+                session_id=sid,
+                access_mode="public",
+                access_revision=0,
+                share_id="shareX",
+                offline_at=None,
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
         vs.create_secret(conn, name="ARCHIVE_KEY", protection="protected", sealed=Sealed("ct", "nonce", "wrap"))
@@ -223,7 +229,6 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert runs["run_done"]["status"] == "succeeded"  # terminal → untouched
 
         page = conn.execute(select(show_pages).where(show_pages.c.session_id == sid)).mappings().first()
-        assert page["visibility"] == "offline"
         assert page["offline_at"] is not None
         grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
         reserved_grant_row = conn.execute(

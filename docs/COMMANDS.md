@@ -527,7 +527,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe memory ...` | Read scoped Memory or queue durable context to remember (user-requested, or Agent-distilled from conversations and local work) through the running controller |
+| `vibe memory ...` | Read scoped Memory or submit context for best-effort, process-local capture through the running controller; acceptance does not guarantee delivery or persistence |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
@@ -617,7 +617,7 @@ vibe doctor
 - checks backend CLI availability
 - checks runtime home migration state
 - checks runtime process, install, and restart metadata state
-- checks askill, avault, Git Runtime, Show Runtime, tmux, and Node.js through one dependency diagnostic group
+- checks askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js through one dependency diagnostic group
 - `vibe doctor --deep` probes missing dependency endpoints without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
 
@@ -632,6 +632,7 @@ vibe doctor repair stale-restart-state --yes
 vibe doctor repair askill --yes
 vibe doctor repair avault --yes
 vibe doctor repair git-runtime --yes
+vibe doctor repair model-hub-engine --yes
 vibe doctor repair show-runtime --yes
 vibe doctor repair tmux --yes
 ```
@@ -907,9 +908,10 @@ result later. Use `--sync` only when the terminal should wait for completion.
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
 definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
-steer. `--send-now` persists the new Run at P3, then promotes the exact FIFO head
-through P1, so it neither stops the active Turn nor jumps older work. `vibe
-session send-now` performs that exact-head promotion without adding a message.
+steer. For an existing Session, `--send-now` explicitly selects the same
+content-bearing P1 behavior; it targets the new message and never promotes older
+queued work. `vibe session send-now` is the content-free P1 operation that
+promotes the exact existing FIFO head without adding a message.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or

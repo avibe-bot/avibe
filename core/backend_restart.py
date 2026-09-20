@@ -41,14 +41,17 @@ class BackendRestartCoordinator:
         self._poll_interval = max(0.001, poll_interval)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._request_locks: dict[str, asyncio.Lock] = {}
+        self._outcomes: dict[str, dict[str, str]] = {}
 
     async def request_restart(self, backend: str) -> str:
         """Begin or join a restart and return without waiting for a long drain."""
         lock = self._request_locks.setdefault(backend, asyncio.Lock())
         async with lock:
             existing = self._tasks.get(backend)
-            if existing is not None and not existing.done():
-                return "draining"
+            if existing is not None:
+                if not existing.done():
+                    return "draining"
+                self._on_done(backend, existing)
 
             agent_service = self.controller.agent_service
             session_turns = self.controller.session_turns
@@ -56,11 +59,12 @@ class BackendRestartCoordinator:
             session_turns.begin_backend_drain(backend)
             try:
                 await agent_service.prepare_backend_restart(backend)
-            except Exception:
+                had_active_work = await self._has_active_turns(backend)
+            except BaseException as exc:
+                self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
                 agent_service.end_backend_drain(backend)
                 await session_turns.end_backend_drain(backend, resume_deferred=False)
                 raise
-            had_active_work = await self._has_active_turns(backend)
             task = asyncio.create_task(self._run(backend), name=f"backend-restart:{backend}")
             self._tasks[backend] = task
             task.add_done_callback(lambda completed, name=backend: self._on_done(name, completed))
@@ -74,14 +78,56 @@ class BackendRestartCoordinator:
         return "draining"
 
     def _on_done(self, backend: str, task: asyncio.Task[None]) -> None:
-        if self._tasks.get(backend) is task:
+        current = self._tasks.get(backend) is task
+        if current:
             self._tasks.pop(backend, None)
         try:
             task.result()
+            if current:
+                self._outcomes[backend] = {"state": "applied"}
         except asyncio.CancelledError:
+            if current:
+                self._outcomes[backend] = {"state": "failed", "error": "cancelled"}
             logger.info("Backend restart cancelled for %s", backend)
-        except Exception:
+        except Exception as exc:
+            if current:
+                self._outcomes[backend] = {"state": "failed", "error": str(exc) or type(exc).__name__}
             logger.exception("Backend restart failed for %s", backend)
+
+    def snapshot(self, backend: str) -> dict[str, str | bool]:
+        """Read application without starting another cutover or credential probe."""
+        lock = self._request_locks.get(backend)
+        if lock is not None and lock.locked():
+            return {"state": "draining"}
+        task = self._tasks.get(backend)
+        if task is not None:
+            if not task.done():
+                return {"state": "draining"}
+            if task.cancelled():
+                return {"state": "failed", "error": "cancelled"}
+            error = task.exception()
+            if error is not None:
+                return {"state": "failed", "error": str(error) or type(error).__name__}
+        outcome = self._outcomes.get(backend)
+        if task is None and outcome and outcome["state"] == "failed":
+            return dict(outcome)
+        from config.v2_compat import AppCompatConfig
+
+        config = getattr(self.controller, "config", None)
+        registered = backend in self.controller.agent_service.agents
+        # Optional compat sections are None only for disabled backends. Claude
+        # stays registered with an explicit flag. Use loaded state, never disk
+        # or a stale successful outcome to excuse unexpected missing agents.
+        if isinstance(config, AppCompatConfig):
+            disabled = (backend in {"codex", "opencode"} and getattr(config, backend) is None and not registered) or (
+                backend == "claude" and registered and config.claude.enabled is False
+            )
+            if disabled:
+                return {"state": "applied", "disabled": True}
+        # Startup-installed agents need no recent restart receipt.
+        if not registered:
+            return {"state": "unavailable"}
+        return {"state": "applied"}
 
     async def _has_active_turns(self, backend: str) -> bool:
         service = self.controller.agent_service

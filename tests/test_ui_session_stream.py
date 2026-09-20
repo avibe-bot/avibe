@@ -16,6 +16,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,7 +31,8 @@ from storage import message_deliveries, messages_service
 from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
+from vibe import remote_access
 
 
 @pytest.fixture()
@@ -174,6 +176,48 @@ def _settle_reserved_delivery(payload: dict, *, state: str) -> dict:
         return settled
 
 
+def _seed_claimed_batch(
+    *,
+    scope_id: str,
+    session_id: str,
+    texts: list[str],
+    platform: str = "avibe",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create the pre-native-write state that must remain visible in Chat."""
+
+    with create_sqlite_engine().begin() as conn:
+        deliveries = [
+            message_deliveries.insert_delivery(
+                conn,
+                delivery_id=f"msg_claimed_{session_id}_{index}",
+                session_id=session_id,
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    platform=platform,
+                    author="user",
+                    source="user",
+                    text=text,
+                    metadata=metadata,
+                ),
+                dispatch_text=text,
+            )
+            for index, text in enumerate(texts)
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        return message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="opencode",
+            deliveries=deliveries,
+            dispatch_text="\n".join(texts),
+        )
+
+
 def _accepted_dispatch(session_id: str) -> AsyncMock:
     async def dispatch(payload: dict) -> dict:
         settled = _settle_reserved_delivery(payload, state="accepted")
@@ -200,25 +244,23 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    async def dispatch(payload):
-        settled = _settle_reserved_delivery(payload, state="accepted")
-        return {
-            "status_code": 202,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "delivery_state": settled["state"],
-            },
-        }
-
-    dispatch_mock = AsyncMock(side_effect=dispatch)
+    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
         patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
     ):
         client = app.test_client()
         headers = csrf_headers(client)
+        saved_draft = client.put(
+            f"/api/sessions/{session_id}/draft",
+            json={"text": "draft before send", "expected_updated_at": None},
+            headers=headers,
+        ).get_json()["draft"]
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"text": "no stream", "author_id": "remote:spoofed"},
@@ -228,16 +270,47 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     payload = response.get_json()
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
-    assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
-    assert payload["metadata"]["_memory_cli_admitted"] is False
+    assert "_web_push_user_key" not in payload["metadata"]
+    assert not any(key.startswith("_memory_") for key in payload["metadata"])
     assert payload["text"] == "no stream"
+    assert payload["draft_advanced"] is True
+    assert payload["draft"]["text"] == ""
+    assert payload["draft"]["updated_at"] not in (None, saved_draft["updated_at"])
     # The turn was kicked off fire-and-forget with the session + text.
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
     assert sent["session_id"] == session_id
     assert sent["text"] == "no stream"
-    assert sent["memory_cli_admitted"] is False
-    assert sent["is_ordinary_text"] is True
+    assert sent["author_id"] == "remote:user-a"
+    assert sent["message_kind"] == "original"
+    assert "user_id" not in sent
+    assert "memory_cli_admitted" not in sent
+    assert "is_ordinary_text" not in sent
+
+
+def test_lan_workbench_message_has_no_memory_author(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    dispatch = _accepted_dispatch(session_id)
+    with (
+        patch("vibe.internal_client.dispatch_async", dispatch),
+        patch("vibe.ui_server._web_push_user_key", return_value="local"),
+        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
+        patch("vibe.ui_server._load_remote_access_config", return_value=None),
+    ):
+        client = app.test_client()
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "LAN input"},
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 201
+    assert response.get_json()["author_id"] is None
+    sent = dispatch.await_args.args[0]
+    assert sent["author_id"] is None
+    assert "memory_cli_admitted" not in sent
 
 
 @pytest.mark.parametrize(
@@ -247,7 +320,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
         {"text": "forwarded text", "metadata": {"forwarded": True}},
     ],
 )
-def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
+def test_workbench_side_actions_have_fail_closed_core_message_kinds(
     isolated_state,
     tmp_path,
     payload,
@@ -265,11 +338,19 @@ def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
         )
 
     assert response.status_code == 201
-    assert dispatch.await_args.args[0]["is_ordinary_text"] is False
+    expected_kind = (
+        "quick_reply"
+        if "quick_reply_for" in payload.get("metadata", {})
+        else "forwarded"
+    )
+    assert dispatch.await_args.args[0]["message_kind"] == expected_kind
+    assert response.get_json()["draft_advanced"] is (
+        "quick_reply_for" not in payload.get("metadata", {})
+    )
 
 
 
-def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
+def test_workbench_text_uses_authenticated_author_and_core_message_kind(
     isolated_state,
     tmp_path,
 ):
@@ -294,30 +375,11 @@ def test_workbench_memory_text_is_persisted_and_dispatched_as_ordinary_input(
     assert response_payload["text"] == "/memory status"
     payload = dispatch.await_args.args[0]
     assert payload["text"] == "/memory status"
-    assert payload["user_id"] == "local"
+    assert payload["author_id"] == "local"
     assert payload["message_id"] == response_payload["id"]
-    assert payload["memory_cli_admitted"] is True
-
-
-@pytest.mark.parametrize(
-    "session_payload,expected",
-    [
-        ({"sub": "user-a"}, "remote:user-a"),
-        ({}, None),
-        (None, None),
-    ],
-)
-def test_remote_workbench_memory_identity_requires_a_stable_subject(session_payload, expected):
-    from vibe import remote_access
-    from vibe.ui_server import app, _workbench_memory_user_id
-
-    with (
-        app.test_request_context("/chat/session", headers={"Cookie": "avibe_remote_session=session"}),
-        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
-        patch("vibe.ui_server._load_remote_access_config", return_value=object()),
-        patch.object(remote_access, "parse_session_cookie", return_value=session_payload),
-    ):
-        assert _workbench_memory_user_id() == expected
+    assert payload["message_kind"] == "original"
+    assert "memory_cli_admitted" not in payload
+    assert "user_id" not in payload
 
 
 def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
@@ -355,11 +417,111 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
 
     assert response.status_code == 201
     payload = dispatch.await_args.args[0]
-    assert payload["user_id"] == "local"
+    assert payload["author_id"] == "local"
+    assert payload["message_kind"] == "original"
     assert payload["message_id"] == response.get_json()["id"]
     assert len(payload["files"]) == 1
     assert payload["files"][0]["name"] == "diagram.png"
     assert Path(payload["files"][0]["path"]).read_bytes() == b"attachment-bytes"
+
+
+def test_queued_projection_carries_the_uploaded_file_identity(isolated_state, tmp_path):
+    """A queued message names the file it is waiting to send, in the shape the
+    queue strip draws (issue #2042).
+
+    The strip renders a thumbnail only for a same-origin ``/api/media/<token>``
+    URL, and resolves the rest from ``content.attachments``. That makes three
+    things a backend contract rather than a browser detail: the upload hands back
+    that URL and a ``kind``, the queued projection still carries them on both the
+    live queue read and the reload path, and the same token still resolves to the
+    uploaded bytes — so the file previewed in the queue is the file that reaches
+    the turn when it flushes.
+    """
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    upload = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        data={"upload_id": "upload-id-queued-1"},
+        files={"file": ("annotation-region.png", b"queued-image-bytes", "image/png")},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+    assert upload.status_code == 201
+    uploaded = upload.get_json()
+    # Same-origin media proxy, not a remote URL: this is the one form the queue
+    # row is allowed to put in an <img src>.
+    assert uploaded["url"] == f"/api/media/{uploaded['token']}"
+    assert uploaded["kind"] == "image"
+    assert uploaded["name"] == "annotation-region.png"
+
+    async def dispatch(payload):
+        settled = _settle_reserved_delivery(payload, state="queued")
+        return {
+            "status_code": 202,
+            "body": {"ok": True, "queued": True, "delivery_state": settled["state"]},
+        }
+
+    sent_attachment = {
+        "token": uploaded["token"],
+        "name": uploaded["name"],
+        "mime": uploaded["mime"],
+        "size": uploaded["size"],
+        "kind": uploaded["kind"],
+        "url": uploaded["url"],
+    }
+    with patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)):
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "", "content": {"text": "", "attachments": [sent_attachment]}},
+            headers=headers,
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+    assert response.status_code == 202
+    assert response.get_json()["queued"] is True
+
+    def queued_attachment(body: dict) -> dict:
+        assert len(body["queued"]) == 1
+        content = body["queued"][0]["content"]
+        assert len(content["attachments"]) == 1
+        return content["attachments"][0]
+
+    # The live queue read and the reload path project the same identity — an
+    # image-only queued row stays identifiable across a refresh.
+    live = client.get(f"/api/sessions/{session_id}/queue")
+    assert live.status_code == 200
+    assert queued_attachment(live.get_json()) == sent_attachment
+
+    with patch(
+        "vibe.api.get_vibe_agents",
+        return_value={"agents": [], "default_agent_name": None},
+    ):
+        bootstrap = client.get(f"/api/sessions/{session_id}/bootstrap")
+    assert bootstrap.status_code == 200
+    assert queued_attachment(bootstrap.get_json()) == sent_attachment
+
+    # The previewed URL is fetchable same-origin, and the token the preview was
+    # drawn from is the one the flush resolves into the agent turn.
+    media = client.get(uploaded["url"])
+    assert media.status_code == 200
+    assert media.content == b"queued-image-bytes"
+
+    from core.workbench_media import resolve_attachment_specs
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        specs = resolve_attachment_specs(
+            conn,
+            session_id=session_id,
+            attachments=[queued_attachment(live.get_json())],
+        )
+    assert len(specs) == 1
+    assert specs[0]["name"] == "annotation-region.png"
+    assert Path(specs[0]["path"]).read_bytes() == b"queued-image-bytes"
 
 
 def test_route_reads_the_materialized_message_id_for_a_merged_batch(
@@ -390,6 +552,7 @@ def test_route_reads_the_materialized_message_id_for_a_merged_batch(
                     text="older queued input",
                     metadata={"_web_push_user_key": "remote:user-a"},
                     author_id="remote:user-a",
+                    message_kind="original",
                 ),
                 dispatch_text="older queued input",
                 now="2026-01-01T00:00:00Z",
@@ -436,6 +599,10 @@ def test_route_reads_the_materialized_message_id_for_a_merged_batch(
     with (
         patch("vibe.internal_client.dispatch_async", AsyncMock(side_effect=dispatch)),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
     ):
         client = app.test_client()
         response = client.post(
@@ -828,7 +995,8 @@ def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tm
     cleared = cleared_response.get_json()
     assert cleared["agent_id"] is None
     assert cleared["agent_name"] is None
-    assert cleared["agent_backend"] == ""
+    # Clearing the Agent selector does not clear the durable backend pin.
+    assert cleared["agent_backend"] == "codex"
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
@@ -1142,6 +1310,8 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
                         "runtime_key": "runtime-1",
                         "kind": "background_task",
                         "status": "running",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for turn",
                     }
                 ],
                 "pending_activity_output_count": 0,
@@ -1172,12 +1342,395 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert [message["type"] for message in body["messages"]] == ["user", "result"]
     assert body["queued"][0]["text"] == "follow-up"
     assert body["draft"]["text"] == "draft text"
+    assert body["draft"]["updated_at"] is not None
     assert body["turn_state"]["in_flight"] is True
     assert body["turn_state"]["foreground"] == "running"
     assert body["turn_state"]["pending_input_count"] == 1
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
+    assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for turn"
     assert body["turn_state"]["connection"] == "connected"
 
+
+def test_message_delivery_024_claimed_active_input_survives_transcript_reload(
+    isolated_state,
+    tmp_path,
+):
+    """MESSAGE-DELIVERY-024: claimed Web input survives and then reconciles."""
+
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-worker",
+        agent_backend="opencode",
+    )
+    claimed = _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=session_id,
+        texts=["first input", "second input"],
+        metadata={"resource_user_context": {"sub": "must-not-leak"}},
+    )
+    first_delivery = claimed["deliveries"][0]
+
+    turn_state = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"in_flight": True, "native_turn_started": False},
+        }
+    )
+    with (
+        patch("vibe.internal_client.turn_state", turn_state),
+        patch(
+            "vibe.api.get_vibe_agents",
+            return_value={"agents": [], "default_agent_name": None},
+        ),
+    ):
+        client = app.test_client()
+        messages_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+        bootstrap_response = client.get(f"/api/sessions/{session_id}/bootstrap")
+
+    assert messages_response.status_code == 200
+    assert bootstrap_response.status_code == 200
+    for rows in (
+        messages_response.get_json()["messages"],
+        bootstrap_response.get_json()["messages"],
+    ):
+        assert [row["id"] for row in rows] == [first_delivery["id"]]
+        assert rows[0]["text"] == "first input\nsecond input"
+        assert rows[0]["type"] == "user"
+        assert rows[0]["metadata"]["merged_delivery_ids"] == [
+            delivery["id"] for delivery in claimed["deliveries"]
+        ]
+        assert rows[0]["projection"] == "claimed_delivery"
+        assert rows[0]["delivered_at"] == claimed["turn"]["started_at"]
+        assert "resource_user_context" not in rows[0]["metadata"]
+
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(messages.c.id).where(messages.c.session_id == session_id)
+        ).scalar_one_or_none() is None
+
+    with create_sqlite_engine().begin() as conn:
+        turn = message_deliveries.get_turn(conn, claimed["turn"]["id"])
+        assert turn is not None
+        assert message_deliveries.bind_native_start(
+            conn,
+            turn["id"],
+            expected_version=int(turn["version"]),
+            runtime_key="runtime:accepted",
+            runtime_turn_id="runtime-turn:accepted",
+            native_turn_id="native:accepted",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id=turn["id"],
+            evidence={"kind": "test_native_acceptance"},
+        )
+
+    accepted_response = client.get(f"/api/sessions/{session_id}/messages?tail=1")
+    accepted_rows = accepted_response.get_json()["messages"]
+    assert accepted_rows[0]["id"] == first_delivery["id"]
+    assert accepted_rows[0]["text"] == "first input\nsecond input"
+    assert "projection" not in accepted_rows[0]
+    assert "workbench_claimed_delivery" not in accepted_rows[0]["metadata"]
+
+    from core.services import sessions as sessions_service
+
+    im_agent = _ensure_vibe_agent("im-opencode-worker", "opencode")
+    with create_sqlite_engine().begin() as conn:
+        im_session = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend=im_agent.backend,
+            agent_id=im_agent.id,
+            agent_name=im_agent.name,
+        )
+    im_session_id = im_session["id"]
+    _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=im_session_id,
+        texts=["unaccepted IM input"],
+        platform="slack",
+    )
+    im_response = client.get(f"/api/sessions/{im_session_id}/messages?tail=1")
+    assert im_response.get_json()["messages"] == []
+
+
+def test_claimed_projection_follows_the_result_before_its_turn(isolated_state, tmp_path):
+    """MESSAGE-DELIVERY-024: projection enters at claim time, not submission time."""
+
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(
+        tmp_path,
+        agent_name="opencode-order",
+        agent_backend="opencode",
+    )
+    with create_sqlite_engine().begin() as conn:
+        result = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            text="previous turn result",
+        )
+    claimed = _seed_claimed_batch(
+        scope_id=scope_id,
+        session_id=session_id,
+        texts=["next turn input"],
+    )
+
+    response = app.test_client().get(f"/api/sessions/{session_id}/messages?tail=1")
+
+    assert response.status_code == 200
+    rows = response.get_json()["messages"]
+    assert [row["id"] for row in rows] == [result["id"], claimed["deliveries"][0]["id"]]
+    assert rows[1]["delivered_at"] == claimed["turn"]["started_at"]
+
+
+def test_chat_bootstrap_filters_harness_activities_for_viewer(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "viewer@example.com",
+            "user-viewer",
+            role="viewer",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(_session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "pending_input_count": 0,
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for approval",
+                        "status": "running",
+                    },
+                    {
+                        "id": "task-1",
+                        "item_kind": "task",
+                        "label": "private prompt head",
+                        "status": "scheduled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "reconnecting",
+            },
+        }
+
+    with (
+        patch("vibe.internal_client.turn_state", projected),
+        patch(
+            "vibe.api.get_vibe_agents",
+            return_value={
+                "agents": [{"name": "worker", "backend": "claude", "enabled": True}],
+                "default_agent_name": "worker",
+            },
+        ),
+    ):
+        response = client.get(
+            f"/api/sessions/{session_id}/bootstrap",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.10"},
+        )
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["turn_state"]["background_activities"]] == ["backend-1"]
+    assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for approval"
+
+
+def test_turn_state_route_preserves_harness_activities_for_editor(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path, paired=True)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "editor@example.com",
+            "user-editor",
+            role="editor",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(session_id_inner):
+        assert session_id_inner == session_id
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "pending_input_count": 0,
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for approval",
+                        "status": "running",
+                    },
+                    {
+                        "id": "watch-1",
+                        "item_kind": "watch",
+                        "label": "private waiter prompt",
+                        "status": "enabled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "reconnecting",
+            },
+        }
+
+    with patch("vibe.internal_client.turn_state", projected):
+        response = client.get(
+            f"/api/sessions/{session_id}/turn-state",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.10"},
+        )
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["background_activities"]] == [
+        "backend-1",
+        "watch-1",
+    ]
+    assert body["background_activities"][1]["label"] == "private waiter prompt"
+
+def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
+    isolated_state,
+    tmp_path,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    path = f"/api/sessions/{session_id}/draft"
+
+    created = client.put(
+        path,
+        json={"text": "first", "expected_updated_at": None},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    created_draft = created.get_json()["draft"]
+    assert created_draft["text"] == "first"
+    first_revision = created_draft["updated_at"]
+    assert first_revision is not None
+
+    fetched = client.get(path)
+    assert fetched.status_code == 200
+    assert fetched.get_json() == created_draft
+
+    stale = client.put(
+        path,
+        json={"text": "stale", "expected_updated_at": None},
+        headers=headers,
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {
+        "ok": False,
+        "code": "draft_conflict",
+        "draft": created_draft,
+    }
+
+    revisionless = client.put(
+        path,
+        json={"text": "legacy overwrite"},
+        headers=headers,
+    )
+    assert revisionless.status_code == 409
+    assert revisionless.get_json() == {
+        "ok": False,
+        "code": "draft_conflict",
+        "draft": created_draft,
+    }
+
+    updated = client.put(
+        path,
+        json={"text": "second", "expected_updated_at": first_revision},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    updated_draft = updated.get_json()["draft"]
+    assert updated_draft["text"] == "second"
+    second_revision = updated_draft["updated_at"]
+    assert second_revision not in (None, first_revision)
+
+    cleared = client.put(
+        path,
+        json={"text": "", "expected_updated_at": second_revision},
+        headers=headers,
+    )
+    assert cleared.status_code == 200
+    cleared_draft = cleared.get_json()["draft"]
+    assert cleared_draft["text"] == ""
+    assert cleared_draft["updated_at"] not in (None, second_revision)
+
+    resurrect = client.put(
+        path,
+        json={"text": "resurrected", "expected_updated_at": second_revision},
+        headers=headers,
+    )
+    assert resurrect.status_code == 409
+    assert resurrect.get_json()["draft"] == cleared_draft
+
+
+def test_session_draft_reserves_writer_before_cas_reads(isolated_state, tmp_path):
+    from core.services import sessions as sessions_service
+    from storage.agent_session_rows import reserve_write_lock as real_reserve_write_lock
+    from vibe.ui_server import app
+
+    real_get_session = sessions_service.get_session
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    calls = []
+
+    def reserve_write_lock(conn):
+        calls.append("write_lock")
+        return real_reserve_write_lock(conn)
+
+    def get_session(conn, target_session_id):
+        calls.append("session_read")
+        return real_get_session(conn, target_session_id)
+
+    with (
+        patch("storage.agent_session_rows.reserve_write_lock", reserve_write_lock),
+        patch("core.services.sessions.get_session", get_session),
+    ):
+        response = client.put(
+            f"/api/sessions/{session_id}/draft",
+            json={"text": "serialized", "expected_updated_at": None},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert calls[:2] == ["write_lock", "session_read"]
 
 def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):
     from vibe.ui_server import app
@@ -1437,6 +1990,7 @@ def test_turn_state_route_preserves_orthogonal_runtime_axes(isolated_state, tmp_
                         "runtime_key": "runtime-1",
                         "kind": "background_task",
                         "status": "running",
+                        "item_kind": "backend_activity",
                     }
                 ],
                 "pending_activity_output_count": 1,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
 import os
 import signal
@@ -225,7 +226,8 @@ def test_posix_watch_worker_waits_for_descendant_after_command_root_exits() -> N
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=10)
         if psutil.pid_exists(descendant_pid):
-            psutil.Process(descendant_pid).kill()
+            with suppress(psutil.NoSuchProcess):
+                psutil.Process(descendant_pid).kill()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group identity contract")

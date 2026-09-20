@@ -41,7 +41,7 @@ Claude Code, Codex, OpenCode are incredible. But:
 **One command turns your own machine into the home your AI partner lives in.** You drive the *official* Claude Code, Codex, and OpenCode — from a browser or any chat app — while your code and keys stay on your machine, and avibe.bot never sees your data.
 
 ```bash
-curl -fsSL https://avibe.bot/install.sh | bash && vibe
+bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --launch'
 ```
 
 The browser opens, you follow a short wizard, and your machine becomes an Agent OS you can reach from anywhere.
@@ -89,6 +89,9 @@ Open **Runs** to see that collaboration as a graph: who started each background 
 When a picture beats a paragraph, your agent hands you a live web page — a flowchart, dashboard, diff, report, or small app. Comment on an element or screenshot, and the agent can rework the page or answer exactly where you pointed.
 
 In Chat, click **Visualize** to switch the current session to its Show Page. Hover the button to open the page in a new app window or browser tab. You can also drag the button downward and release to place a new app window at the pointer, or drop it on **Apps** to pin that Show Page to the Dock.
+
+See [Show Pages](docs/SHOW_PAGES.md) for synchronous API timeout behavior and
+guidance for longer background refreshes.
 
 <img src="assets/screenshots/v4/show-page-en.png" alt="Show Page review with anchored comments and Agent replies on the page" />
 
@@ -321,9 +324,13 @@ npm install -g @openai/codex
 
 ```bash
 vibe stop
+avibe_home="${AVIBE_HOME:-$HOME/.avibe}"
+avibe_home="${avibe_home/#\~/$HOME}"
 uv tool uninstall avibe-os
 uv tool uninstall vibe-remote   # legacy installs
-rm -rf ~/.avibe ~/.vibe_remote
+vibe_bin="$(command -v vibe)" && rm -f "$vibe_bin" "$(dirname "$vibe_bin")/.vibe.avibe-generation"
+rm -rf "$avibe_home/runtime/install-generations"
+rm -rf "$avibe_home" ~/.vibe_remote
 ```
 
 ---
@@ -346,7 +353,7 @@ Shipped recently: multi-window Apps, Show Page annotations, the Agent Harness, S
 - **[Official Docs](https://docs.avibe.bot)** — quickstart, concepts, platform & agent guides, troubleshooting
 - **[What is Avibe](https://docs.avibe.bot/concepts/agent-os)** — the Agent OS model
 - **[CLI Reference](docs/CLI.md)** · **[Commands](docs/COMMANDS.md)**
-- **[Memory](docs/MEMORY.md)** · **[记忆](docs/MEMORY_ZH.md)** — processing timeline, diagnostic capture, retention, and recovery
+- **[Memory](docs/MEMORY.md)** · **[记忆](docs/MEMORY_ZH.md)** — current architecture, best-effort data contract, native records, and recovery
 - **[Install via AI agent](docs/INSTALL_FOR_AI.md)** — hand this to Claude Code, Codex, or OpenCode for guided setup
 - **[Slack](docs/SLACK_SETUP.md)** · **[Discord](docs/DISCORD_SETUP.md)** · **[Telegram](docs/TELEGRAM_SETUP.md)** setup guides
 

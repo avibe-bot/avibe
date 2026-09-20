@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertCircle, ChevronLeft, Loader2, Search, X } from 'lucide-react';
@@ -70,14 +70,6 @@ export const SearchPage: React.FC = () => {
     );
   };
 
-  // Autofocus the field on mount so typing flows straight in (the search page
-  // exists only to search). iOS sometimes needs the focus deferred a tick past
-  // the route transition for the soft keyboard to come up.
-  useEffect(() => {
-    const id = window.setTimeout(() => inputRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
-  }, []);
-
   // Back returns to where the user came from (usually the inbox field); a deep
   // link / refresh has nothing to pop, so fall back to /inbox. Mirrors
   // ChatPage's goBack.
@@ -122,9 +114,10 @@ export const SearchPage: React.FC = () => {
           <ChevronLeft className="size-5" />
         </Button>
         <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3 py-2.5">
-          <Search className="size-4 shrink-0 text-mint" />
+          <Search className="size-4 shrink-0 text-mint-ink" />
           <Input
             ref={inputRef}
+            autoFocus
             variant="bare"
             value={query}
             onChange={(e) => updateQuery(e.target.value)}
@@ -174,7 +167,7 @@ export const SearchPage: React.FC = () => {
         )}
         {showError && (
           <div className="px-2.5 py-12">
-            <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive">
+            <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive-ink">
               <AlertCircle className="size-4 shrink-0" />
               <span>{t('workbench.search.error')}</span>
             </div>

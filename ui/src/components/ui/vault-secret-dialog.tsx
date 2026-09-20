@@ -78,7 +78,7 @@ export const VaultSecretDialog: React.FC<{
           {/* Accessible name; the visible heading is the branded header below. */}
           <DialogTitle className="sr-only">{title}</DialogTitle>
           <div className="flex items-start gap-3 pr-6">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent-ink">
               <HeaderIcon className="size-5" />
             </span>
             <div className="flex flex-col gap-0.5">

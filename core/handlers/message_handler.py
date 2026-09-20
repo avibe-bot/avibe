@@ -3,7 +3,6 @@
 import asyncio
 import logging
 import inspect
-from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -13,13 +12,11 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import (
-    HARNESS_PROMPT_ECHO_SPEC_KEY,
-    terminal_output_for,
-    terminal_turn_output,
-)
+from core.agent_input import AgentInputMetadata
+from core.backend_failure import emit_backend_failure
+from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.memory_adapter import TurnAccepted, snapshot_memory_files
 from core.message_context import (
-    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
 )
 from core.native_dispatch_phase import (
@@ -36,6 +33,39 @@ from .base import BaseHandler
 logger = logging.getLogger(__name__)
 
 SUBAGENT_REACTION_EMOJI = "🤖"
+
+
+def memory_turn_event(
+    context: MessageContext,
+    text: str,
+    session_id: str,
+    lifecycle_snapshot: object,
+    attachment_lease: object = None,
+    sender_name: str | None = None,
+) -> TurnAccepted:
+    """Close one live message context into immutable host-owned facts."""
+
+    payload = (
+        context.platform_specific
+        if isinstance(context.platform_specific, dict)
+        else {}
+    )
+    platform = context.platform or payload.get("platform")
+    user_id = payload.get("author_id") if platform == "avibe" else context.user_id
+    return TurnAccepted(
+        platform=platform,
+        user_id=user_id,
+        message_id=context.message_id,
+        session_id=session_id,
+        text=text,
+        files=snapshot_memory_files(context.files),
+        is_dm=payload.get("is_dm") is True,
+        is_ordinary_text=context.is_original_human_text,
+        is_ordinary_attachment=context.is_original_human_attachment,
+        lifecycle_snapshot=lifecycle_snapshot,
+        attachment_lease=attachment_lease,
+        sender_name=sender_name,
+    )
 
 
 def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Optional[str] = None) -> Optional[str]:
@@ -64,48 +94,45 @@ class MessageHandler(BaseHandler):
         self.session_manager = controller.session_manager
         self.session_handler = None  # Will be set after creation
         self.receiver_tasks = controller.receiver_tasks
-        self._memory_capture_tasks: set[asyncio.Task[Any]] = set()
 
     def set_session_handler(self, session_handler):
         """Set reference to session handler"""
         self.session_handler = session_handler
 
-    def _track_memory_capture_task(self, task: asyncio.Task[Any]) -> None:
-        """Retain a best-effort capture until asyncio reports its completion."""
-
-        self._memory_capture_tasks.add(task)
-
-        def _on_done(done_task: asyncio.Task[Any]) -> None:
-            try:
-                done_task.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.warning("Memory capture task failed", exc_info=True)
-            finally:
-                self._memory_capture_tasks.discard(done_task)
-
-        task.add_done_callback(_on_done)
-
-    async def drain_memory_capture_tasks(self) -> None:
-        """Settle captures accepted before controller shutdown closes Memory."""
-
-        while self._memory_capture_tasks:
-            tasks = tuple(self._memory_capture_tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
-            self._memory_capture_tasks.difference_update(tasks)
-
-    async def handle_user_message(self, context: MessageContext, message: str):
+    async def handle_user_message(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process regular human-originated messages and route to configured agent."""
-        await self._handle_turn(context, message, source=self.TURN_SOURCE_HUMAN)
+        await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_HUMAN,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
-    async def handle_scheduled_message(self, context: MessageContext, message: str, parsed_session_key=None):
+    async def handle_scheduled_message(
+        self,
+        context: MessageContext,
+        message: str,
+        parsed_session_key=None,
+        *,
+        lifecycle_snapshot: object | None = None,
+    ):
         """Process a scheduler-originated turn through the shared turn pipeline."""
         if parsed_session_key is not None:
             payload = dict(context.platform_specific or {})
             payload["parsed_session_key"] = parsed_session_key
             context.platform_specific = payload
-        return await self._handle_turn(context, message, source=self.TURN_SOURCE_SCHEDULED)
+        return await self._handle_turn(
+            context,
+            message,
+            source=self.TURN_SOURCE_SCHEDULED,
+            lifecycle_snapshot=lifecycle_snapshot,
+        )
 
     async def _prepare_turn_context(self, context: MessageContext, source: str) -> MessageContext:
         payload = dict(context.platform_specific or {})
@@ -162,7 +189,14 @@ class MessageHandler(BaseHandler):
             )
             return False
 
-    async def _handle_turn(self, context: MessageContext, message: str, *, source: str) -> Optional[str]:
+    async def _handle_turn(
+        self,
+        context: MessageContext,
+        message: str,
+        *,
+        source: str,
+        lifecycle_snapshot: object | None = None,
+    ) -> Optional[str]:
         """Shared turn-processing pipeline used by both human and scheduled turns."""
         processing_indicator = None
         request: AgentRequest | None = None
@@ -173,6 +207,7 @@ class MessageHandler(BaseHandler):
         # async result is coming, so the ``finally`` releases any streaming SSE
         # waiter for this turn instead of leaving it open until the timeout.
         agent_dispatched = False
+        attachment_lease = None
         try:
             is_human = source == self.TURN_SOURCE_HUMAN
             durable_delivery_owned = bool(
@@ -268,6 +303,24 @@ class MessageHandler(BaseHandler):
                     mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
+            capture_session_id = base_session_id
+            capture_lifecycle_snapshot: object | None = None
+            capture_sender_name = None
+            if is_human:
+                sender_name_for_context = getattr(self.controller, "memory_sender_name_for_context", None)
+                if callable(sender_name_for_context):
+                    capture_sender_name = await sender_name_for_context(context)
+                capture_lifecycle_snapshot = lifecycle_snapshot
+                if capture_lifecycle_snapshot is None:
+                    snapshot = getattr(
+                        getattr(self.controller, "session_turns", None),
+                        "snapshot_session_lifecycle",
+                        None,
+                    )
+                    capture_lifecycle_snapshot = (
+                        snapshot(capture_session_id) if callable(snapshot) else 0
+                    )
+            lifecycle_snapshot = None
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -276,18 +329,20 @@ class MessageHandler(BaseHandler):
             )
             context.platform_specific = payload
 
-            # Memory capture is deliberately outside the agent turn. Native IM
-            # dedup has already claimed this message and the stable base session
-            # is now known, so the controller can make one best-effort capture
-            # decision without delaying dispatch.
-            if is_human:
-                capture_memory = getattr(self.controller, "capture_user_memory", None)
-                if callable(capture_memory):
-                    capture_task = asyncio.create_task(
-                        capture_memory(context, control_message, base_session_id),
-                        name="memory-capture",
+            # Text-only turns keep the original early capture path. Attachment
+            # turns defer only until the shared materializer has produced a
+            # descriptor-backed lease.
+            if is_human and not context.files:
+                self.controller.memory_adapter.offer(
+                    memory_turn_event(
+                        context,
+                        control_message,
+                        capture_session_id,
+                        capture_lifecycle_snapshot,
+                        sender_name=capture_sender_name,
                     )
-                    self._track_memory_capture_task(capture_task)
+                )
+                capture_lifecycle_snapshot = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -574,6 +629,7 @@ class MessageHandler(BaseHandler):
                                 match = name_map.get(normalized)
                                 if match:
                                     subagent_name = match.get("name")
+                                    subagent_model = server.get_explicit_subagent_model(subagent_name)
                         except Exception as err:
                             logger.warning(f"Failed to resolve OpenCode subagent: {err}")
                     elif agent_name == "claude":
@@ -649,14 +705,6 @@ class MessageHandler(BaseHandler):
                 spec["backend_composite_session_id"] = composite_key
                 context.platform_specific = spec
 
-            durable_dispatch_text = None
-            if durable_ingress_enabled and not durable_delivery_owned:
-                durable_dispatch_text = await self._prepend_message_metadata(
-                    context,
-                    message,
-                    include_user_info=True,
-                )
-
             # Resolve remote attachments before admission so a queued Delivery
             # owns stable local media references and can survive a restart.
             processed_files = None
@@ -669,10 +717,26 @@ class MessageHandler(BaseHandler):
                     if isinstance(attachment, FileAttachment)
                     and attachment.local_path
                 }
-                processed_files, attachment_errors = await self._process_file_attachments(
-                    context,
-                    working_path,
-                )
+                try:
+                    attachment_batch = await self._materialize_file_attachments(
+                        context,
+                        working_path,
+                    )
+                except Exception:
+                    if is_human:
+                        self.controller.memory_adapter.offer(
+                            memory_turn_event(
+                                context,
+                                control_message,
+                                capture_session_id,
+                                capture_lifecycle_snapshot,
+                                sender_name=capture_sender_name,
+                            )
+                        )
+                    raise
+                attachment_lease = attachment_batch.lease
+                processed_files = list(attachment_batch.attachments) or None
+                attachment_errors = list(attachment_batch.display_errors)
                 if processed_files:
                     downloaded_attachment_paths = [
                         str(attachment.local_path)
@@ -686,13 +750,25 @@ class MessageHandler(BaseHandler):
                         len(processed_files),
                     )
 
+            if is_human and context.files:
+                self.controller.memory_adapter.offer(
+                    memory_turn_event(
+                        context,
+                        control_message,
+                        capture_session_id,
+                        capture_lifecycle_snapshot,
+                        attachment_lease,
+                        sender_name=capture_sender_name,
+                    )
+                )
+                capture_lifecycle_snapshot = None
+
             if durable_ingress_enabled and not durable_delivery_owned:
-                assert durable_dispatch_text is not None
                 admitted = await self._admit_human_delivery(
                     manager=delivery_manager,
                     context=context,
                     dispatch_text=self._append_attachment_errors(
-                        durable_dispatch_text,
+                        message,
                         attachment_errors,
                     ),
                     display_text=control_message,
@@ -704,6 +780,7 @@ class MessageHandler(BaseHandler):
                     vibe_agent=vibe_agent,
                     delivery_intent=delivery_intent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
+                    attachment_lease=attachment_lease,
                     admission_context={
                         # The reaction target is not always the sender's own
                         # message (a quick reply reacts on its bot echo), and it
@@ -727,7 +804,13 @@ class MessageHandler(BaseHandler):
                     },
                 )
                 if admitted:
+                    attachment_lease = None
                     return None
+
+            if attachment_lease is not None:
+                attachment_lease.adopt()
+                attachment_lease.release()
+                attachment_lease = None
 
             if is_human:
                 # The concise status bubble (footer-only at turn start) is now
@@ -773,20 +856,8 @@ class MessageHandler(BaseHandler):
                 user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
-            scheduled_metadata_applied = bool(
-                source == self.TURN_SOURCE_SCHEDULED
-                and (context.platform_specific or {}).get(
-                    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
-                )
-            )
-            if not (is_human and durable_delivery_owned) and not scheduled_metadata_applied:
-                message = await self._prepend_message_metadata(
-                    context,
-                    message,
-                    include_user_info=is_human,
-                )
-
             message = self._append_attachment_errors(message, attachment_errors)
+            input_metadata = await self.prepare_input_metadata(context, human=is_human)
 
             if vibe_agent:
                 spec = dict(context.platform_specific or {})
@@ -801,6 +872,7 @@ class MessageHandler(BaseHandler):
                 context=context,
                 message=message,
                 user_message=user_message,
+                input_metadata=input_metadata,
                 working_path=working_path,
                 base_session_id=base_session_id,
                 composite_session_id=composite_key,
@@ -814,9 +886,16 @@ class MessageHandler(BaseHandler):
                 vibe_agent_backend=vibe_agent.backend if vibe_agent else None,
                 vibe_agent_model=effective_model,
                 vibe_agent_reasoning_effort=effective_reasoning_effort,
+                vibe_agent_model_explicit="model" in explicit_overrides,
+                vibe_agent_reasoning_effort_explicit="reasoning_effort" in explicit_overrides,
                 vibe_agent_system_prompt=vibe_agent.system_prompt if vibe_agent else None,
                 processing_indicator=processing_indicator,
                 files=processed_files,
+            )
+            request.failure_handler = lambda error: self._emit_agent_dispatch_failure(
+                context,
+                request,
+                error,
             )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
@@ -845,17 +924,12 @@ class MessageHandler(BaseHandler):
                             session_id=str(bound_session_id),
                         )
             except KeyError:
-                await self._handle_missing_agent(context, agent_name)
-                # Synchronous terminal failure (no agent dispatched). Settle the
-                # turn through the OUTBOUND status chokepoint: an empty terminal
-                # error result turns the dot red + releases the SSE waiter (the
-                # missing-agent message was already shown above). No separate latch.
-                await self.controller.emit_agent_message(
+                if request.failure_handled:
+                    raise
+                await self._handle_missing_agent(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    output=terminal_output_for(request),
+                    agent_name,
+                    request=request,
                 )
                 # Clean up reaction on error
                 await self._remove_ack_reaction(context, request)
@@ -878,26 +952,12 @@ class MessageHandler(BaseHandler):
                     )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
-            error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
-            await self._get_im_client(context).send_message(context, error_text)
-            # Surface the failure into the live web-Chat SSE stream first...
-            await self._stream_terminal_error(context, error_text)
-            # ...then settle the failed turn through the OUTBOUND status chokepoint:
-            # an empty terminal error result turns the dot red + releases the SSE
-            # waiter (the visible error was sent + streamed above). No separate latch.
-            await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                is_error=True,
-                output=(
-                    terminal_output_for(request)
-                    if request is not None
-                    else terminal_turn_output()
-                ),
-            )
+            if not bool(getattr(request, "failure_handled", False)):
+                await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
         finally:
+            if attachment_lease is not None:
+                attachment_lease.release()
             if not agent_dispatched:
                 # Synchronous completion — no async agent reply is coming, so
                 # release any live streaming SSE waiter for this turn now
@@ -906,6 +966,26 @@ class MessageHandler(BaseHandler):
                 mark_complete = getattr(self.controller, "mark_turn_complete", None)
                 if callable(mark_complete):
                     mark_complete(context)
+
+    async def _emit_agent_dispatch_failure(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        error: BaseException,
+    ) -> None:
+        """Report one backend dispatch failure through the shared live boundary."""
+
+        error_text = self.formatter.format_error(
+            self._t("error.processMessageFailed", error=str(error))
+        )
+        await emit_backend_failure(
+            self.controller,
+            context,
+            str(getattr(request, "vibe_agent_backend", None) or "agent"),
+            error_text,
+            display_text=error_text,
+            request=request,
+        )
 
     async def _admit_human_delivery(
         self,
@@ -923,6 +1003,7 @@ class MessageHandler(BaseHandler):
         delivery_intent: str,
         downloaded_attachment_paths: List[str],
         admission_context: dict[str, Any],
+        attachment_lease: Any = None,
     ) -> bool:
         """Transfer one IM input to its durable owner before native work."""
 
@@ -945,6 +1026,7 @@ class MessageHandler(BaseHandler):
         from storage.db import get_cached_sqlite_engine
 
         priority = priority_for_delivery_intent(delivery_intent)
+        author_name = await self._input_user_name(context)
         scope_id = None
         request = None
         duplicate_delivery_id = None
@@ -1026,12 +1108,19 @@ class MessageHandler(BaseHandler):
                         author="user",
                         message_type="user",
                         author_id=str(context.user_id or "").strip() or None,
+                        author_name=author_name,
                         display_text=display_text,
                         content_json=content,
                         admission_context=admission_context,
                         native_message_id=native_message_id or None,
                         parent_native_message_id=(
                             str(context.thread_id or "").strip() or None
+                        ),
+                        message_kind=(
+                            "original"
+                            if context.is_original_human_text is True
+                            or context.is_original_human_attachment is True
+                            else context.message_kind
                         ),
                     )
                     reserved = manager.reserve_delivery(conn, request)
@@ -1040,11 +1129,17 @@ class MessageHandler(BaseHandler):
                             "native Delivery appeared after writer reservation"
                         )
         except Exception:
-            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if attachment_lease is not None:
+                attachment_lease.release()
+            else:
+                self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
             raise
 
         if duplicate_delivery_id is not None:
-            self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
+            if attachment_lease is not None:
+                attachment_lease.release()
+            else:
+                self._cleanup_unowned_attachment_paths(downloaded_attachment_paths)
             if duplicate_delivery_id:
                 payload = dict(context.platform_specific or {})
                 payload["delivery_id"] = duplicate_delivery_id
@@ -1053,6 +1148,9 @@ class MessageHandler(BaseHandler):
 
         if request is None:
             raise RuntimeError("Delivery reservation did not produce a request")
+        if attachment_lease is not None:
+            attachment_lease.adopt()
+            attachment_lease.release()
         result = await manager.deliver(request, context=context)
         payload = dict(context.platform_specific or {})
         payload["delivery_id"] = result.delivery_id
@@ -1296,38 +1394,15 @@ class MessageHandler(BaseHandler):
         spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
         context.platform_specific = spec
 
-    @staticmethod
-    def _sanitize_identity(value: str) -> str:
-        """Strip control chars and delimiters that could break the [name<id>] format."""
-        token = (value or "").replace("\n", " ").replace("\r", " ").strip()
-        token = token.replace("[", "(").replace("]", ")").replace("<", "(").replace(">", ")")
-        return token[:80] or "unknown"
-
-    async def _prepend_user_info(self, context: MessageContext, message: str) -> str:
-        """Prepend user identity as [username<user_id>] to the message."""
-        user_info_line = await self._build_user_info_line(context)
-        return f"{user_info_line}\n{message}"
-
-    async def _prepend_message_metadata(
-        self,
-        context: MessageContext,
-        message: str,
-        *,
-        include_user_info: bool,
-    ) -> str:
-        """Prepend configured per-turn metadata lines to the agent message."""
-        metadata_lines: list[str] = []
-        if getattr(self.config, "include_time_info", True):
-            metadata_lines.append(self._build_current_time_line())
-        source_session_id = self._source_session_id(context)
-        if source_session_id:
-            metadata_lines.append(f"From: #{self._sanitize_identity(source_session_id)}")
-        if include_user_info and getattr(self.config, "include_user_info", True):
-            metadata_lines.append(await self._build_user_info_line(context))
-
-        if not metadata_lines:
-            return message
-        return "\n".join([*metadata_lines, message])
+    async def prepare_input_metadata(
+        self, context: MessageContext, *, human: bool
+    ) -> AgentInputMetadata:
+        """Resolve stable sender facts without rendering execution context."""
+        return AgentInputMetadata(
+            user_id=context.user_id if human else None,
+            user_name=await self._input_user_name(context) if human else None,
+            source_session_id=self._source_session_id(context) or None,
+        )
 
     @staticmethod
     def _source_session_id(context: MessageContext) -> str:
@@ -1340,31 +1415,32 @@ class MessageHandler(BaseHandler):
             return str(payload.get("source_actor") or "").strip()
         return ""
 
-    @staticmethod
-    def _build_current_time_line(now: datetime | None = None) -> str:
-        """Return the current local time with seconds and UTC offset."""
-        current = now or datetime.now().astimezone()
-        if current.tzinfo is None:
-            current = current.astimezone()
-        offset = current.strftime("%z")
-        if len(offset) == 5:
-            offset = f"{offset[:3]}:{offset[3:]}"
-        return f"[Current Time: {current.strftime('%Y-%m-%d %H:%M:%S')} UTC{offset}]"
-
-    async def _build_user_info_line(self, context: MessageContext) -> str:
-        """Return user identity as [username<user_id>]."""
+    async def _input_user_name(self, context: MessageContext) -> str:
+        payload = context.platform_specific or {}
+        if payload.get("author_name") and payload.get("author_id") == context.user_id:
+            return str(payload["author_name"])
         try:
             user_info = await self._get_im_client(context).get_user_info(context.user_id)
-            raw_name = self._resolve_user_display_name(user_info, context.user_id)
+            return self._resolve_user_display_name(user_info, context.user_id)
         except Exception as e:
             logger.debug(f"Failed to fetch user info for {context.user_id}: {e}")
-            raw_name = context.user_id
-        name = self._sanitize_identity(raw_name)
-        uid = self._sanitize_identity(context.user_id)
-        return f"[{name}<{uid}>]"
+            return context.user_id
+
+    @staticmethod
+    def _delivery_user_text(context: MessageContext) -> str | None:
+        payload = context.platform_specific or {}
+        content = payload.get("message_content")
+        if payload.get("delivery_ids") and isinstance(content, dict):
+            text = content.get("text")
+            if isinstance(text, str):
+                return text
+        return None
 
     @staticmethod
     def _get_control_message(context: MessageContext, message: str) -> str:
+        original = MessageHandler._delivery_user_text(context)
+        if original is not None:
+            return original
         payload = context.platform_specific or {}
         control_text = payload.get("control_text")
         if isinstance(control_text, str):
@@ -1373,6 +1449,9 @@ class MessageHandler(BaseHandler):
 
     @staticmethod
     def _get_user_message(context: MessageContext, message: str) -> str:
+        original = MessageHandler._delivery_user_text(context)
+        if original is not None:
+            return original
         payload = context.platform_specific or {}
         normalized_user_text = payload.get("normalized_user_text")
         if isinstance(normalized_user_text, str):
@@ -1612,14 +1691,30 @@ class MessageHandler(BaseHandler):
             logger.error(f"Error handling inline stop: {e}", exc_info=True)
             return False
 
-    async def _handle_missing_agent(self, context: MessageContext, agent_name: str):
-        """Notify user when a requested agent backend is unavailable."""
+    async def _handle_missing_agent(
+        self,
+        context: MessageContext,
+        agent_name: str,
+        *,
+        request: AgentRequest | None = None,
+    ) -> None:
+        """Notify and, for a dispatched Turn, settle a missing Agent failure."""
         target = agent_name or self.controller.agent_service.default_agent
         backend = self._missing_agent_backend(context, target)
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
         msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        if request is not None:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                backend or str(target),
+                msg,
+                display_text=msg,
+                request=request,
+            )
+            return
         await self._get_im_client(context).send_message(context, msg)
         await self._stream_terminal_error(context, msg)
 
@@ -1640,7 +1735,11 @@ class MessageHandler(BaseHandler):
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
 
-    async def _stream_terminal_error(self, context: MessageContext, text: str) -> None:
+    async def _stream_terminal_error(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> None:
         """Surface a synchronous, no-agent-dispatched failure (missing backend,
         a pre-dispatch exception) into the web Chat so the browser shows it
         instead of silently ending the turn with only the user's prompt visible.
@@ -1676,146 +1775,34 @@ class MessageHandler(BaseHandler):
     async def _process_file_attachments(
         self, context: MessageContext, working_path: str
     ) -> Tuple[Optional[List[FileAttachment]], List[str]]:
-        """Download and process file attachments from the message.
+        """Materialize native files once and preserve ordinary Agent ownership."""
 
-        All files (including images) are saved to ~/.vibe_remote/attachments/{channel_id}/
-        to avoid polluting the working directory (which is often a git repo).
-        The agent can then use Read tools to access them.
+        batch = await self._materialize_file_attachments(context, working_path)
+        batch.lease.adopt()
+        batch.lease.release()
+        processed = list(batch.attachments)
+        return (processed if processed else None), list(batch.display_errors)
 
-        Args:
-            context: Message context with file attachments
-            working_path: Working directory path (not used for storage, kept for API compat)
+    async def _materialize_file_attachments(
+        self,
+        context: MessageContext,
+        working_path: str,
+    ):
+        """Return an untransferred lease so admission decides final ownership."""
 
-        Returns:
-            Tuple of processed attachments and download error messages
-        """
-        import os
-        import time
         from config.paths import get_attachments_dir
-        from modules.im.base import FileAttachment, FileDownloadResult
+        from core.handlers.inbound_attachments import InboundAttachmentMaterializer
 
         if not context.files:
-            return None, []
-
-        # Create channel-specific attachments directory
-        # Path: ~/.vibe_remote/attachments/{channel_id}/
-        attachments_dir = get_attachments_dir() / context.channel_id
-        attachments_dir.mkdir(parents=True, exist_ok=True)
-
-        processed = []
-        errors: List[str] = []
-        for attachment in context.files:
-            if not isinstance(attachment, FileAttachment):
-                continue
-
-            # Already on local disk (e.g. an avibe workbench upload, saved by the
-            # UI server before dispatch) — there is nothing to download, so pass
-            # it straight through to the agent turn. IM attachments arrive with a
-            # ``url`` and no ``local_path`` and fall through to the download path.
-            if attachment.local_path and os.path.isfile(attachment.local_path):
-                if attachment.size is None:
-                    try:
-                        attachment.size = os.path.getsize(attachment.local_path)
-                    except OSError:
-                        pass
-                processed.append(attachment)
-                continue
-
-            try:
-                im_client = self._get_im_client(context)
-                # Download the file content. Some platforms receive a thin
-                # attachment event first and resolve the actual URL from
-                # platform metadata such as a Slack file id.
-                can_download = hasattr(im_client, "download_file_to_path") or hasattr(im_client, "download_file")
-                if can_download:
-                    # Platform-agnostic download info dict
-                    file_info = {
-                        "url": attachment.url,
-                        "name": attachment.name,
-                        "size": attachment.size,
-                        "platform": context.platform,
-                    }
-                    if attachment.url:
-                        file_info["url_private_download"] = attachment.url  # Slack compat
-                    attachment_data = getattr(attachment, "__dict__", {})
-                    for key, value in attachment_data.items():
-                        if key in {"name", "mimetype", "url", "content", "local_path", "size"}:
-                            continue
-                        file_info[key] = value
-                    timestamp = time.time_ns()
-                    safe_name = self._sanitize_filename(attachment.name)
-                    filename = f"{timestamp}_{safe_name}"
-                    local_path = attachments_dir / filename
-                    temp_path = attachments_dir / f"{filename}.part"
-                    content = None
-                    detected_sample = None
-                    content_size = None
-
-                    if hasattr(im_client, "download_file_to_path"):
-                        self._cleanup_partial_attachment(temp_path)
-                        result = await im_client.download_file_to_path(file_info, str(temp_path))
-                        if not isinstance(result, FileDownloadResult):
-                            result = FileDownloadResult(bool(result), None if result else "Download failed")
-
-                        if result.success:
-                            os.replace(temp_path, local_path)
-                            content_size = local_path.stat().st_size
-                            with open(local_path, "rb") as file_obj:
-                                detected_sample = file_obj.read(AUDIO_SIGNATURE_SAMPLE_BYTES)
-                        else:
-                            self._cleanup_partial_attachment(temp_path)
-                            error_text = result.error or "Download failed"
-                            logger.warning("Failed to download file %s: %s", attachment.name, error_text)
-                            errors.append(f"Attachment '{attachment.name}' could not be downloaded: {error_text}")
-                    else:
-                        content = await im_client.download_file(file_info)
-                        if content:
-                            with open(local_path, "wb") as f:
-                                f.write(content)
-                            content_size = len(content)
-                            detected_sample = content[:AUDIO_SIGNATURE_SAMPLE_BYTES]
-                        else:
-                            logger.warning("Failed to download file %s: download returned no content", attachment.name)
-                            errors.append(
-                                f"Attachment '{attachment.name}' could not be downloaded: Download returned no content"
-                            )
-
-                    if content is not None or content_size is not None:
-                        # Detect actual MIME type from magic bytes for media
-                        # (some platforms don't provide accurate MIME, e.g. Feishu and Slack)
-                        detected = self._detect_image_mime(detected_sample or b"")
-                        if not detected:
-                            detected = detect_audio_mime_from_sample(detected_sample or b"")
-                        if detected:
-                            attachment.mimetype = detected[0]
-                            # Fix filename extension to match actual type
-                            ext = detected[1]
-                            base = os.path.splitext(attachment.name)[0]
-                            attachment.name = f"{base}{ext}"
-
-                        attachment.local_path = str(local_path)
-                        attachment.size = content_size
-
-                        # Determine file type for logging
-                        is_image = (attachment.mimetype or "").startswith("image/")
-                        file_type = "image" if is_image else "file"
-
-                        logger.info(f"Saved {file_type} '{attachment.name}' ({content_size} bytes) to '{local_path}'")
-
-                        processed.append(attachment)
-                    else:
-                        logger.warning(f"Failed to download file: {attachment.name}")
-                else:
-                    logger.warning(f"Cannot download file: {attachment.name} (no URL or download method)")
-                    errors.append(f"Attachment '{attachment.name}' could not be downloaded: No URL or download method")
-
-            except Exception as e:
-                self._cleanup_partial_attachment(locals().get("temp_path"))
-                logger.error(f"Error processing file attachment {attachment.name}: {e}")
-                errors.append(f"Attachment '{attachment.name}' could not be downloaded: {e}")
-                continue
-
-        return (processed if processed else None), errors
+            raise ValueError("attachment materialization requires input files")
+        batch = await InboundAttachmentMaterializer(
+            attachments_root=get_attachments_dir(),
+        ).materialize(
+            context,
+            self._get_im_client(context),
+            language=self._get_lang(),
+        )
+        return batch
 
     @staticmethod
     def _cleanup_partial_attachment(path) -> None:
@@ -1826,12 +1813,16 @@ class MessageHandler(BaseHandler):
         except Exception as err:
             logger.debug("Failed to remove partial attachment %s: %s", path, err)
 
-    @staticmethod
-    def _append_attachment_errors(message: str, errors: List[str]) -> str:
+    def _append_attachment_errors(self, message: str, errors: List[str]) -> str:
         if not errors:
             return message
 
-        error_block = "\n".join(["[Attachment Download Errors]", *[f"- {error}" for error in errors]])
+        error_block = "\n".join(
+            [
+                f"[{self._t('error.attachmentDownload.title')}]",
+                *[f"- {error}" for error in errors],
+            ]
+        )
         if not message or not message.strip():
             return error_block
         return f"{message}\n\n{error_block}"

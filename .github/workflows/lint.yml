@@ -24,16 +24,89 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
       - name: Run pre-commit (ruff)
         run: |
           pip install pre-commit
           pre-commit run --all-files
 
+  ui-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Validate and test UI
+        working-directory: ui
+        run: |
+          npm ci
+          npm run validate:theme
+          npm run lint
+          # Production tsc excludes test files, and vitest only strips types.
+          npm run typecheck:tests
+          npm test
+
+      - name: Test browser interactions
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium webkit
+          npm run test:model-catalog
+          npm run test:model-provider
+          npm run test:project-order
+          npm run test:inbox-return
+          npm run test:badge-triggers
+          npm run test:workbench-general -- sidebar-floating.spec.ts
+
+  show-router-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          repository: avibe-bot/vibe-show-runtime
+          # Producer of the checked-in generated router. Release builds export
+          # it again from the same Runtime source as their platform archives.
+          ref: 5a9a6a52f2ae03611d617a659bfd0c1c32389478
+          path: .show-runtime-test
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: .show-runtime-test/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+      - run: uv sync --frozen --no-install-project
+      - name: Build the real Runtime
+        working-directory: .show-runtime-test
+        run: |
+          npm ci
+          npm run build -w @avibe/show-sdk
+          npm run build -w @avibe/show-ui
+          npm run build -w @avibe/show-runtime
+      - name: Check Python scaffold through Runtime HTTP
+        run: node scripts/check_show_router.mjs --runtime-root .show-runtime-test --python .venv/bin/python
+
   build-linux-artifacts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # Both distributions use VCS-derived versions; a shallow PR merge
+          # checkout falls back to 0.1.dev1 instead of the 3.0 release line.
+          fetch-depth: 0
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -45,9 +118,6 @@ jobs:
         working-directory: ui
         run: |
           npm ci
-          npm run validate:theme
-          npm run lint
-          npm test
           npm run build
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
@@ -56,33 +126,54 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
+            packaging/avibe-memory/pyproject.toml
             uv.lock
 
       - name: Build package artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          AVIBE_PACKAGE_CONTRACT_VERSION: 3.0.99rc1
+          SETUPTOOLS_SCM_PRETEND_VERSION: 3.0.99rc1
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS: 3.0.99rc1
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY: 3.0.99rc1
         run: |
-          pip install build
+          # Build backends are installed by each isolated PEP 517 build.
+          python -m pip install --disable-pip-version-check build
           python scripts/prepare_local_show_runtime_manifest.py
-          python -m build --wheel
+          python -m build --outdir memory-dist packaging/avibe-memory
+          python -m build
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: ui-dist-linux
           path: ui/dist
           if-no-files-found: error
           retention-days: 1
 
-      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: vibe-wheel-linux
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 1
 
+      # Keep the existing core-only wheel artifact stable for all consumers.
+      # Multiple source directories preserve dist/ and memory-dist/ in this
+      # companion artifact, consumed only by the distribution contracts.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: vibe-package-contracts-linux
+          path: |
+            dist/*.tar.gz
+            memory-dist/*.whl
+            memory-dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   unit-test-shards:
     name: unit-tests (${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -102,13 +193,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+      # Exact setup-uv versions still fetch a remote manifest on a cold runner.
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
         with:
-          enable-cache: true
-          save-cache: false
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test deps
         # Install the declared dev group instead of a hand-listed set so test
@@ -121,16 +214,23 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
-    needs: unit-test-shards
+    # Keep UI validation in the existing required gate while allowing artifact
+    # consumers to start as soon as their production bundle is built.
+    needs: [unit-test-shards, ui-checks]
     if: always()
     steps:
-      - name: Verify unit test shards
+      - name: Verify unit test shards and UI checks
+        env:
+          UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
+          UI_RESULT: ${{ needs['ui-checks'].result }}
         run: |
-          if [ "${{ needs['unit-test-shards'].result }}" != "success" ]; then
-            echo "Unit test shards finished with result: ${{ needs['unit-test-shards'].result }}"
-            exit 1
-          fi
-          echo "All unit test shards passed."
+          for result in "$UNIT_RESULT" "$UI_RESULT"; do
+            if [ "$result" != "success" ]; then
+              echo "Unit/UI checks finished with result: $result"
+              exit 1
+            fi
+          done
+          echo "All unit test shards and UI checks passed."
 
   memory-insight-contract:
     runs-on: ubuntu-latest
@@ -139,18 +239,21 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
-          python-version: "3.12"
+          python-version: "3.12.12"
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.9.18
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
         with:
-          version: "0.9.18"
-          enable-cache: true
-          cache-dependency-glob: scripts/memory_runtime/uv.lock
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-memory-uv-0.9.18-py3.12.12-${{ hashFiles('scripts/memory_runtime/uv.lock') }}
 
       - name: Provision pinned Memory Runtime
         run: uv sync --frozen --project scripts/memory_runtime
 
-      - name: Run Memory Insight real-wheel contract
+      - name: Run Memory Runtime real-wheel contracts
         env:
           AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT: "1"
         run: |
@@ -159,10 +262,56 @@ jobs:
           uv run --frozen --project scripts/memory_runtime \
             --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
             python -m pytest \
-            tests/test_memory_everos_insight_patches.py::test_pinned_everos_patch_contract \
+            tests/scenarios/memory_repair/test_memory_lifecycle_runtime.py::test_real_wake_preserves_old_and_processes_new_input \
             -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
-            echo "Memory Insight contract tests must not skip."
+            echo "Memory Runtime contract tests must not skip."
+            exit 1
+          fi
+
+  migration-release-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # The guard reads each release's migration graph straight out of git. The
+          # default shallow checkout fetches no tags, which would leave it with no
+          # shipped graph to compare against.
+          fetch-depth: 0
+
+      # Editable installs require the force-included directory; this job only needs the
+      # migration chain to import.
+      - name: Prepare minimal UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+
+      - name: Install package and test deps
+        run: uv pip install --system -e . --group dev
+
+      - name: Guard the migration graph against every released version
+        run: |
+          set -o pipefail
+          output="$RUNNER_TEMP/migration-release-guard.log"
+          python -m pytest tests/test_migration_release_guard.py -ra | tee "$output"
+          # The release-history properties skip themselves when no tags are reachable so
+          # the sharded unit job stays green on its shallow checkout. This job is the one
+          # that supplies the history, so here a skip means the guard proved nothing.
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "The migration release guard must not skip: this checkout reached no release history."
             exit 1
           fi
 
@@ -183,32 +332,45 @@ jobs:
         working-directory: npm/avibe
         run: npm pack --dry-run
 
-  install-upgrade-regression:
+  install-upgrade-shards:
+    name: install-upgrade-regression (${{ matrix.suite }})
     runs-on: ubuntu-latest
     needs: build-linux-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [packaged-memory, installer]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: ui-dist-linux
           path: ui/dist
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: vibe-wheel-linux
           path: dist
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        if: matrix.suite == 'installer'
+        with:
+          name: vibe-package-contracts-linux
+          path: .
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
         with:
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test dependencies
         run: |
@@ -219,7 +381,35 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: python scripts/prepare_local_show_runtime_manifest.py
 
+      - name: Verify built distribution contracts
+        if: matrix.suite == 'installer'
+        env:
+          AVIBE_PACKAGE_CONTRACT_VERSION: 3.0.99rc1
+        run: |
+          set -o pipefail
+          output="$RUNNER_TEMP/distribution-contracts.log"
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v -ra | tee "$output"
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "Distribution contracts must not skip."
+            exit 1
+          fi
+
+      - name: Run packaged Memory package-shape smoke
+        if: matrix.suite == 'packaged-memory'
+        run: |
+          set -o pipefail
+          test -f vibe/show_runtime_manifest.json
+          output="$RUNNER_TEMP/memory-upgrade-packaged.log"
+          pytest tests/test_memory_upgrade_packaged.py -m integration -v -ra | tee "$output"
+          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
+            echo "Packaged Memory upgrade smoke must not skip."
+            exit 1
+          fi
+
       - name: Run install and upgrade regressions
+        if: matrix.suite == 'installer'
         run: |
           docker info
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/*.whl)"
@@ -230,13 +420,28 @@ jobs:
             tests/e2e/test_upgrade_command.py \
             -v
 
+  install-upgrade-regression:
+    runs-on: ubuntu-latest
+    needs: install-upgrade-shards
+    if: always()
+    steps:
+      - name: Verify all install and upgrade suites
+        env:
+          INSTALL_RESULT: ${{ needs['install-upgrade-shards'].result }}
+        run: |
+          if [ "$INSTALL_RESULT" != "success" ]; then
+            echo "Install/upgrade suites finished with result: $INSTALL_RESULT"
+            exit 1
+          fi
+          echo "All install and upgrade suites passed."
+
   windows-install-smoke:
     runs-on: windows-latest
     needs: build-linux-artifacts
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: vibe-wheel-linux
           path: dist

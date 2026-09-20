@@ -28,6 +28,7 @@ permissions:
 
 jobs:
   resolve-show-runtime-ref:
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.ref.outputs.ref }}
@@ -75,12 +76,30 @@ jobs:
           node-version: "22.14.0"
           cache: "npm"
       - name: Build Show Runtime bundle
+        # Keep the runner's native shell: Git Bash shadows Windows' tar.
         run: |
           npm ci
           npm run build
           npm run bundle:vibe-remote
           cp dist/vibe-show-runtime-node-*.tgz .
           git rev-parse HEAD > show-runtime-ref-${{ matrix.artifact }}.txt
+
+      - name: Export Show Runtime router
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import { mkdtemp, copyFile, rm } from "node:fs/promises"
+          import { tmpdir } from "node:os"
+          import { join } from "node:path"
+          import { ensureSessionTemplate } from "./packages/runtime/dist/templates.js"
+          const workspace = await mkdtemp(join(tmpdir(), "show-router-export-"))
+          try {
+            await ensureSessionTemplate(workspace)
+            await copyFile(join(workspace, "src/router.tsx"), "show-router-${{ matrix.artifact }}.tsx")
+          } finally {
+            await rm(workspace, { recursive: true, force: true })
+          }
+          JS
       - name: Upload Show Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
@@ -88,8 +107,10 @@ jobs:
           path: |
             vibe-show-runtime-node-*.tgz
             show-runtime-ref-${{ matrix.artifact }}.txt
+            show-router-${{ matrix.artifact }}.tsx
 
   memory-runtime-bundles:
+    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -116,11 +137,13 @@ jobs:
           python-version: "3.12"
 
       - name: Build Memory Runtime bundle
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \
             --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.1-${{ matrix.artifact }}.json"
+            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
 
       - name: Upload Memory Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
@@ -155,7 +178,7 @@ jobs:
           npm run build
 
       - name: Download Show Runtime bundles
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: show-runtime-*
           path: runtime-artifacts
@@ -168,10 +191,11 @@ jobs:
             --tag "${{ github.event.inputs.tag || github.ref_name }}" \
             --repo "${{ github.repository }}" \
             --runtime-ref-file 'runtime-artifacts/show-runtime-ref-*.txt' \
-            --output vibe/show_runtime_manifest.json
+            --output vibe/show_runtime_manifest.json \
+            --router-output vibe/show_router.tsx
 
       - name: Download Memory Runtime bundles
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: memory-runtime-*
           path: runtime-artifacts
@@ -198,11 +222,32 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
-      - name: Build Python package
+      - name: Build Python distributions
         run: |
-          pip install build
+          pip install -e . build pytest
+          python -m build --outdir dist packaging/avibe-memory
           python -m build
+
+      - name: Verify Python distribution asset matrix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          patterns = (
+              "avibe_memory-*.whl",
+              "avibe_memory-*.tar.gz",
+              "avibe_os-*.whl",
+              "avibe_os-*.tar.gz",
+          )
+          for pattern in patterns:
+              matches = sorted(Path("dist").glob(pattern))
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected exactly one release asset matching {pattern}, found {len(matches)}"
+                  )
+          PY
 
       - name: Verify bundled runtime manifests
         run: |
@@ -211,29 +256,72 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          wheels = sorted(Path("dist").glob("*.whl"))
-          if len(wheels) != 1:
-              raise SystemExit(f"Expected exactly one wheel, found {len(wheels)}")
+          core_wheels = sorted(Path("dist").glob("avibe_os-*.whl"))
+          memory_wheels = sorted(Path("dist").glob("avibe_memory-*.whl"))
+          if len(core_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(core_wheels)}")
+          if len(memory_wheels) != 1:
+              raise SystemExit(f"Expected exactly one avibe-memory wheel, found {len(memory_wheels)}")
 
-          with zipfile.ZipFile(wheels[0]) as wheel:
-              names = set(wheel.namelist())
+          with zipfile.ZipFile(core_wheels[0]) as wheel:
+              core_names = set(wheel.namelist())
               archives = {
-                  name for name in names
+                  name for name in core_names
                   if name.startswith("vibe/show_runtime/") and name.endswith(".tgz")
               }
 
           if archives:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
-          if "vibe/show_runtime_manifest.json" not in names:
+          if "vibe/show_runtime_manifest.json" not in core_names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in names):
+          if any(name.startswith("vibe/memory_runtime/") for name in core_names):
               raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
-          if "vibe/memory_runtime_manifest.json" not in names:
-              raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
+          if "vibe/memory_runtime_manifest.json" in core_names:
+              raise SystemExit("avibe-os wheel unexpectedly owns the Memory Runtime manifest")
+
+          with zipfile.ZipFile(memory_wheels[0]) as wheel:
+              memory_names = set(wheel.namelist())
+          if "vibe/memory_runtime_manifest.json" not in memory_names:
+              raise SystemExit("avibe-memory wheel is missing vibe/memory_runtime_manifest.json")
+          if any(name.startswith("vibe/memory_runtime/") for name in memory_names):
+              raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
 
           print("vibe/show_runtime_manifest.json")
           print("vibe/memory_runtime_manifest.json")
           PY
+
+      - name: Checkout release verification
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ github.sha }}
+          path: release-automation
+          sparse-checkout: tests/test_memory_distribution.py
+          sparse-checkout-cone-mode: false
+
+      - name: Verify distribution package matrix
+        run: |
+          # Use workflow-owned verification only AFTER building the tagged source.
+          # Keep its location so source comparisons still inspect that source.
+          cp release-automation/tests/test_memory_distribution.py tests/test_memory_distribution.py
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
+            pytest tests/test_memory_distribution.py -v
+
+      - name: Run Memory Runtime release guard for GitHub-only assets
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [[ "$TAG" != gh-v* ]]; then
+            echo "Skipping GitHub-only Memory Runtime guard for $TAG."
+            exit 0
+          fi
+          rm -rf memory-release-guard-assets
+          mkdir -p memory-release-guard-assets
+          cp vibe/memory_runtime_manifest.json memory-release-guard-assets/memory-runtime-manifest.json
+          cp runtime-artifacts/memory-runtime-*.tar.gz memory-release-guard-assets/
+          python scripts/memory_runtime_release_guard.py \
+            --manifest vibe/memory_runtime_manifest.json \
+            verify --asset-dir memory-release-guard-assets
 
       - name: Add Show Runtime release assets
         shell: bash
@@ -256,6 +344,11 @@ jobs:
 
   release:
     needs: build-assets
+    # Official assets belong to publish.yml; only previews require this build.
+    if: >-
+      ${{ !cancelled() && (needs.build-assets.result == 'success' ||
+          (needs.build-assets.result == 'skipped' &&
+           !startsWith(github.event.inputs.tag || github.ref_name, 'gh-v'))) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -531,6 +624,18 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          SOURCE_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
+          # checkout can replace the runner-local annotated ref with its peeled
+          # commit. Read the exact origin object through FETCH_HEAD instead,
+          # without overwriting any local tag or remote-tracking refs.
+          git fetch --no-tags --refmap= origin "refs/tags/${TAG}"
+          TAG_OBJECT="$(git rev-parse FETCH_HEAD)"
+          if [ "$(git rev-parse "${TAG_OBJECT}^{commit}")" != "$SOURCE_SHA" ]; then
+            echo "Remote tag no longer matches the release notes source." >&2
+            exit 1
+          fi
+
           # Permissive form for DETECTING intent to be silent (tag annotation or
           # existing body may carry the marker bare or as a comment).
           MARKER_RE='(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none'
@@ -541,21 +646,23 @@ jobs:
           MARKER_COMMENT_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none[[:space:]]*-->'
           has_marker="false"
 
-          # Source 1: the tag annotation (annotated-tag release flow).
-          TAG_MSG=$(git tag -l --format='%(contents)' "$TAG")
+          # Source 1: only an actual annotation, never a lightweight tag's
+          # commit message (which may merely discuss this marker).
+          TAG_MSG=""
+          if [ "$(git cat-file -t "$TAG_OBJECT")" = "tag" ]; then
+            TAG_MSG="$(git cat-file tag "$TAG_OBJECT" | sed '1,/^$/d')"
+          fi
           if echo "$TAG_MSG" | grep -qE "$MARKER_RE"; then
             echo "Silent update marker found in tag annotation."
             has_marker="true"
           fi
 
-          # Source 2: an already-created release body. A silent release is often
-          # set up by pre-creating the release with the marker comment in its body
-          # (e.g. via 'gh release create --notes-file'). Both this job (official
-          # tags) and the later softprops step (gh-v* tags) replace the body with
-          # release.md, which would otherwise STRIP that marker — so this applies
-          # to ALL tags, not just official ones. Require the STRICT HTML-comment
-          # form here: a body that merely DOCUMENTS the marker text as prose
-          # (e.g. notes about this workflow) is not an intent to go silent.
+          # Source 2: an already-created release body. This keeps reruns and
+          # releases created by the legacy process idempotent; new releases carry
+          # intent in the annotated tag instead. Replacing the body with release.md
+          # would otherwise STRIP that marker, so this applies to ALL tags. Require
+          # the STRICT HTML-comment form: prose that merely documents the marker is
+          # not an intent to go silent.
           if [ "$has_marker" != "true" ]; then
             EXISTING_BODY=$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)
             if echo "$EXISTING_BODY" | grep -qE "$MARKER_COMMENT_RE"; then
@@ -575,8 +682,14 @@ jobs:
             mv release.md.tmp release.md
           fi
 
+          READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} run=${GITHUB_RUN_ID} -->"
+          if ! grep -qF "$READY_MARKER" release.md; then
+            printf '\n\n%s\n' "$READY_MARKER" >> release.md
+          fi
+
       - name: Download release artifacts
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: release-dist
           path: dist/
@@ -589,45 +702,45 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            ARGS=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              ARGS+=(--latest)
-            else
-              ARGS+=(--latest=false)
-            fi
-            gh "${ARGS[@]}" || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
-          else
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file release.md
-          fi
+          python scripts/github_release.py update-notes \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --title "$TAG" \
+            --notes-file release.md
 
           existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           temporary="$(mktemp -d)"
           trap 'rm -rf "$temporary"' EXIT
           runtime_to_upload=()
-          runtime_paths=(
+          package_to_upload=()
+          asset_paths=(
             dist/vibe-show-runtime-node-*.tgz
             dist/show-runtime-manifest.json
             dist/memory-runtime-*.tar.gz
             dist/memory-runtime-manifest.json
+            dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
+            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
           )
-          for path in "${runtime_paths[@]}"; do
-            if [ ! -f "$path" ]; then
-              echo "::error::Missing GitHub-only runtime release asset: $path" >&2
+          # Packages and runtimes share the same immutable publication boundary.
+          # Validate every existing byte before uploading even a missing asset.
+          for path in "${asset_paths[@]}"; do
+            if [ ! -s "$path" ]; then
+              echo "::error::Missing or empty GitHub-only release asset: $path" >&2
               exit 1
             fi
             name="$(basename "$path")"
             if grep -qxF "$name" <<<"$existing"; then
               gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$temporary" --clobber
               if ! cmp -s "$temporary/$name" "$path"; then
-                echo "::error::Immutable runtime asset '$name' differs for $TAG; cut a new version." >&2
+                echo "::error::Immutable release asset '$name' differs for $TAG; cut a new version." >&2
                 exit 1
               fi
             else
-              runtime_to_upload+=("$path")
+              case "$name" in
+                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
+                  runtime_to_upload+=("$path") ;;
+                *) package_to_upload+=("$path") ;;
+              esac
             fi
           done
 
@@ -637,19 +750,15 @@ jobs:
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${runtime_to_upload[@]}"
           fi
 
-          package_assets=()
-          for path in dist/*; do
-            case "$(basename "$path")" in
-              vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
-                ;;
-              *) package_assets+=("$path") ;;
-            esac
-          done
-          if [ "${#package_assets[@]}" -eq 0 ]; then
-            echo "::error::No Python release assets were built." >&2
-            exit 1
+          if [ "${#package_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_to_upload[@]}"
           fi
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "${package_assets[@]}" --clobber
+
+          python scripts/github_release.py finalize \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --prerelease "${{ steps.release_type.outputs.prerelease }}" \
+            --latest false
 
       - name: Update official release notes
         if: ${{ !startsWith(steps.tag.outputs.tag, 'gh-v') }}
@@ -658,24 +767,8 @@ jobs:
         shell: bash
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
-          if ! gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            ARGS=(release create "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              ARGS+=(--prerelease)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              ARGS+=(--latest)
-            fi
-            gh "${ARGS[@]}" || gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --notes-file release.md
-          else
-            EDIT_ARGS=(release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --title "$TAG" --notes-file release.md)
-            if [ "${{ steps.release_type.outputs.prerelease }}" = "true" ]; then
-              EDIT_ARGS+=(--prerelease)
-            else
-              EDIT_ARGS+=(--prerelease=false)
-            fi
-            if [ "${{ github.event_name }}" = "push" ] && [ "${{ steps.release_type.outputs.prerelease }}" != "true" ]; then
-              EDIT_ARGS+=(--latest)
-            fi
-            gh "${EDIT_ARGS[@]}"
-          fi
+          python scripts/github_release.py update-notes \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$TAG" \
+            --title "$TAG" \
+            --notes-file release.md

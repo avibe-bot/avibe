@@ -35,7 +35,7 @@ export interface BackendRuntimeCardProps {
    * with the icon-only chip used elsewhere in the design.
    */
   iconTileClassName: string;
-  /** Tailwind class for the icon glyph colour, e.g. ``"text-cyan"``. */
+  /** Tailwind class for the icon glyph colour, e.g. ``"text-cyan-ink"``. */
   iconClassName: string;
   /** Runtime state object from ``useBackendRuntime``. */
   runtime: BackendRuntimeState;
@@ -107,6 +107,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
               onChanged={runtime.handleLifecycleChanged}
+              onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />
             {!hideEnableToggle && (
               <ToggleSwitch enabled={runtime.enabled} onClick={runtime.toggleEnabled} />
@@ -149,7 +150,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
 
         {runtime.cliStatus === 'missing' && (
           <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
-            <p className="text-[12px] text-cyan">{t('agentDetection.installHint')}</p>
+            <p className="text-[12px] text-cyan-ink">{t('agentDetection.installHint')}</p>
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 variant="brand-cyan"
@@ -170,7 +171,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
                 <span
                   className={clsx(
                     'text-[12px]',
-                    runtime.installResult.ok ? 'text-mint' : 'text-destructive',
+                    runtime.installResult.ok ? 'text-mint-ink' : 'text-destructive-ink',
                   )}
                 >
                   {runtime.installResult.message}
@@ -182,7 +183,7 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
                 <button
                   type="button"
                   onClick={() => runtime.setInstallOutputOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 text-[11px] text-cyan transition hover:text-cyan/80"
+                  className="inline-flex items-center gap-1 text-[11px] text-cyan-ink transition hover:text-cyan-ink/80"
                 >
                   {runtime.installOutputOpen ? (
                     <ChevronUp size={12} />

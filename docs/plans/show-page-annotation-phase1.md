@@ -303,7 +303,7 @@ Do not touch `vibe/**`, `core/**`, `tests/**`.
 3. Merge order: R (runtime main) → A → C (A/C independent; R first so the
    bootstrap asset exists for regression source builds).
 4. End-to-end verification by the orchestrator in the local Incus regression
-   environment (github-source runtime) against the acceptance list below.
+   environment (locally built runtime archive) against the acceptance list below.
 
 ## Acceptance Criteria
 

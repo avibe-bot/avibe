@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ArrowRight, CheckCheck, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
 import { Button } from '../ui/button';
 import { WebPushControl } from './WebPushControl';
+import { useInboxScrollRestoration } from './useInboxScrollRestoration';
 import {
   readInboxFilter,
   writeInboxFilter,
@@ -18,9 +20,14 @@ import {
   type InboxFilter as FilterMode,
 } from '../../lib/inboxFilterMemory';
 
-export const InboxPage: React.FC = () => {
+export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
+  const listRef = useRef<HTMLDivElement>(null);
+  const {
+    capabilities,
+  } = useInstanceAuthorization();
   const {
     inboxSessions,
     unreadBySession,
@@ -93,7 +100,10 @@ export const InboxPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, inboxSessions, unreadBySession]);
 
+  const capturePosition = useInboxScrollRestoration(listRef, location.key, filter, visible);
+
   const openSession = (s: InboxSession) => {
+    capturePosition();
     navigate(`/chat/${encodeURIComponent(s.session_id)}`);
   };
 
@@ -113,14 +123,14 @@ export const InboxPage: React.FC = () => {
   const showEmpty = visible.length === 0 && (filter === 'unread' ? unreadSessions === 0 : !hasMore);
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
+    <div ref={listRef} className="mx-auto flex w-full max-w-4xl flex-col gap-6 py-2">
       {/* Header */}
       <div className="flex flex-wrap items-center gap-4">
-        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint shadow-[0_0_24px_-6px_rgba(91,255,160,0.5)]">
+        <div className="flex size-12 shrink-0 items-center justify-center rounded-2xl border border-mint/30 bg-mint/[0.08] text-mint-ink shadow-glow-md-mint">
           <Inbox className="size-5" />
         </div>
         <div className="flex flex-1 flex-col">
-          <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint">
+          <div className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-mint-ink">
             {t('workbench.inbox.eyebrow')}
           </div>
           <h1 className="text-2xl font-bold text-foreground">{t('workbench.inbox.title')}</h1>
@@ -153,7 +163,7 @@ export const InboxPage: React.FC = () => {
       <Button
         type="button"
         variant="ghost"
-        onClick={() => navigate('/search')}
+        onClick={onOpenSearch}
         className="h-auto w-full justify-start gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3.5 py-2.5 text-left font-normal transition hover:bg-foreground/[0.06] md:hidden"
       >
         <Search className="size-4 shrink-0 text-muted" />
@@ -177,7 +187,7 @@ export const InboxPage: React.FC = () => {
               className={clsx(
                 'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-semibold transition sm:flex-none',
                 filter === key
-                  ? 'bg-mint/[0.10] text-mint shadow-[0_0_12px_-4px_rgba(91,255,160,0.5)]'
+                  ? 'bg-mint/[0.10] text-mint-ink shadow-glow-xs-mint'
                   : 'text-muted hover:text-foreground',
               )}
             >
@@ -187,28 +197,30 @@ export const InboxPage: React.FC = () => {
           ))}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
-          <WebPushControl />
-          <button
-            type="button"
-            onClick={onMarkAllRead}
-            disabled={totalUnread === 0}
-            className={clsx(
-              'flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold transition',
-              totalUnread === 0
-                ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
-                : 'border-mint/30 bg-mint/[0.06] text-mint hover:bg-mint/[0.12]',
-            )}
-          >
-            <CheckCheck className="size-3.5" />
-            {t('workbench.inbox.markAllRead')}
-          </button>
+          {capabilities.can_read_instance && <WebPushControl />}
+          {capabilities.can_chat && (
+            <button
+              type="button"
+              onClick={onMarkAllRead}
+              disabled={totalUnread === 0}
+              className={clsx(
+                'flex shrink-0 items-center gap-1.5 rounded-md border px-3 py-1.5 text-[12px] font-semibold transition',
+                totalUnread === 0
+                  ? 'cursor-not-allowed border-border bg-foreground/[0.02] text-muted'
+                  : 'border-mint/30 bg-mint/[0.06] text-mint-ink hover:bg-mint/[0.12]',
+              )}
+            >
+              <CheckCheck className="size-3.5" />
+              {t('workbench.inbox.markAllRead')}
+            </button>
+          )}
         </div>
       </div>
 
       {/* Empty state */}
       {showEmpty ? (
         <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-surface px-6 py-16 text-center">
-          <CheckCheck className="size-8 text-mint" />
+          <CheckCheck className="size-8 text-mint-ink" />
           <div className="text-[15px] font-semibold text-foreground">
             {filter === 'unread' ? t('workbench.inbox.allClearTitle') : t('workbench.inbox.emptyTitle')}
           </div>
@@ -232,15 +244,16 @@ export const InboxPage: React.FC = () => {
             return (
               <article
                 key={s.session_id}
+                data-inbox-session-id={s.session_id}
                 className={clsx(
                   'flex flex-col gap-3 rounded-xl border p-4 transition',
                   unread > 0
-                    ? 'border-mint/30 bg-mint/[0.05] shadow-[0_0_24px_-12px_rgba(91,255,160,0.4)]'
+                    ? 'border-mint/30 bg-mint/[0.05] shadow-glow-md-mint'
                     : 'border-border bg-surface',
                 )}
               >
                 <div className="flex items-center gap-2 text-[11px]">
-                  <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan">
+                  <span className="inline-flex max-w-[40%] items-center gap-1 truncate rounded-md border border-border-strong bg-surface-2 px-2 py-0.5 font-semibold text-cyan-ink">
                     {projectLabel}
                   </span>
                   <span className="text-muted">·</span>
@@ -248,7 +261,7 @@ export const InboxPage: React.FC = () => {
                     {sessionLabel}
                   </span>
                   {s.replied && (
-                    <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan">
+                    <span className="inline-flex items-center gap-1 rounded-md border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 text-[10px] font-semibold text-cyan-ink">
                       <MessageSquareReply className="size-2.5" />
                       {t('workbench.inbox.replied')}
                     </span>
@@ -257,7 +270,7 @@ export const InboxPage: React.FC = () => {
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-mint">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-mint-ink">
                     {t('workbench.inbox.agent')}
                   </div>
                   {s.preview_text ? (
@@ -278,17 +291,17 @@ export const InboxPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => openSession(s)}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint transition hover:bg-mint/[0.12]"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-mint/30 bg-mint/[0.06] px-3 py-1.5 text-[11px] font-semibold text-mint-ink transition hover:bg-mint/[0.12]"
                   >
                     {unread > 0 && (
-                      <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-[#080812]">
+                      <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-mint px-1.5 font-mono text-[9px] font-bold text-primary-foreground">
                         {unread > 99 ? '99+' : unread}
                       </span>
                     )}
                     {t('workbench.inbox.openSession')}
                     <ArrowRight className="size-3" />
                   </button>
-                  {unread > 0 && (
+                  {capabilities.can_chat && unread > 0 && (
                     <button
                       type="button"
                       onClick={() => markRead(s.session_id)}

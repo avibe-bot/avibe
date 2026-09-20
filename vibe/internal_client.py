@@ -22,17 +22,22 @@ import logging
 import os
 import stat
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Literal, Optional
 
 import httpx
 
 from core import control_ipc
+from vibe.memory_contract import (
+    MAX_AGENTIC_TIMEOUT_SECONDS,
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
 _SOCKET_ERRORS = (httpx.TransportError, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
+_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 
 # A transport deadline shorter than the operation it wraps turns a slow
 # success into a reported failure while the controller keeps working, and
@@ -41,22 +46,32 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 # ``tests/test_internal_client_timeouts.py`` asserts the relationship against
 # the sources below rather than trusting these numbers to stay in step.
 #
-# Memory reads wait on provider operations bounded by
-# ``core.memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s).
+# Most Memory reads wait on one provider operation bounded by
+# ``avibe_memory.module.PROVIDER_READ_TIMEOUT_SECONDS`` (20s). Search can first
+# probe capabilities and then issue an agentic provider read bounded at 30s,
+# so it needs a separate transport bound outside both sequential steps.
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
+MEMORY_SEARCH_TIMEOUT_SECONDS = 55.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
+# The host contract owns the transport deadline; its relationship test keeps it
+# outside the implementation's complete identity/journal/provider/store budget.
+MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS = (
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+)
+MEMORY_FAILURES_TIMEOUT_SECONDS = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+MEMORY_MAINTENANCE_TIMEOUT_SECONDS = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
 MEMORY_RECONCILE_TIMEOUT_SECONDS = 120.0
-# An enabled clear first drains and cleans the provider (5s + 20s), then runs
-# the same replacement lifecycle as reconcile. A retry must not begin while the
-# first destructive request is still completing in the controller.
-MEMORY_CLEAR_TIMEOUT_SECONDS = 150.0
 # Install waits on the controller's download/extract/activate. The Dependencies
 # UI polls the job for 310s (``startAndPollDependencyInstall``), so anything
 # shorter reports a false failure on a slow link while the install continues.
 MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
+# Clearing can include provider-side deletion and journal recovery. Keep the
+# transport outside the controller's bounded operation so a slow success does
+# not race a retry from the settings UI.
+MEMORY_CLEAR_TIMEOUT_SECONDS = 150.0
 
 
 class InternalServerUnavailable(Exception):
@@ -149,11 +164,73 @@ def _verified_socket_path(socket_path: Optional[Path]) -> Path:
         raise InternalServerUnavailable(f"dispatch socket is unsafe at {target}")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise InternalServerUnavailable(f"dispatch socket owner mismatch at {target}")
-    if stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
+    if _CHECK_POSIX_SOCKET_MODE and stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
         raise InternalServerUnavailable(f"dispatch socket mode mismatch at {target}")
     return target
 
 
+async def stream_dispatch(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 1800.0,
+) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    """Send a dispatch request and yield the turn's SSE events as they arrive.
+
+    Each yielded tuple is ``(event_name, parsed_data)`` — e.g. ``("turn.start",
+    {...})``, ``("turn.chunk", {...})``, ``("turn.end", {...})``. The caller
+    re-encodes them for the browser. Raises ``InternalServerUnavailable`` for
+    connect-time failures so the caller can degrade.
+
+    NB: the web **Chat** page no longer uses this (it's fire-and-forget +
+    ``message.new``); this streaming round-trip backs the **Show-page** dispatch
+    flow (``_run_show_event_dispatch`` re-publishes each event as ``show.dispatch``).
+    """
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url, headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            try:
+                stream = client.stream("POST", "/internal/dispatch", json=payload)
+            except _SOCKET_ERRORS as exc:
+                raise InternalServerUnavailable(str(exc)) from exc
+
+            async with stream as resp:
+                _validate_response(resp, endpoint)
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    raise InternalServerUnavailable(
+                        f"dispatch endpoint returned {resp.status_code}: {detail!r}"
+                    )
+
+                current_event: Optional[str] = None
+                async for line in resp.aiter_lines():
+                    if not line:
+                        # Blank line ends an SSE event block; reset the
+                        # event-name buffer so a missing ``event:`` field
+                        # on the next block defaults to ``message``.
+                        current_event = None
+                        continue
+                    if line.startswith("event:"):
+                        current_event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:"):
+                        raw = line[5:].lstrip()
+                        try:
+                            parsed = json.loads(raw)
+                        except json.JSONDecodeError:
+                            logger.warning("internal_client: invalid SSE data line %r", raw)
+                            continue
+                        yield (current_event or "message", parsed)
+    except InternalServerUnavailable:
+        raise
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
 async def stream_events(
     *,
     socket_path: Optional[Path] = None,
@@ -271,6 +348,27 @@ def publish_event_sync(
         raise InternalServerUnavailable(str(exc)) from exc
 
 
+def record_skill_observation_sync(
+    observation: dict[str, Any], *, socket_path: Optional[Path] = None,
+    timeout: float = 0.25,
+) -> dict[str, Any]:
+    """Best-effort queue submission; the response is not a durable receipt."""
+    endpoint = _resolve_endpoint(socket_path)
+    try:
+        with httpx.Client(
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url, headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout),
+        ) as client:
+            response = client.post("/internal/skill-observations", json=observation)
+            _validate_response(response, endpoint)
+            if response.status_code != 202:
+                raise InternalServerUnavailable("Skill observation rejected")
+            return response.json()
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable("Skill observation transport unavailable") from exc
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,
@@ -331,6 +429,48 @@ async def reconcile_platforms(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def invalidate_activity_streaming(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Make the controller re-read the persisted Agent Activity display flag."""
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url, headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = await client.post("/internal/invalidate-activity-streaming")
+            _validate_response(resp, endpoint)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def backend_application(
+    backend: str, *, socket_path: Optional[Path] = None, timeout: float = 5.0,
+) -> dict[str, Any]:
+    from modules.agents.catalog import AGENT_BACKENDS
+
+    if backend not in AGENT_BACKENDS:
+        raise ValueError("unsupported_backend")
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url=endpoint.base_url, headers=endpoint.headers, timeout=timeout,
+        ) as client:
+            response = await client.get(f"/internal/backend-application/{backend}")
+            _validate_response(response, endpoint)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": response.status_code, "body": response.json() if response.content else {}}
+
+
 async def reconcile_agent_backends(
     backends: list[str],
     *,
@@ -356,6 +496,8 @@ async def reconcile_agent_backends(
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 
 
 async def test_backend_auth(
@@ -398,15 +540,99 @@ async def reconcile_memory(
     return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
 
 
-async def memory_restart(
+async def memory_wake(
     *,
     socket_path: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """Wait without a reporting deadline for the retained Runtime restart."""
+    """Wait for one non-destructive wake attempt."""
 
     return await _memory_request(
         "POST",
-        "/internal/memory/restart",
+        "/internal/memory/wake",
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
+async def memory_preflight(
+    *, payload: dict, user_key: str, socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/preflight"
+    return await _memory_request(
+        "POST", path, payload=payload,
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path, timeout=None,
+    )
+
+
+async def memory_repair(
+    *,
+    confirm_loss: bool,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/repair"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={"confirm_loss": confirm_loss},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
+async def memory_delete_data(
+    *,
+    confirm_loss: bool,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/delete-data"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={"confirm_loss": confirm_loss},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
+async def memory_reconfigure(
+    *,
+    confirm_loss: bool,
+    memory: dict[str, Any],
+    expected_memory: dict[str, Any],
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/reconfigure"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={
+            "confirm_loss": confirm_loss,
+            "memory": memory,
+            "expected_memory": expected_memory,
+        },
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
+async def memory_archive_session(
+    session_id: str,
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Await the controller-owned Workbench archive write without a reporting deadline."""
+
+    return await _memory_request(
+        "POST",
+        "/internal/memory/archive-session",
+        payload={"session_id": session_id},
         socket_path=socket_path,
         timeout=None,
     )
@@ -435,12 +661,99 @@ async def memory_status(
     return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
 
 
+async def memory_processing_record(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record"
+    return await _memory_request(
+        "GET",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_processing_record_entries(
+    *,
+    cursor: str | None,
+    limit: int,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entries"
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        params["cursor"] = cursor
+    if project is not None:
+        params["project"] = project
+    return await _memory_request(
+        "GET",
+        path,
+        params=params,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_processing_record_entry(
+    memcell_id: str,
+    *,
+    project: str | None,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/processing-record/entry"
+    return await _memory_request(
+        "GET",
+        path,
+        params={
+            "memcell_id": memcell_id,
+            **({"project": project} if project is not None else {}),
+        },
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 async def memory_failures(
     *,
+    user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float = MEMORY_FAILURES_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
+    path = "/internal/memory/failures"
+    return await _memory_request(
+        "GET",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_maintenance(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    path = "/internal/memory/maintenance"
+    return await _memory_request(
+        "GET",
+        path,
+        headers=_memory_user_key_headers("GET", path, user_key),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
 
 
 async def memory_profile(
@@ -462,18 +775,75 @@ async def memory_profile(
     )
 
 
-async def memory_search(
-    query: str,
-    limit: int,
+async def memory_projects(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
     timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     return await _memory_request(
+        "GET",
+        "/internal/memory/projects",
+        headers=_memory_user_key_headers(
+            "GET",
+            "/internal/memory/projects",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_list(
+    *,
+    user_key: str,
+    project: str | None = None,
+    page: int | None = None,
+    cursor: str | None = None,
+    limit: int = 20,
+    origin: Literal["user", "agent"] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {"limit": limit}
+    if project is not None:
+        payload["project"] = project
+    if page is not None:
+        payload["page"] = page
+    if cursor is not None:
+        payload["cursor"] = cursor
+    if origin is not None:
+        payload["origin"] = origin
+    return await _memory_request(
+        "POST",
+        "/internal/memory/list",
+        payload=payload,
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/list",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_search(
+    query: str,
+    policy: dict[str, object],
+    *,
+    user_key: str,
+    project: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {"query": query, "policy": policy}
+    if project is not None:
+        payload["project"] = project
+    return await _memory_request(
         "POST",
         "/internal/memory/search",
-        payload={"query": query, "limit": limit},
+        payload=payload,
         headers=_memory_user_key_headers(
             "POST",
             "/internal/memory/search",
@@ -484,64 +854,6 @@ async def memory_search(
     )
 
 
-async def memory_log(
-    *,
-    cursor: str | None,
-    limit: int,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log"
-    params: dict[str, str | int] = {"limit": limit}
-    if cursor is not None:
-        params["cursor"] = cursor
-    return await _memory_request(
-        "GET",
-        path,
-        params=params,
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_log_entry(
-    memcell_id: str,
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    path = "/internal/memory/log/entry"
-    return await _memory_request(
-        "GET",
-        path,
-        params={"memcell_id": memcell_id},
-        headers=_memory_user_key_headers("GET", path, user_key),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
-
-
-async def memory_clear(
-    *,
-    user_key: str,
-    socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
-) -> dict[str, Any]:
-    return await _memory_request(
-        "POST",
-        "/internal/memory/clear",
-        payload={"confirm": True},
-        headers=_memory_user_key_headers(
-            "POST",
-            "/internal/memory/clear",
-            user_key,
-        ),
-        socket_path=socket_path,
-        timeout=timeout,
-    )
 
 
 def memory_status_sync(
@@ -574,18 +886,62 @@ def memory_profile_sync(
     )
 
 
+def memory_list_sync(
+    *,
+    page: int = 1,
+    limit: int = 20,
+    caller_session_id: str | None = None,
+    project: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {"page": page, "limit": limit}
+    if project is not None:
+        payload["project"] = project
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/list",
+        payload=payload,
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
 def memory_search_sync(
     query: str,
     limit: int,
     *,
+    mode: Literal["hybrid", "keyword", "vector", "agentic"] = "hybrid",
     caller_session_id: str | None = None,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+    timeout: float = MEMORY_SEARCH_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
+    policy: dict[str, object] = {
+        "mode": mode,
+        "max_results": limit,
+        "include_profile": True,
+        "include_current_session": False,
+    }
+    if mode == "agentic":
+        # RecallPolicy retains its complete legacy budget envelope. EverOSPort
+        # enforces the wall-clock field; EverOS 1.2.3 has no model/token gate.
+        policy.update(
+            timeout_seconds=MAX_AGENTIC_TIMEOUT_SECONDS,
+            max_model_calls=2,
+            cost_budget_tokens=32_000,
+        )
+    payload: dict[str, object] = {
+        "query": query,
+        "policy": policy,
+    }
+    if project is not None:
+        payload["project"] = project
     return _memory_request_sync(
         "POST",
         "/internal/memory/search",
-        payload={"query": query, "limit": limit},
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
@@ -596,13 +952,17 @@ def memory_remember_sync(
     text: str,
     *,
     caller_session_id: str | None = None,
+    project: str | None = None,
     socket_path: Optional[Path] = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
+    payload: dict[str, object] = {"text": text}
+    if project is not None:
+        payload["project"] = project
     return _memory_request_sync(
         "POST",
         "/internal/memory/remember",
-        payload={"text": text},
+        payload=payload,
         headers=_memory_cli_session_headers(caller_session_id),
         socket_path=socket_path,
         timeout=timeout,
@@ -683,14 +1043,14 @@ def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None
     session_id = str(session_id or "").strip()
     if not session_id:
         return None
-    from core.memory.http_headers import CALLER_SESSION_HEADER
+    from vibe.memory_http_headers import CALLER_SESSION_HEADER
 
     return {CALLER_SESSION_HEADER: session_id}
 
 
 def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
-    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory.ui_access import (
+    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
+    from vibe.memory_ui_access import (
         MEMORY_UI_PROOF_HEADER,
         build_ui_read_proof,
         process_ui_read_secret,
@@ -769,7 +1129,12 @@ def notify_vault_request_created_sync(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def cancel_dispatch(
+    session_id: str,
+    *,
+    run_id: str | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Ask the controller to cancel a running ``dispatch_turn`` for
     ``session_id``.
 
@@ -791,7 +1156,10 @@ async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None
             # room so a slow-but-successful stop isn't read-timed-out into a 500.
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
-            resp = await client.post(f"/internal/cancel/{session_id}")
+            resp = await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": run_id} if run_id is not None else None,
+            )
             _validate_response(resp, endpoint)
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
@@ -821,6 +1189,59 @@ async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Pa
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def _show_access_request(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    read_timeout: float | None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url, headers=endpoint.headers,
+            timeout=httpx.Timeout(read_timeout, connect=1.0),
+        ) as client:
+            resp = await client.post(path, json=payload)
+            _validate_response(resp, endpoint)
+    except httpx.ReadTimeout as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def show_access_settings_read(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    return await _show_access_request(
+        "/internal/show-access/settings-read",
+        payload,
+        read_timeout=10.0,
+        socket_path=socket_path,
+    )
+
+
+async def show_access_apply(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    return await _show_access_request(
+        "/internal/show-access/apply",
+        payload,
+        # Once accepted, the controller serializes this non-cancellable SQLite
+        # write. Wait for its definitive CAS result so a slow commit is never
+        # reported as a timeout that invites an ambiguous retry.
+        read_timeout=None,
+        socket_path=socket_path,
+    )
 
 
 async def send_now(
@@ -885,7 +1306,11 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def list_running_agents(
+    *,
+    run_ids: Optional[list[str]] = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Fetch the controller's read-only running-agents snapshot.
 
     Returns ``{status_code, body}``; raises ``InternalServerUnavailable`` on
@@ -904,7 +1329,13 @@ async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str
             headers=endpoint.headers,
             timeout=httpx.Timeout(3.0, connect=0.5),
         ) as client:
-            resp = await client.get("/internal/running-agents")
+            if run_ids is None:
+                resp = await client.get("/internal/running-agents")
+            else:
+                resp = await client.post(
+                    "/internal/running-agents/snapshot",
+                    json={"run_ids": run_ids},
+                )
             _validate_response(resp, endpoint)
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
@@ -989,3 +1420,43 @@ async def health(socket_path: Optional[Path] = None) -> bool:
     """
 
     return await health_identity(socket_path) is not None
+
+
+def health_sync(
+    socket_path: Optional[Path] = None,
+    *,
+    timeout: float = 2.0,
+) -> bool:
+    """Synchronously probe the controller health endpoint.
+
+    Dependency reconciliation runs in a worker thread and must distinguish a
+    connectable controller from a stale Unix-socket pathname left by a crashed
+    process.
+    """
+
+    try:
+        endpoint = _resolve_endpoint(socket_path)
+    except InternalServerUnavailable:
+        return False
+    transport = _sync_transport(endpoint)
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url=endpoint.base_url, headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 1.0)),
+        ) as client:
+            resp = client.get("/internal/health")
+            _validate_response(resp, endpoint)
+            return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
+    except Exception:
+        return False
+
+
+def delegated_memory_owner_sync(session_id: str, proof: str) -> dict[str, Any] | None:
+    """Resolve a delegated owner using an ephemeral host execution proof."""
+    result = _memory_request_sync(
+        "POST", "/internal/memory/delegated-owner",
+        payload={"session_id": session_id, "proof": proof}, timeout=5.0,
+    )
+    owner = result["body"].get("owner") if result["status_code"] == 200 else None
+    return owner if isinstance(owner, dict) else None

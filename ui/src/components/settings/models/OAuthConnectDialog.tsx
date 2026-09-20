@@ -1,4 +1,4 @@
-// 连接订阅 dialog (frame 09). RENDERS DECLARATIVELY from the runtime-declared
+// Add-subscription dialog (frame 04). RENDERS DECLARATIVELY from the runtime-declared
 // oauth-flow presentation (S1 gap ③): `expects` ∈ none | paste_code |
 // paste_callback_url selects the step-2 control; there is NO vendor→form table
 // in the UI. Composes the shared OAuth atoms (OAuthLinkRow / OAuthDeviceCodeRow
@@ -14,7 +14,8 @@
 // how one of the two ends up reading a different half of the envelope, which is
 // the bug `settle` below was written to fix.
 import * as React from 'react';
-import { CheckCircle2, Sparkles, TriangleAlert } from 'lucide-react';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { ArrowRight, CheckCircle2, Info, Sparkles, TriangleAlert, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -24,6 +25,7 @@ import { useToast } from '@/context/ToastContext';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from '../oauth/OAuthFlowParts';
 import { AdoptionNote } from './AdoptionNote';
 import {
+  classifyOAuthFailure,
   createFlowAuthority,
   failureLanded,
   initialFlowView,
@@ -35,18 +37,32 @@ import {
   type FlowAuthority,
   type FlowView,
 } from './asyncLifetime';
-import { ExperimentalConsentDialog } from './ExperimentalConsentDialog';
-import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 import { apiFailure, modelsApi, type Adoption, type OAuthResult } from './modelsApi';
+import {
+  commitProviderTabRetry,
+  disposeProviderTab,
+  preopenProviderTab,
+  takeProviderTabForNavigation,
+} from './providerTab';
 import { REPAIR_LINE_KEY, REPAIR_TOAST, repairOutcome, repairSettles, type RepairOutcome } from './repair';
-import { oauthFailureKey, serverText, type OAuthJourney } from './serverCopy';
-import { adoptionVerdict } from './sufficiency';
-import { SupplyGapNote } from './SupplyGapNote';
+import { NATIVE_SUBSCRIPTION_EXISTS_FAILURE, oauthFailureKey, oauthStartFailureKey, serverText, type OAuthJourney } from './serverCopy';
+import {
+  initialSubscriptionChannel,
+  nativeSubscriptionSlotTaken,
+  recommendedSubscriptionChannel,
+  subscriptionChooser,
+  subscriptionOptionOrder,
+} from './subscriptionOptions';
+import { GuardGapList } from './GuardGapList';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
 import type { Source, SupplyChannel, SupplyGap } from './types';
 
 const POLL_MS = 2000;
 const DEADLINE_MS = 16 * 60 * 1000;
+
+type ConnectPhase = 'choose' | 'flow';
+
+const CHANNELS: SupplyChannel[] = ['native_cli', 'hub'];
 
 const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = ({ n, label, children }) => (
   <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2/40 px-4 py-3">
@@ -69,20 +85,32 @@ export const OAuthConnectDialog: React.FC<{
    * subject mid-flow.
    */
   reauth?: Source | null;
+  /** Snapshot candidates used to decide whether this backend's native slot is occupied. */
+  sources?: Source[];
   onClose: () => void;
-  onConnected: () => void;
-}> = ({ open, vendor, reauth = null, onClose, onConnected }) => {
+  onConnected: (source?: Source, placement?: Adoption) => void;
+}> = ({ open, vendor, reauth = null, sources = [], onClose, onConnected }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
 
   const [view, setView] = React.useState<FlowView>(initialFlowView);
   const [code, setCode] = React.useState('');
   const [submitting, setSubmitting] = React.useState(false);
-  const [channel, setChannel] = React.useState<SupplyChannel>('native_cli');
-  const [consentOpen, setConsentOpen] = React.useState(false);
+  // Seed the chooser from the opening snapshot. Radix may autofocus a control
+  // before the passive open effect runs; deriving this here prevents an occupied
+  // native row from ever being the initially focused/selected option.
+  const [channel, setChannel] = React.useState<SupplyChannel>(() =>
+    reauth ? (reauth.supply_channel ?? 'native_cli') : initialSubscriptionChannel(vendor, sources),
+  );
+  const [phase, setPhase] = React.useState<ConnectPhase>('choose');
+  const [nativeSlotTaken, setNativeSlotTaken] = React.useState(() =>
+    !reauth && nativeSubscriptionSlotTaken(vendor, sources),
+  );
+  const [startAttempt, setStartAttempt] = React.useState(0);
+  const [startFailureCode, setStartFailureCode] = React.useState<string | null>(null);
   // Which Agents took the new subscription in, frozen at commit (api.md). Same
   // note as the API-key dialog: connecting a credential is not the same as
-  // putting it into service, and a `custom` Agent is silently absent.
+  // putting it into service, and an Agent with no accepted match is absent.
   //
   // `null` means the terminal response did not report a creation — which is not
   // 「没有 Agent 采用」 and must not be rendered as it.
@@ -114,8 +142,24 @@ export const OAuthConnectDialog: React.FC<{
   onConnectedRef.current = onConnected;
   const onCloseRef = React.useRef(onClose);
   onCloseRef.current = onClose;
+  const initializedOpenSubject = React.useRef<string | null>(null);
+  const clientNonce = React.useRef<string | null>(null);
+  const heldFlowId = React.useRef<string | null>(null);
+  const rereadHeldFlow = React.useRef<(() => Promise<boolean>) | null>(null);
+
+  const createClientNonce = React.useCallback(() => {
+    const uuid = globalThis.crypto?.randomUUID?.();
+    if (uuid) return `ofn_${uuid.replaceAll('-', '').toLowerCase()}`;
+    const bytes = new Uint8Array(16);
+    globalThis.crypto?.getRandomValues?.(bytes);
+    return `ofn_${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
+  }, []);
 
   const accent = vendor === 'openai' ? 'gold' : 'mint';
+  // The vendor's chooser copy, or null for a subscription no sanctioned CLI can
+  // hold. Read once, outside the effect that consumes it: it is a fact about the
+  // vendor, not about this open.
+  const chooser = subscriptionChooser(vendor);
   // One derivation for 「which journey is this」, read by the start call, the
   // terminal handler and the title alike.
   const reauthId = reauth?.id ?? null;
@@ -124,6 +168,40 @@ export const OAuthConnectDialog: React.FC<{
   // terminal code means 「couldn't create it」 on a connect and 「it's still broken」
   // on a repair, and `oauthFailureKey` takes the journey rather than guessing.
   const journey: OAuthJourney = isReauth ? 'reauth' : 'connect';
+
+  // Take the native-slot reading once per open. A source arriving after this is
+  // the singleton race the start route owns; it must surface as Already bound,
+  // not silently rewrite a choice already under the user's pointer.
+  const openSubject = open ? `${vendor}:${reauthId ?? 'create'}` : null;
+  React.useEffect(() => {
+    if (!openSubject) {
+      initializedOpenSubject.current = null;
+      clientNonce.current = null;
+      setStartAttempt(0);
+      setStartFailureCode(null);
+      setPhase('choose');
+      return;
+    }
+    if (initializedOpenSubject.current === openSubject) return;
+    initializedOpenSubject.current = openSubject;
+    clientNonce.current = null;
+    setStartAttempt(0);
+    setStartFailureCode(null);
+    if (isReauth) {
+      setChannel(reauth?.supply_channel ?? 'native_cli');
+      setPhase('flow');
+      return;
+    }
+    const occupied = nativeSubscriptionSlotTaken(vendor, sources);
+    setNativeSlotTaken(occupied);
+    setChannel(initialSubscriptionChannel(vendor, sources));
+    // A vendor with no chooser copy has no channel choice to put in front of the
+    // user, so it opens straight into its flow — the same entry the re-auth
+    // journey takes above. The gesture that allocated its provider tab was the
+    // menu item that opened this dialog (PD-1), since there is no 去登录 here to
+    // allocate one.
+    setPhase(chooser === null ? 'flow' : 'choose');
+  }, [chooser, isReauth, openSubject, reauth?.supply_channel, sources, vendor]);
 
   /**
    * One owner for 「the server moved the rows the page behind this dialog draws」,
@@ -153,7 +231,7 @@ export const OAuthConnectDialog: React.FC<{
    * none」 and 「this arrival may not answer that question」 need saying separately.
    * It defaults to the SILENT answer, because the two answers are not equally
    * wrong. This component outlives the attempt — both hosts leave it mounted and
-   * toggle `open` (`RepairJourney.tsx`, `SettingsModelsPage.tsx`), so `stranded`
+   * toggle `open`, so `stranded`
    * survives a close, and a request left in flight by attempt A can land after
    * attempt B has already put ITS gap report on screen. A site that forgets to
    * speak costs nothing: the refetch it came for still runs. A site that forgets
@@ -168,10 +246,10 @@ export const OAuthConnectDialog: React.FC<{
    * resolved-after-close path, the released flow's re-read — says nothing, and
    * says it by default.
    */
-  const rowsBehindAreStale = (failure?: ReturnType<typeof apiFailure>, pairsSpeak = false) => {
+  const rowsBehindAreStale = React.useCallback((failure?: ReturnType<typeof apiFailure>, pairsSpeak = false) => {
     if (isReauth && pairsSpeak) setStranded(failure?.interrupted ?? []);
     onConnectedRef.current();
-  };
+  }, [isReauth]);
 
   /**
    * A request of one attempt that resolved after that attempt stopped being the one
@@ -198,7 +276,7 @@ export const OAuthConnectDialog: React.FC<{
    * different source is one click away, and this request can land after that
    * one has failed.
    */
-  const resolvedAfterAttempt = () => rowsBehindAreStale();
+  const resolvedAfterAttempt = React.useCallback(() => rowsBehindAreStale(), [rowsBehindAreStale]);
 
   const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -216,10 +294,9 @@ export const OAuthConnectDialog: React.FC<{
       .catch(() => showToast(t('common.copyFailed') as string, 'error'));
   };
 
-  // Drive the flow while the dialog is open. Re-runs when the target channel
-  // changes (experimental hub opt-in restarts the flow).
+  // Drive the flow only after the user confirms one channel.
   React.useEffect(() => {
-    if (!open) return;
+    if (!open || phase !== 'flow') return;
     let cancelled = false;
     let pollTimer: number | null = null;
     let deadline = Date.now() + DEADLINE_MS;
@@ -279,21 +356,9 @@ export const OAuthConnectDialog: React.FC<{
         // success materializes it server-side and consumes the flow binding doing
         // it — there is nothing left to finalize, and a POST /sources afterwards
         // is refused as `flow_not_found` on a connect that in fact succeeded.
-        setAdoption(created ? { adopted_by: created.adopted_by, skipped_by: created.skipped_by } : null);
+        setAdoption(created ? { added_to: created.added_to, adopted_by: created.adopted_by } : null);
         showToast(t('settings.models.oauth.status.success') as string, 'success');
-        // Same rule as the API-key dialog, through the same owner: 1.4s auto-dismiss
-        // is for a pure 「连接成功」, and every other verdict leaves an instruction on
-        // screen that 1.4s is not long enough to read. The old `!== 0` also read an
-        // ABSENT creation as adopted, which auto-dismissed the one case that knows
-        // least — `adoptionVerdict(null)` is indeterminate, so it now waits.
-        //
-        // `covered` and nothing weaker, and `skipped_by` is what makes it reachable
-        // at all: a non-empty adopter list never ruled out a `custom` backend that
-        // was left out, and that sentence is an instruction too. A response that
-        // omits the field leaves the verdict `indeterminate` and the dialog open —
-        // the same answer this site gave before the field existed.
-        if (adoptionVerdict(created?.adopted_by ?? null, created?.skipped_by).kind === 'covered')
-          successTimer.current = window.setTimeout(() => onCloseRef.current(), 1400);
+        if (created) onConnectedRef.current(created.source, created);
       }
       // Both branches above end with the same fact about the page behind them, and
       // so does the failure neither of them handles: `terminalArrivalMovedRows`
@@ -311,6 +376,11 @@ export const OAuthConnectDialog: React.FC<{
       // the guard above already makes that poll harmless, but there is no reason
       // to let it fire.
       if (isDone(step.action)) stop();
+      if (terminalArrivalMovedRows(step.action)) {
+        disposeProviderTab(
+          step.view.failureClass ?? (step.action === 'succeed' ? 'success' : undefined),
+        );
+      }
       return isDone(step.action);
     };
     settleRef.current = settle;
@@ -320,7 +390,49 @@ export const OAuthConnectDialog: React.FC<{
       // could have written — unlike the two exits below.
       if (cancelled) return;
       const overdue = transition({ kind: 'tick', overdue: Date.now() > deadline });
-      if (isDone(overdue.action)) return;
+      if (isDone(overdue.action)) {
+        // Keep the just-expired flow addressable. Retry performs one authoritative
+        // status read before it is allowed to mint a fresh provider flow.
+        if (overdue.action === 'timeout' && openedFlowId) {
+          const timedOutFlowId = openedFlowId;
+          rereadHeldFlow.current = async () => {
+            try {
+              const result = await modelsApi.getOAuthStatus(timedOutFlowId);
+              if (cancelled || flowAuthorityRef.current !== authority) return true;
+              transition({ kind: 'reset' });
+              if (settle(result)) return true;
+              // The held flow is still pending. Let retryStart continue with a
+              // fresh acquisition; this status read was the required last chance
+              // to observe a near-deadline terminal result.
+              return false;
+            } catch (err) {
+              // The success and rejection paths belong to the same read. Once
+              // this authority is retired, neither outcome may update the view
+              // or dispose a provider tab owned by its replacement.
+              if (cancelled || flowAuthorityRef.current !== authority) return true;
+              const failure = apiFailure(err);
+              const failureClass = classifyOAuthFailure(failure);
+              // This reread did not start a provider journey, so the tab opened
+              // by the Retry gesture has no URL to receive.
+              disposeProviderTab(failureClass);
+              // An unread flow is still held. Retry may ask again, but it may not
+              // turn missing evidence into permission to mint a replacement.
+              if (failureClass === 'inconclusive') return true;
+              // A named failure replaces the local timeout so the same class can
+              // decide whether another Retry is meaningful.
+              transition({ kind: 'reset' });
+              const step = transition({
+                kind: 'error',
+                errorKey: oauthFailureKey(failure?.code, journey),
+                failureClass,
+              });
+              rowsBehindAreStale(failure, failureLanded(step.action));
+              return true;
+            }
+          };
+        }
+        return;
+      }
       try {
         const result = await modelsApi.getOAuthStatus(flowId);
         if (cancelled) {
@@ -336,7 +448,7 @@ export const OAuthConnectDialog: React.FC<{
         }
         // A poll that lands on a just-succeeded flow is also the call that
         // materializes the outcome, so it can fail for reasons that have nothing
-        // to do with the authorization (consent_required / discovery_failed):
+        // to do with the authorization (for example discovery_failed):
         // the vendor said yes and what came after it broke. Naming that
         // separately is the difference between 「重试授权」 and 「授权成功，后面
         // 没成」 — and WHICH object it broke is the journey's to say.
@@ -352,14 +464,20 @@ export const OAuthConnectDialog: React.FC<{
         // about the flow at all — that same read is what materializes a
         // just-succeeded one. Keep reading instead of stopping; the deadline check
         // at the top of each poll bounds either.
-        if (!pollFailureSettles(submittingRef.current, failure?.serverNamed ?? false)) {
+        const failureClass = classifyOAuthFailure(failure);
+        if (!pollFailureSettles(submittingRef.current, failureClass)) {
           pollTimer = window.setTimeout(() => void poll(flowId), POLL_MS);
           return;
         }
+        disposeProviderTab(failureClass);
         // The authority goes first because its answer is what decides whether these
         // pairs are the ones on screen — see `failureLanded`. The refetch below is
         // owed whatever it answers.
-        const step = transition({ kind: 'error', errorKey: oauthFailureKey(failure?.code, journey) });
+        const step = transition({
+          kind: 'error',
+          errorKey: oauthFailureKey(failure?.code, journey),
+          failureClass,
+        });
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     };
@@ -374,14 +492,11 @@ export const OAuthConnectDialog: React.FC<{
     setStranded([]);
     void (async () => {
       try {
-        // Two ways in, one flow out. The reauth route opens the flow ON the
-        // existing source and acknowledges the irreversibility server-side (the
-        // page has already asked); a create opens a fresh one, and a hub-held
-        // connect (channel === 'hub' only after the experimental consent below)
-        // must carry consent or the server returns consent_required.
+        // Two ways in, one flow out. The reauth route opens the flow on the
+        // existing source; a create opens a fresh one for the selected channel.
         const started = reauthId
           ? await modelsApi.reauthSource(reauthId)
-          : await modelsApi.startOAuth(vendor, channel, channel === 'hub');
+          : await modelsApi.startOAuth(vendor, channel, clientNonce.current ?? (clientNonce.current = createClientNonce()));
         if (cancelled) {
           // The dialog closed while this request was in flight, so the cleanup
           // below found no flow to cancel — the flow id exists nowhere but here.
@@ -425,6 +540,7 @@ export const OAuthConnectDialog: React.FC<{
         // to find a null. Earlier than this the abandoned-start branch above is the
         // owner, because cleanup has already run and already answered.
         openedFlowId = started.flow_id;
+        heldFlowId.current = started.flow_id;
         if (startNeedsStatusRead(started)) {
           await poll(started.flow_id);
           return;
@@ -434,6 +550,7 @@ export const OAuthConnectDialog: React.FC<{
         pollTimer = window.setTimeout(() => void poll(started.flow_id), POLL_MS);
       } catch (err) {
         const failure = apiFailure(err);
+        const failureClass = classifyOAuthFailure(failure);
         // A reauth that fails to START can still have written the row: the
         // irreversible marking is rolled back only for a login that fails to
         // spawn, not for the flow-binding failures after it. Which is why this
@@ -444,7 +561,6 @@ export const OAuthConnectDialog: React.FC<{
           resolvedAfterAttempt();
           return;
         }
-        const code = failure?.code;
         // Nothing can have settled this view yet — the reset above is the last
         // thing that touched it, and both other arrivals need the flow this call
         // failed to produce. It asks anyway, because 「may these pairs speak?」 is
@@ -453,11 +569,11 @@ export const OAuthConnectDialog: React.FC<{
         // position moves.
         const step = transition({
           kind: 'error',
-          errorKey:
-            code === 'consent_required'
-              ? 'settings.models.oauth.error.consent'
-              : 'settings.models.oauth.error.start',
+          errorKey: isReauth ? 'settings.models.oauth.error.start' : oauthStartFailureKey(failure?.detail ?? failure?.code),
+          failureClass,
         });
+        if (!isReauth) setStartFailureCode(failure?.detail ?? failure?.code ?? 'start_failed');
+        disposeProviderTab(failureClass);
         rowsBehindAreStale(failure, failureLanded(step.action));
       }
     })();
@@ -492,27 +608,22 @@ export const OAuthConnectDialog: React.FC<{
       // first, and by then the attempt it belongs to is not merely settled but
       // GONE. Whatever gap report is on screen when it returns is somebody else's.
       const opened = openedFlowId;
+      disposeProviderTab('cleanup');
+      if (heldFlowId.current === opened) heldFlowId.current = null;
+      rereadHeldFlow.current = null;
       void releaseFlow(authority, owner, {
         cancel: opened ? () => modelsApi.cancelOAuth(opened) : null,
         reusable: isReauth,
         reread: () => rowsBehindAreStale(),
       });
     };
-  }, [open, vendor, channel, reauthId, t, showToast]);
+  }, [open, phase, startAttempt, vendor, channel, reauthId, t, showToast, isReauth, rowsBehindAreStale, resolvedAfterAttempt, journey, createClientNonce]);
 
   // 1-second ticker so the paste-flow countdown updates.
   React.useEffect(() => {
     if (!open) return;
     const id = window.setInterval(() => tick(), 1000);
     return () => window.clearInterval(id);
-  }, [open]);
-
-  // Consent is per-attempt: reset the experimental hub opt-in when the dialog
-  // CLOSES, so the next open's start effect always begins from native_cli.
-  // (Resetting on open would run after the start effect and briefly launch a
-  // stale hub flow before the reset lands.)
-  React.useEffect(() => {
-    if (!open) setChannel('native_cli');
   }, [open]);
 
   const submit = async () => {
@@ -557,17 +668,43 @@ export const OAuthConnectDialog: React.FC<{
       // the flow id, so a submit rejecting afterwards is still current and still
       // ignored. `failureLanded` is the part that knows.
       const failure = apiFailure(err);
+      const failureClass = classifyOAuthFailure(failure);
       const step = authority.transition({
         kind: 'error',
         errorKey: oauthFailureKey(failure?.code, journey),
+        failureClass,
       });
+      if (failureLanded(step.action)) disposeProviderTab(failureClass);
       rowsBehindAreStale(failure, failureLanded(step.action));
     } finally {
       if (isCurrent()) setSubmitting(false);
     }
   };
 
-  const { flow, errorKey } = view;
+  const retryStart = async () => {
+    if (startFailureCode === NATIVE_SUBSCRIPTION_EXISTS_FAILURE && !isReauth) {
+      // The start route checked the current store under its mutation lock, so
+      // this error is newer and more authoritative than the page snapshot.
+      setNativeSlotTaken(true);
+      setChannel('hub');
+      setStartFailureCode(null);
+      disposeProviderTab(view.failureClass ?? 'retryable-provider');
+      setPhase('choose');
+      return;
+    }
+    const timedOutFlow = view.failureClass === 'inconclusive' ? heldFlowId.current : null;
+    if (timedOutFlow && rereadHeldFlow.current) {
+      if (await rereadHeldFlow.current()) return;
+    }
+    const freshAcquisition = startFailureCode === null;
+    setStartFailureCode(null);
+    if (freshAcquisition) clientNonce.current = null;
+    commitProviderTabRetry();
+    setStartAttempt((attempt) => attempt + 1);
+    setPhase('flow');
+  };
+
+  const { flow, errorKey, failureClass } = view;
   const presentation = flow?.presentation;
   const expects = presentation?.expects;
   const isDevice = expects === 'none';
@@ -576,7 +713,6 @@ export const OAuthConnectDialog: React.FC<{
   // the same call, so there is no in-between to hold the banner for. The complete
   // rendered state comes from the authority's landed view.
   const success = view.settled && flow?.state === 'success';
-  const failed = view.settled && Boolean(errorKey);
   const active = !view.settled;
 
   const remainingMs = flow?.expires_at ? Math.max(0, new Date(flow.expires_at).getTime() - Date.now()) : null;
@@ -595,6 +731,187 @@ export const OAuthConnectDialog: React.FC<{
       : 'settings.models.oauth.pasteCode.hint';
   const step2Label = serverText(t, presentation?.instructions_key, step2Fallback) ?? '';
 
+  const flowActive = Boolean(
+    flow
+      && !view.settled
+      && (flow.state === 'starting' || flow.state === 'awaiting_action' || flow.state === 'verifying'),
+  );
+  React.useEffect(() => {
+    if (!flowActive || !presentation?.auth_url) return;
+    // Claimed at the point of use, not when the dialog opens: the re-auth journey's
+    // tab is allocated by the confirm gesture before this component exists, and a
+    // claim taken at mount is stranded by anything that remounts (StrictMode
+    // replays effects in development) with the tab still open and unreachable.
+    // Claiming here also means a run with nothing to navigate keeps the handoff.
+    const target = takeProviderTabForNavigation();
+    if (!target || target.closed) return;
+    try {
+      target.location.href = presentation.auth_url;
+    } catch {
+      // A popup may become inaccessible after opening; the visible link remains
+      // the fallback in that case.
+    }
+  }, [flowActive, presentation?.auth_url]);
+
+  // The chooser is only for a vendor whose copy exists. A hub-held subscription
+  // has no channel choice to make, so it opens straight into its flow (the open
+  // effect above), and this guard is the render-side half of the same rule: a
+  // chooser drawn for such a vendor would read every line off `null` and
+  // interpolate i18n keys at the user. Narrowing on `chooser` here rather than on
+  // a bare phase check is what makes that a type error, not a runtime one.
+  const choosing = !isReauth && phase === 'choose' && chooser !== null;
+  const recommended = recommendedSubscriptionChannel(vendor);
+  const optionOrder = subscriptionOptionOrder(vendor);
+  const optionRefs = React.useRef<Partial<Record<SupplyChannel, HTMLButtonElement | null>>>({});
+  const selectableChannels = CHANNELS.filter((candidate) => candidate !== 'native_cli' || !nativeSlotTaken);
+
+  const moveSelection = (direction: number) => {
+    const currentIndex = selectableChannels.indexOf(channel);
+    const nextIndex =
+      (Math.max(0, currentIndex) + direction + selectableChannels.length) % selectableChannels.length;
+    const next = selectableChannels[nextIndex];
+    setChannel(next);
+    window.requestAnimationFrame(() => optionRefs.current[next]?.focus());
+  };
+
+  if (choosing && chooser) {
+    const vendorCopy = chooser.copy;
+    const vendorName = chooser.brand;
+    return (
+      <DialogPrimitive.Root open={open} onOpenChange={(value) => !value && onClose()}>
+        <DialogPrimitive.Portal>
+          <DialogPrimitive.Overlay className="model-hub-add-sub-overlay fixed inset-0 z-50" />
+          <DialogPrimitive.Content
+            className="model-hub-add-sub-dialog fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-y-auto border border-border-strong bg-surface p-0 shadow-xl outline-none"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              window.requestAnimationFrame(() => optionRefs.current[channel]?.focus());
+            }}
+          >
+          <header className="model-hub-add-sub-head flex flex-col border-b border-border">
+            <div className="flex items-center justify-between gap-3">
+              <DialogPrimitive.Title id="model-hub-add-sub-title" className="model-hub-add-sub-title font-bold">
+                {t('settings.models.addSub.title', { vendor: vendorName })}
+              </DialogPrimitive.Title>
+              <DialogPrimitive.Close asChild>
+                <Button type="button" variant="ghost" size="icon" className="model-hub-add-sub-close" aria-label={t('settings.models.addSub.cancel')} title={t('settings.models.addSub.cancel')}>
+                  <X aria-hidden />
+                </Button>
+              </DialogPrimitive.Close>
+            </div>
+            <DialogPrimitive.Description className="model-hub-add-sub-subtitle text-muted">{t(`settings.models.addSub.subtitle.${vendorCopy}`)}</DialogPrimitive.Description>
+          </header>
+
+          <div className="model-hub-add-sub-body flex flex-col">
+            <div
+              role="radiogroup"
+              aria-labelledby="model-hub-add-sub-title"
+              className="model-hub-add-sub-options flex flex-col"
+            >
+              {optionOrder.map((candidate) => {
+                const isNative = candidate === 'native_cli';
+                const disabled = isNative && nativeSlotTaken;
+                const selected = channel === candidate;
+                const badgeKey = disabled
+                  ? 'settings.models.addSub.opt.added'
+                  : candidate === recommended
+                    ? 'settings.models.addSub.badge.recommended'
+                    : vendorCopy === 'claude'
+                      ? 'settings.models.addSub.badge.secondary'
+                      : 'settings.models.addSub.badge.supportedNotRecommended';
+                const optionKey = isNative ? 'native' : 'hub';
+                return (
+                  <button
+                    key={candidate}
+                    ref={(node) => {
+                      optionRefs.current[candidate] = node;
+                    }}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-disabled={disabled}
+                    tabIndex={selected ? 0 : -1}
+                    onClick={() => !disabled && setChannel(candidate)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                        event.preventDefault();
+                        moveSelection(1);
+                      } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        moveSelection(-1);
+                      }
+                    }}
+                    className={cn(
+                      'model-hub-add-sub-option flex items-start gap-3 text-left transition-colors',
+                      selected
+                        ? 'border-mint/35 bg-mint/[0.06]'
+                        : 'model-hub-add-sub-option--idle border-border hover:border-border-strong',
+                      disabled && 'cursor-not-allowed opacity-55 hover:border-border',
+                    )}
+                  >
+                    {!disabled && (
+                      <span
+                        className={cn(
+                          'mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border',
+                          selected ? 'border-mint' : 'model-hub-border-33',
+                        )}
+                        aria-hidden
+                      >
+                        {selected && <span className="size-2 rounded-full bg-mint" />}
+                      </span>
+                    )}
+                    <span className="model-hub-add-sub-option-copy min-w-0 flex flex-1 flex-col">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="model-hub-add-sub-option-label font-semibold text-foreground">
+                          {t(`settings.models.addSub.opt.${optionKey}.label`)}
+                        </span>
+                        <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
+                          {t(badgeKey)}
+                        </span>
+                      </span>
+                      <span className="model-hub-add-sub-description block text-muted">
+                        {t(`settings.models.addSub.opt.${optionKey}.desc.${vendorCopy}`)}
+                      </span>
+                      {vendorCopy === 'claude' && candidate === 'hub' && (
+                        <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
+                          <TriangleAlert className="mt-0.5 size-3 shrink-0" />
+                          <span>{t('settings.models.addSub.tos.claude')}</span>
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="model-hub-add-sub-hint flex items-start gap-2 text-muted">
+              <Info className="mt-0.5 size-3 shrink-0" />
+              <span>{t(`settings.models.addSub.hint.${vendorCopy}`)}</span>
+            </p>
+          </div>
+
+          <div className="model-hub-add-sub-foot model-hub-fill-05 flex items-center justify-end gap-2 border-t border-border">
+            <Button variant="ghost" size="sm" className="model-hub-dialog-action" onClick={onClose}>
+              {t('settings.models.addSub.cancel')}
+            </Button>
+            <Button
+              variant="brand"
+              size="sm"
+              className="model-hub-dialog-action"
+              onClick={() => {
+                preopenProviderTab();
+                setPhase('flow');
+              }}
+            >
+              {t('settings.models.addSub.signIn')}
+              <ArrowRight className="size-3.5" />
+            </Button>
+          </div>
+          </DialogPrimitive.Content>
+        </DialogPrimitive.Portal>
+      </DialogPrimitive.Root>
+    );
+  }
+
   return (
     <>
       <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -612,18 +929,21 @@ export const OAuthConnectDialog: React.FC<{
             </DialogTitle>
           </DialogHeader>
 
-          {failed && (
+          {failureClass && (
             <div className="flex flex-col gap-2">
-              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive">
+              <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/[0.08] px-4 py-3 text-[13px] text-destructive-ink">
                 <TriangleAlert className="mt-0.5 size-4 shrink-0" />
                 {/* errorKey may be the flow's own runtime-declared `error_key`, so
                     an unknown one degrades to 连接失败 rather than rendering itself. */}
                 <span>{serverText(t, errorKey, 'settings.models.oauth.error.generic')}</span>
               </div>
+              {isReauth && stranded.length > 0 && <>
               {/* Past tense (`gapsDone`), because this is not a confirm: the
                   credential change these pairs are the cost of has already
                   happened. Self-hides when the failure stranded nobody. */}
-              <SupplyGapNote gaps={stranded} title={t('settings.models.repair.gapsDone') as string} />
+              <p className="text-[12px] font-semibold text-foreground">{t('settings.models.repair.gapsDone')}</p>
+              <GuardGapList gaps={stranded} />
+              </>}
             </div>
           )}
 
@@ -635,10 +955,10 @@ export const OAuthConnectDialog: React.FC<{
             // something is still without a source. Only the last stays on screen.
             repair?.kind === 'gaps' ? (
               <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
-                <span className="text-[12.5px] font-semibold leading-relaxed text-gold">
+                <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
                   {t('settings.models.repair.gapsDone')}
                 </span>
-                <SupplyGapNote gaps={repair.gaps} />
+                <GuardGapList gaps={repair.gaps} />
               </div>
             ) : repair?.kind === 'unresolved' ? (
               // Gold, not destructive, and not a green check: nothing failed —
@@ -646,12 +966,12 @@ export const OAuthConnectDialog: React.FC<{
               // that reports itself signed out lands here). A 「已恢复可用」 over
               // that is the dead end §4.5 forbids; the row keeps its remedy and
               // this line is why it is still there.
-              <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium text-gold">
+              <div className="model-hub-ink-gold flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium">
                 <TriangleAlert className="size-4 shrink-0" />
                 {t('settings.models.repair.unresolved')}
               </div>
             ) : (
-              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
                 <CheckCircle2 className="size-4 shrink-0" />
                 {repair
                   ? t(REPAIR_LINE_KEY[repair.kind])
@@ -660,7 +980,7 @@ export const OAuthConnectDialog: React.FC<{
             )
           ) : success ? (
             <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
                 <CheckCircle2 className="size-4 shrink-0" />
                 {t('settings.models.oauth.connected')}
               </div>
@@ -669,7 +989,7 @@ export const OAuthConnectDialog: React.FC<{
                   a claim this response never made. The two halves come off ONE
                   value, so the note can never read a skip list from one arrival
                   against an adopter list from another. */}
-              <AdoptionNote adoptedBy={adoption?.adopted_by ?? null} skippedBy={adoption?.skipped_by} />
+              <AdoptionNote addedTo={adoption?.added_to ?? null} adoptedBy={adoption?.adopted_by ?? null} />
             </div>
           ) : (
             active && (
@@ -715,35 +1035,6 @@ export const OAuthConnectDialog: React.FC<{
                   )}
                 </Step>
 
-                {/* Withheld on a re-auth: where a subscription is HELD is a
-                    property of the existing source, and this flow is signing back
-                    into it — offering to move it here would be a different
-                    operation wearing this one's clothes. */}
-                {SUBSCRIPTION_HUB_EXPERIMENTAL && !isReauth && (
-                  <button
-                    type="button"
-                    onClick={() => (channel === 'hub' ? setChannel('native_cli') : setConsentOpen(true))}
-                    className={cn(
-                      'flex items-center justify-between gap-3 rounded-lg border px-4 py-2.5 text-left text-[12px] transition-colors',
-                      channel === 'hub'
-                        ? 'border-gold/40 bg-gold/[0.06]'
-                        : 'border-border bg-background hover:border-border-strong',
-                    )}
-                  >
-                    <span className="flex flex-col gap-0.5">
-                      <span className="font-medium text-foreground">{t('settings.models.oauth.hubOption.title')}</span>
-                      <span className="text-muted">{t('settings.models.oauth.hubOption.subtitle')}</span>
-                    </span>
-                    <span
-                      className={cn(
-                        'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                        channel === 'hub' ? 'bg-gold/20 text-gold' : 'bg-surface-2 text-muted',
-                      )}
-                    >
-                      {channel === 'hub' ? t('settings.models.oauth.hubOption.on') : t('settings.models.oauth.hubOption.off')}
-                    </span>
-                  </button>
-                )}
               </div>
             )
           )}
@@ -761,21 +1052,33 @@ export const OAuthConnectDialog: React.FC<{
             ) : (
               <span />
             )}
-            <Button variant={active ? 'ghost' : 'outline'} size="sm" className="h-10 sm:h-9" onClick={onClose}>
-              {active ? t('common.cancel') : t('common.close')}
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* A re-auth retry too. `retryStart` repeats the journey it is in, and
+                  on a failed re-auth the irreversible half is already spent — the
+                  siblings are already marked — so sending the user back to the row
+                  to confirm it a second time asks them to agree to a cost they have
+                  already paid, for the only gesture that can undo it. */}
+              {failureClass && failureClass !== 'authoritative-terminal' && (
+                <Button
+                  variant="brand"
+                  size="sm"
+                  className="h-10 sm:h-9"
+                  onClick={() => {
+                    preopenProviderTab('retry');
+                    void retryStart();
+                  }}
+                >
+                  {t('settings.models.addSub.retry')}
+                </Button>
+              )}
+              <Button variant={active ? 'ghost' : 'outline'} size="sm" className="h-10 sm:h-9" onClick={onClose}>
+                {active ? t('common.cancel') : t('common.close')}
+              </Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      <ExperimentalConsentDialog
-        open={consentOpen}
-        onConsent={() => {
-          setConsentOpen(false);
-          setChannel('hub');
-        }}
-        onCancel={() => setConsentOpen(false)}
-      />
     </>
   );
 };

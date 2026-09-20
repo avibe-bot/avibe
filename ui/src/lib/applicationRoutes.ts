@@ -20,6 +20,7 @@ export const APPLICATION_ROUTE_PATHS = [
   '/apps/library',
   '/admin',
   '/admin/dashboard',
+  '/admin/permissions',
   '/admin/remote-access',
   '/admin/groups',
   '/admin/users',
@@ -43,8 +44,15 @@ export const APPLICATION_ROUTE_PATHS = [
   '/users',
   '/logs',
   '/settings',
+  '/settings/general',
+  '/settings/appearance',
+  '/settings/account',
+  '/settings/shortcuts',
   '/settings/service',
   '/settings/platforms',
+  '/settings/platforms/groups',
+  '/settings/platforms/users',
+  '/settings/remote-access',
   '/settings/backends',
   '/settings/backends/opencode',
   '/settings/backends/claude',
@@ -52,9 +60,12 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings/models',
   '/settings/dependencies',
   '/settings/memory',
+  '/settings/replies',
   '/settings/messaging',
   '/settings/diagnostics',
+  '/settings/diagnostics/logs',
   '/settings/logs',
+  '/settings/access',
   '/remote-access',
   '/doctor',
   '/doctor/logs',
@@ -72,12 +83,49 @@ const APPLICATION_ROUTE_PATTERNS = APPLICATION_DYNAMIC_ROUTE_PATHS.map((path) =>
   const pattern = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/:[^/]+/g, '[^/]+');
   return new RegExp(`^${pattern}$`);
 });
+const CHAT_ROUTE_PATTERN = APPLICATION_ROUTE_PATTERNS[
+  APPLICATION_DYNAMIC_ROUTE_PATHS.indexOf('/chat/:sessionId')
+];
+
+function hrefPathname(href: string): string {
+  const rawPathname = href.split(/[?#]/, 1)[0];
+  return rawPathname.replace(/\/+$/, '') || '/';
+}
+
+function isAbsoluteHref(href: string): boolean {
+  return /^[a-zA-Z][a-zA-Z+\-.]*:/.test(href) || href.startsWith('//');
+}
 
 export function isApplicationRouteHref(href: string): boolean {
-  const rawPathname = href.split(/[?#]/, 1)[0];
-  const pathname = rawPathname.replace(/\/+$/, '') || '/';
+  const pathname = hrefPathname(href);
   return (
     APPLICATION_ROUTES.has(pathname) ||
     APPLICATION_ROUTE_PATTERNS.some((pattern) => pattern.test(pathname))
   );
+}
+
+export function inAppChatPath(href: string, currentHref?: string | null): string | null {
+  try {
+    if (!href) return null;
+    if (isAbsoluteHref(href)) {
+      if (!currentHref) return null;
+      const current = new URL(currentHref);
+      const target = new URL(href, current);
+      if (target.origin !== current.origin || !['http:', 'https:'].includes(target.protocol)) {
+        return null;
+      }
+      return chatPath(target.pathname, target.search, target.hash);
+    }
+    if (!href.startsWith('/') || href.startsWith('//')) return null;
+    const target = new URL(href, 'https://avibe.invalid');
+    return chatPath(target.pathname, target.search, target.hash);
+  } catch {
+    return null;
+  }
+}
+
+function chatPath(pathname: string, search: string, hash: string): string | null {
+  const normalized = hrefPathname(pathname);
+  if (!CHAT_ROUTE_PATTERN?.test(normalized)) return null;
+  return `${normalized}${search}${hash}`;
 }

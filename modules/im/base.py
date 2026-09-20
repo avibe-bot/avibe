@@ -3,8 +3,12 @@
 import logging
 from pathlib import Path
 from abc import ABC, abstractmethod
-from typing import Optional, Callable, Dict, Any, List, Tuple, cast
+from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass
+
+from core.delivery_target import MessageKind
+
+from .download_target import open_download_target
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ class FileDownloadResult:
 
     success: bool
     error: Optional[str] = None
+    failure_reason: Optional[Literal["file_too_large"]] = None
 
 
 @dataclass
@@ -43,7 +48,11 @@ class MessageContext:
     files: Optional[List[FileAttachment]] = None  # List of file attachments
     # Inbound adapters set this only after classifying their native event.
     # None is intentionally fail-closed for Memory capture and commands.
-    is_ordinary_text: Optional[bool] = None
+    is_original_human_text: Optional[bool] = None
+    # Attachment turns use a separate native-event classification so adding
+    # files never widens the existing ordinary-text contract.
+    is_original_human_attachment: Optional[bool] = None
+    message_kind: MessageKind = "unknown"
 
 
 @dataclass
@@ -447,6 +456,7 @@ class BaseIMClient(ABC):
         target_path: str,
         max_bytes: Optional[int] = None,
         timeout_seconds: int = 30,
+        target_fd: Optional[int] = None,
     ) -> FileDownloadResult:
         """Download a remote file directly to a local path.
 
@@ -459,10 +469,9 @@ class BaseIMClient(ABC):
         if content is None:
             return FileDownloadResult(False, "Download returned no content")
 
-        path = Path(target_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            path.write_bytes(content)
+            with open_download_target(target_path, target_fd=target_fd) as file_obj:
+                file_obj.write(content)
         except Exception as err:
             return FileDownloadResult(False, f"Failed to write downloaded file: {err}")
         return FileDownloadResult(True)

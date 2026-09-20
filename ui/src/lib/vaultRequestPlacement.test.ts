@@ -121,6 +121,57 @@ describe('placeVaultProvisionRequests', () => {
     expect(placed.byMessageId.has('agent-later')).toBe(false);
   });
 
+  it('keeps a nonterminal Agent output eligible to own its request card', () => {
+    const output = { ...message('agent-output', '2026-07-30T10:00:10Z'), type: 'output' };
+    const placed = placeVaultProvisionRequests(
+      [output],
+      [request('p', 'provision', '2026-07-30T10:00:00Z', output.id)],
+    );
+
+    expect(placed.byMessageId.get(output.id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
+  it('does not infer an unrelated detached completion as the request owner', () => {
+    const detached = {
+      ...message('background-completion', '2026-07-30T10:00:05Z'),
+      metadata: { detached: true, turn_id: 'turn-background' },
+    };
+    const current = {
+      ...message('current-reply', '2026-07-30T10:00:10Z'),
+      metadata: { turn_id: 'turn-current' },
+    };
+    const placed = placeVaultProvisionRequests(
+      [message('user-before', '2026-07-30T09:59:00Z', 'user'), detached, current],
+      [request('p', 'provision', '2026-07-30T10:00:00Z')],
+    );
+
+    expect(placed.byMessageId.has(detached.id)).toBe(false);
+    expect(placed.byMessageId.get(current.id)?.map((item) => item.id)).toEqual(['p']);
+  });
+
+  it('accepts a detached completion only when request provenance matches', () => {
+    const detached = {
+      ...message('background-completion', '2026-07-30T10:00:05Z'),
+      metadata: { detached: true, turn_id: 'turn-background' },
+    };
+    const placed = placeVaultProvisionRequests(
+      [detached],
+      [
+        request(
+          'p',
+          'provision',
+          '2026-07-30T10:00:00Z',
+          null,
+          { turn_id: 'turn-background' },
+        ),
+      ],
+    );
+
+    expect(placed.byMessageId.get(detached.id)?.map((item) => item.id)).toEqual(['p']);
+    expect(placed.unanchored).toEqual([]);
+  });
+
   it('uses the message id clock when the reply shares the request second', () => {
     const sameSecondMessages = [
       orderedMessage('11111111', '2026-07-30T10:00:00.100Z', '2026-07-30T10:00:00Z', 'user'),

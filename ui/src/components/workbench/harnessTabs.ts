@@ -1,3 +1,4 @@
+import type { TranslationKey } from '@/i18n/types';
 // Which Harness tab is on screen, and what an empty one says. The tab set and
 // the ``?tab=`` mapping live together so removing a tab later cannot strand its
 // old links, and the copy keys are asserted without rendering the page
@@ -19,7 +20,7 @@ export function harnessTabFromParam(param: string | null | undefined): TabKey {
   return (TAB_ORDER as string[]).includes(param ?? '') ? (param as TabKey) : DEFAULT_TAB;
 }
 
-export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): string {
+export function harnessEmptyStateKey(kind: TabKey, hasStoredRows: boolean): TranslationKey {
   if (!hasStoredRows) {
     return kind === 'tasks' ? 'harness.emptyTasks' : kind === 'watches' ? 'harness.emptyWatches' : 'harness.emptyRuns';
   }

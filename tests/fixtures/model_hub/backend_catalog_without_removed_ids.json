@@ -1,0 +1,32 @@
+{
+  "backend": "codex",
+  "mode": "hub",
+  "menu_kind": "fixed",
+  "sources": {
+    "order": []
+  },
+  "routes": {
+    "gpt-kept": {
+      "hops": []
+    }
+  },
+  "menu": null,
+  "models": [
+    {
+      "id": "gpt-kept",
+      "display_name": "GPT Kept",
+      "origin": "builtin",
+      "models_dev_id": null,
+      "context_window": null,
+      "max_output_tokens": null,
+      "input_modalities": [],
+      "output_modalities": [],
+      "supports_tools": null,
+      "supports_reasoning": null,
+      "reasoning_efforts": [
+        "low",
+        "high"
+      ]
+    }
+  ]
+}

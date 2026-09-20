@@ -15,6 +15,7 @@ import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
 import { Button } from '../ui/button';
 import { errorMessage } from '@/lib/errorMessage';
+import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 
 type BackendKey = 'claude' | 'opencode' | 'codex';
 
@@ -51,7 +52,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [model, setModel] = useState('');
-  const [effort, setEffort] = useState<string>('medium');
+  // null is a real answer, not a missing one: a model whose catalog row states
+  // no efforts is created with the effort parameter omitted.
+  const [effort, setEffort] = useState<string | null>('medium');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,21 +103,20 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   // change, so handleSubmit never sends an effort the backend would reject
   // (e.g. picking Codex `xhigh` then switching to Claude).
   useEffect(() => {
-    if (effort && !effortOptions.includes(effort)) {
-      setEffort(effortOptions.includes('medium') ? 'medium' : effortOptions[0] ?? 'medium');
+    if (effortOptions.length === 0) {
+      setEffort(null);
+      return;
+    }
+    if (effort === null || !effortOptions.includes(effort)) {
+      setEffort(effortOptions.includes('medium') ? 'medium' : effortOptions[0]);
     }
   }, [effortOptions, effort]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      // Don't let Esc close the whole create dialog when the expand editor is
-      // open on top — that Esc belongs to the editor.
-      if (e.key === 'Escape' && !editorOpen) onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose, editorOpen]);
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    // Don't let Esc close the whole create dialog when the expand editor is
+    // open on top — that Esc belongs to the editor.
+    if (event.key === 'Escape' && !editorOpen) onClose();
+  }, open);
 
   if (!open) return null;
 
@@ -146,9 +148,9 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   };
 
   const colorClasses: Record<BackendOption['color'], { border: string; bg: string; text: string }> = {
-    mint: { border: 'border-mint', bg: 'bg-mint/[0.08]', text: 'text-mint' },
-    cyan: { border: 'border-cyan', bg: 'bg-cyan/[0.08]', text: 'text-cyan' },
-    violet: { border: 'border-violet', bg: 'bg-violet/[0.08]', text: 'text-violet' },
+    mint: { border: 'border-mint', bg: 'bg-mint/[0.08]', text: 'text-mint-ink' },
+    cyan: { border: 'border-cyan', bg: 'bg-cyan/[0.08]', text: 'text-cyan-ink' },
+    violet: { border: 'border-violet', bg: 'bg-violet/[0.08]', text: 'text-violet-ink' },
   };
 
   return (
@@ -247,9 +249,12 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         {/* Model + Effort — both rows share a 38px height so the Combobox
             on the left and the segmented control on the right align. The
             segments use rounded-md py-2 (was py-0.5 which collapsed to
-            ~24px and looked stubby next to the model field). */}
+            ~24px and looked stubby next to the model field). A model whose
+            catalog row states no efforts has no field here at all: an empty
+            bordered box would read as a control that failed to load, so the
+            model takes the whole row instead. */}
         <div className="grid grid-cols-2 gap-3">
-          <div className="flex flex-col gap-1.5">
+          <div className={clsx('flex flex-col gap-1.5', effortOptions.length === 0 && 'col-span-2')}>
             <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
               {t('agents.create.model')}
             </div>
@@ -262,29 +267,31 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
               allowCustomValue
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
-              {t('agents.detail.effort')}
+          {effortOptions.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
+                {t('agents.detail.effort')}
+              </div>
+              <div
+                className="grid min-h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
+                style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
+              >
+                {effortOptions.map((opt) => (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setEffort(opt)}
+                    className={clsx(
+                      'truncate rounded px-0.5 py-1.5 text-[11px] capitalize transition',
+                      effort === opt ? 'bg-mint-soft font-bold text-mint-ink' : 'font-medium text-muted hover:text-foreground',
+                    )}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div
-              className="grid h-[38px] gap-0.5 rounded-md border border-border-strong bg-surface-2 p-0.5"
-              style={{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }}
-            >
-              {effortOptions.map((opt) => (
-                <button
-                  key={opt}
-                  type="button"
-                  onClick={() => setEffort(opt)}
-                  className={clsx(
-                    'truncate rounded px-0.5 text-[11px] capitalize transition',
-                    effort === opt ? 'bg-mint-soft font-bold text-mint' : 'font-medium text-muted hover:text-foreground',
-                  )}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
 
         {/* System prompt — with token estimate + expand-to-editor, mirroring
@@ -321,7 +328,7 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
         </div>
 
         {error && (
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
             {error}
           </div>
         )}
@@ -334,20 +341,17 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
           >
             {t('common.cancel')}
           </button>
-          <button
+          <Button
             type="button"
+            variant="brand"
+            size={null}
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className={clsx(
-              'inline-flex items-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-bold transition',
-              canSubmit
-                ? 'bg-mint text-[#080812] shadow-[0_0_14px_-4px_rgba(91,255,160,0.6)] hover:brightness-110'
-                : 'cursor-not-allowed bg-muted-soft text-muted',
-            )}
+            className="gap-1.5 rounded-md px-4 py-1.5 text-[12px]"
           >
             {t('agents.create.submit')}
             <ArrowRight className="size-3.5" />
-          </button>
+          </Button>
         </div>
       </div>
     </div>

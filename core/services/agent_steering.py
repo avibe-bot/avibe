@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping
 
+from core.agent_input import AgentInputMetadata
+
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
 
@@ -32,6 +34,7 @@ class SteerRequest:
     expected_native_turn_id: str
     text: str
     attempt_id: str = ""
+    input_metadata: AgentInputMetadata | None = None
 
 
 @dataclass(frozen=True)

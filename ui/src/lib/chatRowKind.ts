@@ -18,7 +18,7 @@
 // ``author`` and ``source`` still decide among the ROLE families below, which is
 // what they legitimately describe. What they no longer do is decide whether a
 // typed row is that type.
-import { isNotifyMessageType } from './chatMessageTypes';
+import { isBoundaryMessage, isNotifyMessageType } from './chatMessageTypes';
 import { readAnnotationView, type AnnotationView } from './annotationView';
 
 // A row typed ``annotation`` whose display record is unreadable. Every writer of
@@ -32,6 +32,7 @@ const UNREADABLE_ANNOTATION: AnnotationView = { direction: 'agent', resolved: fa
 // family and then disagree with a second lookup about what is in it.
 export type ChatRowKind =
   | { kind: 'annotation'; annotation: AnnotationView }
+  | { kind: 'boundary' }
   | { kind: 'notify' }
   | { kind: 'agent' }
   | { kind: 'system' }
@@ -43,6 +44,7 @@ type ChatRowFields = {
   author: string;
   source?: string | null;
   content?: unknown;
+  metadata?: Record<string, unknown> | null;
 };
 
 export function chatRowKind(message: ChatRowFields): ChatRowKind {
@@ -52,6 +54,7 @@ export function chatRowKind(message: ChatRowFields): ChatRowKind {
   if (message.type === 'annotation') {
     return { kind: 'annotation', annotation: readAnnotationView(message.content) ?? UNREADABLE_ANNOTATION };
   }
+  if (isBoundaryMessage(message)) return { kind: 'boundary' };
   // Runtime notifications and legacy error rows are compact status pills, not
   // Agent-authored answers.
   if (isNotifyMessageType(message.type)) return { kind: 'notify' };

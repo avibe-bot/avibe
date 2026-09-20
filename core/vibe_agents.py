@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import yaml
 from sqlalchemy import func, or_, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
@@ -27,9 +28,17 @@ from storage.models import (
     messages,
     run_definitions,
     scope_settings,
+    scopes,
     state_meta,
 )
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+)
+from vibe.authorization import (
+    instance_owner_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +126,29 @@ class AgentNameValidationError(ValueError):
         self.agent_name = str(agent_name)
 
 
+class VibeAgentAccessError(PermissionError):
+    """Raised when the caller is not allowed to use a Vibe Agent."""
+
+
+def get_agent_resource_metadata(
+    connection: Connection,
+    resource_id: str,
+) -> dict[str, str] | None:
+    """Return the safe Agent fields allowed in the hosted resource index."""
+
+    row = connection.execute(
+        select(agents.c.name, agents.c.updated_at)
+        .where(agents.c.id == resource_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    return {
+        "display_name": str(row["name"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -190,6 +222,127 @@ def _json_loads(value: str | None, default: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return default
+
+
+def resolve_resource_access_context(user_context: Any = None):
+    """Resolve request ACL context while preserving local service behavior."""
+
+    from storage import resource_access_service
+
+    return resource_access_service.resolve_resource_access_context(user_context)
+
+
+def ensure_agent_selection_access(
+    connection: Connection,
+    *,
+    agent_name: str | None = None,
+    agent_id: str | None = None,
+    user_context: Any = None,
+    missing_is_error: bool = False,
+) -> "VibeAgent | None":
+    """Resolve an Agent and require use access to that exact resource."""
+
+    from storage import resource_access_service
+
+    selected_name = str(agent_name or "").strip()
+    selected_id = str(agent_id or "").strip()
+    if not selected_name and not selected_id:
+        return None
+
+    context = resolve_resource_access_context(user_context)
+    statement = select(agents)
+    if selected_id:
+        statement = statement.where(agents.c.id == selected_id)
+    if selected_name:
+        statement = statement.where(
+            agents.c.normalized_name == normalize_agent_name(selected_name)
+        )
+    row = connection.execute(statement.limit(1)).mappings().first()
+    if row is None:
+        if missing_is_error:
+            raise LookupError("Agent not found")
+        # Members keep the pre-catalog fallback for historical backend names:
+        # selecting a backend is part of Agent entitlement, not Owner identity.
+        # Editors and Viewers must still resolve a real Agent row.
+        if context.has_role("member"):
+            return None
+        raise VibeAgentAccessError("Agent access is not permitted.")
+
+    agent = VibeAgentStore._from_row(row)
+    if not resource_access_service.can_use_resource(
+        context,
+        "agent",
+        agent.id,
+        connection=connection,
+    ):
+        raise VibeAgentAccessError("Agent access is not permitted.")
+    return agent
+
+
+def ensure_agent_name_access(
+    agent_name: str | None,
+    *,
+    user_context: Any = None,
+) -> None:
+    """Reject a remote task/watch binding to an inaccessible named Agent."""
+
+    if not str(agent_name or "").strip():
+        return
+    context = resolve_resource_access_context(user_context)
+    store = VibeAgentStore()
+    try:
+        try:
+            store.require_accessible(str(agent_name), user_context=context)
+        except ValueError:
+            # Existing local/Owner definitions may predate the Agent catalog.
+            # A Member binding is new data and must resolve a real Agent row,
+            # matching the execution-time catalog requirement.
+            if context.is_instance_owner:
+                return
+            raise
+    finally:
+        store.close()
+
+
+def _require_agent_create_access(user_context: Any) -> None:
+    context = resolve_resource_access_context(user_context)
+    if context.can_manage_agents:
+        return
+    raise VibeAgentAccessError("Agent access is not permitted.")
+
+
+def _require_agent_onboarding_access(user_context: Any):
+    """Require Instance Owner identity for Organization Agent onboarding.
+
+    Onboarding is a one-way bulk migration over *every* Agent row in the
+    instance, not a per-resource action: the inventory discloses Agents the
+    caller cannot otherwise see, and the write claims every policy-less Agent --
+    built-ins and legacy/local rows nobody owns -- under the caller's private
+    ACL, which hides them from everyone else and can fence an existing default
+    route.
+
+    It is deliberately NOT gated on ``can_manage_access_members``: this is a
+    migration tool, not member management, so it does not belong to that
+    capability even though both happen to be Owner-only today. Owner identity is
+    the gate because the migration's blast radius is the whole instance.
+    """
+
+    context = resolve_resource_access_context(user_context)
+    if context.is_instance_owner:
+        return context
+    raise VibeAgentAccessError("Agent access is not permitted.")
+
+
+def _agent_onboarding_counts(inventory: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "total": len(inventory),
+        "system": sum(item.get("source") in {"builtin", "system"} for item in inventory),
+        "custom": sum(item.get("source") not in {"builtin", "system"} for item in inventory),
+        "not_onboarded": sum(item.get("status") == "not_onboarded" for item in inventory),
+        "private": sum(item.get("status") == "private" for item in inventory),
+        "published": sum(item.get("status") == "published" for item in inventory),
+        "conflicts": sum(item.get("status") == "managed_elsewhere" for item in inventory),
+    }
 
 
 def _rewrite_scope_agent_name(
@@ -349,6 +502,153 @@ def agent_reference_is_usable(
     return archived_at is not None and bool(archived_was_enabled)
 
 
+def resolve_effective_default_agent(connection, *, enabled_only: bool = True) -> VibeAgent | None:
+    """Resolve the same instance-wide default used by runtime dispatch."""
+
+    raw_name = connection.execute(
+        select(state_meta.c.value_json).where(state_meta.c.key == DEFAULT_AGENT_META_KEY).limit(1)
+    ).scalar_one_or_none()
+    configured_name = _json_loads(raw_name, None)
+    candidates = [configured_name, DEFAULT_AGENT_NAME]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        try:
+            normalized = normalize_agent_name(candidate)
+        except ValueError:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        statement = select(agents).where(agents.c.normalized_name == normalized)
+        if enabled_only:
+            statement = statement.where(agents.c.enabled == 1)
+        row = connection.execute(statement.limit(1)).mappings().first()
+        if row is not None:
+            return VibeAgentStore._from_row(row)
+
+    if not enabled_only:
+        return None
+    row = connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name).limit(1)).mappings().first()
+    return VibeAgentStore._from_row(row) if row is not None else None
+
+
+# Default routing surfaces -- the instance-wide default Agent and a project's
+# default Agent -- are resolved on behalf of whoever starts an unpinned session,
+# never on behalf of whoever configured them. Validating the assignment against
+# the resource policy's *shape* was tried and abandoned: no predicate over
+# {public, scope, private, absent} is both sound and usable. `private` and
+# `scope` narrow the audience; `absent` is the normal shape on a personal
+# install, where no Agent carries an ACL row at all, so rejecting it refuses
+# every Agent on the primary local-first deployment; and `public` still admits
+# only active members of the policy's organization, while instance and project
+# access are also granted to email and email-domain principals.
+#
+# So a default is advisory, and the ACL is enforced where it is meaningful: at
+# use time, against the principal actually resolving it. A default that some
+# principal cannot use degrades for that principal instead of being refused for
+# everyone at assignment time.
+def resolve_usable_default_agent(
+    connection,
+    *,
+    context,
+    agent: VibeAgent | None,
+) -> VibeAgent | None:
+    """Degrade a resolved default to one this caller may actually use.
+
+    A default is configured by one principal and resolved by another, so the
+    configurer can perfectly well name an Agent some of the audience cannot use.
+    Refusing the assignment cannot fix that (see the note above), and refusing
+    the session is worse than it looks: for a project default it means nobody
+    except the configurer can start a normal session there.
+
+    So fall back instead. Prefer a builtin, then any other enabled Agent the
+    caller can use, so an unpinned session keeps working. Return ``None`` when
+    nothing is usable and let the caller raise the existing machine-readable
+    access error, which is the signal the UI uses to prompt for an explicit
+    choice.
+
+    This is the *unpinned* path only. An explicit Agent selection is a stated
+    intent, not an advisory hint, so ``ensure_agent_selection_access`` still
+    errors rather than silently substituting a different Agent.
+    """
+
+    from storage import resource_access_service
+
+    def _usable(candidate: VibeAgent | None) -> bool:
+        return candidate is not None and resource_access_service.can_use_resource(
+            context,
+            "agent",
+            candidate.id,
+            connection=connection,
+        )
+
+    if _usable(agent):
+        return agent
+
+    rows = (
+        connection.execute(select(agents).where(agents.c.enabled == 1).order_by(agents.c.name))
+        .mappings()
+        .all()
+    )
+    candidates = [VibeAgentStore._from_row(row) for row in rows]
+    # Builtins first: they are the shape every install has and the one a caller
+    # is most likely to be entitled to.
+    candidates.sort(key=lambda item: 0 if item.source == "builtin" else 1)
+    for candidate in candidates:
+        if agent is not None and candidate.id == agent.id:
+            continue
+        if _usable(candidate):
+            return candidate
+    return None
+
+
+def ensure_default_agent_access(
+    connection,
+    *,
+    user_context: Any = None,
+    missing_is_error: bool = False,
+) -> VibeAgent | None:
+    """Resolve the effective default Agent for a caller, degrading if needed."""
+
+    context = resolve_resource_access_context(user_context)
+    agent = resolve_effective_default_agent(connection)
+    if agent is None:
+        if missing_is_error:
+            raise LookupError("Default Agent not found")
+        return None
+    usable = resolve_usable_default_agent(connection, context=context, agent=agent)
+    if usable is None:
+        raise VibeAgentAccessError("Agent access is not permitted.")
+    return usable
+
+
+def ensure_session_agent_access(
+    connection,
+    session: dict[str, Any],
+    *,
+    user_context: Any = None,
+) -> VibeAgent | None:
+    """Revalidate the Agent selected by a persisted session before dispatch."""
+
+    context = resolve_resource_access_context(user_context)
+    if session.get("agent_id") or session.get("agent_name"):
+        return ensure_agent_selection_access(
+            connection,
+            agent_name=session.get("agent_name"),
+            agent_id=session.get("agent_id"),
+            user_context=context,
+        )
+    if not session.get("agent_backend"):
+        return ensure_default_agent_access(connection, user_context=context)
+    # A backend-only row predates the Agent catalog. Dispatch entitlement
+    # follows Agent management rank; it is not an Owner identity operation.
+    if not context.has_role("member"):
+        raise VibeAgentAccessError("Agent access is not permitted.")
+    return None
+
+
 @dataclass(frozen=True)
 class AgentImportCandidate:
     name: str
@@ -410,7 +710,11 @@ class VibeAgentStore:
         *,
         include_disabled: bool = True,
         include_archived: bool = False,
+        user_context: Any = None,
     ) -> list[VibeAgent]:
+        from storage import resource_access_service
+
+        context = resolve_resource_access_context(user_context)
         with self.engine.connect() as conn:
             stmt = select(agents).order_by(agents.c.name)
             if not include_disabled:
@@ -420,8 +724,124 @@ class VibeAgentStore:
                     stmt = stmt.where(agents.c.enabled == 1)
             if not include_archived:
                 stmt = stmt.where(agents.c.archived_at.is_(None))
-            rows = conn.execute(stmt).mappings()
+            rows = conn.execute(stmt).mappings().all()
+            rows = resource_access_service.filter_accessible_resources(
+                context,
+                "agent",
+                rows,
+                connection=conn,
+            )
             return [self._from_row(row) for row in rows]
+
+    def organization_onboarding_inventory(self, *, user_context: Any = None) -> dict[str, Any]:
+        """Return the safe owner inventory for explicit Organization onboarding."""
+
+        from storage import resource_access_service
+
+        context = _require_agent_onboarding_access(user_context)
+        organization_id = context.organization_id if context.is_active_organization_member else None
+        if not organization_id or not context.subject:
+            return {
+                "available": False,
+                "organization_id": None,
+                "agents": [],
+                "counts": _agent_onboarding_counts([]),
+            }
+
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.name)).mappings().all()
+            policies = {
+                str(policy["resource_id"]): policy
+                for policy in resource_access_service.list_resource_policies(
+                    resource_kind="agent",
+                    connection=conn,
+                )
+            }
+
+        inventory: list[dict[str, Any]] = []
+        for row in rows:
+            agent = self._from_row(row)
+            policy = policies.get(agent.id)
+            visible_policy = policy if policy and policy.get("organization_id") == organization_id else None
+            if policy is None:
+                status = "not_onboarded"
+            elif visible_policy is None:
+                status = "managed_elsewhere"
+            elif visible_policy.get("access_level") == "private":
+                status = "private"
+            else:
+                status = "published"
+            inventory.append(
+                {
+                    "id": agent.id,
+                    "name": agent.name,
+                    "backend": agent.backend,
+                    "source": agent.source,
+                    "enabled": agent.enabled,
+                    "status": status,
+                    "access_level": visible_policy.get("access_level") if visible_policy else None,
+                    "group_ids": list(visible_policy.get("group_ids") or []) if visible_policy else [],
+                    "policy_revision": int(visible_policy.get("policy_revision") or 0) if visible_policy else None,
+                    "applied_acl_revision": (
+                        int(visible_policy.get("last_applied_control_plane_revision") or 0)
+                        if visible_policy
+                        else None
+                    ),
+                }
+            )
+        return {
+            "available": True,
+            "organization_id": organization_id,
+            "agents": inventory,
+            "counts": _agent_onboarding_counts(inventory),
+        }
+
+    def onboard_organization_agents(self, *, user_context: Any = None) -> dict[str, Any]:
+        """Register every missing Agent as private without replacing any ACL."""
+
+        from storage import resource_access_service
+
+        context = _require_agent_onboarding_access(user_context)
+        if not context.is_active_organization_member or not context.organization_id or not context.subject:
+            raise VibeAgentAccessError("Agent access is not permitted.")
+
+        created = 0
+        unchanged = 0
+        conflicts = 0
+        with self.engine.begin() as conn:
+            rows = conn.execute(select(agents).order_by(agents.c.name)).mappings().all()
+            policies = {
+                str(policy["resource_id"]): policy
+                for policy in resource_access_service.list_resource_policies(
+                    resource_kind="agent",
+                    connection=conn,
+                )
+            }
+            for row in rows:
+                agent = self._from_row(row)
+                existing = policies.get(agent.id)
+                if existing is not None:
+                    if existing.get("organization_id") == context.organization_id:
+                        unchanged += 1
+                    else:
+                        conflicts += 1
+                    continue
+                resource_access_service.ensure_resource_policy(
+                    conn,
+                    resource_kind="agent",
+                    resource_id=agent.id,
+                    organization_id=context.organization_id,
+                    owner_user_id=context.subject,
+                    owner_email=context.email,
+                    access_level="private",
+                    created_by_user_id=context.subject,
+                    updated_by_user_id=context.subject,
+                )
+                created += 1
+
+        result = self.organization_onboarding_inventory(user_context=context)
+        result.update({"created": created, "unchanged": unchanged, "conflicts": conflicts})
+        return result
 
     def get(self, name: str) -> Optional[VibeAgent]:
         normalized = normalize_agent_name(name)
@@ -488,6 +908,60 @@ class VibeAgentStore:
             )
         return agent
 
+    def require_accessible(self, name: str, *, user_context: Any = None, enabled_only: bool = False) -> VibeAgent:
+        """Return an Agent only when the caller may use its ACL resource."""
+
+        try:
+            with self.engine.connect() as conn:
+                agent = ensure_agent_selection_access(
+                    conn,
+                    agent_name=name,
+                    user_context=user_context,
+                    missing_is_error=True,
+                )
+        except LookupError as exc:
+            raise ValueError(f"agent '{name}' not found") from exc
+        assert agent is not None
+        if enabled_only and not agent.enabled:
+            raise ValueError(f"agent '{agent.name}' is disabled")
+        return agent
+
+    def require_manageable(self, name: str, *, user_context: Any = None) -> VibeAgent:
+        """Return an Agent only when the caller may change its resource."""
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agents).where(agents.c.normalized_name == normalize_agent_name(name)).limit(1)
+            ).mappings().first()
+            if row is None:
+                raise ValueError(f"agent '{name}' not found")
+            agent = self._from_row(row)
+            return self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
+
+    @staticmethod
+    def _require_manageable_agent(
+        conn: Connection,
+        agent: VibeAgent,
+        *,
+        user_context: Any = None,
+    ) -> VibeAgent:
+        """Check mutation access using the transaction that owns the Agent row."""
+
+        from storage import resource_access_service
+
+        context = resolve_resource_access_context(user_context)
+        if not resource_access_service.can_manage_resource_acl(
+            context,
+            "agent",
+            agent.id,
+            connection=conn,
+        ):
+            raise VibeAgentAccessError("Agent access is not permitted.")
+        return agent
+
     def create(
         self,
         *,
@@ -501,9 +975,15 @@ class VibeAgentStore:
         source_ref: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         enabled: bool = True,
+        user_context: Any = None,
     ) -> VibeAgent:
+        from storage import resource_access_service
+
         raw_name, normalized = _validated_public_agent_name(name)
         normalized_backend = validate_agent_backend(backend)
+        context = resolve_resource_access_context(user_context)
+        if source != "builtin":
+            _require_agent_create_access(context)
         now = _utc_now_iso()
         agent = VibeAgent(
             id=uuid4().hex[:12],
@@ -524,6 +1004,22 @@ class VibeAgentStore:
         try:
             with self.engine.begin() as conn:
                 conn.execute(agents.insert().values(**self._values(agent)))
+                # Register a private ACL for any creating subject, including a
+                # Personal/email member. Organization *use* still follows the
+                # stored policy; omitting the row hid the Agent from its creator
+                # because missing-policy fails closed for non-owners.
+                if source != "builtin" and context.subject:
+                    resource_access_service.ensure_resource_policy(
+                        conn,
+                        resource_kind="agent",
+                        resource_id=agent.id,
+                        organization_id=context.organization_id,
+                        owner_user_id=context.subject,
+                        owner_email=context.email,
+                        access_level="private",
+                        created_by_user_id=context.subject,
+                        updated_by_user_id=context.subject,
+                    )
         except IntegrityError as exc:
             raise ValueError(f"agent '{name}' already exists") from exc
         return agent
@@ -538,6 +1034,7 @@ class VibeAgentStore:
         system_prompt: Any = _UNSET,
         metadata: Any = _UNSET,
         enabled: Any = _UNSET,
+        user_context: Any = None,
     ) -> VibeAgent:
         normalized = normalize_agent_name(name)
         with self.engine.begin() as conn:
@@ -550,6 +1047,11 @@ class VibeAgentStore:
                     f"agent '{name}' not found", agent_name=name, reason="missing"
                 )
             existing = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                existing,
+                user_context=user_context,
+            )
             if existing.archived_at is not None:
                 raise AgentArchivedEditError(agent_name=name)
 
@@ -579,10 +1081,16 @@ class VibeAgentStore:
             ).mappings().one()
             return self._from_row(updated)
 
-    def set_enabled(self, name: str, enabled: bool) -> VibeAgent:
-        return self.update(name, enabled=enabled)
+    def set_enabled(self, name: str, enabled: bool, *, user_context: Any = None) -> VibeAgent:
+        return self.update(name, enabled=enabled, user_context=user_context)
 
-    def rename(self, name: str, new_name: str) -> VibeAgent:
+    def rename(
+        self,
+        name: str,
+        new_name: str,
+        *,
+        user_context: Any = None,
+    ) -> VibeAgent:
         raw_new_name, new_normalized = _validated_public_agent_name(new_name)
         old_normalized = normalize_agent_name(name)
         now = _utc_now_iso()
@@ -595,8 +1103,13 @@ class VibeAgentStore:
                 if row is None:
                     raise AgentUnavailableError(
                         f"agent '{name}' not found", agent_name=name, reason="missing"
-                    )
+                )
                 agent = self._from_row(row)
+                self._require_manageable_agent(
+                    conn,
+                    agent,
+                    user_context=user_context,
+                )
                 if agent.archived_at is not None:
                     raise AgentArchivedEditError(agent_name=name)
                 if is_builtin_default_agent(agent):
@@ -642,7 +1155,12 @@ class VibeAgentStore:
             raise ValueError(f"agent '{new_name}' already exists") from exc
         return self._from_row(updated)
 
-    def archive(self, name: str) -> Optional[AgentArchiveResult]:
+    def archive(
+        self,
+        name: str,
+        *,
+        user_context: Any = None,
+    ) -> Optional[AgentArchiveResult]:
         normalized = normalize_agent_name(name)
         now = _utc_now_iso()
         with self.engine.begin() as conn:
@@ -654,8 +1172,18 @@ class VibeAgentStore:
                 legacy = self._legacy_archive_for_original_name(conn, normalized)
                 if legacy is None:
                     return None
+                self._require_manageable_agent(
+                    conn,
+                    legacy,
+                    user_context=user_context,
+                )
                 return self._compact_legacy_archive(conn, legacy, now=now)
             agent = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
             if is_builtin_default_agent(agent):
                 raise AgentArchiveError(
                     code="agent_builtin",
@@ -821,15 +1349,29 @@ class VibeAgentStore:
             default_agent_name=self._default_agent_name(conn),
         )
 
-    def remove(self, name: str) -> bool:
-        agent = self.get(name)
-        if agent is None:
-            return False
-        if is_builtin_default_agent(agent):
-            raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
-        normalized = agent.normalized_name
+    def remove(self, name: str, *, user_context: Any = None) -> bool:
+        from storage import resource_access_service
+
         with self.engine.begin() as conn:
-            result = conn.execute(agents.delete().where(agents.c.normalized_name == normalized))
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agents)
+                .where(agents.c.normalized_name == normalize_agent_name(name))
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            agent = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
+            if is_builtin_default_agent(agent):
+                raise ValueError(f"agent '{agent.name}' is built in and cannot be deleted")
+            result = conn.execute(agents.delete().where(agents.c.id == agent.id))
+            if result.rowcount:
+                resource_access_service.delete_resource_policy(conn, "agent", agent.id)
             return bool(result.rowcount)
 
     def reference_counts(self, name: str) -> dict[str, int]:
@@ -928,8 +1470,14 @@ class VibeAgentStore:
             )
 
         scope_rows = conn.execute(
-            select(scope_settings.c.scope_id, scope_settings.c.agent_name, scope_settings.c.settings_json)
+            select(
+                scope_settings.c.scope_id,
+                scope_settings.c.agent_name,
+                scope_settings.c.settings_json,
+                scopes.c.scope_type,
+            ).select_from(scope_settings.join(scopes, scopes.c.id == scope_settings.c.scope_id))
         ).mappings().all()
+        runtime_settings_changed = False
         for row in scope_rows:
             values: dict[str, Any] = {}
             if _matches_agent_reference(row["agent_name"], reference_names):
@@ -945,6 +1493,11 @@ class VibeAgentStore:
                     .where(scope_settings.c.scope_id == row["scope_id"])
                     .values(**values)
                 )
+                if str(row["scope_type"]) in RUNTIME_SETTINGS_SCOPE_TYPES:
+                    runtime_settings_changed = True
+
+        if runtime_settings_changed:
+            mark_runtime_settings_changed(conn)
 
         definition_rows = conn.execute(
             select(run_definitions.c.id, run_definitions.c.agent_name, run_definitions.c.metadata_json)
@@ -1041,7 +1594,12 @@ class VibeAgentStore:
         ).mappings().first()
         return VibeAgentStore._from_row(first_enabled) if first_enabled is not None else None
 
-    def import_candidates(self, candidates: Iterable[AgentImportCandidate]) -> AgentImportResult:
+    def import_candidates(
+        self,
+        candidates: Iterable[AgentImportCandidate],
+        *,
+        user_context: Any = None,
+    ) -> AgentImportResult:
         imported: list[VibeAgent] = []
         skipped: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -1060,8 +1618,11 @@ class VibeAgentStore:
                         source=candidate.source,
                         source_ref=candidate.source_ref,
                         metadata=candidate.metadata,
+                        user_context=user_context,
                     )
                 )
+            except VibeAgentAccessError:
+                raise
             except Exception as exc:
                 skipped.append({"name": candidate.name, "reason": "invalid", "error": str(exc)})
         return AgentImportResult(imported=imported, skipped=skipped)
@@ -1069,7 +1630,7 @@ class VibeAgentStore:
     def ensure_default_agent(self, *, backend: str = "claude") -> VibeAgent:
         existing = self.get(DEFAULT_AGENT_NAME)
         if existing:
-            self.set_default_agent_name(existing.name)
+            self.set_default_agent_name(existing.name, user_context=instance_owner_context())
             return existing
         agent = self.create(
             name=DEFAULT_AGENT_NAME,
@@ -1079,7 +1640,7 @@ class VibeAgentStore:
             metadata={"builtin": True},
             enabled=True,
         )
-        self.set_default_agent_name(agent.name)
+        self.set_default_agent_name(agent.name, user_context=instance_owner_context())
         return agent
 
     def ensure_builtin_default_agent(self, *, backend: str, name: str | None = None) -> VibeAgent:
@@ -1098,7 +1659,11 @@ class VibeAgentStore:
                 return existing
             merged = {**existing.metadata, **metadata}
             if existing.source != "builtin" or existing.metadata != merged:
-                return self.update(existing.name, metadata=merged)
+                return self.update(
+                    existing.name,
+                    metadata=merged,
+                    user_context=instance_owner_context(),
+                )
             return existing
         return self.create(
             name=agent_name,
@@ -1127,7 +1692,11 @@ class VibeAgentStore:
         elif should_disable:
             updates["enabled"] = False
         if updates:
-            return self.update(agent.name, **updates)
+            return self.update(
+                agent.name,
+                user_context=instance_owner_context(),
+                **updates,
+            )
         return agent
 
     def ensure_builtin_default_agents(
@@ -1159,7 +1728,10 @@ class VibeAgentStore:
         default_agent = self.get(default_name) if default_name else None
         enabled_ensured = [agent for agent in ensured if agent.enabled]
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
-            self.set_default_agent_name(enabled_ensured[0].name)
+            self.set_default_agent_name(
+                enabled_ensured[0].name,
+                user_context=instance_owner_context(),
+            )
         return ensured
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
@@ -1185,8 +1757,16 @@ class VibeAgentStore:
         with self.engine.connect() as conn:
             return self._default_agent_name(conn)
 
-    def set_default_agent_name(self, name: str) -> None:
+    def set_default_agent_name(
+        self,
+        name: str,
+        *,
+        user_context: Any = None,
+    ) -> None:
         normalized = normalize_agent_name(name)
+        context = resolve_resource_access_context(user_context)
+        if not context.can_manage_agents:
+            raise VibeAgentAccessError("Agent access is not permitted.")
         now = _utc_now_iso()
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
@@ -1198,27 +1778,25 @@ class VibeAgentStore:
                     f"agent '{name}' not found", agent_name=name, reason="missing"
                 )
             agent = self._from_row(row)
+            self._require_manageable_agent(
+                conn,
+                agent,
+                user_context=user_context,
+            )
             if not agent.enabled or agent.archived_at is not None:
                 raise AgentUnavailableError(
                     f"agent '{agent.name}' is disabled",
                     agent_name=agent.name,
                     reason="disabled",
                 )
+            # No audience validation here: the default is advisory and the ACL
+            # is enforced per-principal at use time. Agent managers may point
+            # instance-wide routing without widening the target Agent's ACL.
             self._write_default_agent_name(conn, agent.name, now=now)
 
     def get_default_agent(self, *, enabled_only: bool = True) -> Optional[VibeAgent]:
-        name = self.get_default_agent_name()
-        if name:
-            agent = self.get(name)
-            if agent is not None and (agent.enabled or not enabled_only):
-                return agent
-        fallback = self.get(DEFAULT_AGENT_NAME)
-        if fallback is not None and (fallback.enabled or not enabled_only):
-            return fallback
-        if enabled_only:
-            agents_list = self.list_agents(include_disabled=False)
-            return agents_list[0] if agents_list else None
-        return None
+        with self.engine.connect() as conn:
+            return resolve_effective_default_agent(conn, enabled_only=enabled_only)
 
     @staticmethod
     def _from_row(row: Any) -> VibeAgent:

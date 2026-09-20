@@ -4,14 +4,19 @@ import ipaddress
 import json
 import threading
 import time
+import urllib.parse
 from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import func, select
 
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
-from vibe import remote_access
+from storage.db import create_sqlite_engine
+from storage.models import remote_access_authorizations
+from tests.ui_server_test_helpers import remote_session_cookie
+from vibe import api, model_service, remote_access, ui_server
 from vibe import runtime
 
 
@@ -62,10 +67,157 @@ def _config() -> V2Config:
     return config
 
 
+def _session_claims(config: V2Config, *, role: str = "owner") -> dict[str, str | int]:
+    claims = {
+        "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+        "vibe_instance_role": role,
+        "vibe_instance_access_source": "owner",
+    }
+    cloud = config.remote_access.vibe_cloud
+    if cloud.instance_secret and cloud.backend_url:
+        claims["vibe_instance_authorization_revision"] = 1
+    return claims
+
+
+def _session_cookie(
+    config: V2Config,
+    email: str = "alex@example.com",
+    subject: str = "user-1",
+    *,
+    role: str = "owner",
+) -> str:
+    return remote_access.make_session_cookie(
+        config,
+        email,
+        subject,
+        session_claims=_session_claims(config, role=role),
+    )
+
+
+def test_ra_tq_026_remote_status_uses_cf_ray_on_paired_public_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    observed = []
+
+    def status(
+        loaded_config=None,
+        *,
+        client_colo=None,
+        client_access="local",
+        include_network_path=False,
+    ):
+        observed.append((loaded_config, client_colo, client_access, include_network_path))
+        return {"ok": True, "client_colo": client_colo}
+
+    monkeypatch.setattr(remote_access, "status", status)
+    with ui_server.app.test_request_context(
+        "/api/remote-access/status",
+        base_url="https://alex.avibe.bot",
+        headers={"CF-Ray": "9f1234567890abcd-SIN"},
+    ):
+        response = ui_server.remote_access_status()
+
+    assert response.status_code == 200
+    assert observed[0][0].remote_access.vibe_cloud.public_url == config.remote_access.vibe_cloud.public_url
+    assert observed[0][1:] == ("SIN", "remote", True)
+
+
+def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    observed = []
+
+    def status(
+        loaded_config=None,
+        *,
+        client_colo=None,
+        client_access="local",
+        include_network_path=False,
+    ):
+        observed.append((loaded_config, client_colo, client_access, include_network_path))
+        return {"ok": True, "client_colo": client_colo}
+
+    monkeypatch.setattr(remote_access, "status", status)
+    with ui_server.app.test_request_context(
+        "/api/remote-access/status",
+        base_url="http://127.0.0.1:5123",
+        headers={"CF-Ray": "9f1234567890abcd-NRT"},
+    ):
+        response = ui_server.remote_access_status()
+
+    assert response.status_code == 200
+    assert observed[0][1:] == (None, "local", True)
+    assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
+
+
+def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.save()
+    full_payload = {
+        "ok": True,
+        "provider": "vibe_cloud",
+        "enabled": True,
+        "public_url": "https://alex.avibe.bot",
+        "paired": True,
+        "running": True,
+        "pid": 4711,
+        "pid_state": "cloudflared",
+        "binary_found": True,
+        "binary_path": "/usr/local/bin/cloudflared",
+        "binary_version": "2024.1.0",
+        "transport_protocol": "http2",
+        "settings": {
+            "transport_protocol": "http2",
+            "auto_recovery": True,
+            "optimization_profile": "balanced",
+            "edge_ip_version": "4",
+            "edge_bind_address": "192.168.1.5",
+        },
+        "tunnel_quality": {"sampled_at": "2026-08-10T10:00:00Z", "grade": "good"},
+        "network_path": {
+            "schema_version": 1,
+            "provider": "Cloudflare",
+            "asn": 13335,
+            "client_access": "remote",
+        },
+    }
+    monkeypatch.setattr(remote_access, "status", lambda *a, **k: dict(full_payload))
+
+    client = ui_server.app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    remote_response = client.get(
+        "/api/remote-access/status",
+        base_url="https://alex.avibe.bot",
+    )
+    local_response = client.get(
+        "/api/remote-access/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert remote_response.status_code == 200
+    remote_body = remote_response.get_json()
+    assert set(remote_body) == set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS)
+    for sensitive in ("pid", "binary_found", "binary_path", "binary_version"):
+        assert sensitive not in remote_body
+    assert remote_body["network_path"] == full_payload["network_path"]
+    assert remote_body["settings"] == full_payload["settings"]
+    assert remote_body["pid_state"] == "cloudflared"
+
+    assert local_response.status_code == 200
+    assert local_response.get_json() == full_payload
+
+
 def test_session_cookie_roundtrip() -> None:
     config = _config()
 
-    cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     assert remote_access.validate_session_cookie(config, cookie) is True
     assert remote_access.validate_session_cookie(config, cookie + "x") is False
@@ -80,7 +232,7 @@ def test_session_cookie_rejects_empty_session_secret() -> None:
 
 def test_parse_session_cookie_returns_payload_for_fresh_token() -> None:
     config = _config()
-    cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     payload = remote_access.parse_session_cookie(config, cookie)
 
@@ -88,13 +240,256 @@ def test_parse_session_cookie_returns_payload_for_fresh_token() -> None:
     assert payload["email"] == "alex@example.com"
     assert payload["sub"] == "user-1"
     assert payload["instance_id"] == "inst_123"
+    assert payload["vibe_instance_role"] == "owner"
+
+
+def test_parse_session_cookie_rejects_legacy_roleless_payload() -> None:
+    config = _config()
+    issued_at = int(time.time())
+    payload = {
+        "email": "alex@example.com",
+        "sub": "user-1",
+        "instance_id": "inst_123",
+        "vibe_instance_id": "inst_123",
+        "vibe_instance_access_source": "owner",
+        "iat": issued_at,
+        "exp": issued_at + remote_access.SESSION_TTL_SECONDS,
+    }
+    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
+    signature = remote_access._session_signature(config.remote_access.vibe_cloud.session_secret, payload_text)
+
+    assert remote_access.parse_session_cookie(config, f"{payload_text}.{signature}") is None
+
+
+def test_session_claims_reject_missing_or_unknown_instance_role() -> None:
+    config = _config()
+    base_claims = {
+        "vibe_instance_id": "inst_123",
+        "vibe_instance_access_source": "owner",
+    }
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
+        remote_access.session_claims_from_oidc(config, base_claims)
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
+        remote_access.session_claims_from_oidc(config, {**base_claims, "vibe_instance_role": "admin"})
+    claims = remote_access.session_claims_from_oidc(
+        config, {**base_claims, "vibe_instance_role": "member"}
+    )
+    assert claims["vibe_instance_role"] == "member"
+
+
+def test_session_cookie_persists_validated_organization_claims() -> None:
+    config = _config()
+    cookie = remote_session_cookie(
+        config,
+        "member@example.com",
+        "user-1",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+            "vibe_membership_version": "membership-v2",
+        },
+    )
+
+    payload = remote_access.parse_session_cookie(config, cookie)
+
+    assert payload is not None
+    assert payload["vibe_organization_id"] == "org-1"
+    assert payload["vibe_group_ids"] == ["group-engineering"]
+    assert payload["vibe_membership_version"] == "membership-v2"
+    assert remote_access.session_needs_authorization_refresh(
+        payload,
+        now=int(payload["claims_issued_at"]) + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS,
+    ) is True
+
+
+def test_session_cookie_rejects_organization_claims_over_supported_group_limit() -> None:
+    config = _config()
+    group_ids = [f"group-{index}" for index in range(257)]
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as error:
+        remote_access.make_session_cookie(
+            config,
+            "member@example.com",
+            "user-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "viewer",
+                "vibe_instance_access_source": "organization_group",
+                "vibe_organization_id": "org-1",
+                "vibe_organization_member_id": "member-1",
+                "vibe_organization_role": "member",
+                "vibe_group_ids": group_ids,
+            },
+        )
+
+    assert error.value.reason == "invalid_organization_claims"
+
+
+def test_session_claims_accept_organization_member_authorized_by_email() -> None:
+    config = _config()
+
+    claims = remote_access.session_claims_from_oidc(
+        config,
+        {
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "email_domain",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+        },
+    )
+
+    assert claims["vibe_organization_id"] == "org-1"
+
+
+def test_session_claims_reject_partial_organization_context() -> None:
+    config = _config()
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_organization_claims"):
+        remote_access.session_claims_from_oidc(
+            config,
+            {
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_role": "owner",
+                "vibe_instance_access_source": "owner",
+                "vibe_organization_id": None,
+            },
+        )
+
+
+def test_exchange_oauth_code_returns_claims_safe_for_the_local_session(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, id_token):
+            assert id_token == "id-token"
+            return type("SigningKey", (), {"key": "public-key"})()
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+    monkeypatch.setattr(
+        remote_access.jwt,
+        "decode",
+        lambda *args, **kwargs: {
+            "email": "member@example.com",
+            "sub": "user-1",
+            "email_verified": True,
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "viewer",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org-1",
+            "vibe_organization_member_id": "member-1",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["group-engineering"],
+        },
+    )
+
+    result = remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+    cookie = remote_session_cookie(
+        config,
+        result["claims"]["email"],
+        result["claims"]["sub"],
+        session_claims=result["session_claims"],
+    )
+    payload = remote_access.parse_session_cookie(config, cookie)
+
+    assert result["session_claims"] == {
+        "vibe_instance_id": "inst_123",
+        "vibe_instance_role": "viewer",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+        "vibe_organization_member_id": "member-1",
+        "vibe_organization_role": "member",
+        "vibe_group_ids": ["group-engineering"],
+    }
+    assert payload is not None
+    assert payload["vibe_organization_id"] == "org-1"
 
 
 def test_parse_session_cookie_rejects_tampered_signature() -> None:
     config = _config()
-    cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+    cookie = _session_cookie(config)
 
     assert remote_access.parse_session_cookie(config, cookie + "x") is None
+
+
+def test_organization_session_cookie_uses_server_side_claims_for_large_memberships() -> None:
+    config = _config()
+    group_ids = [f"grp-{index:03d}-" + ("x" * 192) for index in range(256)]
+    cookie = remote_access.make_session_cookie(
+        config,
+        "member@example.com",
+        "user-large-membership",
+        session_claims={
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org_123",
+            "vibe_organization_member_id": "member_123",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": group_ids,
+            "vibe_membership_version": "membership-v1",
+        },
+    )
+
+    assert len(cookie.encode("ascii")) <= remote_access.SESSION_COOKIE_MAX_VALUE_BYTES
+    assert group_ids[0] not in cookie
+    payload = remote_access.parse_session_cookie(config, cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == group_ids
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        assert conn.execute(
+            select(func.count()).select_from(remote_access_authorizations)
+        ).scalar_one() == 1
+        conn.execute(remote_access_authorizations.delete())
+    assert remote_access.parse_session_cookie(config, cookie) is None
+
+
+def test_parse_session_cookie_accepts_legacy_inline_organization_claims() -> None:
+    config = _config()
+    issued_at = int(time.time())
+    cookie = remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        {
+            "email": "legacy@example.com",
+            "sub": "legacy-user",
+            "instance_id": "inst_123",
+            "iat": issued_at,
+            "exp": issued_at + remote_access.SESSION_TTL_SECONDS,
+            "claims_issued_at": issued_at,
+            "vibe_instance_id": "inst_123",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "organization_group",
+            "vibe_organization_id": "org_legacy",
+            "vibe_organization_member_id": "member_legacy",
+            "vibe_organization_role": "member",
+            "vibe_group_ids": ["grp_legacy"],
+        },
+    )
+
+    payload = remote_access.parse_session_cookie(config, cookie)
+    assert payload is not None
+    assert payload["vibe_group_ids"] == ["grp_legacy"]
 
 
 def test_session_needs_renewal_only_after_half_ttl() -> None:
@@ -111,7 +506,37 @@ def test_make_session_cookie_requires_session_secret() -> None:
     config.remote_access.vibe_cloud.session_secret = ""
 
     with pytest.raises(ValueError, match="session secret"):
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+        _session_cookie(config)
+
+
+def test_session_cookie_requires_signed_instance_role() -> None:
+    config = _config()
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="invalid_instance_role"):
+        remote_access.make_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            session_claims={
+                "vibe_instance_id": "inst_123",
+                "vibe_instance_access_source": "owner",
+            },
+        )
+
+
+def test_authorization_claims_require_oidc_refresh() -> None:
+    now = 1_700_000_000
+
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": now}) == (
+        now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+    )
+    assert remote_access.session_authorization_refresh_deadline({"claims_issued_at": "invalid"}) is None
+    assert remote_access.session_needs_authorization_refresh(
+        {"claims_issued_at": now}, now=now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS - 1
+    ) is False
+    assert remote_access.session_needs_authorization_refresh(
+        {"claims_issued_at": now}, now=now + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
+    ) is True
 
 
 def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None:
@@ -133,6 +558,34 @@ def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None
 
     assert exc_info.value.reason == "token_endpoint_rejected"
     assert exc_info.value.detail == "invalid_code"
+
+
+def test_exchange_oauth_code_uses_flow_redirect_uri(monkeypatch) -> None:
+    config = _config()
+    captured = {}
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    def post(url, *, data, headers, timeout):
+        captured.update({"url": url, "data": data, "headers": headers, "timeout": timeout})
+        return ResponseStub()
+
+    monkeypatch.setattr(remote_access.requests, "post", post)
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError, match="missing_id_token"):
+        remote_access.exchange_oauth_code(
+            config,
+            "code-1",
+            "verifier-1",
+            redirect_uri="https://max.fileguard.io/auth/callback",
+        )
+
+    assert captured["data"]["redirect_uri"] == "https://max.fileguard.io/auth/callback"
 
 
 def test_oauth_code_exchange_error_string_omits_rejection_detail() -> None:
@@ -230,6 +683,8 @@ def test_exchange_oauth_code_allows_30_seconds_of_clock_skew(
             "iat": issued_at,
             "exp": issued_at + 300,
             "vibe_instance_id": config.remote_access.vibe_cloud.instance_id,
+            "vibe_instance_role": "owner",
+            "vibe_instance_access_source": "owner",
             "email_verified": True,
         },
         private_key,
@@ -263,9 +718,15 @@ def test_exchange_oauth_code_allows_30_seconds_of_clock_skew(
         assert exc_info.value.reason == expected_reason
 
 
-def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("setup_host", "origin_host"),
+    [("127.0.0.1", "127.0.0.1"), ("fd00::1", "[::1]"), ("[2001:db8::5]", "[::1]")],
+)
+def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path, setup_host, origin_host) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
     config = _config()
+    config.ui.setup_host = setup_host
     config.remote_access.vibe_cloud.enabled = False
     config.remote_access.vibe_cloud.session_secret = ""
     config.save()
@@ -273,7 +734,7 @@ def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
     def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
         assert url == "https://backend.test/api/v1/pairing/redeem"
         assert payload["pairing_key"] == "vrp_test"
-        assert payload["origin_service"] == "http://127.0.0.1:5123"
+        assert payload["origin_service"] == f"http://{origin_host}:5123"
         assert kwargs["connection_target"].hostname == "backend.test"
         assert kwargs["connection_target"].connect_host == "93.184.216.34"
         return {
@@ -293,6 +754,12 @@ def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
     monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+    refreshes: list[bool] = []
+    monkeypatch.setattr(
+        model_service,
+        "request_model_service_refresh",
+        lambda: refreshes.append(True),
+    )
 
     result = remote_access.pair("vrp_test", "https://backend.test")
     saved_payload = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
@@ -303,6 +770,35 @@ def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
     assert saved_payload["remote_access"]["vibe_cloud"]["enabled"] is True
     assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
     assert saved_payload["remote_access"]["vibe_cloud"]["session_secret"]
+    assert refreshes == [True]
+
+
+def test_disabling_pairing_requests_an_immediate_model_service_refresh(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_id = "inst_123"
+    cloud.instance_secret = "instance-secret"
+    config.save()
+    refreshes: list[bool] = []
+    monkeypatch.setattr(
+        model_service,
+        "request_model_service_refresh",
+        lambda: refreshes.append(True),
+    )
+
+    saved = api.save_config(
+        {"remote_access": {"vibe_cloud": {"enabled": False}}},
+        validate_remote_access_network=False,
+    )
+
+    assert saved.remote_access.vibe_cloud.runtime_credentials() is None
+    assert refreshes == [True]
 
 
 def test_pair_origin_service_follows_effective_ui_port(monkeypatch, tmp_path) -> None:
@@ -459,6 +955,7 @@ def test_pair_rejects_custom_proxy_only_dns_backend(monkeypatch) -> None:
 
 def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200
@@ -512,6 +1009,7 @@ def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(mo
 
 def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> None:
     attempts: list[str] = []
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
     class FakeResponse:
         status = 200
@@ -770,6 +1268,37 @@ def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, t
     assert remote_access.origin_service_for_pairing() == "http://[::1]:15130"
 
 
+@pytest.mark.parametrize(
+    ("setup_host", "bind_host", "origin_host"),
+    [
+        ("", "127.0.0.1", "127.0.0.1"),
+        ("ui.example.test", "0.0.0.0", "127.0.0.1"),
+        ("192.168.2.3", "0.0.0.0", "127.0.0.1"),
+        ("0.0.0.0", "0.0.0.0", "127.0.0.1"),
+        ("127.0.0.2", "127.0.0.2", "127.0.0.2"),
+        ("::1", "::1", "[::1]"),
+        ("[::1]", "::1", "[::1]"),
+        ("::", "::", "[::1]"),
+        ("[::]", "::", "[::1]"),
+        ("fd00::1", "::", "[::1]"),
+        ("2001:db8::5", "::", "[::1]"),
+        (" [2001:db8::5] ", "::", "[::1]"),
+        ("fe80::1%eth0", "::", "[::1]"),
+        ("::ffff:192.0.2.5", "::", "[::1]"),
+    ],
+)
+def test_pairing_consumers_share_the_bind_address_family(monkeypatch, setup_host, bind_host, origin_host):
+    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
+    config = _config()
+    config.ui.setup_host = setup_host
+    config.ui.setup_port = 15130
+    origin = f"http://{origin_host}:15130"
+
+    assert runtime.effective_ui_bind_host(config) == bind_host
+    assert remote_access.origin_service_for_pairing(config) == origin
+    assert model_service._model_service_ui_origins(config) == (origin,)
+
+
 def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -843,6 +1372,16 @@ def test_ra_tq_014_runtime_status_payload_includes_v2_request_path(monkeypatch, 
 
     assert payload["tunnel_quality"]["schema_version"] == 2
     assert payload["tunnel_quality"]["request_path"]["latency_ms"]["p95"] == 1100
+def test_runtime_status_payload_omits_unknown_observed_origin(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(remote_access, "_local_ui_healthy", lambda cfg: True)
+    monkeypatch.setattr(remote_access, "status", lambda cfg: {"running": True, "binary_found": True})
+    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: None)
+
+    payload = remote_access.runtime_status_payload(config, event="heartbeat")
+
+    assert "observed_origin_service" not in payload
 
 
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
@@ -909,6 +1448,288 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
     ]
 
 
+def test_report_runtime_status_replaces_normalized_active_hostnames(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(remote_access.time, "time", lambda: 1_700_000_000.25)
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "active_hostnames": [
+                " Max-App.Avibe.Tech ",
+                "MAX.FILEGUARD.IO.",
+                "max.fileguard.io",
+                "bad.example:443",
+                "https://evil.example",
+                "",
+                "   ",
+                7,
+                None,
+            ],
+        },
+    )
+
+    result = remote_access.report_runtime_status(config)
+    persisted = json.loads(remote_access._active_hostnames_state_path().read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert remote_access.active_hostnames(config) == frozenset({"max-app.avibe.tech", "max.fileguard.io"})
+    assert persisted == {
+        "schema_version": 1,
+        "instance_id": "inst_123",
+        "active_hostnames": ["max-app.avibe.tech", "max.fileguard.io"],
+        "source_updated_at": 1_700_000_000.25,
+    }
+
+
+def test_report_runtime_status_backfills_instance_kind_once(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    config.save()
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
+    )
+    migration_calls = []
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: migration_calls.append(True),
+    )
+    real_save_config = remote_access.api.save_config
+    saves = []
+
+    def tracked_save_config(payload, **kwargs):
+        saves.append(payload)
+        return real_save_config(payload, **kwargs)
+
+    monkeypatch.setattr(remote_access.api, "save_config", tracked_save_config)
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
+    assert migration_calls == [True]
+    assert saves == [
+        {"remote_access": {"vibe_cloud": {"instance_kind": "organization"}}}
+    ]
+
+
+def test_report_runtime_status_binds_pending_deferred_contexts_through_the_real_path(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A long-running upgraded service must not need another initialization.
+
+    The heartbeat is the only place the authoritative kind arrives, so it owns
+    rerunning the pending migration itself rather than relying on a later
+    ``ensure_sqlite_state()`` call.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    cloud.instance_kind = ""
+    config.save()
+
+    from storage.db import get_cached_sqlite_engine
+    from storage.importer import _run_sqlite_data_migrations, ensure_sqlite_state
+    from storage.models import run_definitions, state_meta
+    from storage.resource_access_service import (
+        LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY,
+        RESOURCE_USER_CONTEXT_METADATA_KEY,
+        resource_user_context_from_metadata,
+    )
+
+    legacy_metadata = {
+        RESOURCE_USER_CONTEXT_METADATA_KEY: {
+            "sub": "legacy-editor",
+            "vibe_instance_role": "editor",
+            "vibe_instance_access_source": "email",
+            "claims_issued_at": 1_700_000_000,
+        }
+    }
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    with engine.begin() as connection:
+        connection.execute(
+            run_definitions.insert().values(
+                id="legacy-task",
+                definition_type="scheduled",
+                name="legacy task",
+                message="run",
+                schedule_type="interval",
+                enabled=1,
+                created_at="2026-08-20T00:00:00Z",
+                updated_at="2026-08-20T00:00:00Z",
+                metadata_json=json.dumps(legacy_metadata),
+            )
+        )
+        counts = _run_sqlite_data_migrations(connection)
+        assert {
+            key: counts[key]
+            for key in (
+                "legacy_deferred_definitions",
+                "legacy_deferred_runs",
+                "legacy_deferred_deliveries",
+            )
+        } == {
+            "legacy_deferred_definitions": 0,
+            "legacy_deferred_runs": 0,
+            "legacy_deferred_deliveries": 0,
+        }
+        marker = json.loads(
+            connection.execute(
+                select(state_meta.c.value_json).where(
+                    state_meta.c.key == LEGACY_DEFERRED_CONTEXT_MIGRATION_KEY
+                )
+            ).scalar_one()
+        )
+    assert marker["state"] == "pending"
+    assert marker["instance_id"] == "inst_123"
+
+    monkeypatch.setattr(
+        remote_access,
+        "runtime_status_payload",
+        lambda *args, **kwargs: {"event": "heartbeat"},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "personal"},
+    )
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "personal"
+    with engine.connect() as connection:
+        metadata = json.loads(
+            connection.execute(
+                select(run_definitions.c.metadata_json).where(
+                    run_definitions.c.id == "legacy-task"
+                )
+            ).scalar_one()
+        )
+    snapshot = metadata[RESOURCE_USER_CONTEXT_METADATA_KEY]
+    assert snapshot["vibe_instance_id"] == "inst_123"
+    assert snapshot["vibe_instance_kind"] == "personal"
+    assert resource_user_context_from_metadata(metadata) is not None
+
+
+@pytest.mark.parametrize("reported_kind", [None, "enterprise", "", 7])
+def test_report_runtime_status_ignores_invalid_instance_kind(
+    monkeypatch,
+    tmp_path,
+    reported_kind,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    cloud.instance_kind = "personal"
+    config.save()
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": reported_kind},
+    )
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invalid kind must not persist")),
+    )
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "personal"
+
+
+def test_report_runtime_status_does_not_backfill_a_replaced_instance(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    config.save()
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+
+    def replace_instance_before_response(*args, **kwargs):
+        current = V2Config.load()
+        current.remote_access.vibe_cloud.instance_id = "inst_replacement"
+        current.save()
+        return {"ok": True, "instance_kind": "organization"}
+
+    monkeypatch.setattr(remote_access, "_json_request", replace_instance_before_response)
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stale heartbeat must not persist")),
+    )
+
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    persisted = V2Config.load().remote_access.vibe_cloud
+    assert persisted.instance_id == "inst_replacement"
+    assert persisted.instance_kind == ""
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param({"ok": True}, id="legacy-response"),
+        pytest.param({"ok": True, "active_hostnames": "max.fileguard.io"}, id="invalid-type"),
+    ],
+)
+def test_report_runtime_status_missing_or_invalid_hostnames_clears_snapshot(
+    monkeypatch,
+    tmp_path,
+    response,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    remote_access._replace_active_hostnames(config, ["max.fileguard.io"])
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
+
+    result = remote_access.report_runtime_status(config)
+    persisted = json.loads(remote_access._active_hostnames_state_path().read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert remote_access.active_hostnames(config) == frozenset()
+    assert persisted["active_hostnames"] == []
+
+
+def test_report_runtime_status_does_not_consume_hostnames_from_http_backend(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "http://backend.test"
+    cloud.instance_secret = "instance-secret"
+    calls = []
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: calls.append(args))
+
+    result = remote_access.report_runtime_status(config)
+
+    assert result == {"ok": False, "error": "remote_status_backend_url_invalid"}
+    assert calls == []
+    assert remote_access.active_hostnames(config) == frozenset()
+
+
 def test_report_runtime_status_posts_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
@@ -945,6 +1766,7 @@ def test_pair_persists_with_locked_incremental_config_save(monkeypatch) -> None:
         "_json_request",
         lambda *args, **kwargs: {
             "instance_id": "inst_123",
+            "instance_kind": "organization",
             "client_id": "vr_client_123",
             "issuer": "https://backend.test",
             "authorization_endpoint": "https://backend.test/oauth/authorize",
@@ -957,6 +1779,11 @@ def test_pair_persists_with_locked_incremental_config_save(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(remote_access.api, "save_config", lambda payload: save_payloads.append(payload) or config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
     monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
@@ -968,8 +1795,84 @@ def test_pair_persists_with_locked_incremental_config_save(monkeypatch) -> None:
     assert set(save_payloads[0]) == {"remote_access"}
     cloud_payload = save_payloads[0]["remote_access"]["vibe_cloud"]
     assert cloud_payload["enabled"] is True
+    assert cloud_payload["instance_kind"] == "organization"
     assert cloud_payload["tunnel_token"] == "tunnel-token"
     assert cloud_payload["session_secret"]
+
+
+@pytest.mark.parametrize("reported_kind", [None, "enterprise"])
+def test_pair_accepts_legacy_or_invalid_instance_kind_as_unknown(monkeypatch, reported_kind) -> None:
+    config = _config()
+    save_payloads = []
+    response = {
+        "instance_id": "inst_456",
+        "client_id": "vr_client_456",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/oauth/jwks.json",
+        "public_url": "https://new.avibe.bot",
+        "redirect_uri": "https://new.avibe.bot/auth/callback",
+        "tunnel_token": "tunnel-token",
+        "instance_secret": "instance-secret",
+    }
+    if reported_kind is not None:
+        response["instance_kind"] = reported_kind
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
+
+    def fake_save_config(payload, **kwargs):
+        save_payloads.append(payload)
+        # Mirror the real save: the returned config carries the persisted
+        # pairing identity, which pair() verifies before publishing a binding.
+        config.remote_access.vibe_cloud.instance_id = payload["remote_access"]["vibe_cloud"]["instance_id"]
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", fake_save_config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+
+    assert remote_access.pair("vrp_test", "https://backend.test")["ok"] is True
+    assert save_payloads[0]["remote_access"]["vibe_cloud"]["instance_kind"] == ""
+
+
+def test_session_projects_instance_kind_for_local_and_authenticated_remote(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.save()
+
+    local = ui_server.app.test_client().get(
+        "/api/session",
+        base_url="http://localhost",
+    )
+    assert local.get_json()["instance_kind"] == "organization"
+
+    remote = ui_server.app.test_client()
+    remote.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    authenticated = remote.get(
+        "/api/session",
+        base_url="https://alex.avibe.bot",
+    )
+    assert authenticated.get_json()["instance_kind"] == "organization"
+
+    unauthenticated = ui_server.app.test_client().get(
+        "/api/session",
+        base_url="https://alex.avibe.bot",
+    )
+    assert "instance_kind" not in unauthenticated.get_json()
 
 
 def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) -> None:
@@ -1006,6 +1909,170 @@ def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) 
     assert result["start"]["ok"] is False
     assert result["start"]["error"] == "cloudflared_spawn_failed"
     assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
+
+
+def _pair_redeem_response(*, instance_id: str = "inst_new") -> dict[str, str]:
+    return {
+        "instance_id": instance_id,
+        "instance_kind": "personal",
+        "client_id": "vr_client_new",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/oauth/jwks.json",
+        "public_url": "https://new.avibe.bot",
+        "redirect_uri": "https://new.avibe.bot/auth/callback",
+        "tunnel_token": "new-tunnel-token",
+        "instance_secret": "new-instance-secret",
+    }
+
+
+def test_pair_aborts_when_legacy_provenance_cannot_be_read(monkeypatch, tmp_path) -> None:
+    """An unavailable pre-pair config read must not replace the pairing."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.instance_id = ""
+    config.remote_access.vibe_cloud.instance_secret = ""
+    config.save()
+    original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
+
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: (_ for _ in ()).throw(RuntimeError("legacy_deferred_context_provenance_unavailable")),
+    )
+    saves: list[dict] = []
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda payload, **kwargs: saves.append(payload) or config,
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_provenance_unavailable"
+    assert saves == []
+    assert redeem_calls == []
+    assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
+
+
+def test_pair_aborts_when_pending_migration_fails(monkeypatch, tmp_path) -> None:
+    """A failing deferred migration must not let pair() stamp a new identity."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.instance_id = ""
+    config.save()
+    original = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
+
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: (_ for _ in ()).throw(RuntimeError("sqlite locked")),
+    )
+    saves: list[dict] = []
+    monkeypatch.setattr(
+        remote_access.api,
+        "save_config",
+        lambda payload, **kwargs: saves.append(payload) or config,
+    )
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_provenance_unavailable"
+    assert saves == []
+    assert redeem_calls == []
+    assert json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8")) == original
+
+
+def test_pair_redeems_when_config_file_is_absent(monkeypatch, tmp_path) -> None:
+    """A fresh install with no config is authoritative unpaired, not unavailable."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config" / "config.json"
+    if config_path.exists():
+        config_path.unlink()
+
+    redeem_calls: list[str] = []
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        redeem_calls.append(url)
+        return _pair_redeem_response()
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(
+        remote_access,
+        "status",
+        lambda next_config=None: {"ok": True, "running": True, "paired": True},
+    )
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(remote_access, "_transition_instance_binding", lambda **kwargs: {"ok": True, "ready": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is True
+    assert redeem_calls
+    assert "/pairing/redeem" in redeem_calls[0]
+
+
+def test_binding_transition_initializes_sqlite_before_taking_config_lock(monkeypatch, tmp_path) -> None:
+    """Lock order: ensure_sqlite_state must complete before config_file_lock."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _config().save()
+    order: list[str] = []
+    real_ensure = __import__("storage.importer", fromlist=["ensure_sqlite_state"]).ensure_sqlite_state
+    real_lock = __import__("config.v2_config", fromlist=["config_file_lock"]).config_file_lock
+
+    def tracking_ensure(*args, **kwargs):
+        order.append("sqlite")
+        return real_ensure(*args, **kwargs)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def tracking_lock(*args, **kwargs):
+        order.append("config")
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr("storage.importer.ensure_sqlite_state", tracking_ensure)
+    monkeypatch.setattr("config.v2_config.config_file_lock", tracking_lock)
+    monkeypatch.setattr(
+        "storage.remote_access_authorization_service._ensure_sqlite_state",
+        lambda: tracking_ensure(),
+    )
+
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+
+    assert "sqlite" in order
+    assert "config" in order
+    assert order.index("sqlite") < order.index("config")
+
 
 
 def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tmp_path) -> None:
@@ -1051,6 +2118,11 @@ def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tm
 
 
 def test_pair_returns_structured_error_when_backend_request_fails(monkeypatch) -> None:
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")))
 
     result = remote_access.pair("vrp_test", "https://backend.test")
@@ -1064,6 +2136,11 @@ def test_pair_preserves_backend_error_response(monkeypatch) -> None:
     def fake_request(*args, **kwargs):
         raise remote_access.BackendRequestError(400, {"error": "invalid_pairing_key"})
 
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "_json_request", fake_request)
 
     result = remote_access.pair("vrp_test", "https://backend.test")
@@ -1093,6 +2170,11 @@ def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:
         },
     )
     monkeypatch.setattr(remote_access.api, "save_config", lambda payload: config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
     monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": False, "error": "cloudflared_spawn_failed"})
     monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": False, "paired": True})
     monkeypatch.setattr(
@@ -1941,6 +3023,7 @@ def _cloud_broker_config() -> V2Config:
     cloud = config.remote_access.vibe_cloud
     cloud.instance_secret = "device-secret"
     cloud.backend_url = "https://avibe.bot"
+    config.save()
     return config
 
 
@@ -1988,25 +3071,51 @@ def test_mint_cloud_token_returns_none_on_backend_error(monkeypatch) -> None:
     assert remote_access.mint_cloud_token(config, sub="u", email="e@x.com") is None
 
 
-def test_cloud_token_for_request_mints_for_authenticated_user(monkeypatch) -> None:
+@pytest.mark.parametrize("role", ("editor", "owner"))
+def test_cloud_token_for_request_mints_for_authorized_remote_asr(
+    monkeypatch,
+    role,
+) -> None:
     config = _cloud_broker_config()
-    cookie = remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role=role)
+    captured: dict = {}
 
-    monkeypatch.setattr(
-        remote_access,
-        "_json_request",
-        lambda *a, **k: {"access_token": "ct_xyz", "expires_in": 43200},
-    )
+    def fake_json_request(*args, **kwargs):
+        captured["payload"] = args[1]
+        return {"access_token": "ct_xyz", "expires_in": 43200}
 
-    before = int(time.time())
-    result = remote_access.cloud_token_for_request(config, cookie)
-    after = int(time.time())
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
 
-    assert result is not None
-    assert result["base_url"] == "https://avibe.bot"
-    assert result["token"] == "ct_xyz"
-    assert result["scope"] == "asr"
-    assert before + 43200 <= result["expires_at"] <= after + 43200
+    token = remote_access.cloud_token_for_request(config, cookie)
+
+    assert token is not None
+    assert token["base_url"] == "https://avibe.bot"
+    assert token["token"] == "ct_xyz"
+    assert token["scope"] == "asr"
+    assert token["expires_at"] > int(time.time())
+    assert captured["payload"] == {
+        "sub": "user-1",
+        "email": "alex@example.com",
+        "scope": "asr",
+    }
+
+
+def test_cloud_token_for_request_rejects_non_asr_scope(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role="owner")
+    called = False
+
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "ct_xyz", "expires_in": 43200}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    assert remote_access.cloud_token_for_request(config, cookie, scope="future") is None
+    assert called is False
 
 
 def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch) -> None:
@@ -2017,6 +3126,120 @@ def test_cloud_token_for_request_returns_none_without_valid_session(monkeypatch)
 
     assert remote_access.cloud_token_for_request(config, None) is None
     assert remote_access.cloud_token_for_request(config, "bogus.cookie") is None
+
+
+def test_cloud_token_for_request_uses_shared_personal_authorization_policy(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    config.remote_access.vibe_cloud.instance_kind = "personal"
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config)
+    called = False
+
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "x", "expires_in": 1}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+    monkeypatch.setattr(
+        remote_access,
+        "session_needs_authorization_refresh",
+        lambda payload: True,
+    )
+
+    assert remote_access.cloud_token_for_request(config, cookie) is not None
+    assert called is True
+
+
+def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    cookie = _session_cookie(config, role="viewer")
+    called = False
+
+    def fake_json_request(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"access_token": "x", "expires_in": 1}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    assert remote_access.cloud_token_for_request(config, cookie) is None
+    assert called is False
+
+
+def test_cloud_token_endpoint_local_origin_without_session_degrades_to_unavailable(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Issue #1491: a local-origin request has no avibe.bot session cookie by
+    design, so the endpoint must return the documented 503 ``cloud_unavailable``
+    fallback instead of the login-required signal that triggers the frontend's
+    full-page redirect to ``/auth/login`` (which the local host rejects)."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 503
+    assert response.get_json() == {"error": "cloud_unavailable"}
+
+
+def test_cloud_token_endpoint_remote_origin_without_session_requires_login(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """On the genuine remote-access host, a missing session still means the
+    browser must log in, so the recovery signal is preserved there."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 401
+    assert response.get_json() == {"ok": False, "error": "remote_access_login_required"}
+
+
+def test_cloud_token_endpoint_remote_origin_with_session_mints_token(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An authenticated remote request still reaches the mint path after the
+    local-origin degrade branch is added in front of it."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _cloud_broker_config()
+    config.save()
+    monkeypatch.setattr(remote_access, "current_authorization_revision", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *a, **k: {"access_token": "ct_abc", "token_type": "Bearer", "expires_in": 43200},
+    )
+
+    client = ui_server.app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _session_cookie(config),
+        domain="alex.avibe.bot",
+    )
+    response = client.get(
+        "/api/cloud/token",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["token"] == "ct_abc"
+    assert payload["scope"] == "asr"
+    assert response.headers["Cache-Control"] == "no-store, private"
 
 
 def test_ra_tq_029_connector_environment_applies_ip_and_interface_controls() -> None:
@@ -2167,3 +3390,146 @@ def test_ra_tq_030_connectivity_diagnostics_filters_dns_by_selected_family(
 
     assert result["dns"]["status"] == "unavailable"
     assert result["http2"]["status"] == "unknown"
+
+
+def test_unknown_kind_pairing_stays_usable_after_pair(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r1: no-kind pairings must not park in reconciling."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    response = {
+        "instance_id": "inst_456",
+        "client_id": "vr_client_456",
+        "issuer": "https://backend.test",
+        "authorization_endpoint": "https://backend.test/oauth/authorize",
+        "token_endpoint": "https://backend.test/oauth/token",
+        "jwks_uri": "https://backend.test/oauth/jwks.json",
+        "public_url": "https://new.avibe.bot",
+        "redirect_uri": "https://new.avibe.bot/auth/callback",
+        "tunnel_token": "tunnel-token",
+        "instance_secret": "instance-secret",
+    }
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: response)
+
+    def fake_save_config(payload, **kwargs):
+        config.remote_access.vibe_cloud.instance_id = payload["remote_access"]["vibe_cloud"]["instance_id"]
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", fake_save_config)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+
+    assert remote_access.pair("vrp_test", "https://backend.test")["ok"] is True
+
+    from storage import remote_access_authorization_service
+
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["state"] == remote_access_authorization_service.INSTANCE_BINDING_STATE_PENDING_KIND
+    assert state["instance_id"] == "inst_456"
+    # The legacy no-kind path stays usable for every authorization consumer.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_456",
+        instance_kind=None,
+        ensure=False,
+    ) is True
+    # A kind-specific bypass is still not claimable from this state.
+    assert remote_access_authorization_service.binding_is_ready_for_pairing(
+        instance_id="inst_456",
+        instance_kind="personal",
+        ensure=False,
+    ) is False
+
+
+def test_pair_refuses_to_publish_binding_for_a_replaced_instance(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r1: pairing save + transition are one critical section."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: _pair_redeem_response())
+
+    def racing_save_config(payload, **kwargs):
+        # Simulate a peer's pairing landing between our save and verification:
+        # the persisted config no longer names the instance we redeemed.
+        config.remote_access.vibe_cloud.instance_id = "inst_other"
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", racing_save_config)
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_reconciliation_failed"
+    assert result["detail"] == "persisted_instance_mismatch"
+
+    from storage import remote_access_authorization_service
+
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    redeemed = _pair_redeem_response()["instance_id"]
+    assert state is None or state.get("instance_id") != redeemed
+
+
+def test_overlapping_heartbeat_refuses_stale_personal_kind(monkeypatch, tmp_path) -> None:
+    """Regression PR #1606 r4: capture generation BEFORE the network call.
+
+    Two overlapping runtime-status requests: the newer Organization response
+    lands first; the older Personal response must CAS-fail and leave the
+    binding Organization.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _config()
+    cloud = config.remote_access.vibe_cloud
+    cloud.backend_url = "https://backend.test"
+    cloud.instance_secret = "instance-secret"
+    cloud.instance_kind = "personal"
+    config.save()
+    remote_access._transition_instance_binding(
+        instance_id="inst_123",
+        instance_kind="personal",
+    )
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
+    )
+
+    from storage import remote_access_authorization_service
+
+    captured = remote_access_authorization_service.current_instance_binding_generation(
+        ensure=False
+    )
+    # Newer Organization heartbeat lands first.
+    assert remote_access.report_runtime_status(config)["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    # Older in-flight Personal response, captured before the Org persist,
+    # must CAS-fail against the newer generation.
+    refused = remote_access._persist_instance_kind(
+        "inst_123",
+        "personal",
+        reconcile=True,
+        expected_binding_generation=captured,
+    )
+    assert refused is False
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+    state = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert state is not None
+    assert state["instance_kind"] == "organization"
+    assert state["generation"] > captured
+    monkeypatch.setattr(remote_access, "runtime_status_payload", lambda *args, **kwargs: {"event": "heartbeat"})
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: {"ok": True, "instance_kind": "organization"},
+    )
+    assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
+    assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"

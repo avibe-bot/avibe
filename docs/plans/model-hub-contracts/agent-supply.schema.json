@@ -2,17 +2,26 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-supply.schema.json",
   "title": "AgentSupply",
-  "description": "Per-backend Gateway configuration and live supply projection. It exposes explicit Source order, menu metadata, model-supply state, and enabled named-Agent attribution without deriving Route membership.",
+  "description": "Per-backend Gateway configuration and live supply projection. It exposes explicit Source order, menu metadata, model-supply state, and enabled named-Agent attribution from the shared effective route planner.",
   "type": "object",
   "required": ["backend", "mode", "menu_kind"],
   "additionalProperties": false,
   "properties": {
     "backend": { "enum": ["claude", "codex", "opencode"] },
+    "cli_present": {
+      "type": "boolean",
+      "description": "Server-authoritative fact that this backend's configured CLI executable is present on the Avibe host. It does not prove login, process readiness, or Source health. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
+    },
     "mode": {
       "enum": ["hub", "direct"],
       "description": "Gateway or Direct. Existing installations start Direct until the user switches; fresh installations default Gateway. A native_cli Source is one configured Gateway hop and is distinct from Direct mode."
     },
     "menu_kind": { "enum": ["fixed", "open"] },
+    "catalog_models": {
+      "type": "array",
+      "description": "The ordered backend Agent model catalog. It controls the Agent menu and capability metadata only; Route configuration remains in routes.",
+      "items": { "$ref": "backend-model.schema.json" }
+    },
     "selected_by_agent": {
       "type": ["string", "null"],
       "description": "The Vibe Agent whose explicit `model` produced `selected_model_id`, by name. Model selection does not live at the backend grain: several enabled Vibe Agents can share one backend and each carry a different model. Derived, never persisted; null while mode=direct or when no routed Agent is projected.",
@@ -26,19 +35,19 @@
     "selected_model_explicit": { "type": "boolean", "description": "TRUE iff `selected_model_id` originates from the user's explicit configuration request; FALSE means no explicit model selection, including a resolver-picked value or no selected model." },
     "sources": {
       "type": ["object", "null"],
-      "description": "This backend's explicit Gateway Source order. It is stored configuration and an Add-time placement input; runtime model execution reads the exact per-model Route chain instead of deriving one from this order. There is no follow/custom or other policy discriminator. It is non-null in Gateway mode and null in Direct mode.",
+      "description": "This backend's default Gateway Source membership and priority. The shared planner uses this order only when a model has no manual override. No second persisted policy discriminator exists. It is non-null in Gateway mode and null in Direct mode.",
       "required": ["order"],
       "additionalProperties": false,
       "properties": {
         "order": {
           "type": "array",
-          "description": "Configured Source ids, position 0 first. A subset, not a permutation: configuration-ineligible Sources or Sources the user removed are absent. The server re-echoes the full canonical order after mutation; clients never compute a partial reorder. Add-time placement is owned only by model-hub.md §4.2 and never reruns during a request.",
+          "description": "Configured Source ids, position 0 first. A subset, not a permutation: configuration-ineligible Sources or Sources the user removed are absent. The server re-echoes the full canonical order after mutation; clients never compute a partial reorder. Source creation appends eligible defaults once; effective routing consumes the latest saved order. Manual overrides may reference eligible Sources outside this subset.",
           "items": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
           "uniqueItems": true
         },
         "eligibility": {
           "type": ["array", "null"],
-          "description": "Server-authoritative configuration eligibility, one row per existing Source. It makes UI eligibility a projection rather than a second compatibility matrix. `in_current_model_chain` reports whether the selected model's stored Route references the Source; `process_availability_reason` reports native CLI readiness independently of Source health. Required and non-null whenever sources is an object.",
+          "description": "Server-authoritative configuration eligibility, one row per existing Source. It makes UI eligibility a projection rather than a second compatibility matrix. `in_current_model_chain` reports whether the selected model's effective Route references the Source; `process_availability_reason` reports native CLI readiness independently of Source health. Required and non-null whenever sources is an object.",
           "items": {
             "type": "object",
             "required": ["source_id", "eligible"],
@@ -85,7 +94,7 @@
               },
               "in_current_model_chain": {
                 "type": ["boolean", "null"],
-                "description": "Whether the selected model's stored Route references this Source. true includes blocked hops because availability does not rewrite configuration; false keeps non-members visible; null exactly when selected_model_id is null."
+                "description": "Whether the selected model's effective Route references this Source. true includes blocked hops because availability does not rewrite configuration; false keeps non-members visible; null exactly when selected_model_id is null."
               },
               "process_availability_reason": {
                 "enum": ["native_cli_unavailable", null],
@@ -97,11 +106,35 @@
         }
       }
     },
+    "routes": {
+      "type": ["object", "null"],
+      "description": "Canonical sparse manual overrides keyed by caller-facing canonical menu ids. Output contains only nonempty arrays, preserving exact stale and dormant overrides. Valid empty configuration/input values normalize to key absence and inherited routing; validate supported raw config before normalization, not against this output-only minimum. Nonempty equal-to-automatic saves remain manual. Restore or empty PUT deletes the key. New catalog rows receive no key; normalization never removes catalog identities.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["hops"],
+        "additionalProperties": false,
+        "properties": {
+          "hops": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["source_id", "model_id"],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                "model_id": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
     "supply_status": {
       "type": ["string", "null"],
       "enum": ["ok", "degraded", "waiting", "interrupted", null],
       "$comment": "This rollup is process-aware, not health-only. A process-unavailable native hop makes a no-runnable chain interrupted rather than waiting.",
-      "description": "Derived supply rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. It reads the same complete runnability predicate as AgentChain: source-global health permits AND this process can serve the channel. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every member is a not-retry-ready cooldown that is process-available; interrupted = no runnable member and at least one blocker needs action — including a native CLI unavailable in this process at any health — or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
+      "description": "Derived supply rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. It reads the same complete runnability predicate as AgentChain: source-global health permits AND no live connection backoff applies AND this process can serve the channel. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every member is a Source cooldown or live connection backoff that is process-available; interrupted = no runnable member and at least one blocker needs action — including a native CLI unavailable in this process at any health — or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
     },
     "menu": {
       "type": ["object", "null"],
@@ -112,31 +145,53 @@
         "view": { "enum": ["featured", "full"] },
         "checked": {
           "type": "array",
-          "description": "prefixed identifiers, e.g. zhipuai/glm-5.2 (see opencode-overlay.md)",
-          "items": { "type": "string", "pattern": "^[a-z0-9_-]+/.+$" },
+          "description": "Bare canonical model identifiers, stored exactly as the backend emits them.",
+          "items": { "type": "string", "minLength": 1, "pattern": "^\\S(?:[\\s\\S]*\\S)?$" },
           "uniqueItems": true
         }
       }
     },
     "model_supply": {
       "type": ["array", "null"],
-      "description": "Per-menu-item configured Route summary so the model menu can flag an empty chain without one chain query per row. Read-only projection; the authoritative chain is GET /api/models/agents/<backend>/chain.",
+      "description": "Per-menu-item effective Route summary so the model menu can flag an empty chain without one chain query per row. Read-only projection; the authoritative chain is GET /api/models/agents/<backend>/chain.",
       "items": {
         "type": "object",
-        "required": ["model_id", "chain_length"],
+        "required": ["model_id", "chain_length", "route_origin"],
         "additionalProperties": false,
         "properties": {
           "model_id": {
             "type": "string",
-            "description": "The identifier this backend's menu uses: the built-in id for fixed menus, the prefixed identifier (vendor/model) for open menus."
+            "description": "The exact canonical identifier this backend's menu uses."
+          },
+          "route_origin": {
+            "enum": ["automatic", "manual", "passthrough", null],
+            "description": "Shared planner origin, independent of transient health. Passthrough uses Hub API-key defaults only; subscriptions remain subject to known-model admission. Null exactly when chain_length is zero."
           },
           "chain_length": {
             "type": "integer",
             "minimum": 0,
-            "$comment": "Configuration visibility is not candidate availability. Every stored hop remains counted regardless of live runnability.",
-            "description": "Length of the exact configured Route chain, including cooling and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
+            "$comment": "Configuration visibility is not candidate availability. Every effective hop remains counted regardless of live runnability.",
+            "description": "Length of the effective Route chain, including cooling, live-connection-backoff, and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
+          },
+          "has_runnable_hop": {
+            "type": "boolean",
+            "description": "True exactly when at least one exact effective hop is runnable under the same source-health AND process-availability axiom as AgentChain. False distinguishes an all-stale or empty Route from a Route with live supply without changing chain_length. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "chain_length": { "const": 0 } },
+              "required": ["chain_length"]
+            },
+            "then": {
+              "properties": { "has_runnable_hop": { "const": false }, "route_origin": { "type": "null" } }
+            },
+            "else": {
+              "properties": { "route_origin": { "enum": ["automatic", "manual", "passthrough"] } }
+            }
+          }
+        ]
       }
     },
     "named_agents": {
@@ -144,7 +199,7 @@
       "description": "Read-only projection of every enabled named Vibe Agent on this backend, derived live from each Agent's explicit model. The distinct name avoids collision with SupplyGap.agents, whose items are bare names inside a mutation-refusal payload.",
       "items": {
         "type": "object",
-        "required": ["name", "effective_model_id", "supply_status"],
+        "required": ["name", "effective_model_id", "supply_status", "route_reason"],
         "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "minLength": 1 },
@@ -155,6 +210,10 @@
           "supply_status": {
             "enum": ["ok", "degraded", "waiting", "interrupted", null],
             "description": "This named Agent's own live rollup for effective_model_id. null in Direct mode or when effective_model_id is null."
+          },
+          "route_reason": {
+            "enum": ["route_unconfigured", null],
+            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops; null covers configured routes, Direct mode, and Agents without an explicit model."
           }
         },
         "allOf": [
@@ -171,8 +230,7 @@
         ]
       }
     },
-    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): fixed-menu backends only — real built-in model ids, server-populated from vibe/backend_model_catalog.py; null for open-menu backends. UI must not hardcode menus." },
-    "standard_vendors": { "type": ["array", "null"], "items": { "type": "string" }, "description": "v1.2 (2026-07-24 integration): opencode only — server-populated mirror of STANDARD_OPENCODE_VENDOR_IDS (core/handlers/model_hub/identifiers.py) so the UI never hand-mirrors vendor lists; null otherwise." }
+    "builtin_models": { "type": ["array", "null"], "items": { "type": "string" }, "description": "Compatibility projection for older clients. New clients consume catalog_models." }
   },
   "allOf": [
     {
@@ -183,12 +241,16 @@
           "selected_model_id": { "type": "null" },
           "selected_by_agent": { "type": "null" },
           "sources": { "type": "null" },
+          "routes": { "type": "null" },
           "supply_status": { "type": "null" },
           "model_supply": { "type": "null" },
           "named_agents": {
             "items": {
-              "required": ["supply_status"],
-              "properties": { "supply_status": { "type": "null" } }
+              "required": ["supply_status", "route_reason"],
+              "properties": {
+                "supply_status": { "type": "null" },
+                "route_reason": { "type": "null" }
+              }
             }
           }
         }
@@ -200,6 +262,7 @@
       "then": {
         "properties": {
           "sources": { "type": "object" },
+          "routes": { "type": "object" },
           "model_supply": { "type": "array" },
           "named_agents": {
             "type": "array",
@@ -268,12 +331,11 @@
       }
     },
     {
-      "$comment": "Fixed-menu backends expose their built-in model catalog; open-menu state and provider metadata are null.",
+      "$comment": "Fixed-menu backends expose their built-in model catalog; open-menu state is null.",
       "if": { "properties": { "menu_kind": { "const": "fixed" } }, "required": ["menu_kind"] },
       "then": {
         "properties": {
-          "menu": { "type": "null" },
-          "standard_vendors": { "type": "null" }
+          "menu": { "type": "null" }
         }
       }
     },
@@ -293,6 +355,34 @@
     {
       "if": { "properties": { "backend": { "enum": ["claude", "codex"] } }, "required": ["backend"] },
       "then": { "properties": { "menu_kind": { "const": "fixed" } } }
+    },
+    {
+      "$comment": "BackendModel has no discriminator, so the containing catalog owns native_protocol presence.",
+      "if": { "properties": { "backend": { "const": "opencode" } }, "required": ["backend"] },
+      "then": {
+        "properties": {
+          "catalog_models": {
+            "items": {
+              "allOf": [
+                { "$ref": "backend-model.schema.json" },
+                { "required": ["native_protocol"] }
+              ]
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "catalog_models": {
+            "items": {
+              "allOf": [
+                { "$ref": "backend-model.schema.json" },
+                { "not": { "required": ["native_protocol"] } }
+              ]
+            }
+          }
+        }
+      }
     },
     {
       "$comment": "A non-null sources object always carries a real eligibility array. The API guard enforces one row per existing Source and requires every id in order to have eligible=true; draft-07 cannot compare the two arrays directly.",
@@ -315,16 +405,14 @@
       "mode": "hub",
       "menu_kind": "fixed",
       "menu": null,
-      "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-      "standard_vendors": null
+      "builtin_models": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"]
     },
     {
       "backend": "opencode",
       "mode": "hub",
       "menu_kind": "open",
-      "menu": { "view": "featured", "checked": ["anthropic/claude-opus-4-6", "openai/gpt-5.6", "zhipuai/glm-5.2", "zhipuai/glm-5.2-air"] },
-      "builtin_models": null,
-      "standard_vendors": ["anthropic", "deepseek", "github-copilot", "google", "groq", "kimi", "minimax", "mistral", "moonshot", "openai", "openrouter", "together", "xai", "zhipuai"]
+      "menu": { "view": "featured", "checked": ["claude-opus-4-6", "gpt-5.6", "glm-5.2", "glm-5.2-air"] },
+      "builtin_models": null
     }
   ]
 }

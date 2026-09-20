@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,15 +25,125 @@ from config.v2_settings import (
     split_thread_native_id,
 )
 from storage.agent_session_rows import reserve_write_lock
-from storage.db import SqliteInvalidationProbe, create_sqlite_engine
+from storage.db import create_sqlite_engine
 from storage.models import agents, auth_codes, scope_settings, scopes
+from storage.settings_revision import (
+    RUNTIME_SETTINGS_SCOPE_TYPES,
+    mark_runtime_settings_changed,
+    read_runtime_settings_revision,
+)
 
 SETTINGS_VERSION = 1
 GUILD_POLICY_KIND = "guild_policy"
-# Scope types whose settings this store owns. avibe project scopes
-# (storage.projects_service) share the scope_settings table but are NOT managed
-# here, so save_state must never delete or overwrite their rows.
-_MANAGED_SCOPE_TYPES = ("channel", "thread", "platform", "guild", "user")
+
+
+def _merge_settings_changes(
+    current: SettingsState, candidate: SettingsState, baseline: SettingsState
+) -> SettingsState:
+    """Apply changed scopes only, retaining other transactions' committed rows."""
+    def merge_rows(fresh, draft, original):
+        merged = dict(fresh)
+        for key in original.keys() - draft.keys():
+            merged.pop(key, None)
+        for key, item in draft.items():
+            previous = original.get(key)
+            if item != previous or getattr(item, "_agent_name_at_load", None) != getattr(
+                previous, "_agent_name_at_load", None
+            ):
+                merged[key] = item
+        return merged
+
+    merged = SettingsState()
+    for name in ("channels", "threads", "users", "guilds", "guild_default_enabled"):
+        setattr(merged, name, merge_rows(getattr(current, name), getattr(candidate, name), getattr(baseline, name)))
+    merged.guild_scope_platforms = (
+        current.guild_scope_platforms - (baseline.guild_scope_platforms - candidate.guild_scope_platforms)
+    ) | (candidate.guild_scope_platforms - baseline.guild_scope_platforms)
+    merged.bind_codes = list(merge_rows(
+        {item.code: item for item in current.bind_codes},
+        {item.code: item for item in candidate.bind_codes},
+        {item.code: item for item in baseline.bind_codes},
+    ).values())
+    return merged
+
+
+def _require_preserved_access_policy(current: SettingsState, candidate: SettingsState) -> None:
+    """Compare access effects against the snapshot held by the SQLite write lock."""
+    from vibe.authorization import InstanceAuthorizationError
+
+    # Until its first settings migration, Discord reads admission from config.
+    # Read the atomic config file directly: V2Config.load can itself migrate and
+    # acquire the config lock, inverting the config -> SQLite writer lock order.
+    from config import paths
+    from config.v2_config import V2Config, _migrate_config_payload_on_load
+
+    legacy_guilds = None
+    if "discord" not in current.guild_scope_platforms or "discord" not in candidate.guild_scope_platforms:
+        try:
+            config_payload = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+        except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError):
+            config_payload = {}
+        if isinstance(config_payload, dict):
+            migrated, _, _ = _migrate_config_payload_on_load(config_payload)
+            config = V2Config._recover_payload(migrated)
+        else:
+            config = V2Config.default()
+        discord = config.discord
+        allowed = getattr(discord, "guild_allowlist", None) or []
+        denied = getattr(discord, "guild_denylist", None) or []
+        default = not bool(allowed)
+        entries = {str(key): True for key in allowed}
+        entries.update({str(key): False for key in denied})
+        legacy_guilds = default, {
+            _make_scoped_key("discord", key): enabled
+            for key, enabled in entries.items() if enabled != default
+        }
+
+    def members(state):
+        return {
+            key: (user.is_admin, user.enabled, user.bound_at, user.dm_chat_id)
+            for key, user in state.users.items()
+        }
+
+    def guild_policy(state, platform):
+        if platform == "discord" and platform not in state.guild_scope_platforms:
+            return legacy_guilds
+        default = (
+            bool(state.guild_default_enabled.get(platform, False))
+            if platform in state.guild_scope_platforms else True
+        )
+        exceptions = {
+            key: bool(guild.enabled)
+            for key, guild in state.guilds.items()
+            if _split_scoped_key(key)[0] == platform and bool(guild.enabled) != default
+        }
+        return default, exceptions
+
+    def binding(state, key, *, thread=False):
+        if thread:
+            item = state.threads.get(key)
+            if item is not None:
+                return bool(item.require_bind)
+            platform, native_id = _split_scoped_key(key)
+            channel_id, _ = split_thread_native_id(native_id)
+            key = _make_scoped_key(platform, channel_id) if platform else channel_id
+        item = state.channels.get(key)
+        # Channel None/False is open; the platform flag only seeds new channels.
+        return bool(item and item.require_bind)
+
+    changed = members(current) != members(candidate) or current.bind_codes != candidate.bind_codes
+    platforms = current.guild_scope_platforms | candidate.guild_scope_platforms
+    changed = changed or any(guild_policy(current, p) != guild_policy(candidate, p) for p in platforms)
+    changed = changed or any(
+        binding(current, key) != binding(candidate, key)
+        for key in current.channels.keys() | candidate.channels.keys()
+    )
+    changed = changed or any(
+        binding(current, key, thread=True) != binding(candidate, key, thread=True)
+        for key in current.threads.keys() | candidate.threads.keys()
+    )
+    if changed:
+        raise InstanceAuthorizationError("owner")
 
 
 class StaleScopeAgentBindingError(ValueError):
@@ -56,31 +166,52 @@ class SQLiteSettingsService:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.engine = create_sqlite_engine(db_path)
-        self._probe = SqliteInvalidationProbe(self.engine)
 
     def close(self) -> None:
-        self._probe.close()
         self.engine.dispose()
 
-    def has_external_write(self) -> bool:
-        return self._probe.has_external_write()
+    def current_revision(self) -> str | None:
+        with self.engine.connect() as conn:
+            return read_runtime_settings_revision(conn)
 
     def load_state(self) -> SettingsState:
         with self.engine.connect() as conn:
-            return SettingsState(
-                channels=self._load_channels(conn),
-                threads=self._load_threads(conn),
-                guilds=self._load_guilds(conn),
-                guild_scope_platforms=self._load_guild_scope_platforms(conn),
-                guild_default_enabled=self._load_guild_policies(conn),
-                users=self._load_users(conn),
-                bind_codes=self._load_bind_codes(conn),
-            )
+            return self._load_state(conn)
 
-    def save_state(self, state: SettingsState) -> None:
+    def _load_state(self, conn: Connection) -> SettingsState:
+        return SettingsState(
+            channels=self._load_channels(conn),
+            threads=self._load_threads(conn),
+            guilds=self._load_guilds(conn),
+            guild_scope_platforms=self._load_guild_scope_platforms(conn),
+            guild_default_enabled=self._load_guild_policies(conn),
+            users=self._load_users(conn),
+            bind_codes=self._load_bind_codes(conn),
+        )
+
+    def save_state(
+        self, state: SettingsState, *, user_context: Any = None, baseline: SettingsState | None = None
+    ) -> str:
+        from vibe.authorization import require_instance_role
+
+        # General config still accepts Editor preferences and may round-trip
+        # the legacy Discord scope projection. HTTP/API management callers
+        # require Member before entering; every non-owner preserves access here.
+        context = require_instance_role(user_context, "editor")
+        draft = state
         saved_bindings: list[tuple[ChannelSettings | UserSettings, RoutingSettings]] = []
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
+            current = self._load_state(conn)
+            if baseline is not None and not context.can_manage_access_members:
+                # A protected-field echo may equal the loaded value but no
+                # longer equal the authoritative value. Reject that stale
+                # snapshot before delta merging could silently drop the echo.
+                _require_preserved_access_policy(current, baseline)
+            if baseline is not None:
+                state = _merge_settings_changes(current, draft, baseline)
+            if not context.can_manage_access_members:
+                _require_preserved_access_policy(current, state)
             now = _utc_now_iso()
             # Per-row reconcile (NOT a delete-everything rewrite): upsert each
             # managed scope's settings, then delete only the managed rows that
@@ -240,10 +371,15 @@ class SQLiteSettingsService:
 
             self._delete_removed_scope_settings(conn, kept)
             self._sync_bind_codes(conn, state.bind_codes, now)
+            revision = mark_runtime_settings_changed(conn)
 
         for item, routing in saved_bindings:
             item.routing = routing
             item._agent_name_at_load = routing.agent_name
+        # Publish the committed snapshot only after the transaction succeeds.
+        for field in fields(SettingsState):
+            setattr(draft, field.name, getattr(state, field.name))
+        return revision
 
     @staticmethod
     def _reconcile_agent_binding(
@@ -306,11 +442,13 @@ class SQLiteSettingsService:
     def _delete_removed_scope_settings(self, conn: Connection, kept: set[str]) -> None:
         """Delete settings rows for managed scopes no longer present in the state.
 
-        Scoped to ``_MANAGED_SCOPE_TYPES`` so avibe project scopes (owned by
+        Scoped to ``RUNTIME_SETTINGS_SCOPE_TYPES`` so avibe project scopes (owned by
         projects_service) keep their settings/workdir even though they live in
         the same table.
         """
-        managed_scope_ids = select(scopes.c.id).where(scopes.c.scope_type.in_(_MANAGED_SCOPE_TYPES))
+        managed_scope_ids = select(scopes.c.id).where(
+            scopes.c.scope_type.in_(RUNTIME_SETTINGS_SCOPE_TYPES)
+        )
         stmt = scope_settings.delete().where(scope_settings.c.scope_id.in_(managed_scope_ids))
         if kept:
             stmt = stmt.where(scope_settings.c.scope_id.notin_(kept))

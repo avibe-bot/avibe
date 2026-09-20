@@ -37,7 +37,7 @@ export function isQueuedRun(
 // run" reads as still-executing and misled users about unfinished work.
 export function activityKindI18nKey(
   item: Pick<SessionActivityState, 'item_kind' | 'schedule_type' | 'status'>,
-): string {
+) {
   const kind = activityItemKind(item);
   if (kind === 'task') {
     if (item.schedule_type === 'at') return 'taskOneShot';

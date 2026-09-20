@@ -12,7 +12,7 @@ export const StepShell: React.FC<StepShellProps> = ({ active, children }) => (
     className={clsx(
       'overflow-hidden rounded-xl border transition-colors',
       active
-        ? 'border-mint/35 bg-surface-2 shadow-[0_8px_32px_-8px_rgba(91,255,160,0.078)]'
+        ? 'border-mint/35 bg-surface-2 shadow-mint-card-sm'
         : 'border-border bg-background'
     )}
   >
@@ -45,7 +45,7 @@ export const StepHeader: React.FC<StepHeaderProps> = ({
       <span
         className={clsx(
           'flex size-7 items-center justify-center rounded-full text-[12px] font-bold transition-colors',
-          completed ? 'bg-mint text-primary-foreground' : 'bg-cyan/15 text-cyan'
+          completed ? 'bg-mint text-primary-foreground' : 'bg-cyan/15 text-cyan-ink'
         )}
       >
         {completed ? <Check size={14} /> : step}

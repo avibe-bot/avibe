@@ -27,8 +27,10 @@ from core.message_context import (
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
 from storage.agent_session_rows import (
+    SESSION_PROJECT_BASE_METADATA_KEY,
     create_agent_session_row,
     get_or_create_agent_session_row,
+    normalize_session_project_base,
     utc_now_iso,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -44,6 +46,7 @@ class AgentRunTarget:
     session_anchor: str
     workdir: str
     source: str
+    project_base: Optional[str] = None
     scope_id: Optional[str] = None
     scope_type: Optional[str] = None
     agent_session_id: Optional[str] = None
@@ -64,6 +67,7 @@ class AgentRunTarget:
             "session_anchor": self.session_anchor,
             "workdir": self.workdir,
             "source": self.source,
+            "project_base": self.project_base,
             "scope_id": self.scope_id,
             "scope_type": self.scope_type,
             "agent_session_id": self.agent_session_id,
@@ -128,8 +132,13 @@ def resolve_agent_run_target(
                 select(
                     agent_sessions,
                     scopes.c.scope_type.label("_scope_type"),
+                    scope_settings.c.workdir.label("_scope_workdir"),
                 )
-                .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
+                .select_from(
+                    agent_sessions
+                    .outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id)
+                    .outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id)
+                )
                 .where(agent_sessions.c.id == target_id)
             ).mappings().first()
             # An archived target is terminal — treat it as gone so no turn resumes it.
@@ -179,8 +188,13 @@ def resolve_agent_run_target(
                     select(
                         agent_sessions,
                         scopes.c.scope_type.label("_scope_type"),
+                        scope_settings.c.workdir.label("_scope_workdir"),
                     )
-                    .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
+                    .select_from(
+                        agent_sessions
+                        .outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id)
+                        .outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id)
+                    )
                     .where(agent_sessions.c.scope_id == candidate_scope_id)
                     .where(agent_sessions.c.session_anchor == candidate_anchor)
                     # Never resolve a turn onto an archived row. The archived row's
@@ -327,8 +341,13 @@ def resolve_agent_run_target(
             select(
                 agent_sessions,
                 scopes.c.scope_type.label("_scope_type"),
+                scope_settings.c.workdir.label("_scope_workdir"),
             )
-            .select_from(agent_sessions.outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id))
+            .select_from(
+                agent_sessions
+                .outerjoin(scopes, scopes.c.id == agent_sessions.c.scope_id)
+                .outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id)
+            )
             .where(agent_sessions.c.id == new_session_id)
         ).mappings().one()
         return _cache_target(
@@ -372,6 +391,7 @@ def _cached_target(
         session_anchor=str(cached.get("session_anchor") or base_session_id or ""),
         workdir=workdir,
         source=str(cached.get("source") or source),
+        project_base=_project_base_for_workdir(workdir, cached.get("project_base")),
         scope_id=_optional_str(cached.get("scope_id")),
         scope_type=_optional_str(cached.get("scope_type")),
         agent_session_id=_optional_str(cached.get("agent_session_id")),
@@ -698,6 +718,7 @@ def _target_from_session_row(
         session_anchor=str(row.get("session_anchor") or fallback_anchor),
         workdir=workdir,
         source=source,
+        project_base=_session_project_base(row, workdir),
         scope_id=_optional_str(row.get("scope_id")),
         scope_type=_optional_str(row.get("_scope_type")),
         agent_session_id=_optional_str(row.get("id")),
@@ -740,6 +761,10 @@ def _unpersisted_target(
         session_anchor=anchor,
         workdir=resolved_workdir,
         source=source,
+        project_base=_project_base_for_workdir(
+            resolved_workdir,
+            scope_row.get("workdir") if scope_row else None,
+        ),
         scope_id=_optional_str(scope_row.get("scope_id")) if scope_row else None,
         scope_type=_optional_str(scope_row.get("scope_type")) if scope_row else None,
         agent_id=agent_target.agent_id if agent_target else None,
@@ -756,6 +781,22 @@ def _normalize_workdir(value: Any) -> Optional[str]:
     if not text:
         return None
     return os.path.abspath(os.path.expanduser(text))
+
+
+def _project_base_for_workdir(workdir: str, candidate: Any) -> Optional[str]:
+    return normalize_session_project_base(workdir, candidate)
+
+
+def _session_project_base(row: dict[str, Any], workdir: str) -> Optional[str]:
+    try:
+        metadata = json.loads(str(row.get("metadata_json") or "{}"))
+    except (TypeError, ValueError):
+        metadata = {}
+    stored = metadata.get(SESSION_PROJECT_BASE_METADATA_KEY) if isinstance(metadata, dict) else None
+    return _project_base_for_workdir(workdir, stored) or _project_base_for_workdir(
+        workdir,
+        row.get("_scope_workdir"),
+    )
 
 
 def _resolve_workdir(

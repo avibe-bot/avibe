@@ -41,6 +41,14 @@ NOW = "2026-07-31T14:00:00+00:00"
 SCOPE_ID = "avibe::project::proj_archive"
 
 
+@pytest.fixture(autouse=True)
+def _prepare_behavior_state(tmp_path, sqlite_db_factory, request):
+    # Archive transactions and lock races need the current schema, not a fresh
+    # migration chain for every private database.
+    if not request.node.get_closest_marker("no_sqlite_template"):
+        sqlite_db_factory(tmp_path / "state" / "vibe.sqlite")
+
+
 def _create_archive_fallback(store: VibeAgentStore) -> None:
     store.create(name="archive-fallback", backend="codex")
 

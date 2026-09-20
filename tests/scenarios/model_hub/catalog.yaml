@@ -1,26 +1,680 @@
-version: 1
+version: 2
 capability:
   id: model_hub
-  name: Model Hub source resolution and supply configuration
+  name: Model Hub configured routes and turn outcomes
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_config.py
+    - tests/test_model_hub_legacy_opencode_migration.py
+    - tests/test_member_management_parity.py
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_injection.py
+    - tests/test_codex_request_routing.py
     - tests/test_model_hub_runtime.py
-    - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/test_model_hub_inference_wait.py
+    - tests/test_model_hub_retry_advice.py
+    - tests/test_model_hub_retry_policy.py
+    - tests/test_model_hub_retry_lifecycle.py
+    - tests/test_model_hub_recovery_evidence.py
+    - tests/test_model_hub_progress.py
+    - tests/test_model_hub_failure_presentation.py
+    - tests/test_opencode_model_hub_retry.py
+    - ui/src/lib/modelHubRecovery.test.ts
+    - tests/test_model_hub_request_body_budget.py
+    - tests/test_model_hub_l3.py
+    - tests/test_model_hub_usage.py
+    - tests/test_local_deps.py
+    - tests/test_opencode_server.py
+    - tests/test_runtime_activation.py
+    # The user-visible half of metering. A vitest case is the only place these
+    # properties can be observed, so the catalog checker resolves both shapes.
+    - ui/src/components/settings/models/UsageTab.test.tsx
+    - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+    - ui/src/components/settings/models/RouteChainDialog.test.tsx
+    - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
+    - ui/src/components/settings/models/AgentCard.test.tsx
+    # Migration: the setup key-import entry and the broader settings dialog it
+    # narrows, plus the one predicate that separates them.
+    - ui/src/components/settings/models/MigrationDialog.test.tsx
+    - ui/src/components/settings/models/migrationScan.test.ts
+    - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+    # The gate that resolves those rows against vitest's own collection, and
+    # its own evidence.
+    - ui/scripts/scenarioCatalog.test.mjs
+    - tests/scenarios/model_hub/test_model_hub_catalog.py
+    - tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
+    - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
+    - tests/e2e/test_model_hub_guards.py
+    - tests/e2e/test_model_hub_migration.py
+    - tests/e2e/test_model_hub_mock_upstream.py
+    - tests/e2e/test_model_hub_routing.py
+    - tests/e2e/test_model_hub_backend_settings.py
+    - tests/e2e/test_model_hub_catalog_consumer.py
+    - tests/e2e/test_codex_request_metadata.py
+    - tests/e2e/test_codex_request_gateway.py
+    - tests/e2e/test_model_hub_runtime.py
+    - tests/e2e/test_model_hub_sources.py
+    - tests/e2e/test_model_hub_usage_events.py
 status_legend:
-  covered: closed-loop scenario coverage exists
-  partial: unit or contract coverage exists but the cross-lane loop is incomplete
-  gap: owned by a later lane or integration pass
+  covered:
+    description: closed-loop coverage exists at the declared layer
+    test_required: true
+    expected_fail: false
+    priority: false
+  partial:
+    description: executable coverage exists at the declared layer, but the layer named in missing_layer is still unproved
+    test_required: true
+    expected_fail: false
+    priority: true
+  gap:
+    description: no executable coverage at any layer yet
+    test_required: false
+    expected_fail: false
+    priority: true
+  assert:
+    description: the E2E scenario asserts the intended contract when its environmental preconditions are present
+    test_required: true
+    expected_fail: false
+    priority: false
+  baseline:
+    description: the E2E scenario freezes current behavior while its product decision remains open
+    test_required: true
+    expected_fail: false
+    priority: true
+  xfail:
+    description: executable evidence isolates a known broken product surface without weakening passing invariants
+    test_required: true
+    expected_fail: true
+    priority: true
+  skip:
+    description: this layer cannot execute the scenario; reason and owning_layer identify the boundary
+    test_required: false
+    expected_fail: false
+    priority: false
 scenarios:
+  - id: MH-CODEX-ROUTING-001
+    name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_codex_request_routing.py::test_codex_shared_transport_routes_overlapping_aliases
+    related_tests:
+      - tests/test_codex_request_routing.py::test_codex_invalid_identity_cannot_route_or_poison_peer
+      - tests/test_codex_request_routing.py::test_codex_late_request_same_route_is_not_owned_by_successor
+      - tests/test_codex_request_routing.py::test_codex_untracked_launch_routes_without_claiming_live_turn
+      - tests/test_codex_request_routing.py::test_codex_request_ownership_precedes_body_parse
+      - tests/test_codex_request_routing.py::test_codex_adapter_keeps_request_metadata_on_compatibility_retry
+  - id: MH-CODEX-ROUTING-002
+    name: Real Codex consumes issued launch metadata through the real gateway and exact turn settlement
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/e2e/test_codex_request_gateway.py::test_codex_native_gateway_keeps_concurrent_route_ownership
+  - id: MH-CODEX-METADATA-001
+    name: Native Codex preserves per-request identity through concurrency, tool continuations, retries and compaction
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/e2e/test_codex_request_metadata.py::test_codex_concurrent_threads_keep_distinct_metadata
+    related_tests:
+      - tests/e2e/test_codex_request_metadata.py::test_codex_tool_continuation_keeps_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_transport_retry_keeps_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_auto_compaction_wire_metadata
+      - tests/e2e/test_codex_request_metadata.py::test_codex_remote_compact_request_uses_header_metadata
+  - id: MH-RETRY-WINDOW-001
+    name: Every fallback pass shares one admission window without replaying output
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_one_window_covers_all_fallback_passes_without_replaying_after_output
+  - id: MH-RETRY-RECOVERY-001
+    name: Real protocol output or empty completion proves recovery while unknown success does not
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
+  - id: MH-RETRY-CONCURRENCY-001
+    name: Concurrent requests share one half-open slot through cancellation and slow inference
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_has_one_half_open_owner_and_interruptible_waiters
+  - id: MH-RETRY-NATIVE-001
+    name: OpenCode consumes the Hub terminal without automatically sending continue
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_opencode_model_hub_retry.py::test_hub_terminal_skips_automatic_continue_and_emits_one_failure
+  - id: MH-RETRY-OWNERSHIP-001
+    name: A production adapter returning without admission releases its provisional half-open claim
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_unavailable_production_client_releases_unadmitted_half_open_claim
+  - id: MH-RETRY-NATIVE-002
+    name: Native CLI settlements retain fixed cooldowns without entering HTTP recovery streaks
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_native_failure_never_enters_http_recovery_streak
+  - id: MH-RETRY-PERSISTENCE-001
+    name: Verified recovery survives failed persistence and fresh reads of the retired cooldown
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_verified_response_survives_failed_recovery_persistence_and_fresh_reads
+  - id: MH-RETRY-EXPIRY-001
+    name: An expired waiter retains its closed terminal when live supply changes
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_remains_a_closed_terminal_when_live_supply_changes
+  - id: MH-RETRY-EXPIRY-002
+    name: Window expiry does not relabel an observed hard failure as temporary recovery exhaustion
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal
+  - id: MH-RETRY-ADVICE-001
+    name: Failed HTTP advice retains the receipt clock across delayed or broken bodies
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_retry_advice.py::test_retry_advice_survives_error_body_delays_and_failures
+  - id: MH-RETRY-EVIDENCE-001
+    name: Unknown buffered success passes through without proving recovery
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_recovery_evidence.py::test_unknown_buffered_success_is_forwarded_without_recovery_evidence
+  - id: MH-RETRY-PROGRESS-001
+    name: Recovery progress invalidates only its exact live Session
+    status: covered
+    kind: projection
+    layer: unit
+    test: tests/test_model_hub_progress.py::test_http_recovery_reaches_live_turn_state_and_clears_without_chat
+  - id: MH-RETRY-COPY-001
+    name: Terminal copy says recovery ended instead of promising automatic restoration
+    status: covered
+    kind: copy
+    layer: unit
+    test: tests/test_model_hub_failure_presentation.py::test_gateway_terminal_survives_native_recorder_before_shared_notice
+  - id: MH-RETRY-WEB-001
+    name: The quiet Web label cannot infer recovery from either deadline
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/lib/modelHubRecovery.test.ts::MH-RETRY-WEB-001
+  - id: MH-CATALOG-001
+    name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_catalog.py::test_mh_catalog_001_scenario_catalog_is_complete_and_executable
+  - id: MH-CATALOG-002
+    name: A UI-evidenced row resolves only to a vitest case that runs under its catalog ID
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/scripts/scenarioCatalog.test.mjs::MH-CATALOG-002
+  - id: MH-S1-001
+    name: Live conditions never change the exact configured hop identity
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity
+  - id: MH-CONFIG-001
+    name: Persisted route configuration changes only through an explicit route edit
+    status: covered
+    kind: persistence
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit
+  - id: MH-ROUTE-EDIT-001
+    name: Replacing one route hop preserves its position and every untouched hop
+    status: covered
+    kind: mutation
+    layer: unit
+    test: ui/src/components/settings/models/RouteChainDialog.test.tsx::MH-ROUTE-EDIT-001
+  - id: MH-MATCH-001
+    name: Source addition projects automatic positions without writing manual overrides
+    status: covered
+    kind: selection
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_001_add_source_projects_automatic_positions_without_persisting_hops
+  - id: MH-MATCH-002
+    name: Matching tie-break is deterministic across inventory processing order
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_match_002_matching_tie_break_is_independent_of_inventory_order
+  - id: MH-MENU-ADD-001
+    name: Adding a provider menu model projects overlapping suppliers in default order without persisting automatic hops
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_menu_add_001_seeds_overlapping_suppliers_in_source_order
+  # The client half of MH-MENU-ADD-001: the server projects a route from whatever
+  # supply exists at commit time, and this is what makes that supply the one the
+  # user was shown. The picker's other two doors — an id the list already holds,
+  # and one no provider offers, reached through the models.dev lookup — are each
+  # a case of their own, named under related_tests because a row resolves through
+  # evidence named for itself and a citation reaching two cases identifies
+  # neither.
+  - id: MH-MENU-COMPOSE-001
+    name: A backend's list is composed from its providers, and the save request carries exactly the suppliers the picker displayed for what was added
+    status: covered
+    kind: mutation
+    layer: unit
+    test: ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::MH-MENU-COMPOSE-001
+    related_tests:
+      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::finds an already-added model by its supplier and shows it as already added
+      - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx::asks which row a typed ID names as the ID it would be saved as
+      - ui/e2e/model-catalog/token-scope.spec.ts
+  - id: MH-GATEWAY-STATUS-001
+    name: Gateway route coverage stays independent of Agent selections and attributes Agent issues below the catalog
+    status: covered
+    kind: presentation
+    layer: unit
+    test: "ui/src/components/settings/models/AgentCard.test.tsx::MH-GATEWAY-STATUS-001: keeps Agent issues in an expandable footer, outside the mode trigger in en"
+    related_tests:
+      - ui/src/components/settings/models/supply.test.ts
+      - ui/e2e/model-catalog/gateway-status.spec.ts
+  - id: MH-SRC-DELETE-001
+    name: Source deletion removes every reference while preserving survivor order
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order
+  # The removal the user performs has a second half the transaction above cannot
+  # state: what the surface they performed it from does next. Keyed to one
+  # selected source, the detail dialog had nothing left to render and stayed open
+  # over a placeholder, so the row states where each ending belongs — a removal
+  # of ours closes, and only a disappearance we did not cause is worth a sentence.
+  - id: MH-SRC-DELETE-002
+    name: A committed removal returns the source detail dialog to the list, leaving the placeholder to a disappearance the user did not cause
+    status: covered
+    kind: presentation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-SRC-DELETE-002
+    related_tests:
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::states in the dialog that a source disappeared with no removal of ours
+      - ui/src/i18n/keyCoverage.test.ts
+  - id: MH-SUPPLY-GAP-001
+    name: Inventory loss preserves an explicit API-key route target
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_supply_gap_001_manual_target_survives_inventory_loss
+  - id: MH-ROUTING-001
+    name: Model-specific mock errors preserve truthful inventory and unrelated model requests
+    status: covered
+    kind: contract
+    layer: e2e
+    test: tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_001_mock_model_errors_are_request_scoped_and_inventory_independent
+  - id: MH-ROUTING-002
+    name: Matching precedes API-key passthrough and health cannot change route membership
+    status: covered
+    kind: determinism
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_002_match_tier_precedes_passthrough_and_health_never_changes_membership
+  - id: MH-ROUTING-003
+    name: Nonempty manual targets persist while absent and legacy-empty routes inherit current defaults through refresh and reload
+    status: covered
+    kind: persistence
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_manual_intent_survives_refresh_default_reorder_and_reload
+    partial_evidence:
+      covers: Inventory gains refine inherited candidates without destructive confirmations or saved-intent changes in Hub and Direct modes
+      test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_003_refresh_refines_inherited_candidates_without_removing_saved_routes
+  - id: MH-ROUTING-004
+    name: Restore and undo previews are inert and committed restore deletes the override idempotently
+    status: covered
+    kind: mutation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_004_preview_cancel_undo_are_inert_and_restore_deletes_only_override
+  - id: MH-ROUTING-005
+    name: Real OpenCode launch, gateway, and pinned CPA preserve unlisted API-key targets and source isolation
+    status: assert
+    kind: transport
+    layer: e2e
+    test: tests/e2e/test_model_hub_mock_upstream.py::test_mh_routing_005_real_opencode_gateway_cpa_preserves_unknown_model_and_source_isolation
+  - id: MH-ROUTING-006
+    name: Subscription sources retain inventory admission and never advertise unknown-model passthrough
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_routing_006_subscription_inventory_admission_is_not_expanded
+  - id: MH-ROUTING-008
+    name: Buffered and streaming real gateway calls preserve exact unlisted model, source, inventory, and engine configuration
+    status: assert
+    kind: transport
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_008_real_gateway_cpa_exact_model_and_source
+  - id: MH-ROUTING-009
+    name: Registration-changing Save waits for active output completion or client close without deadlock or truncation
+    status: assert
+    kind: concurrency
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_009_save_drains_active_stream_without_truncation_or_deadlock
+  - id: MH-ROUTING-010
+    name: Real gateway model-not-found preserves source health and records exact attributed errors superseded by success
+    status: assert
+    kind: recovery
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_010_model_not_found_stays_request_scoped_through_real_gateway_cpa
+  - id: MH-ROUTING-012
+    name: Persisted dormant OpenCode overrides reach the exact API-key source and unlisted target without menu or inventory mutation
+    status: assert
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_012_persisted_dormant_opencode_override_reaches_exact_source_and_target
+  - id: MH-ROUTING-013
+    name: Legacy-empty and absent routes inherit matching and exact passthrough through pinned CPA without changing nonempty manual intent or registration per request
+    status: assert
+    kind: compatibility
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_routing_013_legacy_empty_inherits_matching_and_exact_passthrough_through_real_cpa
+  - id: MH-REQUEST-BUDGET-001
+    name: Large multi-image requests retain exact model input through authenticated HTTP ingress
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_large_multi_image_request_is_forwarded_exactly
+  - id: MH-REQUEST-BUDGET-002
+    name: The inclusive request byte budget returns a local structured error without upstream admission or health mutation
+    status: covered
+    kind: boundary
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_request_budget_is_inclusive_and_local
+  - id: MH-REQUEST-BUDGET-003
+    name: Invalid gateway authentication cannot parse or admit a request body
+    status: covered
+    kind: security
+    layer: unit
+    test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
+  - id: MH-PROTOCOL-001
+    name: Source protocol is response-observed before persistence with no transient residue
+    status: covered
+    kind: observation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state_is_cleaned
+  - id: MH-PROTOCOL-002
+    name: Every protocol consumer shares the authoritative transport vocabulary
+    status: covered
+    kind: contract
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports
+  - id: MH-PROTOCOL-003
+    name: Manual protocol selection constrains observation and persists only matching response proof
+    status: covered
+    kind: observation
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_protocol_003_manual_selection_requires_matching_response_proof
+  - id: MH-PROTOCOL-004
+    name: Codex Model Hub launches use standard Responses provider capabilities
+    status: partial
+    kind: compatibility
+    layer: contract
+    missing_layer: scenario
+    test: tests/test_model_hub_injection.py::test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token
+    partial_evidence:
+      covers: Real Codex catalog and turn consumption preserves unknown image and explicit effort intent; this does not exercise the managed engine
+      test: tests/e2e/test_model_hub_catalog_consumer.py::test_codex_unknown_catalog_preserves_supplied_image_and_effort
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_explicit_catalog_choices_reach_the_consumer
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_native_context_override_wins_over_catalog_planning
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_auto_compaction_consumes_resolved_limits
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_reloads_catalog_after_initialize
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_codex_inherits_catalog_pin
+  - id: MH-CLAUDE-LAUNCH-001
+    name: Claude Hub turns preserve the configured Source and model despite native connection settings
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_routing.py::test_mh_claude_launch_001_settings_cannot_bypass_the_configured_route
+    related_tests:
+      - tests/e2e/test_model_hub_catalog_consumer.py::test_claude_consumer_preserves_explicit_limit_settings
+  - id: MH-CODEX-LAUNCH-001
+    name: Native Codex provider settings preserve the configured Hub Source and upstream model
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_backend_settings.py::test_codex_native_provider_settings_cannot_change_hub_egress
+  - id: MH-OPENCODE-LAUNCH-001
+    name: Native OpenCode settings preserve the exact Hub provider transport and authentication
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_backend_settings.py::test_opencode_native_settings_cannot_change_hub_transport
+  - id: MH-AC29-001
+    name: A persisted import-shaped Source survives canonical serialization and reload
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_validator
   - id: MH-RUNTIME-001
     name: Service restart reports an installed engine as idle until first demand
     status: partial
     kind: recovery
     layer: unit
+    missing_layer: scenario
     test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
+  - id: MH-RUNTIME-002
+    name: Matching OpenCode overlay never waits behind an unrelated active Turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_002_matching_overlay_does_not_wait_for_an_unrelated_active_run
+  - id: MH-RUNTIME-003
+    name: A pending OpenCode overlay transition cannot be starved by new Turns on the old overlay
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_003_pending_overlay_transition_blocks_new_turns_on_the_old_overlay
+  - id: MH-RUNTIME-004
+    name: An OpenCode overlay selection remains reserved until its initiating Turn becomes active
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_opencode_server.py::test_mh_runtime_004_overlay_reservation_promotes_atomically_to_active_run
+  - id: MH-RUNTIME-005
+    name: First CLIProxyAPI cold start remains pending until both health surfaces are ready
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_mh_runtime_005_first_cold_start_waits_for_readiness_within_bounded_budget
+  - id: MH-RUNTIME-006
+    name: CLIProxyAPI readiness timeout stops the child, discards its output, and leaves bounded structured diagnostics
+    status: covered
+    kind: timeout_cancel
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_mh_runtime_006_timeout_stops_engine_with_bounded_structured_diagnostics
+  - id: MH-RUNTIME-007
+    name: An OpenCode overlay change retires drained durable owners without replacing an active native Turn
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_runtime_activation.py::test_mh_runtime_007_opencode_overlay_restart_retires_pre_native_start_owner
+  - id: MH-RUNTIME-008
+    name: Avibe startup converges CPA to its packaged pin without enabling or starting Model Hub
+    status: covered
+    kind: lifecycle
+    layer: unit
+    test: tests/test_local_deps.py::test_reconcile_startup_dependencies_uses_automatic_runtime_admission
+  - id: MH-RUNTIME-009
+    name: Connected inference remains live until completion, transport failure, or owner cancellation
+    status: covered
+    kind: timeout_cancel
+    layer: contract
+    test: tests/test_model_hub_inference_wait.py::test_connected_inference_waits_for_its_owner
+  - id: MH-USAGE-001
+    name: Tokens an upstream reported before the turn ended are still metered
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_the_tokens_the_engine_already_read_survive_every_ending_before_our_first
+  - id: MH-USAGE-002
+    name: A billed failover hop is metered against the Source that billed it
+    status: covered
+    kind: selection
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_billed_failover_hop_is_metered_against_the_source_that_billed_it
+  - id: MH-USAGE-003
+    name: A failed ledger write leaves neither residue nor a damaged document
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_write_that_fails_leaves_neither_residue_nor_a_damaged_document
+  - id: MH-USAGE-004
+    name: Metering never performs its ledger read-modify-write on the event loop
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_neither_metering_owner_writes_the_ledger_on_the_event_loop
+  - id: MH-USAGE-005
+    name: A pre-output usage report remains metered when the stream then fails
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_runtime.py::test_a_prelude_that_dies_after_reporting_tokens_carries_them_to_the_resolver
+  - id: MH-USAGE-006
+    # Malformed historical whitespace/surrogate exceptions remain documented in
+    # docs/plans/model-hub-identifier-boundary-assessment.md; these rows do not
+    # claim that every arbitrary loadable legacy string is correctly attributed.
+    name: Supported persisted model identities remain meterable across reload
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_metering_can_key_exactly_the_identities_a_config_can_hold
+  - id: MH-USAGE-007
+    name: Distinct nonblank UTF-8 model identities and folded literals retain separate usage rows
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_no_two_identities_a_config_holds_can_share_one_row
+  - id: MH-USAGE-008
+    name: Configured nonblank UTF-8 identities label their verbatim and folded ledger rows
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_label_reaches_the_row_of_every_identity_the_ledger_can_key
+  - id: MH-USAGE-009
+    name: A metering backlog is bounded by configured identities rather than by request rate
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_the_write_queue_is_bounded_by_identities_not_by_arrival_rate
+  - id: MH-USAGE-010
+    name: A turn whose settlement raises still meters the call the vendor billed
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_settlement_that_raises_still_meters_the_call_it_was_settling
+  - id: MH-USAGE-011
+    name: A ledger that stopped answering cannot hold the served turn open behind it
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_l3.py::test_a_ledger_that_stopped_answering_cannot_hold_the_served_turn_open
+  - id: MH-USAGE-012
+    name: A caller that names one model twice is refused rather than answered with half of what it sent
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_config.py::test_a_live_chain_is_refused_the_duplicate_a_persisted_chain_is_repaired
+  - id: MH-USAGE-013
+    name: A model's label belongs to the Source it was metered under, not to its ID alone
+    status: covered
+    kind: persistence
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_model_label_is_scoped_to_the_source_it_was_metered_under
+  - id: MH-USAGE-014
+    name: An instant no conversion can carry degrades instead of stopping metering
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_an_instant_no_conversion_can_carry_never_stops_metering
+  - id: MH-USAGE-015
+    name: A wedged ledger write cannot hold the process open at exit
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_wedged_ledger_write_cannot_hold_the_process_open
+  - id: MH-USAGE-016
+    name: The usage report names the window the server served, not the one the view asked for
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-016
+  - id: MH-USAGE-017
+    name: A vanished model's ledger key never reaches the screen, while a vanished Source stays identifiable
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-017
+  - id: MH-USAGE-018
+    name: A token-report shortfall reads as missing reports rather than unused capacity
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-018
+  - id: MH-USAGE-019
+    name: A day the window covered without a metered turn is drawn as idle rather than closed over
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-019
+  - id: MH-USAGE-020
+    name: The usage report is read when its tab is opened, never as part of the routing surface's first paint
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-020
+  - id: MH-USAGE-021
+    name: A day whose calls carried no token report reads as metered rather than idle
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-021
+  - id: MH-USAGE-022
+    name: The usage report stays reachable from every Model Hub landing, including one with no Source left
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-USAGE-022
+  - id: MH-USAGE-023
+    name: Every day of the window states its figures in text, not only in a pointer tooltip
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-023
+  - id: MH-USAGE-024
+    name: Every figure in the usage report names the row and the column it answers, not a position on screen
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-024
+  - id: MH-USAGE-025
+    name: A window whose upstreams reported zero tokens reads as measured rather than unreported
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-025
+  - id: MH-USAGE-026
+    name: Every token figure the usage report states names the coverage it was measured from
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-026
+  - id: MH-USAGE-027
+    name: The usage report stays within a narrow viewport and states every chart-axis label without clipping
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/UsageTab.test.tsx::MH-USAGE-027
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
@@ -39,86 +693,44 @@ scenarios:
     kind: compatibility
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_003_started_stream_never_retries
+  - id: MH-RES-LIVE-004
+    name: Live turn walks a hub subscription onto a metered API key before streaming starts
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_res_live_004_hub_subscription_falls_back_to_api_key_within_turn
   - id: MH-EVT-002
     name: Causal switch events survive service restart
     status: covered
     kind: recovery
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_evt_002_switch_events_survive_router_and_service_restart
-  - id: MH-RES-001
-    name: Quota-exhausted failover and recovery switchback
-    status: partial
-    kind: recovery
-    layer: unit
-    test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
-  - id: MH-SRC-REFRESH-001
-    name: Manual source refresh replaces discovery inventory and freshness timestamp
-    status: partial
-    kind: recovery
-    layer: unit_contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
-  - id: MH-PRI-001
-    name: Per-agent source-order mutations and follow restoration take effect immediately
+  - id: MH-SET-001
+    name: Restored pre-restart attempt cannot settle a Source a newer attempt claimed
     status: covered
-    kind: ordering
+    kind: recovery
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_pri_001_order_mutations_change_the_next_turn
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_set_001_restored_attempt_cannot_settle_health_after_a_newer_attempt
+  - id: MH-SET-002
+    name: Restored pre-restart attempt still settles a Source this runtime left alone
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_set_002_restored_attempt_settles_a_source_this_runtime_left_alone
+  - id: MH-SET-003
+    name: Released launch identity shapes restore without certifying settlement freshness
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_set_003_released_launch_identity_shape_restores_without_certifying_freshness
   - id: MH-SEL-001
     name: Unpinned Hub activation stays honest and resolves the turn model
     status: covered
     kind: selection
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
-  - id: MH-MAP-001
-    name: Mapping applies to Claude Code only
-    status: partial
-    kind: mapping
-    layer: unit_contract
-    test: tests/test_model_hub_resolution.py::test_mapping_is_scoped_to_the_requesting_backend
-  - id: MH-OC-001
-    name: OpenCode identifiers stay stable across mode switches
-    status: covered
-    kind: stability
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations
-  - id: MH-CHAN-001
-    name: Native subscription exhaustion falls back and recovers per turn
-    status: covered
-    kind: recovery
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn
-  - id: MH-INJ-CLAUDE-001
-    name: Claude Hub launch uses environment-only gateway injection
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-INJ-CODEX-001
-    name: Codex Hub launch uses app-server runtime overrides
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-INJ-OPENCODE-001
-    name: OpenCode overlay changes drain work and restart with hash metadata
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_opencode_overlay_change_drains_then_restarts_and_records_hash
-  - id: MH-INJ-DIRECT-001
-    name: Direct launches preserve native configuration and omit Hub injection
-    status: covered
-    kind: compatibility
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-OVL-001
-    name: OpenCode visible identifiers survive source and runtime perturbations
-    status: covered
-    kind: stability
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations
   - id: MH-MIG-001
-    name: Migration copies without modifying native configuration
+    name: Native import copies without modifying native configuration
     status: covered
     kind: migration
     layer: scenario
@@ -130,17 +742,71 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
   - id: MH-MIG-003
-    name: Experimental mode keeps native OAuth files in their CLI stores
+    name: A scan row names the provider it belongs to without ever carrying a plaintext credential
     status: covered
     kind: migration
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_experimental_flag_keeps_oauth_native
-  - id: MH-OAUTH-A-001
-    name: Paste-code OAuth happy path
-    status: partial
-    kind: oauth
-    layer: contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_scan_rows_name_their_provider_without_exposing_plaintext
+    related_tests:
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_masked_credential_is_the_same_masking_the_detail_already_showed
+      - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone
+  - id: MH-MIG-004
+    name: Setup's key-import entry counts, offers and submits one and the same set, and leaves subscriptions and reauth rows to the settings migration
+    status: covered
+    kind: migration
+    layer: unit
+    test: "ui/src/components/onboarding/ImportKeysNotice.test.tsx::MH-MIG-004: submits only the rows still ticked"
+    related_tests:
+      - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
+      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies a keep_native row — it is a real action here, not a leftover
+  - id: MH-TAKEOVER-001
+    name: Recoverable failures walk the configured route and exhaust only at its end
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
+  - id: MH-OVERVIEW-001
+    name: Overview batches model chains by backend and reserves exact reads for route editing
+    status: covered
+    kind: projection
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-OVERVIEW-001
+  - id: MH-ENGINE-001
+    name: Local engine loss is terminal without Source mutation or replay
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_engine_loss_is_terminal_without_source_mutation_or_replay
+  - id: MH-ENGINE-MIDTURN-001
+    name: Local engine loss after output starts never walks a later hop
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_mid_turn_engine_loss_never_replays_after_output_starts
+  - id: MH-CREDENTIAL-001
+    name: Credential rejection retries once only for a refreshable credential
+    status: covered
+    kind: authentication
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_static_credential_failure_does_not_retry_or_claim_takeover
+  - id: MH-EFFORT-001
+    name: Unknown Source capability preserves requested reasoning intent
+    status: covered
+    kind: compatibility
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_effort_001_unknown_capability_preserves_intent_and_turn_completes
+  - id: MH-TURN-RESULT-001
+    name: All terminal outcomes are closed schema-valid provenance products
+    status: covered
+    kind: turn_lifecycle
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_outcomes_and_cancel_are_closed_provenance_products
+  - id: MH-TURN-COPY-001
+    name: Every turn decision resolves to its authoritative backend copy key or silence
+    status: covered
+    kind: turn_lifecycle
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_copy_keys_cover_the_authoritative_outcome_matrix
   - id: MH-OAUTH-B-001
     name: Device-code OAuth happy path
     status: gap
@@ -151,12 +817,6 @@ scenarios:
     status: gap
     kind: oauth
     layer: scenario
-  - id: MH-OAUTH-ERR-001
-    name: OAuth timeout and cancel terminate cleanly
-    status: partial
-    kind: timeout_cancel
-    layer: contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
   - id: MH-OAUTH-NATIVE-001
     name: Claude native CLI paste-code login persists an active Source
     status: covered
@@ -164,41 +824,348 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_001_claude_paste_code_happy_path
   - id: MH-OAUTH-NATIVE-002
-    name: Codex native CLI device-code login self-completes and persists its account Source
+    name: Codex native CLI device-code login persists its account Source
     status: covered
     kind: oauth
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_002_codex_device_code_self_completes
   - id: MH-OAUTH-NATIVE-003
-    name: Native CLI OAuth cancel, timeout, and signed-out state terminate safely
+    name: Native CLI OAuth cancel and timeout terminate without residue
     status: covered
     kind: timeout_cancel
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
-  - id: MH-OAUTH-CONSENT-001
-    name: Experimental hub OAuth requires and persists explicit consent before Source creation
+  - id: A1
+    name: Feature-off Model Hub routes remain dormant
+    status: assert
+    kind: gate
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a1_feature_flag_disables_the_complete_models_api
+  - id: A2
+    name: Offline engine install, start, stop, and hardened configuration
+    status: assert
+    kind: runtime_lifecycle
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a2_offline_engine_install_start_stop_and_hardened_config
+  - id: A3
+    name: Runtime stop reports blocking Hub backends in API and UI copy
+    status: skip
+    kind: guard
+    layer: ui-e2e
+    reason: UI copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
+    partial_evidence:
+      test: tests/e2e/test_model_hub_runtime.py::test_a3_runtime_stop_reports_every_blocking_backend
+      covers: structured 409 guard, runtime_in_use code, and exact blocking backend list
+  - id: A4
+    name: Runtime toggle fails closed when the agents read fails
+    status: skip
+    kind: guard
+    layer: ui-e2e
+    reason: runtime-toggle interaction is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#a-gating-and-runtime-lifecycle-c1c2c5c9c15
+  - id: A5
+    name: Controller restart during OAuth poll reports engine_down
+    status: assert
+    kind: recovery
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_runtime.py::test_a5_controller_restart_during_oauth_poll_reports_engine_down
+  - id: B1
+    name: Automatic observation selects protocol from response evidence
+    status: assert
+    kind: protocol
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b1_auto_observe_selects_protocol_from_response_shape
+  - id: B2
+    name: Manual protocol mismatch is refused with proof evidence
+    status: assert
+    kind: protocol
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b2_manual_protocol_mismatch_is_refused_with_proof_error
+  - id: B3
+    name: Discovery drops upstream-only inventory extensions
+    status: assert
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b3_discovered_model_persists_only_contract_fields
+  - id: B4
+    name: Unavailable inventory requires explicit acceptance before commit
+    status: assert
+    kind: recovery
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b4_inventory_failure_requires_consent_then_commits_error_source
+  - id: B5
+    name: Replayed source creation nonce is idempotent
+    status: xfail
+    kind: idempotency
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b5_source_create_nonce_is_idempotent_across_http_replay
+  - id: B6
+    name: Credential replacement rolls back or commits atomically
+    status: assert
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b6_replace_key_rolls_back_then_rename_and_retarget_commit
+  - id: B7
+    name: Source deletion requires an exact guard-plan echo
+    status: assert
+    kind: guard
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b7_delete_guard_requires_exact_echo_before_force
+  - id: B8
+    name: Delete and refresh retain their current force-transport asymmetry
+    status: baseline
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b8_delete_force_is_query_only_in_the_current_http_contract
+  - id: B9
+    name: Inventory refetch preserves timestamps for existing models
+    status: xfail
+    kind: persistence
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b9_refetch_preserves_existing_model_discovery_timestamp
+  - id: B10
+    name: Reasoning-tier provenance owns managed and user model mutations
+    status: assert
+    kind: mutation
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_sources.py::test_b10_custom_models_and_free_text_tiers_obey_ownership_rules
+  - id: B11
+    name: Model Hub error codes resolve to human-readable copy
+    status: skip
+    kind: copy
+    layer: ui-e2e
+    reason: rendered error copy is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#b-api-key-sources-c16c29
+  - id: C1
+    name: Hub OAuth starts, presents authorization, polls, and cancels
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: the mock upstream does not implement the managed engine provider-OAuth authorization surface
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C2
+    name: OAuth expiry and nonce replay preserve one flow
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: OAuth expiry and replay require provider-OAuth state issued by the managed engine
+    owning_layer: future live OAuth suite (managed engine provider OAuth)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C3
+    name: Native OAuth start failures resolve to actionable copy
+    status: skip
+    kind: oauth
+    layer: e2e-auto
+    reason: native start-failure states require a controlled native CLI auth process and credential store
+    owning_layer: native OAuth scenario suite
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: C4
+    name: Real-vendor login materializes a source with adoption guidance
+    status: skip
+    kind: oauth
+    layer: manual
+    reason: full provider login requires real vendor accounts and credentials
+    owning_layer: manual live-vendor regression
+    evidence: docs/plans/model-hub-e2e-test-plan.md#c-oauth-lifecycle-c30c40-partial-by-1
+  - id: D1
+    name: A later native subscription is appended after an API-key source
+    status: baseline
+    kind: placement
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d1_subscription_added_after_api_key_is_appended_at_tail
+  - id: D2
+    name: A healthy first hop reaches the upstream through the real engine
+    status: assert
+    kind: routing
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d2_healthy_hop_is_served_by_the_real_engine_probe
+  - id: D3
+    name: Rate limiting falls through to hop one within the original turn
+    status: skip
+    kind: failover
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d3_rate_limit_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
+  - id: D4
+    name: Quota exhaustion falls through to hop one within the original turn
+    status: skip
+    kind: failover
+    layer: turn-gateway
+    reason: same-turn walk requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+    partial_evidence:
+      test: tests/e2e/test_model_hub_routing.py::test_d4_quota_moves_the_next_api_probe_to_hop_one
+      covers: cooldown written; next-request selection proven; same-turn hop walk is not covered here
+  - id: D5
+    name: A nonrefreshable 401 marks the source for repair
+    status: assert
+    kind: authentication
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d5_nonrefreshable_401_marks_the_key_for_repair
+  - id: D6
+    name: A server error honors later upstream advice through the real engine
+    status: assert
+    kind: failover
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d6_server_error_preserves_later_retry_after_through_real_engine
+  - id: D7
+    name: A partial stream terminates without replaying another source
+    status: skip
+    kind: stream
+    layer: turn-gateway
+    reason: same-turn partial-stream handling requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D8
+    name: Cooldown expiry permits a real attempt and verified output proves recovery
     status: covered
-    kind: oauth_consent
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_policy.py::test_real_gateway_retries_preoutput_then_preserves_one_response
+  - id: D9
+    name: Exhausting temporary recovery returns one closed terminal with original upstream provenance
+    status: covered
+    kind: failover
     layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_consent_001_is_required_and_persisted
+    test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop
+  - id: D10
+    name: Reasoning intent survives exact-provider fallback without strip telemetry
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_routing.py::test_d10_reasoning_intent_survives_exact_provider_fallback
+  - id: D11
+    name: Claude token counting behavior is documented at the gateway
+    status: skip
+    kind: compatibility
+    layer: turn-gateway
+    reason: backend count-tokens routing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D12
+    name: Backend injection remains isolated by backend contract
+    status: skip
+    kind: injection
+    layer: contract
+    reason: backend launch injection is not observable through the browser-visible HTTP API
+    owning_layer: backend injection contract suite
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: D13
+    name: Member permissions expose explicit Model Hub denials
+    status: skip
+    kind: authorization
+    layer: ui-e2e
+    reason: member dead-ends require a second authenticated role context unavailable in the local bypass-auth harness
+    owning_layer: Playwright lane (multi-role permissions)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#d-per-turn-routing-fallback-capability-behavior-c41c50-c74c81
+  - id: E1
+    name: Metered turns aggregate cache-aware upstream usage
+    status: skip
+    kind: usage
+    layer: turn-gateway
+    reason: metered turns require the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#e-usage-and-events-c54c60
+  - id: E2
+    name: Usage windows remain bounded for every days input
+    status: assert
+    kind: usage
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_usage_events.py::test_e2_usage_windows_are_bounded
+  - id: E3
+    name: Resolution events paginate without credential material
+    status: assert
+    kind: security
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_usage_events.py::test_e3_event_feed_paginates_and_never_persists_credentials
+  - id: F1
+    name: Native scan produces the copy-only migration action matrix
+    status: xfail
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration.py::test_f1_unsupported_opencode_provider_ids_are_noted
+  - id: F2
+    name: Migration copies original API-key bytes without changing native files
+    status: assert
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration.py::test_f2_apply_is_copy_only_and_places_native_login_before_keys
+  - id: F3
+    name: First Model Hub visit surfaces importable native configuration
+    status: skip
+    kind: migration
+    layer: ui-e2e
+    reason: first-visit banner rendering is not executable from the pytest API layer
+    owning_layer: Playwright lane (ui/e2e)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#f-migration-c61c67
+  - id: G1
+    name: A guard echo missing agents remains confirmable
+    status: assert
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g1_guard_echo_missing_agents_does_not_loop
+  - id: G2
+    name: Source-order write and chain reorder retain their current divergence
+    status: baseline
+    kind: compatibility
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g2_source_order_write_and_chain_reorder_are_divergent
+  - id: G3
+    name: Malformed JSON is distinguishable from business refusals
+    status: xfail
+    kind: contract
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_guards.py::test_g3_malformed_json_is_distinct_from_business_refusals
+  - id: H1
+    name: Claude protocol turns complete through an OpenAI Chat source
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: cross-protocol turn completion requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: H2
+    name: Parallel tool calls preserve cross-protocol tuple correlation
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: parallel tool correlation requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: H3
+    name: Image blocks pass through without breaking terminal framing
+    status: skip
+    kind: cross_protocol
+    layer: turn-gateway
+    reason: image-block terminal framing requires the private credential issued to a live backend turn
+    owning_layer: future live-turn suite (turn gateway)
+    evidence: docs/plans/model-hub-e2e-test-plan.md#h-cross-protocol-functional-floor-owner-ruling-baseline
+  - id: MODEL-HUB-MIGRATION-001
+    name: Released OpenCode catalogs migrate before strict validation and restore settings saves
+    status: covered
+    kind: migration
+    layer: config-api
+    test: tests/test_model_hub_legacy_opencode_migration.py::test_legacy_selected_models_preserve_sources_routes_and_order
+    evidence: tests/test_member_management_parity.py::test_legacy_opencode_catalog_clears_recovery_and_allows_config_save
 next_priority:
-  - MH-RES-001
-  - MH-PRI-001
-  - MH-SEL-001
-  - MH-MAP-001
-  - MH-OC-001
-  - MH-CHAN-001
-  - MH-INJ-CLAUDE-001
-  - MH-INJ-CODEX-001
-  - MH-INJ-OPENCODE-001
-  - MH-INJ-DIRECT-001
-  - MH-OVL-001
-  - MH-MIG-001
-  - MH-OAUTH-A-001
+  - MH-PROTOCOL-004
+  - MH-RUNTIME-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001
-  - MH-OAUTH-ERR-001
-  - MH-OAUTH-NATIVE-001
-  - MH-OAUTH-NATIVE-002
-  - MH-OAUTH-NATIVE-003
-  - MH-OAUTH-CONSENT-001
+  - B5
+  - B8
+  - B9
+  - D1
+  - F1
+  - G2
+  - G3

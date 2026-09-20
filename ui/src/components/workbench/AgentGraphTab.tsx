@@ -315,16 +315,11 @@ export const AgentGraphTab: React.FC = () => {
   // transport (contract). Refetch in the background on any signal.
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setEventBridgeConnected(true);
-          void fetchGraph(true);
-        }
-      },
-      onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
-        if (connected) void fetchGraph(true);
-      },
+      // Every gap ends here, whichever leg it was on, so this is the catch-up.
+      // The bridge report is only the indicator's level: it comes with its own
+      // `onConnected`, and refetching from both would pay twice for one gap.
+      onConnected: () => void fetchGraph(true),
+      onEventBridgeStatus: ({ connected }) => setEventBridgeConnected(connected),
       onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => void fetchGraph(true),
       onTurnStart: () => void fetchGraph(true),
@@ -579,7 +574,7 @@ export const AgentGraphTab: React.FC = () => {
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-0 flex-1 text-[12.5px] text-muted">{t('agents.graph.subtitle')}</p>
         {counts && (
-          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-3 py-1 text-[12px] font-semibold text-mint">
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-mint/40 bg-mint-soft px-3 py-1 text-[12px] font-semibold text-mint-ink">
             <span className="size-1.5 rounded-full bg-mint" />
             {t('agents.graph.livePill', { active: counts.active, queued: counts.queued })}
           </span>
@@ -672,14 +667,14 @@ export const AgentGraphTab: React.FC = () => {
       </div>
 
       {graph?.live_unreachable && (
-        <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold">
+        <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold-ink">
           <ServerCrash className="size-3.5" />
           {t('agents.graph.unreachable')}
         </div>
       )}
 
       {graph?.truncated && (
-        <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold">
+        <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.06] px-3 py-2 text-[12px] text-gold-ink">
           <AlertTriangle className="size-3.5 shrink-0" />
           {t('agents.graph.truncated')}
         </div>
@@ -820,7 +815,7 @@ const DropdownItem: React.FC<{ active: boolean; onClick: () => void; children: R
     onClick={onClick}
     className={clsx(
       'flex w-full items-center gap-2 truncate rounded px-2 py-1.5 text-left text-[12px] transition',
-      active ? 'bg-cyan-soft text-cyan' : 'text-foreground hover:bg-foreground/[0.04]',
+      active ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
     )}
   >
     {children}
