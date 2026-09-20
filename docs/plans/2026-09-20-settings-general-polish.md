@@ -115,18 +115,38 @@ the publisher, feeds the rule directly.
 > exactly like the violation. So the contract is now stated where covering is a
 > real concept — a browser hit test — and the dead backdrop is deleted rather
 > than explained.
+>
+> The same head carried a *fourth* instance of the class that is true, and it
+> corrects the rule rather than the code: `WindowLayer` really is `fixed inset-0`
+> at `z-20`, above the sidebar's `z-10`, deliberately, so a window can be dragged
+> over the sidebar and maximize can fill the screen. Under inline Settings that
+> layer stays live behind an opaque `z-30` surface, so an open window shows as a
+> strip over the one column inline exists to keep, with its title bar, controls
+> and content all hidden. So the rule is not "inline leaves the shell live" but
+> **inline keeps the sidebar column live; whatever the opaque surface covers
+> retires in both placements** — which is two consumers, not a growing list:
+> `WindowLayer` and the `AppsLauncher` that opens into it. Everything else is
+> either inside the sidebar column or floats above the surface, so it keeps
+> `settingsCoversSidebar`.
 
 ### What each consumer does with it
 
 - **`AppShell`** previously used one flag, `settingsOpen`, for two different
   questions. It now distinguishes *Settings is the foreground route* (the
   sidebar toggle's label, still `settingsOpen`) from *Settings took over the
-  shell* (`settingsCoversSidebar`). Everything **behind** Settings reads the
-  latter: the `aside`'s `inert`/`aria-hidden`/visibility, the `WorkbenchSidebar`
-  and `AppsLauncher` route-surface boundaries, the content column's left offset,
-  the mobile dock, `NewSessionSheet`, `SearchPalette`, the ⌘K guard, and
-  `WindowLayer`. Inline Settings therefore leaves a fully live shell — which is
-  exactly what shipped before #2051 (verified against `66fc91db^`).
+  shell* (`settingsCoversSidebar`). Everything in or above the sidebar column
+  reads the latter: the `aside`'s `inert`/`aria-hidden`/visibility, the
+  `WorkbenchSidebar` route-surface boundary, the content column's left offset,
+  the mobile dock, `NewSessionSheet`, `SearchPalette` and the ⌘K guard. Inline
+  Settings therefore leaves a live, navigable sidebar — which is exactly what
+  shipped before #2051 (verified against `66fc91db^`).
+
+  The two exceptions read `settingsOpen`, and they are the reason both flags
+  exist: `WindowLayer` spans the whole viewport *above* the sidebar so windows
+  can be dragged over it, so inline's opaque surface would leave it
+  live-but-invisible rather than live; and `AppsLauncher`, whose every result
+  appears in that layer, goes with it. Both retire under either placement, and
+  both come back when Settings closes.
 - **`SettingsOverlayRouteSurface`** picks its own left edge: standalone starts at
   the screen edge with no left border; inline takes the primitive's
   `--app-sidebar-w` offset and a border, so the two edges stay together while the
@@ -163,7 +183,7 @@ the publisher, feeds the rule directly.
 
 ### Incidental fixes
 
-Both are in `DialogSurfaceContent`, and both are the same shape: markup that
+The first two are in `DialogSurfaceContent`, and are the same shape: markup that
 looked authoritative and was in fact dead.
 
 - The default offset was a literal `md:left-[240px]` — dead (its only caller
@@ -178,6 +198,18 @@ looked authoritative and was in fact dead.
   existed at runtime — but on the page it reads as a layer over a live sidebar,
   which is how it produced a P2. Deleted; a caller that wants a real backdrop
   wants `DialogContent`.
+
+The third is the sidebar's own maximum width, and it predates this PR:
+`MAX_SIDEBAR_WIDTH = 496` is viewport-blind, so a full drag in a 768px window
+already leaves a 272px workbench today. Inline Settings spends 196 of that on
+its rail, which is what made it visible. The fix belongs to the sidebar, not to
+its consumers — each of them would otherwise re-derive the same budget, and
+capping only while Settings is open would move the column the moment Settings
+opened. So the maximum now reserves `MIN_WIDTH_BESIDE_SIDEBAR` (768 − 248 = 520,
+exactly what a default sidebar already leaves at `md`, so no shipped
+configuration changes), and follows the viewport as well as the gesture:
+narrowing the window after a wide drag reaches the same starved layout, just
+later. An untouched shell still publishes no inline width at all.
 
 ### The card
 
@@ -206,7 +238,18 @@ edited into `design.pen`.
   arrowed and drawn like the theme one beside it, and does not touch the theme key.
 - `AppShell.test.tsx` — the shell retires only where Settings replaces it, covers
   the shell below `md` even when inline is stored, and publishes a sidebar-free
-  shell to the Settings surfaces above it in a single-app tab.
+  shell to the Settings surfaces above it in a single-app tab. Plus the two
+  exceptions: the window layer and its launcher retire under *either* placement
+  and come back when Settings closes. The `AppsLauncher` stub now honours its
+  route-surface boundary the way the real one does, so it cannot report a live
+  Apps button in a state the shell retires it.
+- `SidebarResizer.test.tsx` — the width budget as a pure function across five
+  viewports, a drag and an `End` press both stopping at the affordable maximum
+  rather than the constant one, a window narrowed *after* a wide drag giving the
+  width back, and an untouched shell still publishing no inline width when the
+  budget moves. Verified non-vacuous: disabling the re-clamp fails the narrowing
+  test (it also caught a real bug while being written — the first re-clamp read
+  an already-clamped width, so it could never see one that no longer fit).
 - `SettingsLayout.test.tsx` — rail width per placement, including standalone where
   the shell draws no sidebar while `inline` is stored.
 - `SettingsOverlayRouteSurface.test.tsx` — the surface's left edge and border per
