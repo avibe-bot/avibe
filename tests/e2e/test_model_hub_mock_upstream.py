@@ -707,6 +707,92 @@ def test_mock_upstream_inventory_and_buffered_protocol_shapes(
 
 
 @pytest.mark.parametrize("protocol", PROTOCOL_CASES)
+@pytest.mark.parametrize("surface", ["models", "buffered", "probe"])
+@pytest.mark.parametrize("credential", [None, "sk-wrong-fixture", "sk-required-fixture"])
+def test_mock_upstream_required_api_key_gates_data_surfaces(
+    mock_llm_upstream, protocol: str, surface: str, credential: str | None,
+) -> None:
+    """An authenticated fixture requires the value, not just a header."""
+    case = PROTOCOL_CASES[protocol]
+    configured = _configure(
+        mock_llm_upstream.url, protocol=protocol,
+        required_api_key="sk-required-fixture",
+    )
+    assert configured["required_api_key"] == "sk-required-fixture"
+    headers = {}
+    if credential is not None:
+        headers = (
+            {"X-Api-Key": credential}
+            if protocol == "anthropic"
+            else {"Authorization": f"Bearer {credential}"}
+        )
+    status, _, payload = _json_request(
+        mock_llm_upstream.url,
+        "/v1/models" if surface == "models" else case["path"],
+        method="GET" if surface == "models" else "POST",
+        body=None if surface == "models" else ({} if surface == "probe" else case["body"]),
+        headers=headers,
+    )
+    if credential != "sk-required-fixture":
+        assert status == 401
+        assert payload["error"]["type"] == "authentication_error"
+    elif surface == "probe":
+        assert status == 400  # Authenticated schema rejection is not inference.
+        assert payload["error"]["type"] == "invalid_request_error"
+    else:
+        assert status == 200
+        if surface == "models":
+            assert payload["data"][0]["id"] == "mock-model"
+        else:
+            assert payload[case["response_key"]] == case["response_value"]
+
+
+@pytest.mark.parametrize("protocol", PROTOCOL_CASES)
+def test_mock_upstream_required_key_uses_the_configured_protocol_header(
+    mock_llm_upstream, protocol: str,
+) -> None:
+    """The other family's header cannot satisfy this interface's credential."""
+    _configure(
+        mock_llm_upstream.url, protocol=protocol,
+        required_api_key="sk-required-fixture",
+    )
+    headers = (
+        {"Authorization": "Bearer sk-required-fixture"}
+        if protocol == "anthropic"
+        else {"X-Api-Key": "sk-required-fixture"}
+    )
+    status, _, _ = _json_request(
+        mock_llm_upstream.url, "/v1/models", headers=headers,
+    )
+    assert status == 401
+    # Control stays reachable and clearing the opt-in restores a public catalogue.
+    assert _configure(mock_llm_upstream.url, required_api_key=None)["required_api_key"] is None
+    assert _json_request(mock_llm_upstream.url, "/v1/models")[0] == 200
+
+
+@pytest.mark.parametrize("protocol", PROTOCOL_CASES)
+@pytest.mark.parametrize(
+    ("behavior", "status"),
+    [({"auth": "429"}, 429), ({"models_endpoint": "http_500"}, 500)],
+)
+def test_mock_upstream_required_key_precedes_configured_failures(
+    mock_llm_upstream, protocol: str, behavior: dict[str, str], status: int,
+) -> None:
+    """A valid credential reaches the existing failure modes unchanged."""
+    _configure(
+        mock_llm_upstream.url, protocol=protocol,
+        required_api_key="sk-required-fixture", **behavior,
+    )
+    headers = (
+        {"X-Api-Key": "sk-required-fixture"}
+        if protocol == "anthropic"
+        else {"Authorization": "Bearer sk-required-fixture"}
+    )
+    assert _json_request(mock_llm_upstream.url, "/v1/models")[0] == 401
+    assert _json_request(mock_llm_upstream.url, "/v1/models", headers=headers)[0] == status
+
+
+@pytest.mark.parametrize("protocol", PROTOCOL_CASES)
 def test_mock_upstream_invalid_probe_evidence_is_family_distinctive(
     mock_llm_upstream, protocol: str
 ) -> None:
@@ -933,6 +1019,11 @@ def test_mock_upstream_control_validation_capture_envelope_and_reset(
         {"stream": "invalid"},
         {"protocol": "invalid"},
         {"models_endpoint": "invalid"},
+        {"required_api_key": ""},
+        {"required_api_key": "  "},
+        {"required_api_key": 123},
+        {"required_api_key": False},
+        {"required_api_key": []},
         {"models": [""]},
         {"model_errors": []},
         {"model_errors": {"": "model_not_found"}},

@@ -13,6 +13,8 @@ from tests.e2e.test_model_hub_sources import _configure_protocol
 
 pytestmark = pytest.mark.e2e_model_hub
 
+SYNTHETIC_MIGRATION_API_KEY = "sk-ant-e2e-claude-independent-123456"
+
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,7 +36,7 @@ def _seed_native_configs(app, upstream_url: str) -> list[Path]:
         json.dumps(
             {
                 "env": {
-                    "ANTHROPIC_API_KEY": "sk-ant-e2e-claude-independent-123456",
+                    "ANTHROPIC_API_KEY": SYNTHETIC_MIGRATION_API_KEY,
                     "ANTHROPIC_BASE_URL": upstream_url,
                 },
                 "permissions": {"allow": ["Read"]},
@@ -172,7 +174,7 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
 ) -> None:
     """F2: grouped custody cleans the selected key without touching blockers."""
 
-    seeded_api_key = "sk-ant-e2e-claude-independent-123456"
+    seeded_api_key = SYNTHETIC_MIGRATION_API_KEY
     seeded_api_key_digest = hashlib.sha256(
         seeded_api_key.encode("utf-8")
     ).hexdigest()
@@ -181,6 +183,7 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         "anthropic",
         models=[{"id": "claude-sonnet-4-6"}],
     )
+    mock_llm_upstream.configure(required_api_key=seeded_api_key)
     launch, seeded_paths = _launch_seeded_app(
         model_hub_app_factory, mock_llm_upstream
     )
@@ -248,3 +251,50 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
                     hashlib.sha256(credential.encode("utf-8")).hexdigest()
                 )
         assert seeded_api_key_digest in captured_digests
+        catalogue_headers = [
+            request["headers"]
+            for request in mock_llm_upstream.requests()
+            if request["path"] == "/v1/models"
+        ]
+        assert any(headers.get("x-api-key") == seeded_api_key for headers in catalogue_headers)
+        assert any(
+            not headers.get("x-api-key") and not headers.get("authorization")
+            for headers in catalogue_headers
+        )
+
+
+@pytest.mark.parametrize(
+    "required_api_key", [None, "sk-ant-e2e-different-key"],
+    ids=["public-catalogue", "rejected-key"],
+)
+def test_f2_unproven_key_keeps_all_native_material(
+    model_hub_app_factory, mock_llm_upstream, required_api_key: str | None,
+) -> None:
+    """F2: a public catalogue or credential rejection cannot authorize cleanup."""
+    _configure_protocol(
+        mock_llm_upstream, "anthropic",
+        models=[{"id": "claude-sonnet-4-6"}],
+    )
+    mock_llm_upstream.configure(required_api_key=required_api_key)
+    launch, seeded_paths = _launch_seeded_app(
+        model_hub_app_factory, mock_llm_upstream,
+    )
+    with launch as app:
+        before = {path: path.read_bytes() for path in seeded_paths}
+        scan = app.client.post("/api/models/migration/scan", {})
+        assert scan.status == 200, scan.json()
+        selected = [
+            item for item in scan.json()["scan"]["items"] if item["selected"]
+        ]
+        assert [(item["backend"], item["kind"]) for item in selected] == [
+            ("claude", "api_key")
+        ]
+        response = app.client.post(
+            "/api/models/migration/apply", {"item_ids": [item["id"] for item in selected]},
+        )
+        assert response.status == 409, response.json()
+        assert response.json()["error"] == "migration_item_conflict"
+        assert all(path.read_bytes() == before[path] for path in seeded_paths)
+        listed = app.client.get("/api/models/sources")
+        assert listed.status == 200, listed.json()
+        assert listed.json()["sources"] == []
