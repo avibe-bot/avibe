@@ -228,6 +228,8 @@ def test_f4_custom_api_key_transport_is_refused_without_cleanup(
     (".zshrc", "shift 1 OPENAI_API_KEY"),
     (".zshrc", "zmodload -FL -P OPENAI_API_KEY zsh/parameter"),
     (".zshrc", "emulate zsh -c 'read OPENAI_API_KEY'"),
+    (".zshrc", "emulate sh -c 'read -p OPENAI_API_KEY'"),
+    (".zshrc", "emulate ksh -c 'print -v OPENAI_API_KEY fixture'"),
     (".zshrc", "logout 'OPENAI_API_KEY=1'"),
     (".zshrc", "fc -e 'read OPENAI_API_KEY'"),
 ])
@@ -269,6 +271,8 @@ def test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof(
     (".bashrc", "wait -p unrelated OPENAI_API_KEY"),
     (".bashrc", "eval " * 32 + "echo OPENAI_API_KEY"),
     (".zshrc", "print -R -v OPENAI_API_KEY"),
+    (".zshrc", "emulate sh -c 'wait -p OPENAI_API_KEY'"),
+    (".zshrc", "emulate sh -c 'mapfile OPENAI_API_KEY'"),
 ])
 def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
     model_hub_app_factory, mock_llm_upstream, profile, data,
