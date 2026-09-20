@@ -1,5 +1,119 @@
 # Shared Workbench and General Settings — issue #2012
 
+## Current PM scope and acceptance (2026-09-20)
+
+The 11:24 PM continuation ruling supersedes the broader exploratory queue scope
+recorded below. Two real `ChatPage` probes on unchanged peer head `7450fd669`
+reproduced bootstrap/refresh overwrites in both arrival directions. The bounded
+repair shares successful snapshot ordering between those readers, retains the
+peer refresh-generation regression and existing send/session guards, and verifies
+that a newer failed read still permits an older successful fallback. Route-lifetime,
+optimistic remove and recall behavior are unchanged; this continuation does not
+claim new repairs or acceptance evidence for those broader hypotheses.
+
+After controlled reproduction of the CI drag failure, PM additionally authorized
+the existing desktop expanded-project test's viewport and visibility precondition
+correction described under "Review round 3 repair". The final scope relative to
+peer head `f227722436` is `ChatPage.tsx`, `ChatPage.hydration.test.tsx`,
+`ui/e2e/project-order/order.spec.ts`, and this plan. Product sidebar, Composer and
+drag behavior remain unchanged. Local candidate `430c5c630` passed 97 focused
+tests, typecheck, lint and build, the two affected browser cases, and the full
+project-order suite (16 passed, two declared platform skips, zero retries).
+PM independently reran six selected queue regressions successfully. These local
+results require fresh exact-head remote review and CI before PR acceptance.
+
+## Historical PM diagnosis: queue snapshot ordering (review 5259163447)
+
+This records the initial diagnosis at `73a8556dd`; its exploratory scope and
+acceptance list were narrowed by the current PM ruling above. Counts and CI state
+in this section are observations from that earlier checkpoint.
+
+The refreshed head `73a8556ddbcc41f13bb8434a2b4fe2d81aacb060` received one
+new actionable finding, inline `4055864365`, thread `PRRT_kwDOPbFPYs6kGUYR`.
+Independent complete inventory: ten reviews, twelve inline comments, three issue
+comments, eight threads with all nested pages exhausted; seven resolved and this
+one open. This is the sixth findings-bearing head and eighth historical finding.
+The current sixteen observed lint jobs have fourteen successes and two pending;
+CI is not the review gate and does not remove this finding.
+
+Causal diagnosis: send invocation identity protects one mutation's completion,
+but queue snapshots also come from initial/authorization bootstrap, SSE queue
+updates, reconnect recovery and mutation-triggered reads. An older successful
+read can overwrite a newer successful read because all these writes do not share
+an ordering owner. This is a repeated asynchronous stale-state class, so the PM
+has stopped blind patching and inspected every `setQueue`, `refreshQueue`, and
+`sendQueueNow` caller before authorizing the bounded repair below.
+
+The invariant is: within the active route lifetime, an older queue snapshot must
+not overwrite a newer successfully committed snapshot. A failed newer read must
+not by itself discard an older valid successful fallback. Bootstrap and ordinary
+refresh snapshots use the same queue ordering boundary; send-now keeps its
+additional invocation admission guard. Leaving and returning to the same Session
+must not re-admit an earlier route lifetime's reads or mutation completions.
+Inspect optimistic remove and successful recall writes as part of this same queue
+owner: a pre-mutation read must not resurrect a removed row; an explicit recovery
+read may restore the authoritative row when removal fails. Keep existing error,
+loading, Stop, spinner and server-authoritative queue behavior.
+
+Authorized implementation scope is `ChatPage.tsx`, its existing
+`ChatPage.hydration.test.tsx` consumer (and `ChatQueueRow.test.tsx` only if needed),
+and this plan. Reuse the adjacent transcript snapshot ordering pattern where
+appropriate; no shared hook, API, dependency, sidebar, Composer or backend change.
+The prior byte-parity assertion describes the mechanical refresh phase only;
+this separately recorded correctness fix is the sole newly authorized production
+delta over original #2058. No architecture rewrite or owner question is required.
+
+Acceptance requires a deterministic red reproduction on unchanged `73a8556dd`,
+then passing real ChatPage consumers for late post-send versus newer SSE reads,
+bootstrap overlap, route A-to-B-to-A lifetime rejection, and newer-read failure
+fallback; cover remove/recall boundaries if changed. Verify visible queue rows and
+their actions, not only helper internals. Run relevant existing tests, typechecks,
+repository lint and UI build. One implementation lane prepares a local committed
+candidate only; PM independently spot-checks code and consumer evidence before
+pushing. Keep the original PM Watch/cursor unchanged, no manual review trigger or
+CI rerun, and require new exact-head review/CI with this thread addressed afterward.
+
+## Owner resolution: PR #2058 over #2061 (2026-09-20)
+
+At 10:30 Asia/Shanghai the owner explicitly selected the complete PR #2058
+presentation when resolving its conflict with merged PR #2061. This decision
+supersedes the sidebar presentation and persistence contract in the retained
+historical `2026-09-20-sidebar-31-alignment.md` plan.
+
+Merge actual master `4de519cce2f7254325a88f652b31f510a7a8ff70` into PR #2058
+head `5b0dab0cbb13fac318e5bfc4bb1778a90d02aca6`, preserving the latter's
+`WorkbenchSidebar.tsx` and `WorkbenchSidebar.inbox.test.tsx` in full. Search
+remains a full-width row below the brand; the logo, Inbox, and capability rows
+follow #2058. Capabilities start expanded and retain their collapsed state while
+the sidebar owner remains mounted, including across Settings, without storing
+that preference in localStorage. Keep #2058's Composer spacing and queue send
+feedback, current authorization filters, and Settings activity boundaries.
+
+The initial conflict-resolution refresh kept all production and test content
+byte-identical to the original #2058 head. Re-run the affected consumers,
+hermetic browser geometry/capability cases, typechecks, lint, and UI build, then
+obtain fresh exact-head Codex review and CI. Historical green results do not
+qualify for the refreshed head. This authorizes updating the existing PR, not
+merging or deploying it. Any later review repair must be recorded with its
+scope and validation below.
+
+PM review inventory before this refresh: nine reviews, eleven inline comments,
+two issue comments, and seven resolved whole-PR threads, including exhausted
+nested pages. The seven original findings span five heads: `366793a02f` (1),
+`24357fb9ee` (2), `8d743f3d42` (1), `e47847a109` (1), and `ad60570259` (2).
+Root causes are documentation drift, server-authoritative queue retention,
+destructive voice-control placement, stale invocation effects, and disconnected
+sidebar state/translation consumers. The stale-invocation class repeated on two
+heads and requires PM diagnosis under the circuit breaker. Independent inspection
+confirms the current invocation predicate gates the settled response, error,
+queue-refresh result, and spinner cleanup; the sidebar toggle and eyebrow have
+live consumers. The current focused consumers pass. This round preserves those
+repairs and resolves the owner-selected presentation conflict. A later exact-head
+review also identified a queue-read ordering race; that repair and its validation
+are recorded below. Any new finding requires complete inventory and a fresh PM
+causal/scope ruling before further edits or pushes.
+
+
 Owner authorized parallel implementation on 2026-09-18 02:36 Asia/Shanghai. PM session: sestqz5wvu5ty. Branch feat/workbench-general-settings starts at GitHub-verified master 4019b704c99afe16223d475fccd9e1cb94a109d7 in its own worktree. #2011 is a separate active lane; #2013 remains deferred. Historical #2010-only or sequential-dispatch language is superseded by this explicit instruction.
 
 ## Outcome
@@ -69,7 +183,8 @@ the user has not answered, while the shell's own location follows the foreground
 ## Implementation record
 
 - **Shell** — `AppShell` sidebar at 248 on `--sidebar-background`, brand row (mark, title, `workbench.eyebrow`)
-  with Search and Inbox as siblings, always-expanded capability navigation via one `SidebarNavRow` carrying the
+  with full-width Search and Inbox rows below it, a capability navigation group that is expanded by default and can be
+  collapsed, with each entry rendered by one `SidebarNavRow` carrying the
   three source states on tokens, real project/session tree or true empty state, Apps/Settings footer, version and
   live service badge. Nav-state tokens (`--nav-selected-bg`/`-border`, `--nav-hover-bg`, `--sidebar-background`,
   `--logo-well-background`, `--illustration-card-border`, `--desktop-overlay-shadow`) and the
@@ -269,6 +384,48 @@ Settings. Against the unrepaired product that assertion reads 6 where it must re
 by label so it fails on the history, not on the element type. Unit scope adds the close behaviour at the phone
 root and holds internal back destinations to links. Re-validated: the six browser cases on the built app, the five
 affected unit files (91), the browser suite's `typecheck`, `lint` on the changed files, and `build`.
+
+## Review round 3 repair — queue snapshot commit ordering
+
+One finding exposed a race between overlapping authoritative queue reads. A
+post-send refresh could start before a newly queued row was inserted, while a
+later `queue.updated` refresh started after it; if the later snapshot resolved
+first, the older response could still pass the send-now predicate and overwrite
+the visible queue, hiding the new row and its Recall/Remove controls.
+
+The existing session and send-now ownership guards remain unchanged. The peer
+repair at `7450fd669` made the shared `refreshQueue` path assign every read a
+monotonic generation and commit a successful response only when it is not older
+than the latest committed read. This continuation puts the bootstrap queue
+snapshot through that same issued/committed sequence, so initial and
+authorization bootstrap cannot overwrite a newer ordinary refresh. Failed reads
+still do not advance the committed generation, preserving a valid older
+successful fallback. This is a read-ordering repair, not a queue ownership or
+server-claim change.
+
+`ChatPage.hydration.test.tsx` covers the peer reverse-resolution case, both
+bootstrap/refresh directions through the real `ChatPage` consumer, and the
+newer-read failure fallback; the queue row consumer remains covered by its
+existing tests. The continuation candidate passed 97 focused tests (hydration
+and queue-row consumers), UI test typechecks, the UI lint baseline, and the
+production build. Before the later fixture correction, the existing project-order
+suite also passed once with `retries: 0` (16 passed, 2 declared skips); at that
+earlier checkpoint no drag source or test had changed.
+
+The remaining CI failure in the expanded desktop drag case was then reproduced
+on the synthetic merge with the same product and fixture source. At the default
+`1280x720` viewport, expanding project 0 makes the next header's center land at
+`y=722`, outside the viewport; pointer-held sidebar auto-scroll moves rows under
+that fixed destination. Controlled holds produced final project-0 indices 2, 5,
+7, and 7. The same coordinates at `1280x1000`, where the list has no overflow,
+produced the intended index 1 in all four holds. This is a test geometry and
+auto-scroll timing issue, not evidence of a product drag defect; manual dragging
+also behaved normally. The existing desktop case now keeps its device width,
+uses height 1000, and asserts the destination header is fully inside the visible
+tree and viewport before pickup. Mobile behavior and the exact index/session
+assertions remain unchanged. The complete project-order suite passed once after
+this correction with `retries: 0`: 16 passed and 2 declared skips. No product
+drag source or unrelated browser test changed.
 
 ## Producer integration — what the end-to-end run found
 

@@ -2555,7 +2555,7 @@
     "resizeSidebar": "调整侧栏宽度"
   },
   "workbench": {
-    "eyebrow": "工作台",
+    "eyebrow": "Agent OS",
     "placeholderTitle": "你的 AI 工作台正在搭建",
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
@@ -4377,6 +4377,7 @@
       "retryHint": "启动失败，自动重试已停止，原输入已保留。排查错误后，点击“立即发送”或失败提示上的“重试”。",
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
+      "sendingNow": "发送中…",
       "recall": "撤回到输入框",
       "remove": "移出队列",
       "attachments": {

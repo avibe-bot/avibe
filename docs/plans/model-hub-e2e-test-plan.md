@@ -213,6 +213,20 @@ lane-to-lane.
     a bare array; extensible envelope), each record carrying method, path,
     headers subset, parsed body; `DELETE /__control/requests` resets.
     *(Shape frozen 2026-09-02.)*
+- Credential-witness fixture amendment (2026-09-20):
+  `required_api_key: <synthetic non-empty string>|null` is opt-in and defaults
+  to `null`, preserving the public catalogue behavior. When set, the mock
+  requires that exact `x-api-key` for Anthropic or `Authorization: Bearer ...`
+  for OpenAI on all data endpoints, before applying the configured `auth`,
+  protocol, inventory, or stream behavior. Missing/wrong credentials return
+  401; `/__control/` remains independently accessible. Correct credentials do
+  not turn model-less schema errors into successful inference responses.
+  F2 migration success explicitly opts into this gate, proving both the
+  credentialed catalogue success and unauthenticated refusal over HTTP/IPC.
+  Public-catalogue and wrong-key controls must refuse migration and preserve
+  every seeded native file and the empty Source list. This is a fixture-only
+  contract: production authentication evidence and other suites' defaults
+  are unchanged.
 - The Playwright lane consumes this ONLY over HTTP via env
   `VIBE_E2E_MOCK_UPSTREAM_URL`; it never imports the Python module. Mock-
   dependent specs skip with a clear message when the env is absent.

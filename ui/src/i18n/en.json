@@ -2555,7 +2555,7 @@
     "resizeSidebar": "Resize sidebar"
   },
   "workbench": {
-    "eyebrow": "Workbench",
+    "eyebrow": "Agent OS",
     "placeholderTitle": "Your AI workbench is coming together",
     "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
     "home": {
@@ -4377,6 +4377,7 @@
       "retryRequired": "Retry needed · {{count}}",
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "sendNow": "Send now",
+      "sendingNow": "Sending…",
       "recall": "Recall to input",
       "remove": "Remove from queue",
       "attachments": {

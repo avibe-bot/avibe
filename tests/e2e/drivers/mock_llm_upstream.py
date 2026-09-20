@@ -196,6 +196,7 @@ class MockUpstreamState:
         self._lock = threading.RLock()
         self._config: dict[str, Any] = {
             "auth": "ok",
+            "required_api_key": None,
             "stream": "healthy",
             "models": [copy.deepcopy(model) for model in DEFAULT_MODELS],
             "protocol": "openai_chat",
@@ -213,6 +214,7 @@ class MockUpstreamState:
     def configure(self, update: Mapping[str, Any]) -> dict[str, Any]:
         unknown = set(update) - {
             "auth",
+            "required_api_key",
             "stream",
             "models",
             "protocol",
@@ -227,6 +229,11 @@ class MockUpstreamState:
         candidate.update(copy.deepcopy(dict(update)))
         if candidate["auth"] not in AUTH_BEHAVIORS:
             raise ConfigurationError("unsupported auth behavior")
+        required_key = candidate["required_api_key"]
+        if required_key is not None and (
+            not isinstance(required_key, str) or not required_key.strip()
+        ):
+            raise ConfigurationError("required_api_key must be a non-empty string or null")
         if candidate["stream"] not in STREAM_BEHAVIORS:
             raise ConfigurationError("unsupported stream behavior")
         if candidate["protocol"] not in PROTOCOLS:
@@ -298,8 +305,7 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
         if path == "/v1/models":
             self._capture(path, None)
             config = self.state.config()
-            if config["auth"] != "ok":
-                self._write_behavior_error(config)
+            if not self._authenticate(config):
                 return
             if config["models_endpoint"] != "ok":
                 self._write_models_endpoint_failure(
@@ -347,8 +353,7 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
         self._capture(path, body)
         config = self.state.config()
         protocol = config["protocol"]
-        if config["auth"] != "ok":
-            self._write_behavior_error(config)
+        if not self._authenticate(config):
             return
         if path != PROTOCOL_PATHS[protocol]:
             self._write_json(
@@ -376,6 +381,28 @@ class MockLLMUpstreamHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             _buffered_response(protocol, body),
         )
+
+    def _authenticate(self, config: Mapping[str, Any]) -> bool:
+        """Optional value check for synthetic credentials on data endpoints."""
+        required_key = config["required_api_key"]
+        if required_key is not None:
+            supplied = (
+                self.headers.get("x-api-key")
+                if config["protocol"] == "anthropic"
+                else self.headers.get("authorization")
+            )
+            expected = (
+                required_key
+                if config["protocol"] == "anthropic"
+                else f"Bearer {required_key}"
+            )
+            if supplied != expected:
+                self._write_behavior_error({**config, "auth": "401"})
+                return False
+        if config["auth"] != "ok":
+            self._write_behavior_error(config)
+            return False
+        return True
 
     def _configure(self, body: object) -> None:
         if not isinstance(body, dict):

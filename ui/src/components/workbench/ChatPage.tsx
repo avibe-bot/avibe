@@ -880,6 +880,32 @@ export const ChatPage: React.FC = () => {
   // Send-while-busy queue (messages sent while a turn runs, shown above the
   // composer) + the loaded draft to seed the composer with.
   const [queue, setQueue] = useState<WorkbenchMessage[]>([]);
+  const [sendingQueueNow, setSendingQueueNow] = useState(false);
+  // Each send-now invocation owns its completion state. A request can survive
+  // navigation away and back to the same session, so the session id alone is
+  // not enough to keep an older request from clearing a newer spinner.
+  const queueSendGenerationRef = useRef(0);
+  // Queue reads can overlap independently of send-now (for example, a
+  // queue.updated event can start a newer read while the post-send refresh is
+  // still in flight). Only a read that is not older than the latest committed
+  // read may replace the visible queue, so an older response cannot resurrect
+  // rows that a newer snapshot already observed as gone or hide newly queued
+  // rows.
+  const queueReadGenerationRef = useRef(0);
+  const committedQueueReadGenerationRef = useRef(0);
+  const beginQueueSnapshotRead = useCallback((requestSessionId: string) => {
+    const generation = ++queueReadGenerationRef.current;
+    return () => {
+      if (
+        requestSessionId !== sessionIdRef.current
+        || generation < committedQueueReadGenerationRef.current
+      ) {
+        return false;
+      }
+      committedQueueReadGenerationRef.current = generation;
+      return true;
+    };
+  }, []);
   const [initialDraft, setInitialDraft] = useState<string | null>(null);
   const draftTimerRef = useRef<number | null>(null);
   // The debounced draft save still owed to the server, tagged with the session
@@ -1254,16 +1280,19 @@ export const ChatPage: React.FC = () => {
 
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
-  const refreshQueue = useCallback(async () => {
+  const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return;
+    const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
+      if (isCurrentRequest && !isCurrentRequest()) return;
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
+      if (!claimQueueSnapshot()) return;
       setQueue(res.queued ?? []);
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
     }
-  }, [api, sessionId]);
+  }, [api, beginQueueSnapshotRead, sessionId]);
 
   // Returns false only when the fetch itself failed, so the transcript scroller can
   // re-arm and let a later scroll retry; true for success / no-op / stale session.
@@ -1456,6 +1485,7 @@ export const ChatPage: React.FC = () => {
       // payload so remote links don't pay a tunnel round-trip per widget.
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const epochAtRequest = turnEpochRef.current;
+      const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
@@ -1513,7 +1543,7 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      setQueue(bootstrap.queued ?? []);
+      if (claimQueueSnapshot()) setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
@@ -1553,7 +1583,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, installServerSession]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
@@ -1599,6 +1629,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
+    setSendingQueueNow(false);
     setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
@@ -2296,15 +2327,24 @@ export const ChatPage: React.FC = () => {
   const sendQueueNow = useCallback(async () => {
     // "立即发送": interrupt the running turn + flush the queue now. The queue
     // flushes as one merged turn, so this runs the whole queue.
-    if (!sessionId || queue.length === 0) return;
+    const sid = sessionId;
+    if (!sid || queue.length === 0 || sendingQueueNow) return;
+    const requestGeneration = ++queueSendGenerationRef.current;
+    const isCurrentRequest = () =>
+      requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current;
+    // Give the click an immediate visual response while the request interrupts
+    // the current turn. The queue stays visible until admission succeeds so a
+    // failed or ambiguous request never hides work the user may need to retry.
+    setSendingQueueNow(true);
     // A turn is about to run (the flushed queue) — reflect it immediately so
     // Stop stays available even if the controller's turn.start is missed/delayed
     // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
     markWorking();
     try {
-      const res = await api.sendQueuedNow(sessionId, queue[0].id);
-      // Drop the response if the user switched chats mid-request (Codex P2).
-      if (sessionId !== sessionIdRef.current) return;
+      const res = await api.sendQueuedNow(sid, queue[0].id);
+      // Drop every effect from a request that lost ownership while it was in
+      // flight, including responses that arrive after a newer send starts.
+      if (!isCurrentRequest()) return;
       if (res && res.ok === false) {
         // stop_failed: the controller left the ORIGINAL turn running and the
         // queue intact — keep Stop visible so the user can still interrupt it
@@ -2315,17 +2355,26 @@ export const ChatPage: React.FC = () => {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
         setWorking(false);
-        void refreshQueue();
+      } else {
+        // A successful admission may only claim the compatible prefix (for
+        // example, attachment rows can remain queued behind an active turn).
+        // Re-read the authoritative queue instead of assuming the whole visible
+        // batch was flushed.
       }
+      await refreshQueue(isCurrentRequest);
     } catch (err) {
-      // Same session guard as the success path: a rejection after a chat switch
-      // must not clear the new chat's working / stamp this error on it (Codex P2).
-      if (sessionId === sessionIdRef.current) {
+      // The same ownership guard applies to failures: an older request must not
+      // clear the new chat's working state or surface a stale error.
+      if (isCurrentRequest()) {
         setWorking(false);
         setError(errorMessage(err) ?? String(err));
       }
+    } finally {
+      if (isCurrentRequest()) {
+        setSendingQueueNow(false);
+      }
     }
-  }, [api, sessionId, queue, t, refreshQueue, markWorking]);
+  }, [api, sessionId, queue, sendingQueueNow, t, refreshQueue, markWorking]);
 
   useEffect(() => {
     refresh();
@@ -2939,7 +2988,13 @@ export const ChatPage: React.FC = () => {
             holding pre-archive rows, and every button here writes: Send now POSTs
             the flush, Recall appends into the disabled composer. */}
         {writable && (
-          <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
+          <QueueStrip
+            queue={queue}
+            onRemove={removeQueued}
+            onRecall={recallQueued}
+            onSendNow={sendQueueNow}
+            sendingNow={sendingQueueNow}
+          />
         )}
         {sessionId && !readOnly && capabilities.can_use_vault_secrets && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
@@ -3354,7 +3409,8 @@ export const QueueStrip: React.FC<{
   onRemove: (id: string) => void;
   onRecall: (item: WorkbenchMessage) => void;
   onSendNow: () => void;
-}> = ({ queue, onRemove, onRecall, onSendNow }) => {
+  sendingNow?: boolean;
+}> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
@@ -3366,8 +3422,23 @@ export const QueueStrip: React.FC<{
             <Clock className="size-3" />
             {t(retryRequired ? 'chat.queue.retryRequired' : 'chat.queue.title', { count: queue.length })}
           </span>
-          <Button type="button" variant="ghost" size="sm" onClick={onSendNow} className="h-6 px-2 text-[11px] text-cyan-ink">
-            {t('chat.queue.sendNow')}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onSendNow}
+            disabled={sendingNow}
+            aria-busy={sendingNow}
+            className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
+          >
+            {sendingNow ? (
+              <>
+                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                {t('chat.queue.sendingNow')}
+              </>
+            ) : (
+              t('chat.queue.sendNow')
+            )}
           </Button>
         </div>
         {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
