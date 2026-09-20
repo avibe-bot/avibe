@@ -250,3 +250,28 @@ def test_explicit_mode_fallback_changes_only_the_unpublished_inode(tmp_path, mon
     write_atomic(target, b"after", mode=0o640)
     assert calls == [0o640]
     assert target.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("mask", [0o200, 0o400, 0o777])
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_captured_publication_mode_is_not_narrowed_by_umask(tmp_path, mask, mode):
+    target = tmp_path / "profile"
+    target.write_bytes(b"before")
+    previous_mask = os.umask(mask)
+    try:
+        write_atomic(target, b"after", mode=mode)
+    finally:
+        os.umask(previous_mask)
+    assert target.read_bytes() == b"after"
+    assert target.stat().st_mode & 0o777 == mode
+
+
+def test_default_publication_mode_is_exact_under_restrictive_umask(tmp_path):
+    target = tmp_path / "state"
+    previous_mask = os.umask(0o777)
+    try:
+        write_atomic(target, b"state")
+    finally:
+        os.umask(previous_mask)
+    assert target.read_bytes() == b"state"
+    assert target.stat().st_mode & 0o777 == 0o600

@@ -409,6 +409,21 @@ def test_reverse_uses_captured_before_mode_when_target_mode_differs(home):
     NativeFileEdit.from_payload(edit.to_payload()).apply(reverse=True)
 
 
+def test_captured_private_shell_mode_survives_restrictive_umask(home):
+    path = home / ".profile"
+    path.write_bytes(b"before\n")
+    path.chmod(0o600)
+    edit = NativeFileEdit.plan(path, b"after\n")
+    previous_mask = os.umask(0o200)
+    try:
+        edit.apply()
+        NativeFileEdit.from_payload(edit.to_payload()).apply(reverse=True)
+    finally:
+        os.umask(previous_mask)
+    assert path.read_bytes() == b"before\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_deleted_target_replay_completes_directory_durability(home, monkeypatch):
     path = home / ".fixture"
     path.write_bytes(b"fixture\n")

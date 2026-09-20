@@ -107,8 +107,8 @@ def write_atomic(
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = data.encode("utf-8") if isinstance(data, str) else data
 
-    # mkstemp creates the file 0600 without relying on Unix-only APIs, and the
-    # rename carries that mode onto the destination.
+    # mkstemp starts owner-private. Its creation mode is still filtered by
+    # umask, so set the exact publication mode on the unpublished inode.
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.",
         suffix=".tmp",
@@ -120,11 +120,10 @@ def write_atomic(
             descriptor = -1
             handle.write(payload)
             handle.flush()
-            if mode != 0o600:
-                if hasattr(os, "fchmod"):
-                    os.fchmod(handle.fileno(), mode)
-                else:  # pragma: no cover - platform permission fallback
-                    os.chmod(temporary_name, mode)
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            else:  # pragma: no cover - platform permission fallback
+                os.chmod(temporary_name, mode)
             os.fsync(handle.fileno())
         if before_replace is not None:
             before_replace()
