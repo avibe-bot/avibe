@@ -78,8 +78,12 @@ receiver.
 
 - **Codex:** call the installed app-server `turn/steer` method with `threadId`,
   `expectedTurnId`, and the same text / `localImage` input builder as `turn/start`.
-  Non-image files use the existing attachment context. A response is accepted only when its
-  `turnId` equals the expected native turn. Never fall back to `turn/start`.
+  Include the durable steer attempt id as `clientUserMessageId`; Codex persists it
+  on the resulting `userMessage` item. A response is accepted only when its
+  `turnId` equals the expected native turn. If the acknowledgement is ambiguous,
+  recovery reads the exact thread turn and accepts only a matching `clientId`;
+  absence of that evidence remains `unknown` and fenced. Never fall back to
+  `turn/start`.
 - **Claude:** call `query()` on the existing live client using the existing
   runtime session id while retaining the same receiver generation. Successful
   completion of the SDK transport write is the acknowledgement. A timeout,

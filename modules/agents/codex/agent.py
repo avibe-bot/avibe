@@ -37,6 +37,7 @@ from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
+    SteerReconcileRequest,
     SteerRequest,
     SteerResult,
     result as steer_result,
@@ -622,14 +623,21 @@ class CodexAgent(BaseAgent):
         if transport is None or not transport.is_initialized:
             return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
 
+        steer_params = {
+            "threadId": thread_id,
+            "expectedTurnId": request.expected_native_turn_id,
+            "input": self._build_native_input(request.text, request.files, request.input_metadata),
+        }
+        if request.attempt_id:
+            # Codex persists this opaque client id on the userMessage item. It
+            # lets recovery prove whether an acknowledgement-ambiguous write
+            # landed without matching by text or replaying the input.
+            steer_params["clientUserMessageId"] = request.attempt_id
+
         try:
             response = await transport.send_request(
                 "turn/steer",
-                {
-                    "threadId": thread_id,
-                    "expectedTurnId": request.expected_native_turn_id,
-                    "input": self._build_native_input(request.text, request.files, request.input_metadata),
-                },
+                steer_params,
             )
         except RuntimeError as exc:
             diagnostic = str(exc)
@@ -704,6 +712,106 @@ class CodexAgent(BaseAgent):
             backend=self.name,
             thread_id=thread_id,
             turn_id=response_turn_id,
+        )
+
+    async def reconcile_steer_attempt(
+        self,
+        request: SteerReconcileRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        """Read Codex's persisted user-message id for one prior steer."""
+
+        if not request.attempt_id:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="missing_attempt_identity",
+                backend=self.name,
+            )
+
+        active_request = target.agent_request
+        if active_request is None:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="missing_primary_request",
+                backend=self.name,
+            )
+
+        base_session_id = active_request.base_session_id
+        active_turn_id = self._turn_registry.get_active_turn(base_session_id)
+        if active_turn_id != request.expected_native_turn_id:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="stale_native_turn",
+                backend=self.name,
+            )
+
+        thread_id = self._session_mgr.get_thread_id(base_session_id)
+        cwd = self._session_mgr.get_cwd(base_session_id) or active_request.working_path
+        transport = self._transports.get(cwd)
+        if not thread_id or transport is None or not transport.is_initialized:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+            )
+
+        try:
+            response = await transport.send_request(
+                "thread/read",
+                {
+                    "threadId": thread_id,
+                    "includeTurns": True,
+                },
+            )
+        except (ConnectionError, TimeoutError) as exc:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - absence is not negative proof
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        thread = response.get("thread") if isinstance(response, dict) else None
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        if not isinstance(turns, list):
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+            )
+
+        for turn in turns:
+            if not isinstance(turn, dict) or str(turn.get("id") or "") != request.expected_native_turn_id:
+                continue
+            items = turn.get("items")
+            if not isinstance(items, list):
+                break
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "userMessage"
+                    and str(item.get("clientId") or "") == request.attempt_id
+                ):
+                    return steer_result(
+                        SteerOutcome.ACCEPTED,
+                        reason="native_attempt_client_id_found",
+                        backend=self.name,
+                        native_turn_id=request.expected_native_turn_id,
+                        client_user_message_id=request.attempt_id,
+                    )
+            break
+
+        return steer_result(
+            SteerOutcome.UNKNOWN,
+            reason="untrusted_attempt_evidence",
+            backend=self.name,
         )
 
     async def handle_stop(self, request: AgentRequest) -> bool:
