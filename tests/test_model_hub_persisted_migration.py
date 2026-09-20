@@ -1,0 +1,150 @@
+"""Persisted migration boundaries; never inspect real stores or launch a CLI."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from core.handlers.model_hub import migration
+from core.handlers.model_hub.service import ModelHubError
+from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
+    _isolate_native_home,
+    _service,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_native_boundary(monkeypatch, tmp_path):
+    home = tmp_path / "native"
+    _isolate_native_home(monkeypatch, home)
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local/share"))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(migration, "read_native_oauth", lambda *args, **kwargs: None)
+    return home
+
+
+def write(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        payload if isinstance(payload, str) else json.dumps(payload),
+        encoding="utf-8",
+    )
+
+
+def test_runtime_auth_alone_is_not_a_saved_configuration(monkeypatch, tmp_path):
+    service, store, adapter = _service(tmp_path, migration_home=None)
+    service.migration_home = None
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
+        monkeypatch.setenv(name, "fixture-runtime-not-an-import")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:12345")
+    assert all(agent.mode == "hub" for agent in store.load().agents.values())
+    assert service.migration_scan()["items"] == []
+    assert adapter.provisioned == []
+
+
+def test_mh_mig_005_runtime_auth_cannot_disable_saved_opencode_keys(
+    monkeypatch, tmp_path, isolated_native_boundary,
+):
+    home = isolated_native_boundary
+    path = home / ".config/opencode/opencode.json"
+    write(path, {"provider": {
+        "anthropic": {"options": {"apiKey": "fixture-saved-anthropic"}},
+        "openai": {"options": {"apiKey": "fixture-saved-openai"}},
+    }})
+    service, _, adapter = _service(tmp_path, migration_home=None)
+    service.migration_home = None
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-runtime-anthropic")
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture-runtime-openai")
+    rows = service.migration_scan()["items"]
+    assert len(rows) == 2
+    assert all(row["proposed_action"] == "import" and row["selected"] for row in rows)
+    assert all(row["source_paths"] == [str(path)] for row in rows)
+    result = asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert result["applied"] == 2
+    assert len(adapter.provisioned) == 2
+    assert "fixture-runtime" not in json.dumps(adapter.keys)
+    assert all(not provider.get("options") for provider in json.loads(path.read_text())["provider"].values())
+    assert os.environ["ANTHROPIC_API_KEY"] == "fixture-runtime-anthropic"
+    assert os.environ["OPENAI_API_KEY"] == "fixture-runtime-openai"
+
+
+def test_shell_saved_key_takeover_keeps_unrelated_bytes_and_runtime(
+    monkeypatch, tmp_path, isolated_native_boundary,
+):
+    home = isolated_native_boundary
+    profile = home / ".bashrc"
+    retained = "# 我的终端设置\r\nexport EDITOR='vim'\r\n"
+    write(profile, retained + (
+        "export ANTHROPIC_API_KEY='fixture-shell-key'\r\n"
+        "export ANTHROPIC_BASE_URL='https://fixture.example'\r\n"
+    ))
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-runtime-preserved")
+    rows = service.migration_scan()["items"]
+    assert len(rows) == 1 and rows[0]["proposed_action"] == "import"
+    assert rows[0]["source_paths"] == [str(profile)]
+    assert "fixture-shell-key" not in json.dumps(rows)
+    ids = [row["id"] for row in rows]
+    asyncio.run(service.migration_apply(ids))
+    assert profile.read_bytes() == retained.encode()
+    assert len(store.load().sources) == 1
+    assert store.load().sources[0].base_url == "https://fixture.example"
+    assert list(adapter.keys.values())[0][2] == "fixture-shell-key"
+    assert service.migration_scan()["items"] == []
+    asyncio.run(service.migration_apply(ids))
+    assert len(adapter.provisioned) == 1
+    assert os.environ["ANTHROPIC_API_KEY"] == "fixture-runtime-preserved"
+
+
+def test_new_shell_layer_during_provision_cannot_escape_consent(
+    monkeypatch, tmp_path, isolated_native_boundary,
+):
+    home = isolated_native_boundary
+    profile = home / ".bashrc"
+    write(profile, "export ANTHROPIC_API_KEY='fixture-original-key'\n")
+    original = profile.read_bytes()
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    ids = [row["id"] for row in service.migration_scan()["items"]]
+    provision = adapter.provision_credential
+
+    async def new_layer(*args, **kwargs):
+        ref = await provision(*args, **kwargs)
+        write(home / ".profile", "export ANTHROPIC_API_KEY='fixture-new-key'\n")
+        return ref
+
+    monkeypatch.setattr(adapter, "provision_credential", new_layer)
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply(ids))
+    assert profile.read_bytes() == original
+    assert "fixture-new-key" in (home / ".profile").read_text()
+    assert not store.load().sources
+    assert adapter.revoked
+
+
+def test_shared_shell_key_requires_both_backend_consents(
+    tmp_path, isolated_native_boundary,
+):
+    home = isolated_native_boundary
+    profile = home / ".profile"
+    write(profile, "export OPENAI_API_KEY='fixture-shared-key'\n")
+    config_path = home / ".config/opencode/opencode.json"
+    write(config_path, {"provider": {"openai": {"options": {"apiKey": "{env:OPENAI_API_KEY}"}}}})
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    assert {row["backend"] for row in rows} == {"codex", "opencode"}
+    assert all(set(row["required_backends"]) == {"codex", "opencode"} for row in rows)
+    before = profile.read_bytes(), config_path.read_bytes()
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply([row["id"] for row in rows if row["backend"] == "opencode"]))
+    assert adapter.provisioned == []
+    assert (profile.read_bytes(), config_path.read_bytes()) == before
+    asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert profile.read_bytes() == b""
+    assert "apiKey" not in json.dumps(json.loads(config_path.read_text()))
+    assert len(store.load().sources) == 1
+    source = store.load().sources[0]
+    assert all(source.id in store.load().agents[backend].sources.order for backend in ("codex", "opencode"))

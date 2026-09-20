@@ -770,6 +770,35 @@ def test_mock_upstream_required_key_uses_the_configured_protocol_header(
     assert _json_request(mock_llm_upstream.url, "/v1/models")[0] == 200
 
 
+@pytest.mark.parametrize("surface", ["models", "probe", "buffered"])
+@pytest.mark.parametrize("header", ["missing", "wrong", "x-api-key", "bearer"])
+def test_mock_upstream_bearer_opt_in_preserves_authentication_shape(
+    mock_llm_upstream, surface, header,
+) -> None:
+    """A custom Anthropic relay can require Bearer, not either auth header."""
+    key = "fixture-static-bearer"
+    _configure(
+        mock_llm_upstream.url, protocol="anthropic",
+        required_api_key=key, required_auth_scheme="bearer",
+    )
+    headers = {
+        "missing": {},
+        "wrong": {"Authorization": "Bearer fixture-wrong"},
+        "x-api-key": {"X-Api-Key": key},
+        "bearer": {"Authorization": f"Bearer {key}"},
+    }[header]
+    status, _, _ = _json_request(
+        mock_llm_upstream.url,
+        "/v1/models" if surface == "models" else "/v1/messages",
+        method="GET" if surface == "models" else "POST",
+        body=None if surface == "models" else (
+            {} if surface == "probe" else PROTOCOL_CASES["anthropic"]["body"]
+        ),
+        headers=headers,
+    )
+    assert status == (401 if header != "bearer" else 400 if surface == "probe" else 200)
+
+
 @pytest.mark.parametrize("protocol", PROTOCOL_CASES)
 @pytest.mark.parametrize(
     ("behavior", "status"),
@@ -1024,6 +1053,9 @@ def test_mock_upstream_control_validation_capture_envelope_and_reset(
         {"required_api_key": 123},
         {"required_api_key": False},
         {"required_api_key": []},
+        {"required_auth_scheme": "anything"},
+        {"required_auth_scheme": None},
+        {"required_auth_scheme": []},
         {"models": [""]},
         {"model_errors": []},
         {"model_errors": {"": "model_not_found"}},

@@ -93,6 +93,7 @@ Out of scope (documented, not dropped silently):
 | F1 | seed hermetic HOME with native claude/codex/opencode configs; scan | complete Claude API-key custody is importable; access-only Codex OAuth and unsupported OpenCode credentials remain visible blockers; no credential material is returned | assert |
 | F2 | apply the selected complete backend group | Claude API-key custody is committed and its direct native auth is cleaned; blocked Codex/OpenCode material and unrelated Claude settings remain unchanged | assert |
 | F3 | first open `/settings/models` after upgrade with importable items | banner visible (B2 — currently only in wizard: expected-fail until mounted) | fix-first |
+| F4 | already-Hub agents with populated runtime auth; import saved CLI/shell files | runtime values neither supply nor block import; static Bearer retains its header through CPA; public/wrong-key proof preserves files; unrelated shell bytes remain exact | assert |
 
 ### G. Guards and contract hygiene (C51–C53, B3,B7,B13,B16)
 | ID | Steps | Expect | Status |
@@ -227,6 +228,13 @@ lane-to-lane.
   every seeded native file and the empty Source list. This is a fixture-only
   contract: production authentication evidence and other suites' defaults
   are unchanged.
+  `required_auth_scheme: "protocol"|"bearer"` defaults to `"protocol"` and
+  leaves that behavior unchanged. Opting into `"bearer"` models a custom
+  Anthropic relay accepting only the exact Authorization bearer value, not
+  the same value sent as `x-api-key`. The persisted-migration suite uses this
+  to check that a saved `ANTHROPIC_AUTH_TOKEN` keeps its authentication
+  semantics through proof and actual CPA requests; missing/wrong credentials
+  still return 401, and authenticated schema probes still return 400.
 - The Playwright lane consumes this ONLY over HTTP via env
   `VIBE_E2E_MOCK_UPSTREAM_URL`; it never imports the Python module. Mock-
   dependent specs skip with a clear message when the env is absent.
