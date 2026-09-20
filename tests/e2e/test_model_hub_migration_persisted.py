@@ -212,6 +212,24 @@ def test_f4_custom_api_key_transport_is_refused_without_cleanup(
     (".bashrc", 'read "-$FLAGS" OPENAI_API_KEY'),
     (".bashrc", 'printf "$OPTIONS" OPENAI_API_KEY %s fixture-dynamic'),
     (".zshrc", "read -p OPENAI_API_KEY"),
+    (".bashrc", "wait -npOPENAI_API_KEY 123"),
+    (".bashrc", 'wait "$OPTIONS" OPENAI_API_KEY 123'),
+    (".bashrc", "compgen -V OPENAI_API_KEY -W fixture"),
+    (".bashrc", "trap 'read OPENAI_API_KEY' DEBUG"),
+    (".bashrc", "complete -W '$(read OPENAI_API_KEY)' fixture-command"),
+    (".bashrc", "jobs -x read OPENAI_API_KEY"),
+    (".bashrc", "exec {OPENAI_API_KEY}>/fixture/data"),
+    (".bashrc", "coproc OPENAI_API_KEY { :; }"),
+    (".bashrc", "eval " * 32 + "read OPENAI_API_KEY"),
+    (".zshrc", "print -v OPENAI_API_KEY fixture"),
+    (".zshrc", "set -A OPENAI_API_KEY fixture"),
+    (".zshrc", "integer OPENAI_API_KEY"),
+    (".zshrc", "getln OPENAI_API_KEY"),
+    (".zshrc", "shift 1 OPENAI_API_KEY"),
+    (".zshrc", "zmodload -FL -P OPENAI_API_KEY zsh/parameter"),
+    (".zshrc", "emulate zsh -c 'read OPENAI_API_KEY'"),
+    (".zshrc", "logout 'OPENAI_API_KEY=1'"),
+    (".zshrc", "fc -e 'read OPENAI_API_KEY'"),
 ])
 def test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof(
     model_hub_app_factory, mock_llm_upstream, profile, writer,
@@ -242,6 +260,51 @@ def test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof(
         assert paths[0].read_bytes() == before
         assert app.client.get("/api/models/sources").json()["sources"] == []
         assert mock_llm_upstream.requests() == []
+
+
+@pytest.mark.parametrize("profile,data", [
+    (".bashrc", "source 'OPENAI_API_KEY=fixture-script'"),
+    (".bashrc", "rg --fixed-strings OPENAI_API_KEY /fixture/input"),
+    (".bashrc", "compgen -W OPENAI_API_KEY=fixture-data"),
+    (".bashrc", "wait -p unrelated OPENAI_API_KEY"),
+    (".bashrc", "eval " * 32 + "echo OPENAI_API_KEY"),
+    (".zshrc", "print -R -v OPENAI_API_KEY"),
+])
+def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
+    model_hub_app_factory, mock_llm_upstream, profile, data,
+):
+    """Written argv data is preserved, not executed or promoted into code."""
+    _configure_protocol(mock_llm_upstream, "openai_responses", models=[{"id": "mock-model"}])
+    mock_llm_upstream.configure(required_api_key=KEY)
+    paths = []
+    retained = f"# 保留数据与换行\r\n{data}\r\n".encode()
+
+    def seed(app):
+        _seed_hub(app)
+        path = app.home / profile
+        _write(path, (
+            f"export OPENAI_API_KEY='{KEY}'\r\n"
+            f"export OPENAI_BASE_URL='{mock_llm_upstream.url}'\r\n"
+        ))
+        path.write_bytes(path.read_bytes() + retained)
+        path.chmod(0o640)
+        paths.append(path)
+
+    with model_hub_app_factory(extra_env=RUNTIME_ENV, before_start=seed) as app:
+        before_env = dict(app.env)
+        response = app.client.post("/api/models/migration/scan", {})
+        assert response.status == 200, response.json()
+        [row] = response.json()["scan"]["items"]
+        assert row["selected"] is True
+        assert row["proposed_action"] == "import"
+        applied = app.client.post("/api/models/migration/apply", {"item_ids": [row["id"]]})
+        assert applied.status == 200, applied.json()
+        assert applied.json()["applied"] == 1
+        assert len(applied.json()["sources"]) == 1
+        assert paths[0].read_bytes() == retained
+        assert paths[0].stat().st_mode & 0o777 == 0o640
+        assert app.env == before_env
+        assert app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"] == []
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
