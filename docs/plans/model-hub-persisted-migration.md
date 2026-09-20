@@ -25,14 +25,40 @@ is authorized by this implementation task.
   shell commands/includes are not credential candidates and are never
   followed. This is an inventory of direct persisted assignments, not an
   emulation of shell execution or a recursive scan of arbitrary scripts.
-  Known dynamic writers include `mapfile`/`readarray` destinations and explicit
-  callback assignments; option operands and quoted command data are not writers.
-  Classify the existing builtin writer family by its argument grammar, including
-  attached/combined destination options, array destinations, implicit destinations
-  and explicit arithmetic writes. Output/query-only options do not write.
+  The bounded writer surface is derived from the Bash 5.3 and Zsh 5.9 core
+  command manuals/source, not from whichever branches already exist in the
+  parser. It includes explicit named-output/declaration destinations, written
+  code/expansion operands, and explicit target-bearing shell syntax (including
+  named file-descriptor allocation and named Bash coprocs). Core aliases and
+  command modifiers belong to that inventory too. A checked-in coverage ledger
+  classifies every core command/alias and relevant syntax as a role handler,
+  ordinary data/query, or an explicit exclusion, with primary source version/
+  digest and independent positive/negative consuming cases. Tests must detect
+  unclassified entries and missing role coverage.
+  Classify argument roles, including attached/combined destination options,
+  array destinations, documented default destinations and explicit arithmetic
+  writes. Code, expansion-only text, destinations, data, queries and filenames
+  are distinct roles. In particular, `source`/`.` take a filename and argv,
+  not an embedded shell program; neither an assignment-shaped filename nor an
+  argument is code, and the included file is never followed. Known callback
+  bodies are inspected only as written; named functions and external content
+  are not resolved. Output/query-only options do not write.
   Bash/POSIX startup paths and Zsh startup paths use their respective option
-  semantics. This remains bounded syntax recognition, not execution, alias
-  resolution, effective precedence, or arbitrary expansion.
+  semantics. `.profile` conservatively recognizes explicit Bash extensions
+  as ambiguous without claiming that every POSIX shell executes them.
+  Nested written code operands must retain the same role analysis: reaching
+  an analysis limit cannot silently mean "no writer". Prefer a finite iterative
+  traversal; any necessary limit must preserve an actionable uncertainty in
+  the known code context, not manufacture credential values.
+  This remains bounded syntax recognition, not execution, alias/nameref
+  resolution, effective precedence, history replay, implicit shell-state
+  simulation or arbitrary expansion. Module-provided commands and user-defined
+  extensions are excluded; that does not exclude a core command's explicit
+  named output such as `zmodload -P`. Unknown ordinary commands are not blocked
+  merely because their data mentions a credential variable. The guarantee is
+  inventory of persisted literals and refusal of explicit related writers
+  within this fixed surface, not restoration of the effective environment or
+  proof that an arbitrary startup script cannot regenerate a credential.
 - File references to environment variables resolve only from unambiguous
   persisted literal assignments, never `os.environ`. Unresolved references
   describe a missing persistent value, not a permission failure.
