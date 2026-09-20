@@ -36,12 +36,16 @@ def _seed_hub(app) -> None:
     _write(path, json.dumps(payload))
 
 
-@pytest.mark.parametrize("shape", ["claude-shell", "claude-bearer", "codex-shell", "opencode-file"])
+@pytest.mark.parametrize("shape", [
+    "claude-shell", "claude-bearer", "codex-shell", "opencode-file",
+    "claude-shell-padded", "codex-shell-padded",
+])
 def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
     model_hub_app_factory, mock_llm_upstream, shape,
 ):
     """F4: inherited values neither supply nor block a persisted credential."""
     backend = shape.split("-")[0]
+    shell_fixture = "-shell" in shape
     protocol = "anthropic" if backend == "claude" else "openai_responses"
     _configure_protocol(mock_llm_upstream, protocol, models=[{"id": "mock-model"}])
     mock_llm_upstream.configure(
@@ -53,14 +57,16 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
 
     def seed(app):
         _seed_hub(app)
-        if shape.endswith("-shell"):
+        if shell_fixture:
             prefix = "ANTHROPIC" if backend == "claude" else "OPENAI"
             credential_name = "ANTHROPIC_AUTH_TOKEN" if backend == "claude" else "OPENAI_API_KEY"
             path = app.home / ".bashrc"
+            saved_key = f" \t{KEY} \t" if shape.endswith("-padded") else KEY
             _write(path, retained + (
-                f"export {credential_name}='{KEY}'\n"
+                f"export {credential_name}='{saved_key}'\n"
                 f"export {prefix}_BASE_URL='{mock_llm_upstream.url}'\n"
             ))
+            path.chmod(0o640)
         elif shape == "claude-bearer":
             path = app.home / ".claude/settings.json"
             _write(path, json.dumps({
@@ -92,8 +98,9 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
         [source] = applied.json()["sources"]
         assert source["supply_channel"] == "hub"
         assert app.env == before_env
-        if shape.endswith("-shell"):
+        if shell_fixture:
             assert source_paths[0].read_bytes() == retained.encode()
+            assert source_paths[0].stat().st_mode & 0o777 == 0o640
         elif shape == "claude-bearer":
             assert json.loads(source_paths[0].read_text()) == {"env": {}, "permissions": {"allow": ["Read"]}}
         else:

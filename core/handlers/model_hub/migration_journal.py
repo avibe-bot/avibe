@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,12 +55,13 @@ class NativeFileEdit:
     before: bytes | None
     after: bytes | None
     mode: int = 0o600
+    before_mode: int | None = None
 
     @classmethod
     def plan(cls, path: Path, after: bytes | None) -> NativeFileEdit:
         before = _read_regular(path)
         mode = stat.S_IMODE(path.stat().st_mode) if before is not None else 0o600
-        return cls(path.absolute(), before, after, mode)
+        return cls(path.absolute(), before, after, mode, mode if before is not None and before != after else None)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -67,14 +69,20 @@ class NativeFileEdit:
             "before": _encoded(self.before),
             "after": _encoded(self.after),
             "mode": self.mode,
+            **({"before_mode": self.before_mode} if self.before_mode is not None else {}),
         }
 
     @classmethod
     def from_payload(cls, payload: object) -> NativeFileEdit:
-        if not isinstance(payload, dict) or set(payload) != {"path", "before", "after", "mode"}:
+        required = {"path", "before", "after", "mode"}
+        if (
+            not isinstance(payload, dict) or not required <= set(payload)
+            or set(payload) - required - {"before_mode"}
+        ):
             raise TakeoverStateError("invalid takeover snapshot")
         path = payload["path"]
         mode = payload["mode"]
+        before_mode = payload.get("before_mode")
         if (
             not isinstance(path, str)
             or not Path(path).is_absolute()
@@ -82,23 +90,37 @@ class NativeFileEdit:
             or isinstance(mode, bool)
             or mode < 0
             or mode > 0o777
+            or (
+                before_mode is not None and (
+                    not isinstance(before_mode, int) or isinstance(before_mode, bool)
+                    or not 0 <= before_mode <= 0o777
+                )
+            )
         ):
             raise TakeoverStateError("invalid takeover snapshot")
-        return cls(Path(path), _decoded(payload["before"]), _decoded(payload["after"]), mode)
+        return cls(Path(path), _decoded(payload["before"]), _decoded(payload["after"]), mode, before_mode)
 
     def check(self, *, applied: bool = False) -> None:
         expected = self.after if applied else self.before
-        if _read_regular(self.path) != expected:
-            raise TakeoverStateError("native configuration changed")
+        mode = (self.mode if applied else self.before_mode) if self.before != self.after else None
+        self._verify(expected, mode)
 
     def apply(self, *, reverse: bool = False) -> None:
         """Compare before writing; replay accepts only either recorded state."""
         source, target = (self.after, self.before) if reverse else (self.before, self.after)
         actual = _read_regular(self.path)
         if actual == target:
+            if self.before != self.after:
+                if target is not None:
+                    # Bytes and mode were published together. Replay may complete
+                    # durability, but never chmod someone else's replacement.
+                    self._verify(target, self.before_mode if reverse else self.mode, sync=True)
+                _fsync_directory(self.path.parent)
             return
         if actual != source:
             raise TakeoverStateError("native configuration changed")
+        source_mode = self.mode if reverse else self.before_mode
+        self._verify(source, source_mode)
         if target is None:
             self.path.unlink()
             # The absence is part of the ownership decision, not best effort.
@@ -107,11 +129,58 @@ class NativeFileEdit:
             _fsync_directory(self.path.parent)
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Authentication-bearing files must never become more permissive.
-        write_atomic(self.path, target)
+        # Unlike agent-owned state (write_atomic, always 0600), this transaction
+        # edits user files. Publish captured permissions WITH the target bytes;
+        # never widen a path after publication. Recheck consent before swapping.
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
+        unpublished: str | None = temporary
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(target)
+                handle.flush()
+                if hasattr(os, "fchmod"):
+                    os.fchmod(handle.fileno(), self.mode)
+                else:  # pragma: no cover - Windows permission fallback
+                    os.chmod(temporary, self.mode)
+                os.fsync(handle.fileno())
+            self._verify(source, source_mode)
+            os.replace(temporary, self.path)
+            unpublished = None
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if unpublished is not None:
+                Path(unpublished).unlink(missing_ok=True)
         _fsync_directory(self.path.parent)
-        if _read_regular(self.path) != target:
-            raise TakeoverStateError("native configuration did not persist")
+        self._verify(target, self.mode)
+
+    def _verify(self, expected: bytes | None, mode: int | None, *, sync: bool = False) -> None:
+        if expected is None:
+            if _read_regular(self.path) is not None:
+                raise TakeoverStateError("native configuration changed")
+            return
+        descriptor = os.open(
+            self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        try:
+            current = os.fstat(descriptor)
+            if not stat.S_ISREG(current.st_mode):
+                raise TakeoverStateError("native configuration is not a regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                content = handle.read()
+            current = os.fstat(descriptor)
+            entry = self.path.lstat()
+            if (
+                content != expected
+                or (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino)
+                or (mode is not None and stat.S_IMODE(current.st_mode) != mode)
+            ):
+                raise TakeoverStateError("native configuration changed")
+            if sync:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _fsync_directory(path: Path) -> None:

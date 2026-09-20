@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -53,6 +53,7 @@ class ShellProfile:
     before: bytes | None
     assignments: tuple[ShellAssignment, ...]
     issues: tuple[ShellIssue, ...]
+    mode: int = 0o600
 
     @property
     def values(self) -> dict[str, str]:
@@ -312,6 +313,44 @@ def _embedded_writers(token: _Token, names: frozenset[str], depth: int) -> set[s
     return found
 
 
+def _array_reader_writers(arguments: list[_Token], names: frozenset[str], depth: int) -> set[str]:
+    """Locate mapfile/readarray's array without mistaking option data for it."""
+    found: set[str] = set()
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index].value
+        if argument == "--":
+            index += 1
+            break
+        if not argument.startswith("-") or argument == "-":
+            break
+        for position, option in enumerate(argument[1:], start=2):
+            if option == "t":
+                continue
+            if option not in "dnOsuCc":
+                # Unknown syntax cannot establish an explicit writer's absence.
+                return found | {arg.value for arg in arguments[index + 1:] if arg.value in names}
+            value = argument[position:]
+            if not value:
+                index += 1
+                if index >= len(arguments):
+                    return found
+                value = arguments[index].value
+            if option == "C":
+                # A callback is evaluated by Bash, but we only inventory its
+                # explicit syntax; named functions and files are never followed.
+                found.update(
+                    _written_names(value, names, depth + 1)
+                    if depth < 12 else _arithmetic_writers(value, names)
+                )
+            break
+        index += 1
+    destination = arguments[index].value if index < len(arguments) else "MAPFILE"
+    if destination in names:
+        found.add(destination)
+    return found
+
+
 def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int) -> set[str]:
     found = set().union(*(_embedded_writers(token, names, depth) for token in tokens))
     words: list[_Token] = []
@@ -377,6 +416,8 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int) ->
             if argument in names:
                 found.add(argument)
             index += 1
+    elif command in {"mapfile", "readarray"}:
+        found.update(_array_reader_writers(arguments, names, depth))
     elif command == "unset":
         found.update(argument.value for argument in arguments if argument.value in names)
     elif command == "getopts" and len(arguments) > 1 and arguments[1].value in names:
@@ -500,15 +541,17 @@ def _parse(path: Path, before: bytes, names: frozenset[str]) -> ShellProfile:
 
 def read_shell_profiles(home: Path | None, names: frozenset[str]) -> tuple[ShellProfile, ...]:
     """Read only the eight fixed paths, retaining absent paths as consent guards."""
-    from .migration_journal import TakeoverStateError, _read_regular
+    from .migration_journal import NativeFileEdit, TakeoverStateError
 
     root = Path.home() if home is None else home
     profiles: list[ShellProfile] = []
     for name in SHELL_PROFILE_NAMES:
         path = (root / name).absolute()
         try:
-            before = _read_regular(path)
+            snapshot = NativeFileEdit.plan(path, None)
+            before = snapshot.before
             profile = _parse(path, before, names) if before is not None else ShellProfile(path, None, (), ())
+            profile = replace(profile, mode=snapshot.mode)
         except (OSError, UnicodeError, TakeoverStateError):
             profile = ShellProfile(path, None, (), (ShellIssue(tuple(sorted(names)), "unreadable", None),))
         profiles.append(profile)
@@ -533,4 +576,7 @@ def cleanup_shell_profile(profile: ShellProfile, selected: Mapping[str, str]) ->
         if after is None or not 0 <= assignment.start < assignment.end <= len(after):
             raise TakeoverStateError("invalid shell configuration snapshot")
         after = after[:assignment.start] + after[assignment.end:]
-    return NativeFileEdit(profile.path, profile.before, after)
+    return NativeFileEdit(
+        profile.path, profile.before, after, profile.mode,
+        profile.mode if profile.before is not None and profile.before != after else None,
+    )

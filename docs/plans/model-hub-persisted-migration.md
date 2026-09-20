@@ -25,9 +25,14 @@ is authorized by this implementation task.
   shell commands/includes are not credential candidates and are never
   followed. This is an inventory of direct persisted assignments, not an
   emulation of shell execution or a recursive scan of arbitrary scripts.
+  Known dynamic writers include `mapfile`/`readarray` destinations and explicit
+  callback assignments; option operands and quoted command data are not writers.
 - File references to environment variables resolve only from unambiguous
   persisted literal assignments, never `os.environ`. Unresolved references
   describe a missing persistent value, not a permission failure.
+- Saved API keys use the existing whitespace-normalization policy once at
+  inventory construction. Proof, identity reuse and permanent custody consume
+  that same value; exact raw shell assignments remain separate cleanup evidence.
 - Every credential keeps its original target and authentication semantics.
   A static bearer token is not assumed to be an API-key header or an OAuth grant.
   Any unsupported transport must have an honest, actionable row-level reason.
@@ -59,6 +64,16 @@ is authorized by this implementation task.
   before exposure. Already exposed grants never roll back to old credentials.
   Compare-only guards do not represent a native write or grant exposure, and
   rollback never restores their bytes. Recheck them after runtime start as well.
+  Shell edits retain captured permission bits through journal serialization,
+  forward/reverse writes and interrupted-write replay. The transaction writes
+  bytes and mode on a temporary inode, rechecks the source and publishes them
+  together; replay verifies the target and completes file/directory durability,
+  never chmods a published path. Optional `before_mode` records actual captured
+  evidence, not a legacy default. This is compare-before-write, not a claim of
+  cross-process atomic CAS. Compare-only guards never claim permissions;
+  Avibe-owned journal/state files remain owner-private.
+  Shared-reference guards cover configuration/profile consumers, not unrelated
+  backend credential-store bytes. Credential snapshots stay backend-scoped.
   Completed receipts retain optional opaque `inventory_ids`, distinct from
   snapshot-bound consent IDs. Fresh consent for the exact restored old
   credential/target may clean it again only while the receipt's current Hub

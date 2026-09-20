@@ -370,7 +370,7 @@ def plan_native_cleanup(
                             and value.startswith("{env:") and value.endswith("}")
                             and (
                                 not shell_values.get(value[5:-1])
-                                or shell_values[value[5:-1]] in selected_secrets
+                                or shell_values[value[5:-1]].strip() in selected_secrets
                             )
                         )
                         if not reference:
@@ -414,7 +414,7 @@ def plan_native_cleanup(
             }
         for profile in read_shell_profiles(home, frozenset(selected_values)):
             previous = edits.get(profile.path)
-            if previous and previous.before != profile.before:
+            if previous and (previous.before != profile.before or previous.mode != profile.mode):
                 raise TakeoverStateError("native configuration changed")
             # Keep guards even when this profile contributes no selected line.
             edits[profile.path] = cleanup_shell_profile(profile, selected_values)

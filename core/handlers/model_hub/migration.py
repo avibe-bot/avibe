@@ -674,21 +674,22 @@ def _codex_items(
             shell_values: tuple[tuple[str, str], ...] = ()
             if env_key:
                 resolved = persisted.resolve(env_key)
-                if resolved.reason or not resolved.value:
+                saved_key = resolved.value.strip() if resolved.value is not None else None
+                if resolved.reason or not saved_key:
                     items.append(_blocked_item(
                         "codex", f"{path}:{provider_id}", resolved.reason or "reference",
                         source_paths=paths, shell_variables=names, shell_auth_variables=names,
                     ))
                     continue
-                if key and key != resolved.value:
+                if key and key != saved_key:
                     # Two credential mechanisms must not silently discard one.
                     items.append(_blocked_item(
                         "codex", f"{path}:{provider_id}", "credential",
                         source_paths=paths, shell_variables=names, shell_auth_variables=names,
                     ))
                     continue
-                key = resolved.value
-                shell_values = ((env_key, key),)
+                key = saved_key
+                shell_values = ((env_key, cast(str, resolved.value)),)
             if not key:
                 continue
             base_url = _oauth_text(provider, "base_url")
@@ -884,14 +885,14 @@ def _opencode_candidates(
         key_name = env_reference(key_setting)
         if key_name:
             resolved = persisted.resolve(key_name)
-            if resolved.reason or (not resolved.value and not auth_key):
+            config_key = (resolved.value.strip() or None) if resolved.value is not None else None
+            if resolved.reason or (not config_key and not auth_key):
                 items.append(blocked(
                     f"{locator}:{provider_id}:key-reference", resolved.reason or "reference",
                 ))
                 continue
-            config_key = resolved.value
             if config_key:
-                shell_values.append((key_name, config_key))
+                shell_values.append((key_name, cast(str, resolved.value)))
         elif isinstance(key_setting, str) and ("{env:" in key_setting or "{file:" in key_setting):
             items.append(blocked(f"{locator}:{provider_id}:key-reference", "reference"))
             continue
@@ -1001,7 +1002,10 @@ def _shell_items(
             # A native provider reference owns the target and transport.
             continue
         value = persisted.resolve(name)
-        if not value.paths or (not value.value and not value.reason):
+        # Use the same canonical API-key bytes as proof, reuse and custody.
+        # The original assignment remains separate for exact native cleanup.
+        secret = value.value.strip() if value.value is not None else None
+        if not value.paths or (not secret and not value.reason):
             continue
         base = persisted.resolve(base_name) if base_name else None
         names = (name, *((base_name,) if base and base.paths else ()))
@@ -1018,14 +1022,14 @@ def _shell_items(
         scheme = None
         if name == "CLAUDE_CODE_OAUTH_TOKEN":
             reason = reason or "token"
-        elif name == "ANTHROPIC_AUTH_TOKEN" and value.value and not reason:
+        elif name == "ANTHROPIC_AUTH_TOKEN" and secret and not reason:
             try:
                 scheme = validate_api_key_auth_scheme(
-                    vendor, protocol, base_url, value.value, "bearer",
+                    vendor, protocol, base_url, secret, "bearer",
                 )
             except ValueError:
                 reason = "token"
-        if reason or not value.value:
+        if reason or not secret:
             items.append(_blocked_item(
                 backend, f"shell:{name}", reason or "reference",
                 source_paths=paths, shell_variables=names, shell_auth_variables=(name,),
@@ -1036,19 +1040,19 @@ def _shell_items(
         kind = "opencode_provider" if backend == "opencode" else "api_key"
         item_id, source_id = _ids(
             backend, kind, f"shell:{name}", "import",
-            _stable_suffix(value.value, base_url or "", scheme or ""),
+            _stable_suffix(secret, base_url or "", scheme or ""),
         )
-        masked = mask_credential(value.value)
+        masked = mask_credential(secret)
         items.append(NativeMigrationItem(
             id=item_id, source_id=source_id, backend=cast(Any, backend),
             kind=cast(Any, kind), masked_detail=masked, proposed_action="import",
             selected=True, notes_key=_CUSTOM_ENDPOINT_NOTE if base_url else None,
             vendor=vendor, protocol=cast(Any, protocol), display_name=vendor,
-            base_url=base_url, secret=value.value, masked_credential=masked,
+            base_url=base_url, secret=secret, masked_credential=masked,
             source_paths=paths, shell_variables=names,
             shell_auth_variables=(name,),
             shell_values=(
-                (name, value.value),
+                (name, cast(str, value.value)),
                 *(((base_name, base_url),) if base and base.value else ()),
             ),
             auth_scheme=scheme,

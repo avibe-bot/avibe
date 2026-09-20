@@ -139,13 +139,17 @@ class PersistedInventory:
         paths = {*self.backend_paths[backend], *self.credential_paths[backend]}
         if backend == "opencode":
             paths.add(self.catalog_path)
+        if shared:
+            # Only native configuration can introduce another shell consumer.
+            # Sharing guards is not consent to journal other backends' grants.
+            paths.update(path for group in self.backend_paths.values() for path in group)
         guards = tuple(
             guard for guard in self.guards
-            if shared or guard.path in paths
+            if guard.path in paths
         )
         return (
             *guards,
-            *(NativeFileEdit(profile.path, profile.before, profile.before) for profile in self.profiles
+            *(NativeFileEdit(profile.path, profile.before, profile.before, profile.mode) for profile in self.profiles
               if not any(issue.reason == "unreadable" for issue in profile.issues)),
         )
 
@@ -154,6 +158,7 @@ class PersistedInventory:
         digest = hashlib.sha256()
         for guard in guards:
             digest.update(str(guard.path).encode())
+            digest.update(f"\0mode:{guard.mode:o}\0".encode())
             digest.update(
                 b"\0absent\0" if guard.before is None
                 else b"\0present\0" + hashlib.sha256(guard.before).digest()
