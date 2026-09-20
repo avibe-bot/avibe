@@ -275,6 +275,7 @@ async def run_supervised_command(
     label: str,
     on_spawn: Optional[Callable[[int, Optional[PersistedProcessIdentity]], None]] = None,
     max_output_bytes: Optional[int] = None,
+    env: Optional[Mapping[str, str]] = None,
     extra_env: Optional[Mapping[str, str]] = None,
     remove_env: Collection[str] = (),
     discard_stderr: bool = False,
@@ -283,7 +284,9 @@ async def run_supervised_command(
 
     ``timeout_seconds <= 0`` means no timeout. ``max_output_bytes`` of ``None``
     keeps exact ``communicate()`` semantics; a value caps the retained bytes per
-    stream while still draining the child to EOF. ``extra_env`` is added to the
+    stream while still draining the child to EOF. ``env`` is the complete base
+    environment when supplied; otherwise the current process is inherited.
+    ``extra_env`` is added to the
     environment the supervisor hands the command, for context the command can only
     learn from its caller; ``remove_env`` then deletes inherited keys. The runner's
     process-identity marker is restored after both operations. ``discard_stderr``
@@ -292,7 +295,7 @@ async def run_supervised_command(
     """
 
     worker_marker = new_process_identity_marker()
-    spawn_env = process_identity_subprocess_env(worker_marker)
+    spawn_env = dict(env) if env is not None else process_identity_subprocess_env(worker_marker)
     if extra_env:
         spawn_env.update(extra_env)
     for key in remove_env:

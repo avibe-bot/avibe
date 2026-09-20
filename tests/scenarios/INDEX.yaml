@@ -199,6 +199,7 @@ capabilities:
       - tests/test_agent_run_target.py
       - tests/test_watches.py
       - tests/test_cli_watch_command.py
+      - tests/test_background_command_caller_context.py
   - id: harness_command_task
     name: Scheduled command tasks and their failure visibility
     status: active
