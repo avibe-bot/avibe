@@ -826,7 +826,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
-            <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
+            <div className="truncate text-[11px] text-muted">{t('workbench.eyebrow')}</div>
           </div>
         </Link>
       </div>
@@ -888,14 +888,30 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
 
       {/* Navigation m8K59 — the home brand is the new-conversation entry, so
           capability destinations are the only rows in this group. */}
-      <nav className="flex shrink-0 flex-col gap-0.5">
-        {capabilityNav.map(({ to, i18nKey, icon }) => (
-          <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
-        ))}
-      </nav>
+      {capabilityNav.length > 0 && (
+        <div className="flex shrink-0 flex-col gap-1">
+          <button
+            type="button"
+            className="group flex h-7 items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+            aria-expanded={capabilitiesOpen}
+            aria-controls="workbench-capability-nav"
+            onClick={() => setCapabilitiesOpen((open) => !open)}
+          >
+            {capabilitiesOpen ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
+            <span>{t('nav.capabilities')}</span>
+          </button>
+          {capabilitiesOpen && (
+            <nav id="workbench-capability-nav" className="flex flex-col gap-0.5">
+              {capabilityNav.map(({ to, i18nKey, icon }) => (
+                <SidebarNavRow key={to} to={to} icon={icon} label={t(i18nKey)} />
+              ))}
+            </nav>
+          )}
+        </div>
+      )}
 
       {/* Projects section t7o96 — the label on the left and the create
-          affordance on the right; Search now lives in the brand row. */}
+          affordance on the right; Search has its own row below the brand. */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
         <div className="flex items-center justify-between px-1">
           <span className="font-mono text-[10px] font-bold uppercase tracking-[0.16em] text-muted">
