@@ -177,9 +177,10 @@ Read back every PR-body/comment change. Hand back PR/head, source parent SHAs, s
 
   Readiness timeout alone releases retry eligibility, not liveness evidence.
   Receipt refusal removes scoped stop authority but preserves uncertainty.
-  `reset_after_confirmed_runtime_loss` releases retry and stop ownership after
-  the readiness monitor's recovery threshold, but does not itself prove process
-  absence or clear the removal fence. Tests cover timeout -> retry eligibility -> uninstall,
+  `reset_after_confirmed_runtime_loss` is called by the readiness-only recovery
+  monitor. It releases retry and stop ownership after the monitor's recovery
+  threshold, but does not itself prove process absence or clear the removal
+  fence. Tests cover timeout -> retry eligibility -> uninstall,
   late-ready scoped stop, refusal, no-overlap, valid handover, fresh inactive
   removal, and safe successful cleanup.
 - The Windows notification review finding `4056057501` is a verified false
@@ -220,6 +221,34 @@ Read back every PR-body/comment change. Hand back PR/head, source parent SHAs, s
   launch sources. The connection-test safety fixture now removes those five
   variables before each test, and the same consumer set passes with hermetic
   source selection. Production credential precedence is unchanged.
+
+### Final mainline synchronization candidate
+
+- 2026-09-20: The restricted tracking refs were refreshed with explicit
+  refspecs, and `origin/master` was verified at
+  `a32cd9df9be96ae9b86e1cdf81c86e9fd6bdbfc3`; `origin/desktop` remained
+  `007f631613be43b3d00918c9e1e3cde58235099d`. A real normal merge produced
+  candidate `f07634ac61ba41d6f05e26c1a1f6b6feff2175a1`, with parents
+  `e2c92afc19c9f95b2581ea8bc46b8ad40ce98896` and
+  `a32cd9df9be96ae9b86e1cdf81c86e9fd6bdbfc3`. The expected merged tree was
+  independently checked as `5dea0c52f75b6eedb5c952bd9f7f4ca56f462ebf` before
+  this plan append. The only overlapping files are the i18n catalogs; the
+  upstream Workbench/AppShell/ChatPage/Composer/Sidebar behavior and the two
+  migration test fixtures are retained.
+- Independent pre-push spot-checks covered the three CI compatibility classes
+  and exhaustive dependency selection (`270` tests), 13 RuntimeHost/bootstrap
+  consumers, and the native credential fixture boundary. On the merged tree,
+  the focused Python CI compatibility, dependency, and observability command
+  passed `314` tests; Runtime-host passed `94` library, `25` bootstrap, and `5`
+  notification HTTP tests; the merged Workbench queue tests passed `106` UI
+  tests. Rust formatting and workspace Clippy passed. The opt-in hermetic
+  mock-upstream Model Hub suite passed `69` tests with `20` expected skips.
+  The migration E2E command requires the separately supplied offline engine
+  manifest; this workspace did not have that fixture. Its local attempt failed
+  closed at `engine_down`/`migration_native_busy`, before credential mutation,
+  confirming the fixture prerequisite rather than a production catalog or
+  native-auth bypass. The command was not retried against a network asset or
+  installed service.
 
 ### Original-head review inventory and scope decision
 
