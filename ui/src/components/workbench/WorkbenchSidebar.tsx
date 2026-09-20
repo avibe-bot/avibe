@@ -813,7 +813,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           mint well, resting glow that strengthens on hover) inside this
           sidebar's own padding, so the adjustable width still governs the
           column. Search is a compact icon in the Projects header below. */}
-      <div className="flex shrink-0 items-center py-2">
+      <div className="flex shrink-0 items-center pb-3">
         <Link
           to="/"
           className="group flex min-w-0 items-center gap-2.5 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
