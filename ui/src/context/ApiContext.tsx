@@ -786,7 +786,7 @@ export type ApiContextType = {
   // Send-while-busy queue (messages sent while a turn runs) + per-session draft.
   listSessionQueue: (sessionId: string, options?: { cache?: boolean }) => Promise<{ queued: WorkbenchMessage[] }>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
-  sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
+  sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; reason?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getCachedSessionDraft: (sessionId: string) => string | null;
   cacheSessionDraft: (sessionId: string, text: string) => void;

@@ -2325,17 +2325,18 @@ export const ChatPage: React.FC = () => {
   );
 
   const sendQueueNow = useCallback(async () => {
-    // "立即发送": interrupt the running turn + flush the queue now. The queue
-    // flushes as one merged turn, so this runs the whole queue.
+    // Promote the exact FIFO head: steer the current turn without interrupting
+    // it, or start a new turn if idle. Only a compatible prefix may be claimed.
     const sid = sessionId;
     if (!sid || queue.length === 0 || sendingQueueNow) return;
     const requestGeneration = ++queueSendGenerationRef.current;
     const isCurrentRequest = () =>
       requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current;
-    // Give the click an immediate visual response while the request interrupts
-    // the current turn. The queue stays visible until admission succeeds so a
+    // Give the click an immediate visual response during admission.
+    // The queue stays visible until admission succeeds so a
     // failed or ambiguous request never hides work the user may need to retry.
     setSendingQueueNow(true);
+    setError(null);
     // A turn is about to run (the flushed queue) — reflect it immediately so
     // Stop stays available even if the controller's turn.start is missed/delayed
     // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
@@ -2351,13 +2352,18 @@ export const ChatPage: React.FC = () => {
         // (Codex P2). Other failures mean no turn is running → clear working.
         if (res.code !== 'stop_failed') setWorking(false);
         setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
-      } else if (res && (res as { status?: string }).status === 'empty') {
+      } else if (res?.status === 'queued') {
+        setError(t(res.reason === 'attachments_unavailable'
+          ? 'chat.queue.attachmentsUnavailable'
+          : 'chat.queue.sendDeferred'));
+      } else if (res?.status === 'reconciling_steer') {
+        setError(t('chat.queue.sendReconciling'));
+      } else if (res?.status === 'empty') {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
         setWorking(false);
       } else {
-        // A successful admission may only claim the compatible prefix (for
-        // example, attachment rows can remain queued behind an active turn).
+        // A successful admission may only claim the compatible prefix.
         // Re-read the authoritative queue instead of assuming the whole visible
         // batch was flushed.
       }

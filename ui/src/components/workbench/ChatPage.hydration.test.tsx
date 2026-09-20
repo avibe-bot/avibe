@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
     getWorkbenchPrefs: vi.fn(),
     listSessionMessages: vi.fn(),
     listSessionQueue: vi.fn(),
+    sendQueuedNow: vi.fn(),
     mutateConfig: vi.fn(),
     waitForAgentActivityConfigMutations: vi.fn(),
     onSessionArchived: vi.fn(),
@@ -243,6 +244,7 @@ describe('ChatPage transcript hydration', () => {
     mocks.api.getWorkbenchPrefs.mockResolvedValue({});
     mocks.api.listSessionMessages.mockResolvedValue({ messages: [] });
     mocks.api.listSessionQueue.mockResolvedValue([]);
+    mocks.api.sendQueuedNow.mockResolvedValue({ ok: true, status: 'accepted' });
     mocks.api.mutateConfig.mockResolvedValue({ ui: {} });
     mocks.api.waitForAgentActivityConfigMutations.mockResolvedValue(undefined);
     mocks.api.onSessionArchived.mockReturnValue(() => {});
@@ -252,6 +254,42 @@ describe('ChatPage transcript hydration', () => {
     cleanup();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it.each([
+    { status: 'queued', reason: 'attachments_unavailable', notice: 'chat.queue.attachmentsUnavailable' },
+    { status: 'queued', reason: 'runtime_unavailable', notice: 'chat.queue.sendDeferred' },
+    { status: 'reconciling_steer', reason: undefined, notice: 'chat.queue.sendReconciling' },
+  ])('retains the image and explains $status after send-now', async ({ status, reason, notice }) => {
+    const image = {
+      ...queuedMessage('queued-image', ''),
+      content: { attachments: [{
+        token: 'image-token', name: '队列图片.png', mime: 'image/png', url: '/api/media/image-token',
+      }] },
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'), queued: [image], turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [image] });
+    const send = deferred<{ ok: boolean; status: string; reason?: string }>();
+    mocks.api.sendQueuedNow.mockReturnValue(send.promise);
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    const button = await screen.findByRole('button', { name: 'chat.queue.sendNow' });
+    fireEvent.click(button);
+    expect(screen.getByRole('button', { name: 'chat.queue.sendingNow' }).getAttribute('disabled')).not.toBeNull();
+    expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith('session-new', 'queued-image');
+    expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
+    await act(async () => send.resolve({ ok: true, status, reason }));
+    await screen.findByText(notice);
+    expect(document.querySelector('img[src="/api/media/image-token"]')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'chat.queue.sendNow' }).getAttribute('disabled')).toBeNull();
+    expect(mocks.api.cancelSession).not.toHaveBeenCalled();
   });
 
   it('keeps the loading view when SSE Session-row recovery beats transcript bootstrap', async () => {

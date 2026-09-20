@@ -45,6 +45,7 @@ from modules.agents.base import (
     AGENT_TURN_TOKEN,
     AgentRequest,
     BaseAgent,
+    message_with_files,
 )
 
 # NOTE: AskUserQuestion support is disabled because Claude Code SDK cannot
@@ -1161,7 +1162,7 @@ class ClaudeAgent(BaseAgent):
                 )
             writers = self._steering_writer_keys()
             writers.add(composite_key)
-            message = self.render_input(request.text, request.input_metadata)
+            message = self.render_input(message_with_files(request.text, request.files), request.input_metadata)
             input_receipt = self._register_native_input(
                 composite_key,
                 message,
@@ -4309,54 +4310,4 @@ class ClaudeAgent(BaseAgent):
         return mapping.get(class_name)
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:
-        """Prepare message with file attachment information.
-
-        If there are file attachments, append file info to the message
-        so the agent knows what files are available to read.
-        Files are stored in ~/.vibe_remote/attachments/{channel_id}/.
-
-        Args:
-            request: The agent request containing message and files
-
-        Returns:
-            Message string, potentially with file info appended
-        """
-        if not request.files:
-            return request.message
-
-        # Build file info section
-        images = []
-        other_files = []
-
-        for attachment in request.files:
-            if not attachment.local_path:
-                continue
-
-            is_image = (attachment.mimetype or "").startswith("image/")
-            if is_image:
-                images.append(attachment)
-            else:
-                other_files.append(attachment)
-
-        if not images and not other_files:
-            return request.message
-
-        # Format file info as a clear block at the end
-        file_lines = ["", "[User Attachments]"]
-
-        for img in images:
-            size_str = f", {img.size} bytes" if img.size else ""
-            file_lines.append(f"- Image: {img.local_path} ({img.mimetype}{size_str})")
-
-        for f in other_files:
-            size_str = f", {f.size} bytes" if f.size else ""
-            file_lines.append(f"- File: {f.local_path} ({f.mimetype}{size_str})")
-
-        file_info = "\n".join(file_lines)
-
-        # If there's no text message, just use file info (without leading newline)
-        if not request.message or not request.message.strip():
-            return file_info.lstrip()
-
-        # Append file info to message
-        return f"{request.message}{file_info}"
+        return message_with_files(request.message, request.files)

@@ -44,6 +44,30 @@ Owner acceptance after authorized deployment: queue text with an image, an image
 
 One PR against master, closes #2042. Exact-head Codex review, all expected CI green, and zero unresolved threads required. The lane owns its fix watch; the orchestrator independently gates and checks scope. No merge or shared deployment without owner instruction. Record material deviations and validation evidence below as they land.
 
+## Attachment send-now repair (2026-09-20)
+
+A subsequent user report exposed a separate dispatch defect: the active-turn
+promotion path deliberately left every attachment-bearing Delivery queued, and
+its response discarded the reason. The orchestrator expanded this follow-up's
+scope to carry resolved attachments through the existing native steering owner.
+See `agent-message-priority.md`, scenarios `QUEUE-IMAGE-001`–`004`, for the amended
+contract. No Stop fallback, new queue owner, storage migration, or dependency is
+introduced.
+
+Use each backend's normal-turn attachment encoding: Codex `localImage`, and the
+existing file/image path context for Claude and OpenCode. Preserve complete
+Delivery snapshots on refusal or ambiguous acknowledgement. Surface deferred
+send feedback without hiding the queued image.
+
+The current queue renderer already handles Web and IM image shapes. Inspection
+found an installed host serving an older bundle without those components, while
+the current local master regression contains them; do not infer a new renderer
+defect or restart that host. This follow-up extends isolated upload-to-native
+coverage with a decodable PNG, a Chinese filename, image-only input, real busy
+admission, queue/reload projections and transcript identity. Existing browser
+preview tests remain required. Deployed acceptance is a separate authorized
+local regression step under `docs/regression/README.md`, not a host restart.
+
 ## What was built
 
 - `ui/src/lib/messageAttachments.ts` reads `content.attachments` and decides, on

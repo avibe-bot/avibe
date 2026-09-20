@@ -23,6 +23,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iterator, Literal, Optional
 
 from sqlalchemy import and_, exists, literal, or_, select, update
@@ -2490,11 +2491,6 @@ class SessionTurnManager:
             has_attachments=bool(specs),
         )
 
-    @staticmethod
-    def _delivery_has_attachment_references(delivery: dict[str, Any]) -> bool:
-        payload = delivery_store.delivery_payload(delivery)
-        return bool((payload.get("content") or {}).get("attachments"))
-
     def _hydrate_delivery_batch_context(
         self,
         context: "MessageContext",
@@ -2728,6 +2724,26 @@ class SessionTurnManager:
                 delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
             )
         try:
+            from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
+
+            attachments = [
+                attachment
+                for row in deliveries
+                for attachment in ((delivery_store.delivery_payload(row).get("content") or {}).get("attachments") or [])
+            ]
+            with self._sqlite_engine().connect() as conn:
+                specs = resolve_attachment_specs(
+                    conn, session_id=str(deliveries[0]["session_id"]), attachments=attachments
+                )
+            files = tuple(file_attachments_from_specs(specs) or ())
+            # Never accept the text while silently losing one of its attachments.
+            # Resolve only session-bound tokens, never caller-supplied local paths.
+            if len(files) != len(attachments) or any(not Path(file.local_path).is_file() for file in files):
+                return await self._finish_steer(
+                    delivery_id,
+                    steer_result(SteerOutcome.REFUSED, reason="attachments_unavailable"),
+                    context=context,
+                )
             metadata = await self._steer_input_metadata(deliveries)
             request = SteerRequest(
                 target_session_id=str(deliveries[0]["session_id"]),
@@ -2736,6 +2752,7 @@ class SessionTurnManager:
                 text=_segment_dispatch_text(deliveries),
                 attempt_id=attempt_id,
                 input_metadata=metadata,
+                files=files,
             )
         except asyncio.CancelledError:
             await self._finish_steer(
@@ -3038,23 +3055,7 @@ class SessionTurnManager:
                 and identity is not None
                 and identity[0] == observed_id
             )
-            if current is not None and self._delivery_has_attachment_references(delivery):
-                claimed = delivery_store.cas_delivery(
-                    conn,
-                    str(delivery["id"]),
-                    expected_version=int(delivery["version"]),
-                    expected_states=("reserved",),
-                    values={"priority": "p3", "state": "queued"},
-                    history_event={
-                        "kind": "steer",
-                        "turn_id": str(current["id"]),
-                        "outcome": "attachments_require_new_turn",
-                    },
-                )
-                if claimed is None:
-                    raise RuntimeError("attachment P1 fallback claim lost")
-                delivery = claimed
-            elif same_active:
+            if same_active:
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
                 turn_id = observed_id
@@ -3248,17 +3249,6 @@ class SessionTurnManager:
                         )
                 else:
                     claimed_rows = claimed["deliveries"]
-            elif any(
-                self._delivery_has_attachment_references(row)
-                for row in delivery_rows
-            ):
-                return DeliveryResult(
-                    delivery_id,
-                    None,
-                    "queued",
-                    str(current_turn["id"]),
-                    reason="attachments_wait_for_new_turn",
-                )
             elif (
                 observed_turn_id
                 and str(current_turn["id"]) == observed_turn_id
@@ -3485,9 +3475,8 @@ class SessionTurnManager:
             )
         if should_drain:
             await self.drain_delivery_queue(session_id)
-            return self._committed_delivery_result(
-                delivery_id,
-            )
+            committed = self._committed_delivery_result(delivery_id)
+            return replace(committed, reason=body["reason"]) if committed.state == "queued" else committed
         return DeliveryResult(
             delivery_id,
             None,
@@ -8406,6 +8395,7 @@ class SessionTurnManager:
             "session_id": session_id,
             "status": result.state,
             "delivery_id": result.delivery_id,
+            **({"reason": result.reason} if result.reason else {}),
         }
 
     # --- shared turn chokepoints (status + Show checkpoint projection) ------------

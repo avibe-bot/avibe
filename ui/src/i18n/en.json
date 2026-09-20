@@ -4295,6 +4295,9 @@
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
       "sendNow": "Send now",
       "sendingNow": "Sending…",
+      "sendDeferred": "Couldn't send into the current turn. Your message is still queued.",
+      "attachmentsUnavailable": "An attachment is no longer available. Your message is still queued; upload the attachment again to resend it.",
+      "sendReconciling": "Delivery is being confirmed. Your message is retained; don't resend it.",
       "recall": "Recall to input",
       "remove": "Remove from queue",
       "attachments": {

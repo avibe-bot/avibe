@@ -31,6 +31,7 @@ from modules.agents.opencode.agent import (
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
+from modules.im.base import FileAttachment
 
 from tests.test_memory_delegated_reads import (
     _create_definition,
@@ -281,6 +282,83 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["codex", "claude", "opencode"])
+@pytest.mark.parametrize("text", ["", STEER_TEXT])
+async def test_native_steer_uses_normal_attachment_input_without_replacing_primary(backend, text, tmp_path):
+    """QUEUE-IMAGE-002: attachment delivery shares each adapter's start format."""
+    image = tmp_path / "队列图片.png"
+    image.write_bytes(b"test image")
+    document = tmp_path / "说明.txt"
+    document.write_text("附件说明", encoding="utf-8")
+    files = (
+        FileAttachment(name=image.name, local_path=str(image), mimetype="image/png"),
+        FileAttachment(name=document.name, local_path=str(document), mimetype="text/plain"),
+    )
+    primary = _primary_request(backend=backend)
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    transport = _CodexTransport()
+    client = _ClaudeClient()
+    server = _OpenCodeServer()
+    if backend == "codex":
+        agent = object.__new__(CodexAgent)
+        agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+        agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
+        agent._transports = {primary.working_path: transport}
+    elif backend == "claude":
+        agent = object.__new__(ClaudeAgent)
+        agent.claude_sessions = {"runtime-key": client}
+        agent.receiver_tasks = {"runtime-key": receiver_task}
+        agent.session_handler = _ClaudeSessionHandler("runtime-key")
+        agent._pending_requests = {"runtime-key": [primary]}
+    else:
+        agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, backend, "avibe-session")
+        assert identity is not None
+        request = SteerRequest(
+            target_session_id="avibe-session",
+            expected_logical_turn_id=identity[0],
+            expected_native_turn_id=identity[1],
+            text=text,
+            files=files,
+        )
+        receipt = await steer_active_turn(controller, backend, request)
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        if backend == "codex":
+            assert transport.calls == [("turn/steer", {
+                "threadId": "codex-thread",
+                "expectedTurnId": identity[1],
+                "input": [
+                    {"type": "text", "text": f"{text}\n\n[User Attachments]\n- File: {document} (text/plain)"},
+                    {"type": "localImage", "path": str(image)},
+                ],
+            })]
+        else:
+            prompt = (
+                f"{text}\n[User Attachments]\n"
+                f"- Image: {image} (image/png)\n- File: {document} (text/plain)"
+            )
+            if not text:
+                prompt = prompt.lstrip()
+            if backend == "claude":
+                assert client.queries[-1] == (prompt, "runtime-key")
+                assert agent._pending_requests["runtime-key"] == [primary]
+                assert agent.receiver_tasks["runtime-key"] is receiver_task
+                client._transport.end_input.assert_not_awaited()
+            else:
+                assert server.prompt_calls[0]["text"] == prompt
+                assert agent._steering_states[primary.base_session_id].awaiting_user_text == prompt
+                assert server.abort_calls == []
+        assert request.text == text
+        assert primary.message == "primary" and primary.files is None
+        assert not gate_task.done() and not receiver_task.done()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
 
 
 @pytest.mark.anyio
