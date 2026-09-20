@@ -143,23 +143,33 @@ export const SettingsOverlayRouteSurface = ({
                 : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
+                // Inline has no outside in the sense this handler assumes. It is
+                // a pane beside a live shell, not a popup over an inert one, and
+                // everything still reachable belongs to that shell: the sidebar
+                // column left of this surface, plus the launcher, Dock, menus and
+                // floating details it portals to `document.body` above this
+                // layer. Each of those already owns what it does. The resize edge
+                // moves this surface's own left edge, so grabbing it must not
+                // close what the drag is laying out; a sidebar link navigates,
+                // and that navigation IS the way out — were dismissal to fire
+                // too, `closeSettingsOverlay`'s asynchronous history traversal
+                // would race the link's synchronous push and could land on the
+                // retained origin instead of the route that was clicked.
+                //
+                // Naming those surfaces is what a portal defeats: they are not
+                // DOM descendants of the column they belong to, so any ancestry
+                // test can only cover the ones someone remembered. Inline is left
+                // by Escape, by the Settings toggle, or by navigating — never by
+                // clicking its neighbour — so it simply does not dismiss.
+                if (!standaloneMenu) {
+                  event.preventDefault();
+                  return;
+                }
+                // Standalone does own the whole viewport, and keeps the dismissal
+                // that shipped with it. Only the toggle is exempt there, because
+                // it closes this surface itself and must not do it twice.
                 const target = event.target;
-                if (
-                  target instanceof Element
-                  // The toggle closes the overlay itself, wherever it is drawn.
-                  //
-                  // The app sidebar is not "outside" at all once inline leaves
-                  // it live: it is the surface this one sits beside, and its
-                  // affordances already own what they do. The resize edge moves
-                  // this surface's own left edge, so grabbing it must not close
-                  // what the drag is laying out. A sidebar link navigates, and
-                  // that navigation is what takes the user out of Settings — if
-                  // dismissal also fired, `closeSettingsOverlay`'s asynchronous
-                  // history traversal would race the link's synchronous push and
-                  // could land on the retained origin instead of the route that
-                  // was clicked. One navigation, chosen by the sidebar.
-                  && target.closest('[data-settings-toggle="true"], [data-app-sidebar="true"]')
-                ) {
+                if (target instanceof Element && target.closest('[data-settings-toggle="true"]')) {
                   event.preventDefault();
                 }
               }}
