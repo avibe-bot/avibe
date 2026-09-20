@@ -28,7 +28,7 @@ import { NARROW, open, serveProduct } from './support';
  * double-mount; `playwright.workbench-general-build.config.ts` explains why.
  */
 
-const COMPOSER = 'Describe a task or ask a question...';
+const COMPOSER = 'Tell the agent what you want…';
 const DRAFT = '把「中文项目」的日志整理成周报，并附上待办清单';
 
 // Two workspaces, because one cannot tell a preserved selection from the
@@ -72,6 +72,11 @@ const BROWSE: Record<string, { path: string; parent: string | null; dirs: { name
       { name: RECENT_WORKSPACE.display_name, path: RECENT_WORKSPACE.folder_path },
     ],
   },
+  // The browser opens on the current target's folder, so the walk starts at
+  // the recent workspace and goes up through the breadcrumb — the same route a
+  // user takes. Without this entry the very first listing fails and no folder
+  // is reachable at all.
+  [RECENT_WORKSPACE.folder_path]: { path: RECENT_WORKSPACE.folder_path, parent: WORKSPACES_DIR, dirs: [] },
   [PICKED_WORKSPACE.folder_path]: { path: PICKED_WORKSPACE.folder_path, parent: WORKSPACES_DIR, dirs: [] },
 };
 
@@ -150,9 +155,16 @@ const asEditor = (page: Page) =>
 
 const composer = (page: Page) => page.getByPlaceholder(COMPOSER);
 const agentTrigger = (page: Page) => page.getByRole('button', { name: /codex|claude/ }).first();
-// One accessible name for both chip branches: the workspace path, which is what
-// actually distinguishes the two fixtures.
-const workspaceChip = (page: Page) => page.getByRole('button', { name: /^Workspace: / });
+// The home's own project row, not the sidebar tree. The mint fill is how the
+// shared picker marks the resolved target, so "which workspace is selected" is
+// read off the named chip rather than off a separate label.
+const homeMain = (page: Page) => page.locator('main#app-shell-scroll');
+const projectChip = (page: Page, name: string) => homeMain(page).getByRole('button', { name, exact: true });
+const expectSelectedProject = async (page: Page, name: string) => {
+  await expect(projectChip(page, name)).toHaveClass(/bg-mint-soft/);
+};
+// Opening a folder is the card's own action now, not a chip beside the input.
+const openProjectPill = (page: Page) => homeMain(page).getByRole('button', { name: 'Open project', exact: true });
 const popover = (page: Page) => page.locator('[data-radix-popper-content-wrapper]');
 const settingsSurface = (page: Page) => page.locator('[data-settings-overlay="true"]');
 const inboxTab = (page: Page) => page.locator('nav.fixed.bottom-0 a[href="/inbox"]');
@@ -193,17 +205,23 @@ async function pickClaude(page: Page) {
   await agentTrigger(page).click();
   await popover(page).getByRole('button', { name: 'claude', exact: true }).click();
   await expect(agentTrigger(page)).toHaveText(/claude/);
+  // The picker keeps its panel open after a pick so the model and effort rows
+  // stay reachable. It is anchored above the input column, so leaving it open
+  // would cover the project row; close it the way a user does.
+  await page.keyboard.press('Escape');
+  await expect(popover(page)).toHaveCount(0);
 }
 
 /**
  * Opens the non-default workspace the way someone who can manage projects
- * actually does it: the chip opens the directory browser, the browser walks to
- * a real folder, and the confirm card fires create_project — which is
+ * actually does it: the card's Open project starts the directory browser on the
+ * current target's folder, the browser walks up and into a real one, and the
+ * confirm card fires create_project — which is
  * find-or-create by path, so opening a folder that is already a project selects
  * that project. No product code is aware of this test; only the endpoints are.
  */
 async function openPickedWorkspace(page: Page) {
-  await workspaceChip(page).click();
+  await openProjectPill(page).click();
   const browser = page.getByRole('dialog', { name: 'Select Project Folder' });
   await browser.getByRole('button', { name: '工作区' }).click();
   await browser.getByRole('button', { name: PICKED_WORKSPACE.display_name }).click();
@@ -214,8 +232,7 @@ async function openPickedWorkspace(page: Page) {
   await expect(confirm).toContainText(PICKED_WORKSPACE.folder_path);
   await confirm.getByRole('button', { name: 'Open project' }).click();
 
-  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${PICKED_WORKSPACE.folder_path}`);
-  await expect(workspaceChip(page)).toContainText(PICKED_WORKSPACE.display_name);
+  await expectSelectedProject(page, PICKED_WORKSPACE.display_name);
 }
 
 /**
@@ -228,7 +245,7 @@ async function primeHome(page: Page) {
   await composer(page).fill(DRAFT);
   // The home resolves the most recent project on its own; the open below is
   // what makes a preserved reading distinguishable from a re-derived one.
-  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
+  await expectSelectedProject(page, RECENT_WORKSPACE.display_name);
   await openPickedWorkspace(page);
   await pickClaude(page);
   await markInstance(page);
@@ -253,7 +270,7 @@ async function leaveByInboxTab(page: Page) {
 async function expectHomeIntact(page: Page, creates: unknown[]) {
   await expect(composer(page)).toHaveValue(DRAFT);
   await expect(agentTrigger(page)).toHaveText(/claude/);
-  await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${PICKED_WORKSPACE.folder_path}`);
+  await expectSelectedProject(page, PICKED_WORKSPACE.display_name);
   expect(await instanceSurvived(page)).toBe(true);
   // Coming back must not re-run the open: the same home is still there, so the
   // one create the user made is the only one the server ever sees.
@@ -386,7 +403,7 @@ test.describe('Workbench continuations on a phone', () => {
 
     await expect(composer(page)).toHaveValue('');
     await expect(agentTrigger(page)).toHaveText(/codex/);
-    await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
+    await expectSelectedProject(page, RECENT_WORKSPACE.display_name);
     expect(await instanceSurvived(page)).toBe(false);
     expect(creates).toEqual([{ folder_path: PICKED_WORKSPACE.folder_path }]);
     expect(denied).toEqual([]);
@@ -398,15 +415,15 @@ test.describe('Workbench continuations on a phone', () => {
     await asEditor(page);
     await open(page, '/');
 
-    // The other branch of the same chip: someone who cannot open folders picks
-    // among the projects they already have, with no create call at all.
+    // The other half of the same row: someone who cannot open folders picks
+    // among the projects they already have, with no create call at all — and
+    // gets no folder-opening affordance to reach for.
     await composer(page).fill(DRAFT);
     await pickClaude(page);
-    await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
-    await workspaceChip(page).click();
-    await popover(page).getByRole('button', { name: PICKED_WORKSPACE.display_name }).click();
-    await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${PICKED_WORKSPACE.folder_path}`);
-    await expect(workspaceChip(page)).toContainText(PICKED_WORKSPACE.display_name);
+    await expectSelectedProject(page, RECENT_WORKSPACE.display_name);
+    await expect(openProjectPill(page)).toHaveCount(0);
+    await projectChip(page, PICKED_WORKSPACE.display_name).click();
+    await expectSelectedProject(page, PICKED_WORKSPACE.display_name);
 
     // No continuation to offer: both destinations sit behind `can_manage_instance`,
     // which this role does not have — so neither the links nor the sentence that
@@ -423,7 +440,7 @@ test.describe('Workbench continuations on a phone', () => {
     await page.goBack();
     await expect(page).toHaveURL(/127\.0\.0\.1:5213\/$/);
     await expect(composer(page)).toHaveValue('');
-    await expect(workspaceChip(page)).toHaveAccessibleName(`Workspace: ${RECENT_WORKSPACE.folder_path}`);
+    await expectSelectedProject(page, RECENT_WORKSPACE.display_name);
 
     expect(creates).toEqual([]);
     expect(denied).toEqual([]);
