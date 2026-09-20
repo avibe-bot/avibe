@@ -269,6 +269,10 @@ The pre-existing shell and writer-role suites remain additional coverage.
   `-W` is only expansion text: literal `KEY=value` is data. `jobs -x` and
   command modifiers route argv, never prefix assignments. Includes have no
   source role, even for an assignment-shaped filename or argument.
+  `pcomplete.c` gen_wordlist_matches splits/dequotes words and expands them,
+  not source statements. Expansion-only traversal uses the shared word lexer
+  without source comments or heredoc dispatch: `#` cannot hide a later written
+  substitution, while single quotes and escaped dollars remain protective.
 - Completion F/V/A/o operands are validated as each option is consumed,
   including overwritten occurrences. Unknown values are not proven invalid.
   `complete.def` clears F's WORD flags, then uses `general.c` check_identifier
@@ -279,8 +283,12 @@ The pre-existing shell and writer-role suites remain additional coverage.
   (including Bash 5.3 `fullquote`). Independent fixtures cover every named
   action/option, unknown values, repeated occurrences and query/data boundaries.
 - Named/default Bash coprocs account for both the array and `_PID`. The simple
-  command form has no named-coproc slot. A named fd requires unquoted adjacent
-  braces; closing an existing fd is not an allocation.
+  command form has no named-coproc slot. Following `execute_cmd.c`, a written
+  name is validated after static dequoting; dynamic names are not resolved or
+  replaced with the default name. A named fd requires unquoted logically
+  adjacent braces, including backslash-newline removal as in `parse.y`.
+  Raw spans/byte offsets stay unchanged; real whitespace, quoted braces and
+  closing an existing fd do not allocate a named descriptor.
 - Zsh numeric coercion has a written destination even without `=`; ordinary
   attribute-only export/readonly remains nonwriting. Tied declarations inspect
   only the two written targets, never propagate a tie/nameref to another line.
@@ -295,9 +303,20 @@ The pre-existing shell and writer-role suites remain additional coverage.
   word can supply that one boundary, but it does not enable letter options.
   Tests distinguish Bash invalid options, Zsh command/data text, split source,
   quoted/unknown boundaries, and a second `--` that must remain source.
+  Numeric control commands share this envelope before their maximum-one
+  operand check. Trap's BINF_HANDLES_OPTS registration bypasses the generic
+  envelope, but bin_trap owns the equivalent single `--` removal. All three
+  use one bounded helper with at most two cases; no repeated stripping or
+  environment lookup occurs.
+- Zsh `bin_print` guards format reuse with `!OPT_ISSET(ops,'r')`, documented
+  in `builtins.yo` under printf. Print's projected role state retains `r` and
+  consumes only one format pass when present, including positional/star slots.
+  Unknown formats retain their possible explicit target/numeric roles;
+  ordinary print and printf still reuse the format.
 - The worklist keys dialect, role and written source/argv. It has no recursion
   cutoff. Tests bound visited contexts for 1100 nested evals and 200 duplicate
-  callbacks; both the related writer and echo/data controls run. Option tests
+  callbacks and 200 repeated substitutions after `#`; both the related writer
+  and echo/data controls run. Option tests
   bound call counts, not wall time; role projection does not retain combinations
   of unrelated callback/format/target values.
 - Excluded: modules/custom builtins; alias, nameref and named-function

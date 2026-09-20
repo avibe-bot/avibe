@@ -3,11 +3,13 @@
 import asyncio
 import hashlib
 from pathlib import Path
+import shlex
 import socket
 
 import pytest
 
 from core.handlers.model_hub import migration_shell as shell
+from core.handlers.model_hub.service import ModelHubError
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import _service
 from tests.test_model_hub_persisted_inventory import home  # noqa: F401
 from tests.test_model_hub_shell_writer_roles import (
@@ -443,6 +445,131 @@ CASES = [
             ('eval "-Q$FLAGS" "read OPENAI_API_KEY"', False),
         ))
     ],
+    *[
+        case(
+            f"{command}-expansion", f"boundary-word-{index}",
+            f"{command} -W {shlex.quote(text)}" + (" fixture" if command == "complete" else ""), writer,
+        )
+        for command in ("complete", "compgen")
+        for index, (text, writer) in enumerate((
+            ("# $((OPENAI_API_KEY=1))", True),
+            ("# $(read OPENAI_API_KEY)", True),
+            ("# ${OPENAI_API_KEY:=new}", True),
+            ("# `read OPENAI_API_KEY`", True),
+            ("<<EOF\n# $(read OPENAI_API_KEY)\nEOF", True),
+            ("# $(# source comment\nread OPENAI_API_KEY)", True),
+            ('# "$(read OPENAI_API_KEY)"', True),
+            ("# '$((OPENAI_API_KEY=1))'", False),
+            ("# '$(read OPENAI_API_KEY)'", False),
+            (r"# \$(read OPENAI_API_KEY)", False),
+            (r"# \${OPENAI_API_KEY:=new}", False),
+            ("# OPENAI_API_KEY=1", False),
+            ("# ((OPENAI_API_KEY=1))", False),
+            ("# $(echo OPENAI_API_KEY)", False),
+            ("# $(# read OPENAI_API_KEY\n:)", False),
+            ("<<EOF\n# '$(read OPENAI_API_KEY)'\nEOF", False),
+        ))
+    ],
+    *[
+        case("coproc", f"boundary-name-{index}-{pid}", f"coproc {name} {{ :; }}", True, name=target)
+        for index, name in enumerate((
+            "'WORKER'", '"WORKER"', "WOR'KER'",
+            r"WOR\KER", "WOR\\\nKER",
+        ))
+        for pid, target in ((False, "WORKER"), (True, "WORKER_PID"))
+    ],
+    *[
+        case("coproc", f"boundary-shape-{index}", line, writer, name=name)
+        for index, (line, name, writer) in enumerate((
+            ("coproc 'OPENAI_API_KEY' ( : )", KEY, True),
+            ("coproc 'OPENAI_API_KEY' while :; do :; done", KEY, True),
+            ("coproc echo 'OPENAI_API_KEY'", KEY, False),
+            ("coproc 'OPENAI_API_KEY' echo data", KEY, False),
+            ('coproc "$NAME" { :; }', KEY, False),
+            ('coproc "$NAME" { :; }', "COPROC", False),
+            ("coproc 'not-a-name' { :; }", "COPROC_PID", False),
+            ('coproc "$NAME" { read OPENAI_API_KEY; }', KEY, True),
+            ("coproc 'WORKER' { echo OPENAI_API_KEY; }", KEY, False),
+            ("coproc echo 'OPENAI_API_KEY'", "COPROC", True),
+        ))
+    ],
+    *[
+        case("fd", f"boundary-continuation-{index}-{operator}-{ending!r}", f": {target}{operator}fixture", True)
+        for ending in ("\n", "\r\n")
+        for index, target in enumerate((
+            "{OPENAI_API_KEY}\\" + ending,
+            "{OPENAI_\\" + ending + "API_KEY}",
+            "\\" + ending + "{OPENAI_API_KEY}",
+            "{OPENAI_\\" + ending + "API_KEY}\\" + ending,
+        ))
+        for operator in (">", ">&", "<<<")
+    ],
+    *[
+        case("fd", f"boundary-data-{index}", line, False)
+        for index, line in enumerate((
+            ": {OPENAI_API_KEY}\\\n >fixture",
+            ": {OPENAI_API_KEY} \\\n>fixture",
+            ": {OPENAI_API_KEY}\\\n\t>fixture",
+            ": '{OPENAI_API_KEY}'\\\n>fixture",
+            ': "{OPENAI_\\\nAPI_KEY}">fixture',
+            ": {OPENAI_API_KEY}\\\n>&-",
+            ": {OPENAI_\\\nAPI_KEY}<&'-'",
+            ": {OPENAI_API_KEY}\\\n>&\\\n-",
+            ": {OPENAI_API_KEY}\\\n>",
+        ))
+    ],
+    *[
+        case("zsh-control", f"boundary-{command}-{index}", f"{command} {operands}", writer, path=".zshrc")
+        for command in ("break", "continue", "return", "exit", "bye", "logout")
+        for index, (operands, writer) in enumerate((
+            ('"$BOUNDARY" \'OPENAI_API_KEY=1\'', True),
+            ('"-$BOUNDARY" \'OPENAI_API_KEY=1\'', True),
+            ("-- 'OPENAI_API_KEY=1'", True),
+            ('"$BOUNDARY" \'OPENAI_API_KEY+1\'', False),
+            ('-- "$BOUNDARY" \'OPENAI_API_KEY=1\'', False),
+            ('"$BOUNDARY" -- \'OPENAI_API_KEY=1\'', False),
+            ("-- -- 'OPENAI_API_KEY=1'", False),
+            ('"fixed$BOUNDARY" \'OPENAI_API_KEY=1\'', False),
+            ('"$BOUNDARY" \'OPENAI_API_KEY=1\' extra', False),
+        ))
+    ],
+    *[
+        case("zsh-trap", f"boundary-{index}", line, writer, path=".zshrc")
+        for index, (line, writer) in enumerate((
+            ('trap "$BOUNDARY" \'read OPENAI_API_KEY\' DEBUG', True),
+            ('trap "-$BOUNDARY" \'print -v OPENAI_API_KEY value\' DEBUG', True),
+            ('trap "$BOUNDARY" \'read OPENAI_API_KEY\'', False),
+            ('trap "$BOUNDARY" \'echo OPENAI_API_KEY\' DEBUG', False),
+            ('trap -- "$BOUNDARY" \'read OPENAI_API_KEY\' DEBUG', False),
+            ('trap "$BOUNDARY" -- \'read OPENAI_API_KEY\' DEBUG', False),
+            ("trap -- -- 'read OPENAI_API_KEY' DEBUG", False),
+            ('trap "fixed$BOUNDARY" \'read OPENAI_API_KEY\' DEBUG', False),
+            ('trap "$BOUNDARY" "print -rf %n unrelated OPENAI_API_KEY" DEBUG', False),
+            ('trap "$BOUNDARY" "print -rf %n OPENAI_API_KEY unrelated" DEBUG', True),
+        ))
+    ],
+    *[
+        case("print-format", f"boundary-reuse-{index}", line, writer, path=".zshrc")
+        for index, (line, writer) in enumerate((
+            ("print -rf '%n' unrelated OPENAI_API_KEY", False),
+            ("print -r -f '%d' 1 'OPENAI_API_KEY=2'", False),
+            ("print -r -f '%s%n' value unrelated ignored OPENAI_API_KEY", False),
+            ("print -rf '%n' OPENAI_API_KEY unrelated", True),
+            ("print -rf '%d' 'OPENAI_API_KEY=1' 2", True),
+            ("print -rf '%2$n' unrelated OPENAI_API_KEY unused", True),
+            ("print -rf '%2$n' unrelated other OPENAI_API_KEY", False),
+            ("print -rf '%*d%n' 1 2 unrelated OPENAI_API_KEY", False),
+            ("print -rf '%*d%n' 1 2 OPENAI_API_KEY unrelated", True),
+            ("print -rf '%*d' 'OPENAI_API_KEY=1' 2", True),
+            ("print -f '%n' unrelated OPENAI_API_KEY", True),
+            ("printf '%n' unrelated OPENAI_API_KEY", True),
+            ("print -rvOPENAI_API_KEY -f '%n' unrelated OPENAI_API_KEY", True),
+            ('print -rf "$FORMAT" unrelated OPENAI_API_KEY', True),
+            ('print -r "$FLAGS" -f "%n" unrelated OPENAI_API_KEY', False),
+            # A preceding unknown -f can consume -r as its format operand.
+            ('print "$FLAGS" -r -f "%n" unrelated OPENAI_API_KEY', True),
+        ))
+    ],
 ]
 
 
@@ -477,19 +604,31 @@ def test_core_standalone_writer_scan(home, tmp_path, role, filename, name, line,
     service, store, adapter = _service(tmp_path, migration_home=home)
     rows = service.migration_scan()["items"]
     assert rows and all(row["proposed_action"] == "reauth" for row in rows)
-    assert not adapter.provisioned and not store.config.sources
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply([row["id"] for row in rows]))
+    assert not adapter.provisioned and not adapter.oauth_provisioned and not adapter.transient_refs
+    assert not adapter.observed and not store.config.sources
+    assert path.read_bytes() == line.encode()
 
 
-@pytest.mark.parametrize("line", [
-    "wait -p OPENAI_API_KEY",
-    "compgen -VOPENAI_API_KEY -W fixture",
-    "trap 'read OPENAI_API_KEY' EXIT",
-    "eval " * 32 + "read OPENAI_API_KEY",
+@pytest.mark.parametrize("filename,line", [
+    (".bashrc", "wait -p OPENAI_API_KEY"),
+    (".bashrc", "compgen -VOPENAI_API_KEY -W fixture"),
+    (".bashrc", "trap 'read OPENAI_API_KEY' EXIT"),
+    (".bashrc", "eval " * 32 + "read OPENAI_API_KEY"),
+    (".bashrc", "compgen -W '# $(read OPENAI_API_KEY)'"),
+    (".bashrc", "coproc 'OPENAI_API_KEY' { :; }"),
+    (".bashrc", ": {OPENAI_API_KEY}\\\n>fixture"),
+    (".zshrc", 'return "$BOUNDARY" "OPENAI_API_KEY=1"'),
+    (".zshrc", "print -rf '%n' OPENAI_API_KEY unrelated"),
 ])
-def test_core_independent_backend(home, tmp_path, line):
-    path = home / ".bashrc"
+def test_core_independent_backend(home, tmp_path, filename, line):
+    path = home / filename
     kept = "export OPENAI_API_KEY=fixture-codex\n" + line + "\n"
-    path.write_text(kept + "export ANTHROPIC_API_KEY=fixture-claude\n")
+    independent = "export ANTHROPIC_API_KEY=fixture-claude\n"
+    # coproc's existing conservative post-compound top-level boundary is not
+    # part of destination dequoting. Use a proven top-level independent row.
+    path.write_text(independent + kept if line.startswith("coproc") else kept + independent)
     service, store, adapter = _service(tmp_path, migration_home=home)
     rows = {row["backend"]: row for row in service.migration_scan()["items"]}
     assert rows["codex"]["notes_key"].endswith(".dynamic_shell")
@@ -532,6 +671,49 @@ def test_duplicate_code_contexts_are_visited_once(monkeypatch, writer):
     body = ("read" if writer else "echo") + " OPENAI_API_KEY"
     text = "; ".join([f"trap '{body}' EXIT"] * 200)
     assert shell._written_names(text, frozenset({KEY})) == ({KEY} if writer else set())
+
+
+@pytest.mark.parametrize("writer", [True, False])
+def test_duplicate_expansions_after_hash_share_code_work(monkeypatch, writer):
+    original = shell._WrittenCode.visit
+    calls = 0
+
+    def counted(self, *args):
+        nonlocal calls
+        calls += 1
+        assert calls <= 3
+        return original(self, *args)
+
+    monkeypatch.setattr(shell._WrittenCode, "visit", counted)
+    command = "read" if writer else "echo"
+    analysis = shell._WrittenCode(frozenset({KEY}))
+    analysis.add("expansion", "# " + f"$({command} {KEY}) " * 200, "bash")
+    assert analysis.run() == ({KEY} if writer else set())
+
+
+def test_optionless_envelope_has_at_most_two_once_only_cases():
+    words = [shell._Token(f"$BOUNDARY{index}", f"$BOUNDARY{index}", literal=False) for index in range(20)]
+    assert list(shell._zsh_optionless_cases(words)) == [words, words[1:]]
+    assert list(shell._zsh_optionless_cases([shell._Token("--", "--"), *words])) == [words]
+
+
+def test_fd_logical_continuation_keeps_original_cleanup_offsets(home):
+    path = home / ".bashrc"
+    prefix = "# 保留偏好\r\n: {WORKER}\\\r\n>fixture\r\n".encode()
+    assignment = b"export OPENAI_API_KEY='fixture-literal'\r\n"
+    suffix = b"# unchanged tail\r\n"
+    before = prefix + assignment + suffix
+    path.write_bytes(before)
+    profile = next(p for p in shell.read_shell_profiles(home, frozenset({KEY})) if p.path == path)
+    assert profile.values == {KEY: "fixture-literal"} and not profile.issues
+    [stored] = profile.assignments
+    assert (stored.start, stored.end) == (len(prefix), len(prefix + assignment))
+    edit = shell.cleanup_shell_profile(profile, profile.values)
+    edit = type(edit).from_payload(edit.to_payload())
+    edit.apply()
+    assert path.read_bytes() == prefix + suffix
+    edit.apply(reverse=True)
+    assert path.read_bytes() == before
 
 
 def test_code_identity_keeps_role_and_local_dialect():
