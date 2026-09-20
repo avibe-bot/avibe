@@ -10,6 +10,8 @@ import { useApi } from '@/context/ApiContext';
 import type { BackendAuthTestResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
+import { HubOwnedAuthNotice } from './shared/HubOwnedAuthNotice';
 
 type Backend = 'claude' | 'codex';
 
@@ -100,7 +102,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
           t('settings.backends.testConnectionSuccessToast', { ms: result.duration_ms ?? '?' }),
           'success',
         );
-      } else {
+      } else if (!isNativeAuthHubOwned(result)) {
         showToast(failureSentence(result), 'error');
       }
     } catch (err) {
@@ -114,6 +116,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
 
   const resultLine = (() => {
     if (!lastResult) return null;
+    if (isNativeAuthHubOwned(lastResult)) return null;
     if (lastResult.ok) {
       return t('settings.backends.testConnectionLastOk', {
         ms: lastResult.duration_ms ?? '?',
@@ -187,6 +190,8 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
         </div>
       </div>
 
+      {lastResult && isNativeAuthHubOwned(lastResult) && <HubOwnedAuthNotice />}
+
       {/* Show what the model actually said on success — without this the
           user only sees "ok · 312 ms" and has to trust us that the
           round-trip went through. The excerpt is server-side trimmed to
@@ -207,7 +212,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
           user at a non-clickable toast. Previously the i18n copy said
           "click the toast to see raw output" but no such affordance
           existed. */}
-      {lastResult && !lastResult.ok && lastResult.detail && (
+      {lastResult && !lastResult.ok && !isNativeAuthHubOwned(lastResult) && lastResult.detail && (
         <details className="rounded-md border border-destructive/30 bg-destructive/[0.04] px-3 py-2 [&[open]>summary]:mb-2">
           <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-wide text-destructive-ink">
             {t('settings.backends.testConnectionRawOutputLabel')}

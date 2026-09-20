@@ -9,6 +9,7 @@ import json
 import re
 import textwrap
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -415,6 +416,7 @@ def _service(tmp_path, adapter=None):
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=lambda: datetime(2026, 7, 23, 3, 0, tzinfo=timezone.utc),
         requested_model_override=lambda backend: store.requested_model(backend),
+        migration_home=tmp_path / "native-home",
     )
     return service, store, adapter
 
@@ -968,7 +970,7 @@ def test_runtime_status_observes_engine_without_starting_it(tmp_path):
 
     assert adapter.start_calls == 0
     assert adapter.status_calls == 1
-    assert runtime["enabled"] is False
+    assert runtime["enabled"] is True
     assert runtime["status"]["health"] == "ok"
     assert runtime["status"]["verified"] is True
 
@@ -1029,21 +1031,22 @@ def test_runtime_stop_returns_explicit_not_started_state(tmp_path):
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 
-def test_runtime_recovery_starts_only_for_persisted_user_intent(tmp_path):
+def test_runtime_recovery_respects_the_persisted_default_on_intent(tmp_path):
     service, store, adapter = _service(tmp_path)
 
     asyncio.run(service.recover_runtime_intent())
 
-    assert adapter.start_calls == 0
-    assert adapter.ensure_calls == []
+    assert adapter.start_calls == 1
+    assert adapter.ensure_calls == [False]
 
-    store.config.enabled = True
+    store.config.enabled = False
     restarted = ModelHubService(
         store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "restarted-events.json"),
         oauth_flows=OAuthFlowRegistry(tmp_path / "restarted-oauth-flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "restarted-revocations.json"),
+        migration_home=tmp_path / "restarted-native-home",
     )
 
     asyncio.run(restarted.recover_runtime_intent())
@@ -1487,7 +1490,7 @@ def test_runtime_dependency_ensure_is_allowlisted_without_starting_engine(tmp_pa
     )
 
     assert runtime["changed"] is True
-    assert runtime["enabled"] is False
+    assert runtime["enabled"] is True
     assert runtime["status"]["installed_version"] == "v7.2.149"
     assert adapter.ensure_calls == [True]
     assert adapter.ensure_offline_calls == [True]
@@ -4173,33 +4176,36 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
     }
 
 
-def test_direct_to_hub_atomically_adopts_recognized_native_login(tmp_path):
+@asynccontextmanager
+async def _idle_mode_guard(backends):
+    async def verify_idle():
+        pass
+    yield verify_idle
+
+
+def test_direct_to_hub_changes_only_mode(tmp_path):
     service, store, _adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"
-    service.migration_claude_oauth_probe = lambda: True
+    service.migration_guard = _idle_mode_guard
     store.config.agents["claude"].mode = "direct"
 
-    adopted = asyncio.run(service.set_agent_mode("claude", "hub"))
+    switched = asyncio.run(service.set_agent_mode("claude", "hub"))
 
-    assert adopted["mode"] == "hub"
-    assert len(store.config.sources) == 1
-    native = store.config.sources[0]
-    assert native.supply_channel == "native_cli"
-    assert native.vendor == "anthropic"
-    assert store.config.agents["claude"].sources.order[0] == native.id
+    assert switched["mode"] == "hub"
+    assert store.config.sources == []
+    assert store.config.agents["claude"].sources.order == []
     assert store.config.agents["claude"].routes == {}
-    assert service.agent_chain("claude", "claude-opus-4-6")["chain"][0]["source_id"] == native.id
 
     repeated = asyncio.run(service.set_agent_mode("claude", "hub"))
 
     assert repeated["mode"] == "hub"
-    assert [source.id for source in store.config.sources] == [native.id]
+    assert store.config.sources == []
 
 
 def test_direct_to_hub_without_recognized_login_changes_only_mode(tmp_path):
     service, store, adapter = _service(tmp_path)
     service.migration_home = tmp_path / "native-home"
-    service.migration_claude_oauth_probe = lambda: False
+    service.migration_guard = _idle_mode_guard
     store.config.agents["claude"].mode = "direct"
 
     switched = asyncio.run(service.set_agent_mode("claude", "hub"))
@@ -4387,12 +4393,13 @@ def test_direct_to_hub_adoption_does_not_leak_partial_state_on_save_failure(tmp_
         oauth_flows=OAuthFlowRegistry(tmp_path / "oauth_flows.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         migration_home=tmp_path / "native-home",
-        migration_claude_oauth_probe=lambda: True,
+        migration_guard=_idle_mode_guard,
     )
 
-    with pytest.raises(OSError, match="persist failed"):
+    with pytest.raises(ModelHubError) as failure:
         asyncio.run(service.set_agent_mode("claude", "hub"))
 
+    assert failure.value.code == "mode_switch_blocked"
     assert store.config.agents["claude"].mode == "direct"
     assert store.config.sources == []
 

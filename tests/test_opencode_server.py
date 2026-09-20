@@ -157,7 +157,11 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         config_home = self.enterContext(tempfile.TemporaryDirectory(prefix="opencode-server-test-"))
         self.enterContext(patch.dict(os.environ, {"AVIBE_HOME": config_home}))
-        default_config().save()
+        config = default_config()
+        # These server lifecycle cases exercise native Direct launches.
+        # Hub-specific cases explicitly supply the Controller-owned overlay.
+        config.model_hub.agents["opencode"].mode = "direct"
+        config.save()
 
     def test_managed_runtime_config_accepts_jsonc_and_disables_native_skill(self):
         content = SERVER_MODULE._managed_runtime_config_content(

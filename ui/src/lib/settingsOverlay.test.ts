@@ -127,6 +127,23 @@ describe('Settings overlay navigation ownership', () => {
     expect(navigate).toHaveBeenCalledWith(-2);
   });
 
+  it('retains the setup wizard behind mobile Model Hub and returns to it', () => {
+    const setup = location('/setup');
+    const state = settingsOverlayNavigationState({
+      destinationPathname: '/settings/models',
+      desktop: false,
+      historyState: { idx: 4 },
+      source: setup,
+      targetState: undefined,
+    });
+
+    expect(settingsOverlayOriginFromState(state)).toEqual({ historyIndex: 4, location: setup });
+
+    const navigate = vi.fn();
+    closeSettingsOverlay(navigate, settingsOverlayOriginFromState(state)!, { idx: 5 });
+    expect(navigate).toHaveBeenCalledWith(-1);
+  });
+
   it('keeps the origin across a retired-alias redirect', () => {
     const opened = settingsOverlayNavigationState({
       destinationPathname: '/settings/appearance',

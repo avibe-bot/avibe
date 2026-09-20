@@ -15,7 +15,40 @@ from core.agent_auth_service import (
     WebAuthFlow,
 )
 from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter
+from config.v2_config import V2Config
 from modules.im import MessageContext
+
+
+class _SyntheticProcess:
+    """A hermetic subprocess double with the lifecycle used by cleanup."""
+
+    def __init__(self, *, returncode: int | None = 0) -> None:
+        self.stdout = None
+        self.returncode = returncode
+
+    def terminate(self) -> None:
+        self.returncode = 0
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        return self.returncode
+
+
+def _synthetic_claude_client() -> SimpleNamespace:
+    return SimpleNamespace(disconnect=AsyncMock())
+
+
+@pytest.fixture(autouse=True)
+def _direct_native_auth_config(monkeypatch, tmp_path) -> None:
+    """Give native-login tests explicit Direct custody in isolated state."""
+    home = tmp_path / "avibe-home"
+    monkeypatch.setenv("AVIBE_HOME", str(home))
+    config = V2Config.default()
+    for agent in config.model_hub.agents.values():
+        agent.mode = "direct"
+    config.save(config_path=home / "config" / "config.json")
 
 
 class _IMClient:
@@ -53,12 +86,12 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
     async def start_codex(**_kwargs):
         nonlocal startup_finished
         startup_finished = datetime.now(timezone.utc)
-        return SimpleNamespace(stdout=None, returncode=None)
+        return _SyntheticProcess()
 
     async def start_claude(_context, **_kwargs):
         nonlocal startup_finished
         startup_finished = datetime.now(timezone.utc)
-        return object(), "https://claude.ai/oauth/authorize", None
+        return _synthetic_claude_client(), "https://claude.ai/oauth/authorize", None
 
     async def start_provider_oauth(*_args, **_kwargs):
         nonlocal startup_finished
@@ -100,7 +133,7 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
     """Drive the backend catalog through the shared IM flow contract."""
     service = AgentAuthService(_Controller())
     startup_finished: datetime | None = None
-    process = SimpleNamespace(stdout=None, returncode=None)
+    process = _SyntheticProcess()
 
     async def start_codex(**_kwargs):
         nonlocal startup_finished
@@ -110,7 +143,7 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
     async def start_claude(_context, **_kwargs):
         nonlocal startup_finished
         startup_finished = datetime.now(timezone.utc)
-        return object(), "https://claude.ai/oauth/authorize", None
+        return _synthetic_claude_client(), "https://claude.ai/oauth/authorize", None
 
     async def start_opencode(_context, **_kwargs):
         nonlocal startup_finished
@@ -176,7 +209,8 @@ async def test_single_service_fixture_routes_all_callers_to_the_same_registry() 
     """
     controller = _Controller()
     service = AgentAuthService(controller)
-    process = SimpleNamespace(stdout=object(), returncode=0)
+    process = _SyntheticProcess(returncode=0)
+    process.stdout = object()
     service._start_codex_process = AsyncMock(return_value=process)
     service._read_codex_output = AsyncMock()
     service._wait_for_completion = AsyncMock()
@@ -211,11 +245,15 @@ async def test_single_service_fixture_routes_all_callers_to_the_same_registry() 
 async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() -> None:
     """Model Hub delegates one Web flow lifecycle within a service instance."""
     service = AgentAuthService(_Controller())
-    client = object()
+    client = _synthetic_claude_client()
     service._start_claude_control_flow = AsyncMock(
         return_value=(client, "https://claude.ai/oauth/authorize", None)
     )
-    service._wait_for_claude_completion_web = AsyncMock()
+
+    async def wait_for_cancel(_flow) -> None:
+        await asyncio.Future()
+
+    service._wait_for_claude_completion_web = wait_for_cancel
     service._send_claude_callback = AsyncMock()
     service._terminate_web_flow = AsyncMock()
     adapter = AgentAuthNativeOAuthAdapter(
@@ -235,6 +273,7 @@ async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() 
     assert service._flows_by_id[state.flow_id] is flow
 
     await adapter.cancel_oauth(state.flow_id)
+    await asyncio.sleep(0)
     service._terminate_web_flow.assert_awaited_once_with(
         flow, final_state="cancelled"
     )
@@ -244,17 +283,19 @@ async def test_model_hub_drives_the_shared_web_flow_through_submit_and_cancel() 
 @pytest.mark.asyncio
 async def test_cancel_keeps_native_claim_until_termination_settles() -> None:
     service = AgentAuthService(_Controller())
-    process = SimpleNamespace(stdout=None, returncode=None)
+    process = _SyntheticProcess(returncode=None)
     service._start_codex_process = AsyncMock(return_value=process)
     service._read_codex_output_web = AsyncMock()
     service._wait_for_codex_completion_web = AsyncMock()
     flow = await service.start_web_setup("codex", force_reset=False)
     termination_started = asyncio.Event()
     finish_termination = asyncio.Event()
+    real_terminate = service._terminate_web_flow
 
-    async def terminate(_flow, **_kwargs) -> None:
+    async def terminate(flow, **kwargs) -> None:
         termination_started.set()
         await finish_termination.wait()
+        await real_terminate(flow, **kwargs)
 
     service._terminate_web_flow = terminate
     cancel_task = asyncio.create_task(service.cancel_web_flow(flow.flow_id))
@@ -272,18 +313,26 @@ async def test_cancel_keeps_native_claim_until_termination_settles() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_releases_native_claim_when_termination_raises() -> None:
+async def test_cancel_retains_native_claim_when_termination_raises() -> None:
     service = AgentAuthService(_Controller())
-    process = SimpleNamespace(stdout=None, returncode=None)
+    process = _SyntheticProcess(returncode=None)
     service._start_codex_process = AsyncMock(return_value=process)
     service._read_codex_output_web = AsyncMock()
     service._wait_for_codex_completion_web = AsyncMock()
     flow = await service.start_web_setup("codex", force_reset=False)
+    # Keep the lease owned by this flow while the injected termination error
+    # is reported. A real waiter would otherwise race the failure with its
+    # independent cleanup path.
+    flow.waiter_task = None
     service._terminate_web_flow = AsyncMock(side_effect=RuntimeError("terminate failed"))
 
     with pytest.raises(RuntimeError, match="terminate failed"):
         await service.cancel_web_flow(flow.flow_id)
 
-    assert flow.flow_id not in service._flows_by_id
-    replacement = await service.start_web_setup("codex", force_reset=False)
-    assert replacement.flow_id in service._flows_by_id
+    assert flow.flow_id in service._flows_by_id
+    with pytest.raises(BackendLoginInProgressError):
+        await service.start_web_setup("codex", force_reset=False)
+    if flow.native_lease is not None:
+        flow.native_lease.release()
+        flow.native_lease = None
+    service._flow_registry.drop(flow)

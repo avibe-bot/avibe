@@ -16,7 +16,7 @@ import { ApiCallError, modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
@@ -60,6 +60,26 @@ const nativeSubscription: Source = {
   kind: 'subscription',
   supply_channel: 'native_cli',
   display_name: 'Claude native login',
+};
+
+const migrationCandidate: MigrationItem = {
+  id: 'mig_claude_oauth',
+  backend: 'claude',
+  kind: 'oauth_native',
+  masked_detail: 'Claude native login',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+  vendor: 'anthropic',
+  display_name: 'Anthropic',
+  masked_credential: null,
+};
+
+const blockedMigrationCandidate: MigrationItem = {
+  ...migrationCandidate,
+  id: 'mig_claude_keychain',
+  masked_detail: 'Claude native login',
+  proposed_action: 'keep_native',
 };
 
 /** The row every re-auth journey starts from: a subscription that stopped. */
@@ -126,14 +146,18 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-const renderPage = (sources: Source[], agents?: AgentSupply[]) => {
+const renderPage = (
+  sources: Source[],
+  agents?: AgentSupply[],
+  runtimeValue: RuntimeDependency = runtime,
+) => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
   vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(agents ?? [
     directAgent('claude'),
     directAgent('codex'),
     directAgent('opencode'),
   ]);
-  vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+  vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtimeValue);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
   vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   return render(
@@ -166,6 +190,86 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  it('opens the consent dialog before Direct-to-Hub takeover and leaves Direct unchanged on cancel', async () => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [migrationCandidate] });
+    const apply = vi.spyOn(modelsApi, 'applyMigration');
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
+    renderPage([], [directAgent('claude')]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
+    expect(within(dialog).getByText(/After migration|迁移后/)).toBeTruthy();
+
+    await userEvent.click(within(dialog).getByRole('button', { name: /Later|稍后/i }));
+
+    expect(apply).not.toHaveBeenCalled();
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it('uses the ordinary mode switch when Direct has no migration candidates', async () => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
+    const apply = vi.spyOn(modelsApi, 'applyMigration');
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode')
+      .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
+    renderPage([], [directAgent('claude')]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('keeps Direct mode and blocks migration when only unsupported native auth exists', async () => {
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [blockedMigrationCandidate] });
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode')
+      .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
+    renderPage([], [directAgent('claude')]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Use the existing Add flow|现有的添加流程/)).toBeTruthy();
+    expect(
+      (within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it('opens the same migration dialog from an existing Hub user entry', async () => {
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [migrationCandidate] });
+    const apply = vi.spyOn(modelsApi, 'applyMigration');
+    renderPage([retainedSource], [{
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+    }]);
+
+    await userEvent.click(await screen.findByRole('button', { name: /Migrate configuration|迁移配置/i }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole('button', { name: /Later|稍后/i }));
+
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('installs and starts the runtime inline without an install confirmation dialog', async () => {
+    const notInstalled = {
+      ...runtime,
+      status: { ...runtime.status, installed_version: null, verified: false, health: 'not_installed' as const },
+    };
+    const install = vi.spyOn(modelsApi, 'installRuntime').mockResolvedValue({
+      ...notInstalled,
+      status: { ...notInstalled.status, installed_version: '1', verified: true, health: 'not_started' as const },
+    });
+    const start = vi.spyOn(modelsApi, 'startRuntime').mockResolvedValue(runtime);
+    renderPage([], [directAgent('claude')], notInstalled);
+
+    await userEvent.click(await screen.findByRole('switch', { name: /Turn model gateway on|开启模型网关/i }));
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+    await waitFor(() => expect(start).toHaveBeenCalledOnce());
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it.each(['automatic', 'passthrough', 'manual'] as const)('renders %s relations from the actual chain collection for all backends', async (origin) => {
     const agents = (['claude', 'codex', 'opencode'] as const).map((backend): AgentSupply => ({
       ...takeoverAgent, backend, sources: { order: [retainedSource.id], eligibility: [] },

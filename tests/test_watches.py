@@ -56,6 +56,21 @@ TEST_MARKER = "test-watch-worker"
 TEST_FINGERPRINT = fingerprint_process_marker(TEST_MARKER)
 
 
+class _ControlledWatchClock:
+    """Clock double for the wall-time cooldown branch in the real wait loop."""
+
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def now(self, tz=None) -> datetime:
+        if tz is None:
+            return self.current.replace(tzinfo=None)
+        return self.current.astimezone(tz)
+
+    def fromisoformat(self, value: str) -> datetime:
+        return datetime.fromisoformat(value)
+
+
 def _quiet_waiter_command(summary: str = "") -> list[str]:
     """A waiter that ends a cycle the way the no-event protocol asks it to.
 
@@ -1694,25 +1709,40 @@ def test_forever_watch_waits_for_previous_follow_up_before_rearming(
 
     monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
     monkeypatch.setattr(watches_module, "WATCH_MIN_REARM_SECONDS", 0.1)
-    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0.005)
+    # The production fence uses wall time for the cooldown and polls for both
+    # unsettled Runs and the cooldown boundary. Drive that clock explicitly and
+    # use zero-delay yields so the test never infers elapsed time from a loaded
+    # runner's sleep duration.
+    clock = _ControlledWatchClock(datetime.now(timezone.utc))
+    monkeypatch.setattr(watches_module, "datetime", clock)
+    monkeypatch.setattr(watches_module, "WATCH_FOLLOW_UP_POLL_SECONDS", 0)
     service._running = True
     service._requires_service_lease = False
 
     async def _run() -> None:
         task = asyncio.create_task(service._run_watch(watch.id))
-        for _ in range(100):
-            if request_store.list_pending():
-                break
-            await asyncio.sleep(0.01)
+        async def wait_for_pending() -> None:
+            while not request_store.list_pending():
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_for_pending(), timeout=1)
         assert calls == 1
-        await asyncio.sleep(0.05)
-        assert calls == 1, "an unfinished event Run must hold the waiter closed"
+        for _ in range(8):
+            await asyncio.sleep(0)
+            assert calls == 1, "an unfinished event Run must hold the waiter closed"
         request = request_store.list_pending()[0]
         claimed = request_store.claim(request.id)
         assert claimed is not None
         request_store.complete(claimed, ok=True)
-        await asyncio.sleep(0.03)
-        assert calls == 1, "the post-Run re-arm delay must hold the waiter closed"
+        settled = request_store.get_run(request.id)
+        assert settled is not None
+        assert settled["status"] == "succeeded"
+        completed_at = datetime.fromisoformat(settled["completed_at"])
+        clock.current = completed_at + timedelta(seconds=0.099)
+        for _ in range(8):
+            await asyncio.sleep(0)
+            assert calls == 1, "the cooldown must hold the waiter closed"
+        clock.current = completed_at + timedelta(seconds=0.101)
         await asyncio.wait_for(task, timeout=2)
 
     asyncio.run(_run())

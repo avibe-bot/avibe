@@ -64,7 +64,8 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
 
 1. Plaintext upstream credentials never appear in config, API payloads, events, logs,
    or Agent runtime configuration. Hub-held material is referenced by an opaque engine
-   credential id; native credentials remain in the sanctioned CLI store.
+   credential id; a retained `native_cli` Source remains in the sanctioned CLI store,
+   while an approved native migration explicitly transfers selected custody into Hub.
 2. Every persisted Source has a protocol with a named owner before commit: a shipped
    api-key vendor catalog pin, a user declaration on `custom`, or a matching
    protocol-shaped upstream response. `POST /api/models/sources/observe` is the
@@ -109,6 +110,53 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
    Native is one configured hop inside Gateway mode.
+
+### Takeover producer/consumer closure
+
+Source identity reuse retains the current credential proof and Source/ref/state.
+If the consenting backend references that Source in neither its default order nor
+an explicit Route, append it only to that backend's defaults before withdrawal.
+Do not rewrite existing Routes or other backends' orders. This also applies when
+an existing native subscription Source changes custody in place.
+
+OpenCode candidates sharing vendor, protocol, normalized target and credential
+are one logical import even when several native config layers reference them.
+Union their manual model IDs (later layer labels win for a repeated ID), and bind
+the consent identity to every contributing candidate. Distinct credentials or
+targets and all blockers remain separate. Physical cleanup still inventories and
+journals every supported config/auth path; logical deduplication cannot remove
+file compare guards or unrelated settings.
+
+Persisted native authentication and live launch configuration must converge
+before custody can complete or native admission can reopen. The internal,
+synchronous seam is:
+
+- `ModelHubService._reconcile_native_auth(backends: tuple[str, ...]) -> None`
+  reads the store's current `native_auth_snapshot`, not a guessed Hub-mode
+  projection, and supplies it to optional `migration_reconcile_auth`.
+- The Controller binds that callback to
+  `BackendRestartCoordinator.reconcile_migration_auth(snapshot) -> None`.
+  It is valid only inside that coordinator's existing migration guard with
+  request locks, native lease and both admission gates still owned.
+- The coordinator calls
+  `AgentAuthService.reconcile_native_auth_snapshot(snapshot) -> None`.
+  Only the existing native-auth fields are mirrored to live compatibility/raw
+  config consumers: Controller, handlers, agents, Claude control client and
+  Codex config aliases. Update existing objects/fields so shared aliases stay
+  coherent; do not register agents, call native auth or HTTP, launch processes,
+  release turns, restart services, or change unrelated runtime configuration.
+- After a successful V2 takeover save, mirror before the first possible
+  exposure. On exposed recovery mirror even when the Hub payload is unchanged.
+  Success and terminal completion mirror before writing a completed receipt;
+  reversal mirrors the restored persistent direction before forgetting its
+  journal. A mirror failure retains a recoverable pending transaction and closed
+  admission. Exposure remains forward-only; a pre-exposure failure may use the
+  existing reversal path. Empty-only/native-retained state is not blindly cleared.
+
+Standalone fixture services may omit the callback because they have no live
+Controller cache. Production cannot acquire the migration guard without its
+Controller owner. This is a memory-consumer correction inside the existing
+lifecycle, not another journal, marker, lock, phase or public API field.
 
 ## Authority and mirror guard
 
@@ -185,7 +233,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
-| `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
+| `migration-scan.schema.json` | Server-owned custody-takeover scan of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, persisted enablement intent, lifecycle, and health. |
 | `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
 | `api.md` | Routes, envelopes, default Source order and manual Route writes/Restore/preview, guards, OAuth/import results, provenance, usage, and runtime status. |

@@ -9,7 +9,7 @@ import {
   RefreshCw,
   Sliders,
 } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
@@ -30,6 +30,8 @@ import type { BackendId as RuntimeBackendId } from '../settings/shared/useBacken
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
 import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 
 interface AgentDetectionProps {
   data: any;
@@ -78,6 +80,8 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const navigate = useNavigate();
+  const routeSurfaceActive = useRouteSurfaceActive();
   const modelHubEnabled = useModelHubCapability();
   const [agents, setAgents] = useState<Record<string, AgentState>>(normalizeAgents(data));
   const permission = useOpencodePermission({ autoFetchStatus: true });
@@ -95,6 +99,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [entering, setEntering] = useState(false);
   const [entryError, setEntryError] = useState('');
   const connectionTokens = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  const previousRouteSurfaceActive = useRef(routeSurfaceActive);
   const enableQueue = useRef(Promise.resolve());
   const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
@@ -135,6 +140,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
     } };
   }, [refreshConnection, isPage]);
+  useEffect(() => {
+    const returnedToSurface = routeSurfaceActive && !previousRouteSurfaceActive.current;
+    previousRouteSurfaceActive.current = routeSurfaceActive;
+    if (!isPage && returnedToSurface) {
+      for (const name of ASSISTANT_ORDER) void refreshConnection(name);
+    }
+  }, [isPage, refreshConnection, routeSurfaceActive]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
@@ -516,9 +528,25 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           return <AssistantRow key={name} backend={name} status={agent.status || 'unknown'}
             installing={!!installingAgents[name]} detecting={!!detectingAgents[name]} error={error}
             onInstall={() => void installAgent(name)} onDetect={() => void detect(name, agent.cli_path)}
-            onConfigure={() => setProviderModal({ backend: name, method: 'oauth' })}
-            onAddKey={() => setProviderModal({ backend: name, method: 'api_key' })}
-            connection={!connectionErrors[name] && connections[name]?.ready ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key') : undefined}
+            onConfigure={() => {
+              if (connections[name]?.supply_mode === 'hub') {
+                navigate(MODEL_HUB_SETTINGS_PATH);
+                return;
+              }
+              setProviderModal({ backend: name, method: 'oauth' });
+            }}
+            onAddKey={() => {
+              if (connections[name]?.supply_mode === 'hub') {
+                navigate(MODEL_HUB_SETTINGS_PATH);
+                return;
+              }
+              setProviderModal({ backend: name, method: 'api_key' });
+            }}
+            connection={connections[name]?.supply_mode === 'hub'
+              ? 'hub'
+              : !connectionErrors[name] && connections[name]?.ready
+                ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
+                : undefined}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}

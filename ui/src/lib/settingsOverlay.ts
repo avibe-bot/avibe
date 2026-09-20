@@ -97,7 +97,7 @@ export const settingsOverlayStateForOrigin = (
  * route keeps its ordinary unmount-on-navigate lifecycle, and a direct Settings
  * link still invents no origin.
  */
-const retainsOriginOnMobile = (pathname: string): boolean => pathname === '/';
+const retainsOriginOnMobile = (pathname: string): boolean => pathname === '/' || pathname === '/setup';
 
 export const settingsOverlayNavigationState = ({
   destinationPathname,

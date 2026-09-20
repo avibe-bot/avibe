@@ -8,9 +8,9 @@
 // all read `isImportableKey` — a number that came from a different rule than the
 // rows behind it is the bug this exists to prevent.
 //
-// It is NOT the settings migration's rule. The broader surface legitimately
-// applies `keep_native` (that path creates a native_cli-channel source, see
-// `migration.py`) and shows `reauth` rows for context; this entry copies neither.
+// It is intentionally narrower than the server's complete migration matrix:
+// only API-key-like rows can be handled by the setup notice. OAuth takeover and
+// re-authentication stay in the settings migration flow.
 import { modelsApi } from './modelsApi';
 import type { MigrationItem, MigrationKind } from './types';
 

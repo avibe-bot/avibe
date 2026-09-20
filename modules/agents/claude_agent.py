@@ -711,6 +711,35 @@ class ClaudeAgent(BaseAgent):
         except Exception as exc:  # noqa: BLE001
             logger.warning("Error stopping Claude receiver during cleanup: %s", exc)
 
+    async def retire_for_native_migration(self) -> None:
+        """Strict retirement without the broad duplicate-process reaper."""
+        handler = self.session_handler
+        for key, client in list(self.claude_sessions.items()):
+            async with handler._claude_runtime_generation_lock(key):
+                if self.claude_sessions.get(key) is not client:
+                    raise RuntimeError("Claude runtime generation changed")
+                if key in handler.active_sessions or not handler._retire_claude_runtime_activation(
+                    key, client, lambda: self.claude_sessions.get(key) is client
+                ):
+                    raise RuntimeError("Claude runtime retirement was refused")
+                process = getattr(getattr(client, "_transport", None), "_process", None)
+                if process is None:
+                    raise RuntimeError("Claude runtime process ownership is unavailable")
+                await client.disconnect()
+                if process.returncode is None:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                if process.returncode is None:
+                    raise RuntimeError("Claude runtime process did not exit")
+                await self._stop_receiver_task(self.receiver_tasks.get(key))
+                self.receiver_tasks.pop(key, None)
+                self.claude_sessions.pop(key, None)
+                handler.clear_session_tracking(key)
+                handler._retire_model_hub_process_scope(key)
+                self._native_session_ids.pop(key, None)
+                self._last_assistant_text.pop(key, None)
+                self._pending_assistant_message.pop(key, None)
+                self._retire_steering_state(key)
+
     async def _cleanup_runtime_session(
         self,
         composite_key: str,

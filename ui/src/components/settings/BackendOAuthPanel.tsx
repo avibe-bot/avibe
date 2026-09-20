@@ -9,7 +9,9 @@ import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthF
 import { useApi, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { surfaceBackendNotices } from './shared/surfaceBackendNotices';
+import { HubOwnedAuthNotice } from './shared/HubOwnedAuthNotice';
 import { errorMessage } from '@/lib/errorMessage';
+import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 
 type Backend = 'claude' | 'codex' | 'opencode';
 
@@ -88,9 +90,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   const { showToast } = useToast();
 
   const { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
-    startFlow, cancelFlow, submitCallback, resetToIdle, copyUrl, copyDeviceCode, isActive } =
+    startFlow, cancelFlow, submitCallback, resetToIdle, copyUrl, copyDeviceCode, isActive, hubOwnedAuth } =
     useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
+  const [removeHubOwnedAuth, setRemoveHubOwnedAuth] = useState(false);
   const removalOwner = useRef({ mounted: true, busy: false });
   useEffect(() => {
     const owner = removalOwner.current; owner.mounted = true;
@@ -107,6 +110,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     if (removalOwner.current.busy) return;
     removalOwner.current.busy = true;
     setRemoving(true);
+    setRemoveHubOwnedAuth(false);
     onActiveChange?.(true);
     setError(null);
     try {
@@ -116,6 +120,11 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           : await api.removeBackendAuth(backend);
       if (!removalOwner.current.mounted) return;
       if (!result.ok) {
+        if (isNativeAuthHubOwned(result)) {
+          setRemoveHubOwnedAuth(true);
+          await onActiveChange?.(false);
+          return;
+        }
         showToast(
           t('settings.backends.oauthRemoveFailed', {
             detail: result.error || result.detail || 'unknown',
@@ -218,7 +227,9 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         </div>
       )}
 
-      {error && (
+      {(hubOwnedAuth || removeHubOwnedAuth) && <HubOwnedAuthNotice onNavigate={onCancel} />}
+
+      {error && !hubOwnedAuth && !removeHubOwnedAuth && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/[0.08] px-3 py-2">
           <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive-ink" />
           <p className="text-[12px] leading-relaxed text-destructive-ink">
@@ -312,7 +323,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             type="button"
             variant="brand"
             size="default"
-            onClick={() => void startFlow()}
+            onClick={() => { setRemoveHubOwnedAuth(false); void startFlow(); }}
             disabled={starting || removing}
           >
             <LogIn className="size-3.5" />
