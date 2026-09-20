@@ -379,7 +379,7 @@ export const AppShell: React.FC = () => {
         aria-hidden={settingsOpen || undefined}
         inert={settingsOpen || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-5 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 py-4 md:flex',
           settingsOpen && 'invisible pointer-events-none',
         )}
       >
