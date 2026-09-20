@@ -269,6 +269,15 @@ The pre-existing shell and writer-role suites remain additional coverage.
   `-W` is only expansion text: literal `KEY=value` is data. `jobs -x` and
   command modifiers route argv, never prefix assignments. Includes have no
   source role, even for an assignment-shaped filename or argument.
+- Completion F/V/A/o operands are validated as each option is consumed,
+  including overwritten occurrences. Unknown values are not proven invalid.
+  `complete.def` clears F's WORD flags, then uses `general.c` check_identifier
+  with runtime POSIX mode and `syntax.h` shell_break_chars. Without inferring
+  that mode, hyphens, equals signs, digits and empty F values do not prove
+  rejection; break characters do. F remains a function name, never code.
+  V still requires an identifier; A and o use the complete pinned tables
+  (including Bash 5.3 `fullquote`). Independent fixtures cover every named
+  action/option, unknown values, repeated occurrences and query/data boundaries.
 - Named/default Bash coprocs account for both the array and `_PID`. The simple
   command form has no named-coproc slot. A named fd requires unquoted adjacent
   braces; closing an existing fd is not an allocation.

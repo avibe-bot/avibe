@@ -334,6 +334,91 @@ CASES = [
             ("echo OPENAI_API_KEY", False),
         ))
     ],
+    *[
+        case(
+            f"{command}-source", f"validation-{flag}-{index}",
+            f"{command} -{flag} {value} -C 'read OPENAI_API_KEY'"
+            + (" fixture" if command == "complete" else ""), valid,
+        )
+        for command in ("complete", "compgen")
+        for flag, values in (
+            ("F", (
+                ('"$FUNCTION"', True), ("fixture-function", True), ("'not=a_name'", True),
+                ("fixture.function", True), ("'9'", True), ("''", True),
+                ("'$FUNCTION'", True), ("'bad name'", False), ("'bad(name'", False),
+                ("'bad;name'", False), ("'bad|name'", False), ("'bad\\nname'".replace("\\n", "\n"), False),
+            )),
+            ("V", (
+                ('"$ARRAY"', True), ("unrelated", True), ("'other[0]'", False),
+                ("'not=a_name'", False), ("'9'", False), ("''", False),
+            ) if command == "compgen" else ()),
+            ("A", (
+                ('"$ACTION"', True), ("variable", True), ("''", False), ("not-an-action", False),
+            )),
+            ("o", (
+                ('"$OPTION"', True), ("fullquote", True), ("''", False), ("not-an-option", False),
+            )),
+        )
+        for index, (value, valid) in enumerate(values)
+    ],
+    *[
+        case(
+            f"{command}-expansion", f"validation-{flag}-word-{writer}",
+            f"{command} -{flag} \"${variable}\" -W '{body}'"
+            + (" fixture" if command == "complete" else ""), writer,
+        )
+        for command in ("complete", "compgen")
+        for flag, variable in (("F", "FUNCTION"), ("A", "ACTION"), ("o", "OPTION"))
+        for body, writer in (
+            ("$(read OPENAI_API_KEY)", True),
+            ("${OPENAI_API_KEY:=new}", True),
+            ("OPENAI_API_KEY=new", False),
+            ("$(echo OPENAI_API_KEY)", False),
+        )
+    ],
+    *[
+        case(
+            f"{command}-source", f"validation-order-{flag}-{index}",
+            f"{command} {options} -C 'read OPENAI_API_KEY'"
+            + (" fixture" if command == "complete" else ""), writer,
+        )
+        for command, flag, invalid, valid in (
+            ("complete", "F", "'bad name'", "fixture-function"),
+            ("compgen", "V", "'other[0]'", "unrelated"),
+            ("complete", "A", "not-an-action", "variable"),
+            ("compgen", "o", "not-an-option", "fullquote"),
+        )
+        for index, (options, writer) in enumerate((
+            (f"-{flag} {invalid} -{flag} {valid}", False),
+            (f"-{flag} {valid} -{flag} {invalid}", False),
+            (f'-{flag} "$VALUE" -{flag} {invalid}', False),
+            (f'-{flag} {invalid} "$FLAGS"', False),
+            (f'"-{flag}$VALUE"', True),
+            (f'-- -{flag} {invalid}', False),
+            (f'fixture -{flag} {invalid}', False),
+        ))
+    ],
+    *[
+        case(
+            "complete-source", f"validation-upstream-{flag}-{value}",
+            f"complete -{flag} {value} -C 'read OPENAI_API_KEY' fixture", True,
+        )
+        for flag, values in (
+            ("A", (
+                "alias", "arrayvar", "binding", "builtin", "command", "directory", "disabled", "enabled",
+                "export", "file", "function", "group", "helptopic", "hostname", "job", "keyword",
+                "running", "service", "setopt", "shopt", "signal", "stopped", "user", "variable",
+            )),
+            ("o", ("bashdefault", "default", "dirnames", "filenames", "fullquote", "noquote", "nosort", "nospace", "plusdirs")),
+        )
+        for value in values
+    ],
+    case("complete-source", "validation-dynamic-query", """complete -p -F "$FN" -C 'read OPENAI_API_KEY' fixture""", False),
+    case("complete-source", "validation-dynamic-remove", """complete -r -F "$FN" -C 'read OPENAI_API_KEY' fixture""", False),
+    case("complete-source", "validation-data-boundary", """complete -C 'read OPENAI_API_KEY' "$FLAGS" -F 'bad name' fixture""", True),
+    case("complete-source", "validation-function-not-code", """complete -F 'OPENAI_API_KEY=new' fixture""", False),
+    case("compgen-target", "validation-unknown-no-invented-target", """compgen -V "$ARRAY" -W fixture""", False),
+    case("compgen-target", "validation-literal-target-code-format", """compgen -V OPENAI_API_KEY -F "$FUNCTION" """, True),
 ]
 
 

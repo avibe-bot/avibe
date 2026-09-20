@@ -9,7 +9,7 @@ keep quoted text, compound commands and here-documents out of the literal path.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -381,6 +381,7 @@ def _options(
     long: Mapping[str, tuple[str, str]] | None = None,
     stop_after: str = "",
     stop_unless: str = "",
+    validate: Callable[[str, _Token], bool] | None = None,
 ) -> tuple[dict[str, _Token | None], list[_Token]] | _UnknownOptions | None:
     """Decode argument roles, not values; the last occurrence of an option wins.
 
@@ -421,6 +422,8 @@ def _options(
                 if index >= len(arguments):
                     return None
                 operand = arguments[index]
+            if operand is not None and validate is not None and not validate(flag, operand):
+                return None
             options[flag] = operand
             index += 1
             if flag in stop_after and not options.keys() & set(stop_unless):
@@ -447,6 +450,8 @@ def _options(
                 if not token.literal and flag in _DYNAMIC_STARTS:
                     return _UnknownOptions(options, arguments[index:])
                 return None
+            if operand is not None and validate is not None and not validate(flag, operand):
+                return None
             options.pop(flag, None)
             options.pop("+" + flag, None)
             options[("+" if argument[0] == "+" else "") + flag] = operand
@@ -467,6 +472,7 @@ def _option_cases(
     stop_unless: str = "",
     writer_flags: str | tuple[str, ...] = "", state_flags: str = "", state_values: str = "",
     zero_values: str = "",
+    validate: Callable[[str, _Token], bool] | None = None,
 ) -> Iterator[tuple[dict[str, _Token | None], list[_Token]]]:
     """Project an unknown option onto this builtin's existing argument roles.
 
@@ -501,6 +507,7 @@ def _option_cases(
             remaining, flags, required, numeric=numeric, plus=plus,
             long=long, stop_after="" if prefix.keys() & set(stop_unless) else stop_after,
             stop_unless=stop_unless,
+            validate=validate,
         )
         if parsed is None:
             continue
@@ -526,6 +533,8 @@ def _option_cases(
             pending.append((tail, {**options, **dict.fromkeys(bundle)}))
         if tail:
             for flag in required + numeric:
+                if validate is not None and not validate(flag, tail[0]):
+                    continue  # Only this possible operand role is invalid.
                 changed = dict(options)
                 remember(changed, flag, tail[0])
                 if flag in stop_after:
@@ -964,30 +973,39 @@ def _bind_source(text: str) -> str:
     return tail if colon else ""
 
 
+def _completion_value_valid(flag: str, token: _Token) -> bool:
+    """Reject only proven-invalid operands, at each option occurrence.
+
+    complete.def validates before replacing a previous option or applying a
+    query. Unknown values are not invalid. -F sets WORD.flags=0 and calls
+    check_identifier(..., posixly_correct) plus shell_break_chars; without
+    inferring POSIX mode only those literal break characters prove rejection.
+    This never resolves the named function or treats its name as code.
+    """
+    if not token.literal:
+        return True
+    if flag == "V":
+        return re.fullmatch(_NAME, token.value) is not None
+    if flag == "F":
+        return not any(char in "()<>;&| \t\n" for char in token.value)
+    if flag == "A":
+        return token.value in {
+            "alias", "arrayvar", "binding", "builtin", "command", "directory", "disabled", "enabled",
+            "export", "file", "function", "group", "helptopic", "hostname", "job", "keyword",
+            "running", "service", "setopt", "shopt", "signal", "stopped", "user", "variable",
+        }
+    if flag == "o":
+        return token.value in {
+            "bashdefault", "default", "dirnames", "filenames", "fullquote",
+            "noquote", "nosort", "nospace", "plusdirs",
+        }
+    return True
+
+
 def _completion_writers(command: str, arguments: list[_Token], analysis: _WrittenCode, dialect: str) -> set[str]:
     found: set[str] = set()
     flags = "abcdefgjksuv" + ("prDEI" if command == "complete" else "")
     required = "oAGWPSXFC" + ("V" if command == "compgen" else "")
-    parsed = _options(arguments, flags, required)
-    if parsed is None:
-        return found
-    if not isinstance(parsed, _UnknownOptions):
-        options = parsed[0]
-        # These options are validated before query/registration in Bash.
-        if (target := options.get("V")) is not None and not re.fullmatch(_NAME, target.value):
-            return found
-        if (function := options.get("F")) is not None and not re.fullmatch(_NAME, function.value):
-            return found
-        if (action := options.get("A")) is not None and action.literal and action.value not in {
-            "alias", "arrayvar", "binding", "builtin", "command", "directory", "disabled", "enabled",
-            "export", "file", "function", "group", "helptopic", "hostname", "job", "keyword",
-            "running", "service", "setopt", "shopt", "signal", "stopped", "user", "variable",
-        }:
-            return found
-        if (option := options.get("o")) is not None and option.literal and option.value not in {
-            "bashdefault", "default", "dirnames", "filenames", "noquote", "nosort", "nospace", "plusdirs",
-        }:
-            return found
     # Independent roles must not retain a Cartesian product of callback,
     # word-list, target and unrelated option values under dynamic options.
     for flag, role in (("V", "target"), ("C", "source"), ("W", "expansion")):
@@ -996,6 +1014,7 @@ def _completion_writers(command: str, arguments: list[_Token], analysis: _Writte
         for options, operands in _option_cases(
             arguments, flags, required, state_flags="prDEI", state_values=flag,
             writer_flags="D" if command == "complete" else "",
+            validate=_completion_value_valid,
         ):
             if command == "complete" and (
                 options.keys() & {"p", "r"} or not (operands or options.keys() & {"D", "E", "I"})
