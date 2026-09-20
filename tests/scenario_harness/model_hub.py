@@ -187,6 +187,9 @@ class ModelHubScenarioAdapter:
     async def revoke_credential(self, credential_ref: str) -> None:
         self.revoked.append(credential_ref)
 
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        await self.revoke_credential(credential_ref)
+
     async def sync_sources(self, bindings) -> None:
         self.synced.append(tuple(bindings))
 

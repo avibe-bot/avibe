@@ -49,7 +49,7 @@ def _service_with_custody(tmp_path):
     for name in (
         "provision_credential", "provision_transient_credential", "credential_auth_scheme",
         "retarget_api_key_credential", "matches_api_key_credential",
-        "observe_source", "discover_models", "revoke_credential", "sync_sources",
+        "observe_source", "discover_models", "revoke_credential", "revoke_api_key_credential", "sync_sources",
     ):
         setattr(adapter, name, getattr(runtime, name))
     return service, config, runtime

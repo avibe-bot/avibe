@@ -237,6 +237,9 @@ class FakeAdapter:
             await self.revoke_block.wait()
         self.revoked.append(credential_ref)
 
+    async def revoke_api_key_credential(self, credential_ref):
+        await self.revoke_credential(credential_ref)
+
     async def credential_supports_refresh(self, credential_ref):
         self.capability_queries.append(credential_ref)
         return credential_ref in self.refreshable_credential_refs

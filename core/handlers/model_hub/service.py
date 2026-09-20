@@ -444,6 +444,9 @@ class UnavailableEngineAdapter:
     async def revoke_credential(self, credential_ref: str) -> None:
         raise EngineUnavailableError
 
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
     async def sync_sources(self, bindings) -> None:
         raise EngineUnavailableError
 
@@ -1291,6 +1294,13 @@ class ModelHubService:
                     except Exception:
                         continue
                     if not cleaned:
+                        continue
+                elif pending.operation == "revoke_api_key_credential":
+                    try:
+                        await self.adapter.revoke_api_key_credential(pending.credential_ref)
+                    except Exception:
+                        # Only successful exact-namespace cleanup establishes
+                        # absence. Metadata errors are not retirement proof.
                         continue
                 else:
                     try:
@@ -3252,7 +3262,20 @@ class ModelHubService:
                 source.masked_credential = _mask_credential(key)
                 discovered = await self._discover(source)
                 if old_credential_ref != replacement_ref:
-                    self.revocations.add(source.id, old_credential_ref)
+                    if any(
+                        pending.source_id == source.id
+                        and pending.credential_ref == old_credential_ref
+                        and pending.operation == "revoke_credential"
+                        for pending in self.revocations.list()
+                    ):
+                        # Replay also discards intents for the current active
+                        # ref. Do that here for a pre-upgrade generic intent:
+                        # syncing the damaged old credential is not required
+                        # to establish that it is still the committed ref.
+                        self.revocations.remove(source.id, old_credential_ref)
+                    self.revocations.add(
+                        source.id, old_credential_ref, operation="revoke_api_key_credential",
+                    )
                     old_revocation_recorded = True
                 removed_hops, interrupted = await self._finalize_successful_discovery(
                     previous,
@@ -3291,7 +3314,7 @@ class ModelHubService:
 
             if old_credential_ref != replacement_ref:
                 try:
-                    await self.adapter.revoke_credential(old_credential_ref)
+                    await self.adapter.revoke_api_key_credential(old_credential_ref)
                 except Exception:
                     pass
                 else:

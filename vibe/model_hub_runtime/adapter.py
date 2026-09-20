@@ -1917,10 +1917,7 @@ class CLIProxyEngineAdapter:
         )
 
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
-        metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
-        if metadata.get("kind") != "api_key":
-            raise EngineStateError("API key credential is unavailable")
-        return metadata.get("auth_scheme")
+        return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
 
     async def retarget_api_key_credential(
         self,
@@ -1987,6 +1984,12 @@ class CLIProxyEngineAdapter:
             **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
+        await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
+        await asyncio.to_thread(self.supervisor.invalidate_configs)
+        await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
     async def revoke_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(

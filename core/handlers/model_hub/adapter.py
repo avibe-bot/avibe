@@ -520,7 +520,12 @@ class EngineAdapter(Protocol):
         ...
 
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
-        """Read validated, non-secret static transport metadata for replacement."""
+        """Resolve immutable static transport without requiring the old secret.
+
+        A safe missing/content-corrupt private document may recover from its
+        ref. Readable wrong-kind/unknown/conflicting metadata, unsafe paths and
+        I/O errors reject. The replacement still needs normal key validation.
+        """
         ...
 
     async def retarget_api_key_credential(
@@ -547,7 +552,17 @@ class EngineAdapter(Protocol):
         ...
 
     async def revoke_credential(self, credential_ref: str) -> None:
-        """Release the stored credential (source deletion / key replacement)."""
+        """Release a stored credential, preserving OAuth auth-file ordering."""
+        ...
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        """Retire an unbound ref under durable API-key-only caller intent.
+
+        Remove only the exact safe private ref namespace, even if the old
+        document is missing/content-corrupt. Reject readable identity conflicts
+        and unsafe paths. Never delete watched OAuth auth files or call OAuth
+        management APIs. Return only after durable cleanup; failure is retryable.
+        """
         ...
 
     async def provision_transient_credential(
