@@ -40,11 +40,27 @@ function highestVisibleWindow(windows: readonly WindowInstance[]): WindowInstanc
  * save would clobber the real workbench layout with `[]` in every other tab. Windows
  * opened later inside that tab still work (WindowLayer stays mounted); they just live
  * and die with it. The flag is frozen by the shell at mount, so it never flips mid-life.
+ *
+ * `onWindowForeground`: the shell can hide the whole window layer (Settings does), in
+ * which case a window brought forward would arrive invisible. Rather than teach every
+ * caller — launcher, Dock, deep link, a window focusing itself on restore — to ask what
+ * is covering it, the manager tells the shell that a window is coming forward and lets
+ * the shell clear the way. `focus` and `openApp` are the only two places that can put a
+ * window on top (`restore` goes through `focus`), so both announce it.
  */
-export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standalone?: boolean }> = ({
+export const WindowManagerProvider: React.FC<{
+  children: React.ReactNode;
+  standalone?: boolean;
+  onWindowForeground?: () => void;
+}> = ({
   children,
   standalone = false,
+  onWindowForeground,
 }) => {
+  // Through a ref: `focus` and `openApp` are part of the context value every window
+  // consumes, so their identity must not change each time the shell recomputes its
+  // exit route.
+  const foregroundRef = useLatestRef(onWindowForeground);
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
@@ -165,6 +181,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
   }, []);
 
   const focus = useCallback((id: string) => {
+    foregroundRef.current?.();
     setFocusedId(id);
     setWindows((prev) => {
       const target = prev.find((w) => w.id === id);
@@ -174,7 +191,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
       if (target.z === nextZ - 1 && prev.every((w) => w.id === id || w.z < target.z)) return prev;
       return prev.map((w) => (w.id === id ? { ...w, z: nextZ } : w));
     });
-  }, []);
+  }, [foregroundRef]);
 
   const focusCanvas = useCallback(() => {
     setFocusedId(null);
@@ -183,6 +200,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
   }, []);
 
   const openApp = useCallback<WindowManagerValue['openApp']>((appId, opts) => {
+    foregroundRef.current?.();
     const def = APP_REGISTRY[appId];
     const size = { ...DEFAULT_SIZE, ...def?.defaultSize };
     const i = openCount.current++ % CASCADE_WRAP;
@@ -212,7 +230,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode; standa
     ]);
     setFocusedId(id);
     return id;
-  }, []);
+  }, [foregroundRef]);
 
   const close = useCallback((id: string) => {
     closeGuards.current.delete(id);

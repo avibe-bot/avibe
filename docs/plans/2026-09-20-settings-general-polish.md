@@ -124,10 +124,14 @@ the publisher, feeds the rule directly.
 > strip over the one column inline exists to keep, with its title bar, controls
 > and content all hidden. So the rule is not "inline leaves the shell live" but
 > **inline keeps the sidebar column live; whatever the opaque surface covers
-> retires in both placements** — which is two consumers, not a growing list:
-> `WindowLayer` and the `AppsLauncher` that opens into it. Everything else is
+> retires in both placements** — one consumer, `WindowLayer`. Everything else is
 > either inside the sidebar column or floats above the surface, so it keeps
 > `settingsCoversSidebar`.
+>
+> (As merged this also took the `AppsLauncher` with the layer, on the grounds
+> that a control whose every result is hidden is not a live control. That was
+> wrong in the user-visible direction — see *Follow-up: the launcher is a sidebar
+> control* at the end.)
 
 ### What each consumer does with it
 
@@ -141,12 +145,11 @@ the publisher, feeds the rule directly.
   Settings therefore leaves a live, navigable sidebar — which is exactly what
   shipped before #2051 (verified against `66fc91db^`).
 
-  The two exceptions read `settingsOpen`, and they are the reason both flags
-  exist: `WindowLayer` spans the whole viewport *above* the sidebar so windows
-  can be dragged over it, so inline's opaque surface would leave it
-  live-but-invisible rather than live; and `AppsLauncher`, whose every result
-  appears in that layer, goes with it. Both retire under either placement, and
-  both come back when Settings closes.
+  The one exception reads `settingsOpen`, and it is the reason both flags exist:
+  `WindowLayer` spans the whole viewport *above* the sidebar so windows can be
+  dragged over it, so inline's opaque surface would leave it live-but-invisible
+  rather than live. It retires under either placement and comes back when
+  Settings closes. `AppsLauncher` does *not* go with it — see the follow-up.
 - **`SettingsOverlayRouteSurface`** picks its own left edge: standalone starts at
   the screen edge with no left border; inline takes the primitive's
   `--app-sidebar-w` offset and a border, so the two edges stay together while the
@@ -239,10 +242,10 @@ edited into `design.pen`.
 - `AppShell.test.tsx` — the shell retires only where Settings replaces it, covers
   the shell below `md` even when inline is stored, and publishes a sidebar-free
   shell to the Settings surfaces above it in a single-app tab. Plus the two
-  exceptions: the window layer and its launcher retire under *either* placement
-  and come back when Settings closes. The `AppsLauncher` stub now honours its
-  route-surface boundary the way the real one does, so it cannot report a live
-  Apps button in a state the shell retires it.
+  exception: the window layer retires under *either* placement and comes back
+  when Settings closes, while the launcher retires only under standalone. The
+  `AppsLauncher` stub honours its route-surface boundary the way the real one
+  does, so it cannot report a live Apps button in a state the shell retires it.
 - `SidebarResizer.test.tsx` — the width budget as a pure function across five
   viewports, a drag and an `End` press both stopping at the affordable maximum
   rather than the constant one, a window narrowed *after* a wide drag giving the
@@ -267,3 +270,61 @@ edited into `design.pen`.
   settled — a class name, a bounding box and jsdom all miss a transparent
   layer. Verified non-vacuous: injecting a real `fixed inset-0 z-20` div into
   the surface fails it.
+
+## Follow-up: the launcher is a sidebar control
+
+Reported after merge: *switching to the inline menu makes the Apps button at the
+bottom of the sidebar disappear.* It does, and the cause is the paragraph above —
+the launcher was retired together with the window layer it opens into.
+
+The reasoning behind that ("a control whose every result is hidden is not a live
+control") is sound about the *layer* and wrong about the *control*. Apps is a
+sidebar control, sitting in the same bottom row as the Settings toggle and the
+service status, and inline's whole claim is that the sidebar column stays live.
+A column that keeps every button except one has no rule the user can see; it just
+looks like something broke. So the launcher goes back to `settingsCoversSidebar`,
+like every other control in that column.
+
+What made retiring it look necessary is real, though: the window layer is hidden
+while Settings is open, so a window opened from there would arrive invisible.
+That is answered the way the sidebar already answers it for its links — **bringing
+a window forward is a way out of Settings**. Clicking Inbox leaves Settings by
+going to Inbox; opening Files leaves Settings by opening Files. The Settings
+toggle beside it uses the same exit.
+
+Where to put that is the only real design question. Not in `AppsLauncher`: the
+Dock, a deep link, a restored window and a window focusing itself all reach the
+same layer, and each would have to ask what happens to be covering it. So
+`WindowManagerProvider` takes an `onWindowForeground` callback and calls it from
+the only two places a window can reach the top — `focus` and `openApp`, with
+`restore` funnelling through `focus` — and `AppShell` supplies the exit. The
+callback is held in a `useLatestRef` so `focus`/`openApp` keep their identity;
+they are part of the context value every window consumes.
+
+The second report — *clicking blank space in the app sidebar while the inline
+menu is open also dismisses it* — does **not** reproduce on `b45fbc604`. Swept in
+a browser with `document.elementFromPoint` at two x positions across sixteen y
+positions of the sidebar: every point that closed Settings had a real link under
+it (the brand row's `a[href="/"]`, the tree's `a[href="/inbox"]`) and navigated
+there, which is the designed exit; every genuinely blank point — the aside
+itself, the tree's scroll container, the bottom row, the whole right-hand column —
+kept it open. The brand link is content-sized (measured 159.5px wide against a
+248px rail), so the apparent blank to its right is not part of it. Most likely a
+build predating `4f2e34ab1`, where inline still dismissed on any outside
+interaction; that build would also show the missing Apps button.
+
+### Validation
+
+- `WindowManagerProvider.test.tsx` — every way a window reaches the top announces
+  itself (`openApp`, `focus`, and `restore` through `focus`), the ways down do not
+  (`focusCanvas`, `minimize`, `close`), and a provider with no listener still
+  works.
+- `AppShell.test.tsx` — the launcher retires under standalone and stays under
+  inline; a foreground announcement while Settings is open returns to the origin
+  route and brings the window layer back; one outside Settings changes nothing.
+  Verified non-vacuous: restoring the old boundary fails the first, dropping the
+  prop fails the second, dropping the `settingsOpen` guard fails the third.
+- `e2e/workbench-general/geometry.spec.ts` — in a browser: Apps is gone under
+  standalone, back under inline, and the pointer actually lands on it rather than
+  on the surface above it; opening a Dock tile from there closes Settings and
+  shows the window.

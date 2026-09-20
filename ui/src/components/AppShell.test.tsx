@@ -104,8 +104,18 @@ vi.mock('../context/DockProvider', () => ({
     <div data-testid="dock-provider" data-enabled={String(enabled)}>{children}</div>
   ),
 }));
+// Captures the one prop the shell hands the manager: what to do when a window is
+// about to come forward. The real manager calls it from `focus`/`openApp`; here
+// the test calls it directly, which is the same event from the shell's side.
+const windowManager = vi.hoisted(() => ({ foreground: null as (() => void) | null }));
 vi.mock('../context/WindowManagerProvider', () => ({
-  WindowManagerProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  WindowManagerProvider: ({ children, onWindowForeground }: {
+    children: ReactNode;
+    onWindowForeground?: () => void;
+  }) => {
+    windowManager.foreground = onWindowForeground ?? null;
+    return <>{children}</>;
+  },
 }));
 vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -164,6 +174,7 @@ const StandaloneMenuProbe = () => (
 
 beforeEach(() => {
   viewport.isDesktop = false;
+  windowManager.foreground = null;
   window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
@@ -395,10 +406,9 @@ describe('AppShell sidebar width', () => {
   // at z-30. Left live, a window would show as a strip over the very column
   // inline exists to keep, with everything that makes it a window — title bar,
   // controls, content — behind Settings. Live-but-invisible is worse than
-  // retired, so this one retires in both placements. Its launcher goes with it:
-  // a control whose every result is hidden is not a live control.
+  // retired, so this one retires in both placements.
   it.each(['standalone', 'inline'] as const)(
-    'retires the window layer and its launcher under %s Settings',
+    'retires the window layer under %s Settings',
     async (placement) => {
       viewport.isDesktop = true;
       window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
@@ -407,12 +417,11 @@ describe('AppShell sidebar width', () => {
 
       expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
       expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('false');
-      expect(screen.queryByTestId('apps-launcher')).toBeNull();
     },
   );
 
   // ...and comes back, so retiring it is not a way of losing it.
-  it('restores the window layer and its launcher once Settings closes', async () => {
+  it('restores the window layer once Settings closes', async () => {
     viewport.isDesktop = true;
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
     renderShell('/');
@@ -421,6 +430,80 @@ describe('AppShell sidebar width', () => {
     expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
     expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('true');
     expect(screen.getByTestId('apps-launcher')).toBeTruthy();
+  });
+
+  // The launcher does NOT go with the layer. It is a sidebar control, and it
+  // retires with the column it sits in like every other control there: gone
+  // under standalone, which stands in for that column, present under inline,
+  // which keeps it. Taking Apps away under inline is the sidebar losing a button
+  // that is on screen the rest of the time, for no reason the user can see.
+  it.each([
+    ['standalone', false],
+    ['inline', true],
+  ] as const)('keeps the Apps launcher wherever the sidebar stays live (%s)', async (
+    placement,
+    live,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    expect(Boolean(screen.queryByTestId('apps-launcher'))).toBe(live);
+  });
+
+  // What makes keeping it safe: the layer a window arrives in is hidden while
+  // Settings is open, so coming forward has to leave Settings first — the same
+  // exit a sidebar link takes by navigating, and the toggle beside it by closing.
+  // The shell says it once, to the manager, rather than each caller working out
+  // what is covering the layer.
+  it('leaves Settings when a window comes forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
+
+    act(() => windowManager.foreground?.());
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+  });
+
+  // The window it opens is the foreground, not a reason to leave one route for
+  // another: with Settings closed there is nothing to clear out of the way.
+  it('stays put when a window comes forward outside Settings', async () => {
+    viewport.isDesktop = true;
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+
+    expect(screen.getByTestId('chat')).toBeTruthy();
+    expect(screen.queryByTestId('workbench')).toBeNull();
   });
 
   it('covers the shell below md even when inline is the stored preference', async () => {
