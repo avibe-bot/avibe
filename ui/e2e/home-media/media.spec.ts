@@ -24,19 +24,22 @@ test('draft files follow final project and Agent selection through picker cancel
   await expect(page.getByText(file.name, { exact: true })).toBeVisible();
   expect(await writes(page, '/api/sessions')).toEqual([]);
   expect(await writes(page, '/attachments')).toEqual([]);
-  const workspace = () => page.getByRole('button', { name: /^Workspace:/ });
-  await workspace().click();
+  // Opening a folder is the card's own action; the project row below shows
+  // which one the draft is bound to, with the mint fill marking the target.
+  const openProject = () => page.getByRole('button', { name: en.workbench.home.openProject, exact: true });
+  const projectChip = (name: string) => page.getByRole('button', { name, exact: true });
+  await openProject().click();
   expect((await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目');
   await page.keyboard.press('Escape');
   await expect(input(page)).toHaveValue('请阅读这份中文文件');
-  await workspace().click();
+  await openProject().click();
   await page.getByRole('button', { name: '另一个项目', exact: true }).click();
   await page.getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
   await page.getByRole('button', { name: en.workbench.newProjectDialog.pickFolder, exact: false }).click();
   expect((await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/另一个项目');
   await page.getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: en.workbench.newProjectDialog.create, exact: true }).click();
-  await expect(workspace()).toContainText('另一个项目');
+  await expect(projectChip('另一个项目')).toHaveClass(/bg-mint-soft/);
   await page.getByRole('button', { name: /codex/ }).first().click();
   await page.getByRole('button', { name: /^claude/ }).click();
   await page.keyboard.press('Escape');
@@ -140,9 +143,13 @@ for (const width of [320, 375, 390, 1366, 1600]) {
       await expect(page.getByRole('heading', { name: copy.workbench.home.heroTitle })).toBeVisible();
       await expect(page.getByRole('button', { name: copy.chat.compose.voice, exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
+      // The home now uses the composer's single-row box, the same one the chat
+      // page uses, and that mode gives its controls a 28x36 target of their own.
+      // Fixed numbers either way: the control must not shrink or stretch with
+      // the viewport, the language or the theme.
       const attachBox = await page.getByRole('button', { name: copy.chat.compose.attach }).boundingBox();
       expect(attachBox?.width).toBe(28);
-      expect(attachBox?.height).toBe(28);
+      expect(attachBox?.height).toBe(36);
       await page.getByRole('button', { name: copy.chat.compose.attach }).focus();
       await expect(page.getByRole('button', { name: copy.chat.compose.attach })).toBeFocused();
       await page.screenshot({ path: testInfo.outputPath('home.png'), fullPage: true });
@@ -170,7 +177,7 @@ test('voice failure retains the recording for explicit retry while preserving th
 test('directory picker remains keyboard-contained and its footer reachable on a short narrow viewport', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 440 });
   await open(page);
-  await page.getByRole('button', { name: /^Workspace:/ }).click();
+  await page.getByRole('button', { name: en.workbench.home.openProject, exact: true }).click();
   const dialog = page.getByRole('dialog');
   const select = dialog.getByRole('button', { name: en.directoryBrowser.select, exact: true });
   await expect(select).toBeInViewport();

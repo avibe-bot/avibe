@@ -208,17 +208,17 @@ describe('Workbench first-task home', () => {
     expect(await screen.findByText('chat-page')).toBeTruthy();
   });
 
-  it('opens the folder picker straight from the workspace chip and keeps the draft when it is cancelled', async () => {
+  it('shows the real project row and reaches the folder picker from it without a menu', async () => {
     const user = userEvent.setup();
     renderHome();
 
     await user.type(input(), '帮我看看这个仓库');
-    const chip = screen.getByRole('button', { name: `Workspace: ${项目.folder_path}` });
-    expect(chip.getAttribute('title')).toBe(项目.folder_path);
-    expect(chip.textContent).toContain(项目.display_name);
+    // The row names the instance's own projects, so where the session lands is
+    // readable before anything is typed.
+    expect(screen.getByRole('button', { name: 项目.display_name })).toBeTruthy();
 
-    await user.click(chip);
-    // No menu in between: the chip reaches the folder picker itself.
+    // No menu in between: the row reaches the folder picker itself.
+    await user.click(screen.getByRole('button', { name: en.newSession.newProject }));
     expect(screen.getByRole('dialog', { name: 'directory-browser' })).toBeTruthy();
 
     await user.click(screen.getByText('cancel-folder'));
@@ -226,6 +226,11 @@ describe('Workbench first-task home', () => {
     expect(input().value).toBe('帮我看看这个仓库');
     expect(newSession.setSelected).not.toHaveBeenCalled();
     expect(newSession.upsertSelectProject).not.toHaveBeenCalled();
+
+    // Picking one is a real selection, not a decoration.
+    await user.click(screen.getByRole('button', { name: 项目.display_name }));
+    expect(newSession.setSelected).toHaveBeenCalledWith(项目.id);
+    expect(input().value).toBe('帮我看看这个仓库');
   });
 
   it('keeps the draft when the Agent route changes', async () => {

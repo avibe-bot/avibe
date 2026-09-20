@@ -2481,7 +2481,7 @@
     "placeholderBody": "Agents、Skills、Harness、Vaults 将会汇聚到这里。现在先进控制面板配置平台和 backend。",
     "home": {
       "heroTitle": "今天想搭点什么？",
-      "heroBody": "从一个真实任务开始，助手可以规划、研究和构建",
+      "heroBody": "在下面输入想做的事，Agent 会按你的描述执行。你也可以从下面的建议开始。",
       "suggestions": {
         "exploreTitle": "探索项目",
         "exploreBody": "了解工作区中的文件",
@@ -2493,12 +2493,10 @@
         "planBody": "把目标拆成可执行的下一步",
         "planDraft": "帮我把这个目标拆成具体、可执行的步骤"
       },
-      "inputPlaceholder": "给你的助手安排任务…",
+      "inputPlaceholder": "和 Agent 聊点什么…",
       "openProject": "打开项目",
       "manageAgents": "管理 Agents",
       "createTask": "建后台任务",
-      "chooseWorkspace": "选择工作区",
-      "workspaceAria": "工作区：{{path}}",
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
       "ready": "{{backend}} 已连接，可以开始工作",
       "readyDismiss": "关闭",

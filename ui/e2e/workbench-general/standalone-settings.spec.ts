@@ -23,7 +23,10 @@ const caps = {
 };
 const editor = { remote: true, authenticated: true, authorization_state: 'current',
   instance_kind: 'organization', instance_role: 'editor', capabilities: caps };
-const textarea = (page: Page) => page.getByPlaceholder('Describe a task or ask a question...');
+const textarea = (page: Page) => page.getByPlaceholder('Tell the agent what you want…');
+// The home's own project row, not the sidebar tree.
+const homeProject = (page: Page, name: string) =>
+  page.locator('main#app-shell-scroll').getByRole('button', { name, exact: true });
 const settings = (page: Page) => page.locator('[data-settings-overlay="true"]');
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Settings sections' });
 const toggle = (page: Page) => page.locator('aside [data-settings-toggle="true"]');
@@ -94,9 +97,8 @@ test('C-SETTINGS-02: preserves picked Agent/workspace, Unicode draft and history
   await page.setViewportSize({ width: 1366, height: 768 });
   await open(page, '/');
   await textarea(page).fill(draft);
-  const workspace = page.getByRole('button', { name: /^Workspace: / });
+  const workspace = homeProject(page, '星河项目');
   await workspace.click();
-  await page.locator('[data-radix-popper-content-wrapper]').getByRole('button', { name: '星河项目', exact: true }).click();
   const agent = page.getByRole('button', { name: /codex|claude/ }).first();
   await agent.click();
   await page.locator('[data-radix-popper-content-wrapper]').getByRole('button', { name: 'claude', exact: true }).click();
@@ -113,7 +115,8 @@ test('C-SETTINGS-02: preserves picked Agent/workspace, Unicode draft and history
   await expect(page).toHaveURL(`${origin}/`);
   await expect(textarea(page)).toHaveValue(draft);
   await expect(textarea(page)).toHaveAttribute('data-origin-instance', 'preserved');
-  await expect(workspace).toHaveAccessibleName('Workspace: /fixture/星河项目');
+  // The mint fill is how the shared picker marks the resolved target.
+  await expect(workspace).toHaveClass(/bg-mint-soft/);
   await expect(agent).toContainText('claude');
   await expect(toggle(page)).toBeFocused();
   expect(await page.evaluate(() => window.history.state.idx)).toBe(index);
