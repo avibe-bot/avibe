@@ -547,3 +547,79 @@ test('C-SETTINGS-09: a held sidebar create cannot navigate through foreground Se
   expect(denied).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
+
+// A command route is a route only in the url bar: /apps/show/:id opens its
+// window and replaces itself with the canvas. It is lazily loaded, so the user
+// can open Settings before its chunk lands, and the window it then opens has to
+// wait behind Settings instead of evicting it. The half that outlived two
+// attempts at this is the way OUT. The exit prefers a history pop back to the
+// entry the origin was read from — that entry still holds the command url — so
+// leaving Settings mounts the command a second time and raises its window over
+// whatever the user actually asked for. Only a browser has the history stack
+// that decision turns on, which is why it is settled here and not in jsdom.
+test('C-SETTINGS-10: a command route finished under Settings does not re-run over the app the user picks', async ({ page }) => {
+  const denied = await serveProduct(page);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.route('**/api/show-pages', (route) => route.fulfill({ json: { pages: [] } }));
+  await page.route('**/api/sessions/ses-show**', (route) => route.fulfill({ json: {
+    id: 'ses-show', title: 'Pinned page', status: 'active', scope_id: 'scope-1', project_id: 'proj-1',
+  } }));
+
+  // Hold the chunk the way a cold load does, then let it land while Settings is
+  // in front — the one ordering this is about.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let chunkRequests = 0;
+  await page.route('**/ShowPageRoute.tsx*', async (route) => {
+    chunkRequests += 1;
+    if (chunkRequests === 1) await held;
+    return route.fallback();
+  });
+
+  // Inline, because that is where this is reachable: it is the placement that
+  // keeps the Apps launcher beside Settings, so picking another app is the
+  // ordinary way out rather than a second gesture.
+  await page.addInitScript(() => {
+    window.localStorage.setItem('avibe.settings.menu-placement.v1', 'inline');
+  });
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await open(page, '/apps/show/ses-show');
+  await expect(toggle(page)).toBeVisible();
+
+  await toggle(page).click();
+  await expect(settings(page)).toHaveAttribute('data-settings-menu-placement', 'inline');
+  const originIndex = await page.evaluate(() => history.state.idx);
+  release();
+
+  // The command runs while retired: its window opens behind Settings, which
+  // does not move, and the origin it will return to becomes the canvas.
+  const windows = page.locator('[data-window-id]');
+  await expect(windows).toHaveCount(1);
+  await expect(settings(page)).toBeVisible();
+  await expect(page).toHaveURL(/\/settings\/general$/);
+
+  // Now the reported gesture: a different app, chosen from the launcher that
+  // inline keeps on screen. It opens its window and that is what closes
+  // Settings.
+  await page.getByRole('button', { name: 'Apps', exact: true }).click();
+  await page.getByRole('menu', { name: 'Apps', exact: true })
+    .getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(settings(page)).toHaveCount(0);
+  await expect(windows).toHaveCount(2);
+
+  // The window the user just picked is the one in front, and stays there: a
+  // re-run of the command would focus the Show Page window over it.
+  const topWindow = () => page.evaluate(() => Array.from(
+    document.querySelectorAll<HTMLElement>('[data-window-id]'),
+  ).sort((a, b) => Number(a.style.zIndex || 0) - Number(b.style.zIndex || 0))
+    .at(-1)?.getAttribute('aria-label') ?? null);
+  await expect(page).toHaveURL(`${origin}/`);
+  await page.waitForTimeout(400);
+  expect(await topWindow()).toBe('Files');
+  await expect(page).toHaveURL(`${origin}/`);
+  // Left forward, not popped back onto the entry the command already spent.
+  expect(await page.evaluate(() => history.state.idx)).toBe(originIndex);
+  expect(denied).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});

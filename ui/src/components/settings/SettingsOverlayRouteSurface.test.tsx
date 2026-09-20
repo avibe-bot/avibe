@@ -151,6 +151,16 @@ const ChatProbe = () => {
     }
   }, [location, navigate, routeSurfaceActive]);
 
+  // Stands in for a command route — /apps/show/:id, /apps/library — reaching the
+  // end of its errand while Settings holds the foreground: it opens its window
+  // and replaces itself with the canvas. Retired is exactly when this happens,
+  // because those routes are lazily loaded and the chunk can land after the
+  // user has opened Settings.
+  useEffect(() => {
+    const handoff = (location.state as { handoff?: string } | null)?.handoff;
+    if (!routeSurfaceActive && handoff === 'pending') navigate('/', { replace: true });
+  }, [location, navigate, routeSurfaceActive]);
+
   return (
     <main>
       <div data-testid="chat-location">{`${location.pathname}${location.search}${location.hash}`}</div>
@@ -311,6 +321,9 @@ beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
   window.localStorage.clear();
+  // The exit reads the real history stack to decide between a pop and a
+  // replace, so tests that care about which one it takes set `idx` themselves.
+  window.history.replaceState(null, '');
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     matches: true,
     addEventListener: vi.fn(),
@@ -374,6 +387,57 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(router.state.location.pathname).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
+    expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
+  });
+
+  // With a real history stack behind it the exit prefers a pop back to the
+  // entry the origin was read from — cheaper, and it keeps the stack honest.
+  // That entry is only the origin for as long as nobody has moved the origin.
+  // A command route finishing under Settings moves it, and the pop would undo
+  // that: back to the url the command was already spent on, which mounts it
+  // again and puts its window over whatever the user opened Settings to reach.
+  it('returns to a rewritten origin instead of the entry it was read from', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { handoff: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    // The browser pushed an entry for Settings; the origin still points at 0.
+    window.history.replaceState({ idx: 1 }, '');
+
+    // The command ran while retired and handed the canvas back to the surface,
+    // so the retained route is already gone before the user leaves Settings.
+    await waitFor(() => expect(screen.queryByTestId('chat-location')).toBeNull());
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByText('workbench')).toBeTruthy();
+    expect(screen.queryByTestId('chat-location')).toBeNull();
+  });
+
+  // The same rule with nothing but state rewritten. The pop would land on the
+  // right url carrying the wrong payload, which is the same staleness wearing a
+  // smaller hat — and it is what a browser, unlike a memory router, would
+  // actually have done to the assertion two tests up.
+  it('returns to a state-only rewrite of the origin as well', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { maintenance: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    window.history.replaceState({ idx: 1 }, '');
+    await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
   });
 

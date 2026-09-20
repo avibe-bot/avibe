@@ -9,7 +9,6 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
-import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Button } from '../ui/button';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
 import { ShowPageLaunchControl } from '../workbench/ShowPageLaunchControl';
@@ -28,7 +27,6 @@ import { useShowPageAnnotation } from '../workbench/useShowPageAnnotation';
 export const ShowPageRoute: React.FC = () => {
   const { sessionId = '' } = useParams();
   const isDesktop = useIsDesktop();
-  const surfaceActive = useRouteSurfaceActive();
   const wm = useWindowManager();
   const navigate = useNavigate();
   const handledRef = useRef(false);
@@ -36,14 +34,17 @@ export const ShowPageRoute: React.FC = () => {
   // Desktop: open (or focus) the Show Page window for this session and hand back
   // to the canvas. Guarded so the effect runs once even as window state ticks.
   //
-  // Only while this surface is the live one. Both halves of the handoff are
-  // foreground gestures: the window comes to the top, and the route redirects to
-  // the canvas. A retired surface — Settings took over while this route's chunk
-  // was still loading — may do neither, and the boundary already refuses the
-  // redirect, which used to leave the launch half done with the latch spent. It
-  // waits instead, and runs whole when the surface is live again.
+  // This runs whether or not the surface is the live one, and it has to. This
+  // route is a command, not a place: it is lazily loaded, so Settings can take
+  // the foreground before its chunk arrives, and a command held back is a
+  // command that fires later — after the user has asked for something else.
+  // Running it now is safe in both halves. `useWindowManager` withholds the
+  // foreground announcement from a retired surface, so the window opens and
+  // waits behind Settings instead of evicting it, and the redirect is diverted
+  // to that surface's `inactiveReplace`, which moves the retained origin here
+  // so leaving Settings lands on the canvas rather than back on this command.
   useEffect(() => {
-    if (!surfaceActive || !isDesktop || handledRef.current || !sessionId) return;
+    if (!isDesktop || handledRef.current || !sessionId) return;
     handledRef.current = true;
     const own = wm.windows.filter((w) => w.appId === 'showpage' && w.params?.sessionId === sessionId);
     const target = own.find((w) => !w.minimized) ?? own[0];
@@ -54,7 +55,7 @@ export const ShowPageRoute: React.FC = () => {
       wm.openApp('showpage', { params: { sessionId } });
     }
     navigate('/', { replace: true });
-  }, [surfaceActive, isDesktop, sessionId, wm, navigate]);
+  }, [isDesktop, sessionId, wm, navigate]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   // Key by sessionId: React Router keeps this route element mounted across param

@@ -3,6 +3,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import type { Navigator } from 'react-router-dom';
 
 import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import { ShowPageRoute } from './ShowPageRoute';
@@ -115,15 +116,16 @@ describe('mobile Show Page app route', () => {
 });
 
 // Desktop turns this route into a handoff: open the window, then get out of the
-// way. Both halves are foreground gestures, so both belong to the surface that
-// is actually in front. This route is lazily loaded, so Settings can take the
-// foreground while its chunk is still arriving — and a retired surface may do
-// neither half: its boundary refuses the redirect, and a window brought forward
-// under Settings would arrive behind an opaque overlay.
+// way. It is a command, not a place — and because it is lazily loaded, Settings
+// can take the foreground before its chunk arrives. It runs anyway, both halves,
+// because a command held back is a command that fires later, once the user has
+// asked for something else. Neither half reaches over the top of Settings: the
+// window manager withholds the foreground announcement from a retired surface,
+// and the surface takes the redirect through its own replacement.
 describe('desktop Show Page window handoff', () => {
-  const renderRoute = (active: boolean) => render(
+  const renderRoute = (active: boolean, inactiveReplace?: Navigator['replace']) => render(
     <MemoryRouter initialEntries={['/apps/show/session-1']}>
-      <RouteSurfaceActivityBoundary active={active}>
+      <RouteSurfaceActivityBoundary active={active} inactiveReplace={inactiveReplace}>
         <Routes>
           <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
           <Route path="/" element={<div data-testid="canvas" />} />
@@ -133,29 +135,17 @@ describe('desktop Show Page window handoff', () => {
     </MemoryRouter>,
   );
 
-  it('waits while the surface is retired, then runs whole once it is live', () => {
+  it('runs whole while the surface is retired, handing the redirect to it', () => {
     viewport.isDesktop = true;
-    const { rerender } = renderRoute(false);
-
-    expect(wm.openApp).not.toHaveBeenCalled();
-    expect(screen.getByTestId('location').textContent).toBe('/apps/show/session-1');
-
-    // Same mounted route, now the foreground one: the half that was skipped is
-    // still owed, so it must not have been spent by the render that skipped it.
-    rerender(
-      <MemoryRouter initialEntries={['/apps/show/session-1']}>
-        <RouteSurfaceActivityBoundary active>
-          <Routes>
-            <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
-            <Route path="/" element={<div data-testid="canvas" />} />
-          </Routes>
-        </RouteSurfaceActivityBoundary>
-        <LocationProbe />
-      </MemoryRouter>,
-    );
+    const inactiveReplace = vi.fn();
+    renderRoute(false, inactiveReplace);
 
     expect(wm.openApp).toHaveBeenCalledWith('showpage', { params: { sessionId: 'session-1' } });
-    expect(screen.getByTestId('location').textContent).toBe('/');
+    // The retired surface decides where its own origin goes — here it just
+    // records the ask — so the foreground url is untouched while Settings owns it.
+    expect(inactiveReplace).toHaveBeenCalledTimes(1);
+    expect(inactiveReplace.mock.calls[0][0]).toMatchObject({ pathname: '/' });
+    expect(screen.getByTestId('location').textContent).toBe('/apps/show/session-1');
   });
 
   it('opens the window and hands back to the canvas on the live surface', () => {

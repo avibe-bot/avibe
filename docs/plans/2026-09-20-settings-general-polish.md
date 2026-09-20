@@ -484,3 +484,59 @@ Non-vacuous — removing the gate fails both.
 with `"files": []` and only project references. The real typecheck is `tsc -b`,
 which is what `npm run build` runs — and it caught a nullability error in the
 first version of the hook that the vacuous command had reported clean.
+
+## Review round 4: a command route is not a place
+
+Fourth findings-bearing head, same class, so the breaker applies again and the
+diagnosis goes up another level. This time it reaches something I wrote in
+round 1 and then reasoned from three times.
+
+Round 1 claimed that `RouteSurfaceActivityBoundary` "already refuses the
+redirect" from a retired surface, and deferred `ShowPageRoute`'s whole handoff
+on that basis. The boundary does no such thing. It swallows `go` and `push`,
+but `replace` is *diverted* to `inactiveReplace`, and
+`SettingsOverlayRouteSurface` always supplies one. The claim came from the
+round-1 test itself, which rendered the boundary without that prop and so
+manufactured the premise it went on to verify. The round-3 note repeated it and
+extended the same gate to `LibraryRoute`.
+
+With the real boundary in view, the deferral is the defect Codex reported: a
+command that waits is a command that fires later, once the user has moved on.
+Both gates are removed. `ShowPageRoute` and `LibraryRoute` run when they are
+asked, retired or not, and neither half reaches over the foreground — the
+window manager withholds the announcement (round 3) and the boundary routes the
+redirect to the surface. `LibraryRoute` is not lazily loaded, so its gate was
+unreachable on top of being wrong.
+
+Removing the deferral is necessary and not sufficient. The exit had the same
+bug by a second road:
+
+`replaceBackground` rewrote the retained origin's *location* and kept its
+recorded `historyIndex`. That index names the history entry the origin was read
+from, and that entry still holds the pre-rewrite url. `closeSettingsOverlay`
+prefers a history pop whenever the index is usable, so leaving Settings landed
+back on the command url, mounted the command a second time, and raised its
+window over the app the user had just picked from the launcher — Codex's
+scenario exactly, reproduced with the deferral already gone. The rewrite now
+clears the index, so the exit replaces forward onto where the origin actually
+is.
+
+Unconditional, including a rewrite that only carries new state. Two rules would
+have let the same surface answer differently for a url change and a state
+change, and the state case is not benign either: the existing
+"maintains only the retained origin" test asserts the rewrite survives the
+exit, which was true in jsdom only because a memory router leaves
+`history.state` null. One rule makes that assertion true in a browser too.
+
+Rejected: Codex's proposed "a window-caused Settings exit supersedes pending
+handoffs", which adds a concept to carry the deferral rather than removing it;
+and abandoning a handoff that cannot run, which silently drops a navigation the
+user asked for.
+
+Evidence. `ShowPageRoute.test.tsx`'s handoff describe is rewritten around a real
+`inactiveReplace` — the prop whose absence caused this. Two surface tests pin
+the exit against a seeded `history.state.idx`, and both fail without the index
+fix. `C-SETTINGS-10` plays the reported gesture end to end in a browser, where
+the history stack is real: hold the lazy chunk, open inline Settings, release
+it, pick Files from the launcher, and require Files to stay in front. It fails
+against either half of the fix reverted on its own.
