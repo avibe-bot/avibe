@@ -112,15 +112,16 @@ reconcile the final exact wheel/version/hash and installation authority.
 The user approves the sanitized title/body, public repository and official actor
 once. The helper commits the exact payload and UUID before POST and retains a
 private attempt outbox under AVIBE_HOME (default ~/.avibe). `resume UUID` only
-reads status in every phase. Prior definitive429+minimal404 is retained separately
-from sending intent. Only a later explicit identical submit first obtaining a
-fresh minimal404 may attempt one same-ID/bytes delivery. Unavailable/malformed/
-redirected status suppresses upload. Every observed server receipt permanently
-revokes recovery; terminal evidence never regresses under concurrent updates.
-An interrupted recovery is reported unknown, not rate limited based on old
-history. This relies on the fixed receiver's unreset ledger coalescing original
-and recovery deliveries into at most one GitHub write. An initial unknown
-without429 history cannot be replayed. See the launch plan's complete state table.
+reads status in every phase. A directly observed POST429 is retained separately
+from the next status query and sending intent. Only a later explicit identical
+submit first obtaining a fresh minimal404 may attempt one same-ID/bytes delivery.
+Unavailable/malformed/redirected status suppresses upload. Every observed server
+receipt permanently revokes recovery; terminal evidence never regresses under
+concurrent updates. An interrupted recovery is reported unknown, not rate
+limited based on old history. This relies on the fixed receiver's unreset ledger
+coalescing original and recovery deliveries into at most one GitHub write. An
+initial unknown without observed429 history cannot be replayed. See the launch
+plan's complete state table.
 Saved terminal receipts survive polling outages. Security, vulnerability and
 private reports stay off this public route. Existing direct user-authorized
 GitHub behavior remains supported.

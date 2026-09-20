@@ -190,8 +190,11 @@ Linux live commissioning, write permission or universal client distribution.
 
 First review refinement: worker slot rejection before claiming a pending row
 persists a known no-write failed receipt. A native pre-reservation 429 instead
-leaves no service receipt; the client requires both 429 and receipt 404, durably records that result and
-permits only a later explicit identical submit with the same saved ID/bytes.
+leaves no service receipt; the client durably records the directly observed POST
+status before polling its receipt, even when the following status request is
+busy, unavailable, malformed or interrupted. That observation is history, not
+proof that no concurrent delivery exists. Only a later explicit identical
+submit that gets a fresh minimal 404 may send the same saved ID and bytes.
 Resume remains status-only. Saved verified terminal receipts survive polling
 outages, and client state honors AVIBE_HOME. Artifact verification uses explicit
 errors so optimized Python cannot remove commissioning checks.
@@ -212,26 +215,31 @@ same-bytes recovery delivery can coalesce with an older arriving delivery only
 because reserve/claim are atomic and no receipt is reset or evicted. Delivery
 recovery is not permission for a second GitHub operation.
 
-Client state separates the historical eligibility flag (`retryable`, meaning a
-previous definitive POST429 plus minimal GET404) from phase and send generation:
+The current state table below incorporates the R4 amendment; R2 originally
+required both POST429 and GET404 to acquire history, now superseded. Client
+state separates the historical rejection flag (`retryable`, meaning a
+directly observed POST429 with no saved receipt) from phase and send generation.
+It is retained independently of the next status request; a new explicit submit
+still needs a fresh minimal 404 before it may send:
 
 | Evidence / phase | Publicly reported result | Explicit identical submit | resume |
 | --- | --- | --- | --- |
 | Initial sending/unknown, no rejection history | unknown until valid receipt | GET only, even after404 | GET only |
-| Historical429+404, rate_limited | local rate_limited admission | GET first; minimal404 permits one same-ID/bytes send | GET only |
-| Historical429+404, sending interrupted/uncertain | unknown; prior rejection does not describe current send | GET first; minimal404 permits one recovery delivery | GET only |
+| Observed429, rate_limited | local rate_limited admission; another delivery may exist | GET first; minimal404 permits one same-ID/bytes send | GET only |
+| Observed429, sending interrupted/uncertain | unknown; prior rejection does not describe current send | GET first; minimal404 permits one recovery delivery | GET only |
 | Any observed pending/unknown receipt | saved server state | GET only permanently | GET only |
 | Verified created/failed | saved terminal receipt, including URL | GET only permanently | GET only |
 
 Before every explicit recovery send, valid pending/unknown/created/failed settles
 eligibility permanently. Unavailable, malformed, redirected or other responses
-suppress delivery. A GET404 without historical eligibility grants nothing. A
+suppress delivery. A GET404 without historical observed429 grants nothing. A
 fresh minimal404 permits exactly one delivery attempt in that invocation; the
 client commits sending plus a generation while retaining historical evidence.
-Only that generation's429+404 can record rate_limited. All receipt merges run in
-transactions: terminal evidence never regresses, unknown never returns to
-pending, and late rejection cannot restore rights over an observed reservation.
-Old rows lacking eligibility remain conservative; no unknown reset is added.
+Only a directly observed 429 for that generation records rate_limited. All
+receipt merges run in transactions: terminal evidence never regresses, unknown
+never returns to pending, and late rejection cannot restore rights over an
+observed reservation. Old rows lacking eligibility remain conservative; no
+unknown reset is added.
 
 Artifact preparation imports the existing side-effect-free platform selector
 and safe extractor from core.managed_runtime. The executing platform chooses
@@ -261,3 +269,48 @@ It retains exact ID/bytes, one POST/Issue, actual readback and GET-only resume
 assertions; cleanup releases barriers and joins/reaps owned resources. Production
 bytes remain identical. No subsequent head is pushed during the pending6365f99
 Codex review; actual findings must first be reconciled against the two-head history.
+
+## PM R4 rejection-evidence decision (2026-09-20)
+
+At exact head e32351d5b, Codex finding4056419180 identified a second boundary in
+the same admission/outcome lifecycle class: a POST429 was discarded when the
+following public status request was itself busy. PM independently reproduced
+POST429 followed by GET429 and GET503, then a later GET404; resume and identical
+submit performed no second POST. The prior requirement that eligibility needed
+429 plus 404 is superseded only by the rules in this section. The durable counts
+remain three findings-bearing heads; lifecycle appears on all three, and the
+writer paused before editing.
+
+The client now records a directly observed POST429 with the current generation,
+phase and absence of a saved receipt before reading an optional POST body or
+starting another request. That local rejection is evidence about that delivery,
+not proof that no concurrent or prior delivery exists. A later failure, busy
+response, timeout, disconnect, malformed body or invalid status receipt cannot
+erase it. A new explicit identical submit must still receive a fresh minimal
+GET404 before one same-ID, same-byte delivery; resume remains GET-only. Any
+valid pending, unknown, failed or created receipt permanently wins and removes
+replay eligibility. An initial timeout, 5xx or disconnect without observed429
+remains conservative and cannot become replayable merely because a later GET404
+appears. POST status is authoritative for this local observation; its body is
+optional data and cannot select a destination or grant permission.
+
+The exact e323 source was exercised through an isolated UI HTTP server and the
+packaged Runtime5e31. The candidate TS handler and `runWorker` were unchanged.
+The probe used only a fixed temporary executable through `AVIBE_FEEDBACK_PYTHON`
+to hold child slots by loopback IPC; it did not invoke Vault or GitHub. Runtime
+compilation showed that POST and GET have separate active counters: four held
+POST children caused the fifth POST to return the native status-only rejection
+and left no receipt, while GET still started an independent child and returned
+404. Four held GET children caused the fifth GET to return429 while POST still
+started an independent child and returned202. All child processes, handlers,
+listeners and the Runtime exited cleanly. The probe's JSON evidence and source
+hashes were delivered to PM; this admission probe does not replace the
+separately recorded real Vault/GitHub-fake integration.
+
+The bounded continuation updates only the existing Skill helper, focused client
+consumers, Skill reference and launch documentation. It adds no queue, endpoint,
+receiver schema, Runtime/core/UI change or automatic retry. Tests cover every
+status-query outcome after observed429, status-independent POST body handling,
+interruption after the durable observation, fresh404-gated recovery, monotonic
+server receipt precedence and the existing one-write race. Any new finding in
+this lifecycle class returns to PM before another edit or push.

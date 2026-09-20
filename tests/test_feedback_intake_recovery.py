@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -34,12 +35,30 @@ def intake(github, monkeypatch):
             self.end_headers()
             try:
                 self.wfile.write(raw)
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError):
                 pass
 
         def do_GET(self):  # noqa: N802
+            with self.server.lock:
+                self.server.status_threads.append(threading.current_thread())
+            self.server.status_calls.append(self.path)
             mode = self.server.status_mode
-            if mode == "unavailable":
+            if mode == "busy":
+                self.send(429, {})
+            elif mode == "disconnect":
+                self.close_connection = True
+            elif mode == "stall":
+                self.server.status_entered.set()
+                if not self.server.status_release.wait(30):
+                    raise RuntimeError("Status barrier timed out")
+                self.send(404, {})
+            elif mode == "invalid_json":
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'not JSON')
+            elif mode == "oversize":
+                self.send(404, "x" * 32769)
+            elif mode == "unavailable":
                 self.send(503, {})
             elif mode == "malformed404":
                 self.send(404, {"not": "a fixed receipt response"})
@@ -66,7 +85,28 @@ def intake(github, monkeypatch):
                 self.server.handlers[index] = record
             try:
                 if self.server.rate_limit:
-                    self.send(429,{})
+                    if self.server.post_status == "disconnect":
+                        self.close_connection = True
+                        return
+                    mode = self.server.post_body
+                    raw = {"normal": b"{}", "empty": b"", "nonjson": b"observed 429",
+                           "oversize": b"x" * 32769, "stall": b"", "truncated": b"{}"}[mode]
+                    self.send_response(self.server.post_status)
+                    if self.server.post_status == 302:
+                        self.send_header("Location", "/api/feedback-status?request_id=redirected")
+                    self.send_header("Content-Length", str(100 if mode in ("stall", "truncated") else len(raw)))
+                    self.end_headers()
+                    self.wfile.flush()
+                    if mode == "stall":
+                        self.server.body_entered.set()
+                        if not self.server.body_release.wait(30):
+                            raise RuntimeError("POST body barrier timed out")
+                    if mode == "truncated":
+                        self.close_connection = True
+                    try:
+                        self.wfile.write(raw)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
                     return
                 if index >= 3:
                     self.server.recovery_arrived.set()
@@ -116,6 +156,10 @@ def intake(github, monkeypatch):
     server.readback_entered, server.readback_release = threading.Event(), threading.Event()
     server.lock = threading.Lock()
     server.rate_limit = True
+    server.post_body, server.post_status = "normal", 429
+    server.status_calls, server.status_threads = [], []
+    server.status_entered, server.status_release = threading.Event(), threading.Event()
+    server.body_entered, server.body_release = threading.Event(), threading.Event()
     server.status_mode = "normal"
     server.delay_upload = None
     server.disconnect = False
@@ -142,13 +186,19 @@ def intake(github, monkeypatch):
         server.release.set()
         server.reserved.set()
         server.readback_release.set()
+        server.status_release.set()
+        server.body_release.set()
         server.shutdown()
         thread.join(2)
         with server.lock:
             handlers = list(server.handlers.values())
+            status_threads = list(server.status_threads)
         for record in handlers:
             record["thread"].join(28)
             assert not record["thread"].is_alive(), "Intake handler did not terminate"
+        for status_thread in status_threads:
+            status_thread.join(3)
+            assert not status_thread.is_alive(), "Status handler did not terminate"
         server.server_close()
         assert not server.errors, server.errors
 
@@ -264,17 +314,187 @@ def test_original_delivery_races_explicit_recovery_one_github_write(intake, winn
             recovery.communicate(timeout=3)
 
 
-@pytest.mark.parametrize("status_mode",["unavailable","malformed","malformed404","redirect"])
-def test_interrupted_retry_recovery_requires_available_absent_receipt(intake,status_mode):
-    server, _, _=intake
+@pytest.mark.parametrize("status_mode", [
+    "busy", "unavailable", "disconnect", "stall", "invalid_json", "oversize", "malformed",
+    "malformed404", "redirect",
+])
+def test_observed_429_survives_every_status_failure_until_fresh_absence(intake, status_mode):
+    server, upstream, worker = intake
+    server.status_mode = status_mode
+    if status_mode == "stall":
+        first_process = subprocess.Popen(
+            COMMAND, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        try:
+            first_process.stdin.write(BODY)
+            first_process.stdin.close()
+            first_process.stdin = None
+            assert server.status_entered.wait(5)
+            assert row()["retryable"] == 1 and server.uploads
+            # Preserve the real ten-second network timeout; the release is
+            # cleanup, so a successful response cannot masquerade as timeout.
+            stdout, stderr = first_process.communicate(timeout=13)
+            assert first_process.returncode == 3, stderr.decode()
+            first = subprocess.CompletedProcess(COMMAND, first_process.returncode, stdout, stderr)
+        finally:
+            server.status_release.set()
+            if first_process.poll() is None:
+                first_process.kill()
+            first_process.communicate(timeout=3)
+    else:
+        first = run_submit()
+    request_id = json.loads(first.stdout)["request_id"]
+    if status_mode == "stall":
+        server.status_mode = "busy"
+    assert json.loads(first.stdout)["admission"] == "rate_limited"
+    assert row()["request_id"] == request_id
+    assert row()["retryable"] == 1 and row()["phase"] == "rate_limited"
+    resumed = subprocess.run([sys.executable, str(HELPER), "resume", request_id], capture_output=True, timeout=15)
+    assert json.loads(resumed.stdout)["admission"] == "rate_limited"
+    suppressed = run_submit()
+    assert json.loads(suppressed.stdout)["admission"] == "rate_limited"
+    assert len(server.uploads) == 1
+    server.status_mode = "normal"
+    server.rate_limit = False
+    resumed = subprocess.run([sys.executable, str(HELPER), "resume", request_id], capture_output=True, timeout=5)
+    assert json.loads(resumed.stdout)["admission"] == "rate_limited" and len(server.uploads) == 1
+    recovered = run_submit()
+    assert recovered.returncode == 0, recovered.stderr.decode()
+    assert json.loads(recovered.stdout)["request_id"] == request_id
+    assert len(server.uploads) == 2 and server.uploads[0] == server.uploads[1]
+    assert sum(call[0] == "POST" for call in upstream.calls) == len(upstream.issues) == 1
+    assert worker.receipt(request_id)["state"] == "created" and row()["retryable"] == 0
+
+
+@pytest.mark.parametrize("post_body", ["normal", "empty", "nonjson", "oversize", "truncated", "stall"])
+def test_observed_429_is_saved_before_post_body_is_consumed(intake, post_body):
+    server, upstream, worker = intake
+    server.post_body = post_body
+    if post_body == "stall":
+        # Observe the committed callback with IPC, then leave the actual body
+        # blocked until the normal network timeout returns. No shortened limit.
+        script = '''
+import importlib.util,socket,sys
+spec=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
+channel=socket.socket(fileno=int(sys.argv[2]));channel.settimeout(5)
+original=c._record_rejection
+def recorded(*args):
+ original(*args)
+ channel.sendall(b'1')
+c._record_rejection=recorded
+sys.argv=[sys.argv[1],*sys.argv[3:]];sys.exit(c.main())
+'''
+        parent, child_socket = socket.socketpair()
+        parent.settimeout(5)
+        first_process = subprocess.Popen(
+            [sys.executable, "-c", script, str(HELPER), str(child_socket.fileno()), *COMMAND[2:]],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(child_socket.fileno(),),
+        )
+        child_socket.close()
+        try:
+            first_process.stdin.write(BODY)
+            first_process.stdin.close()
+            first_process.stdin = None
+            assert parent.recv(1) == b"1" and server.body_entered.wait(5)
+            assert row()["retryable"] == 1 and row()["phase"] == "rate_limited"
+            assert first_process.poll() is None and server.status_calls == []
+            stdout, stderr = first_process.communicate(timeout=13)
+            assert first_process.returncode == 3, stderr.decode()
+            first = subprocess.CompletedProcess(COMMAND, first_process.returncode, stdout, stderr)
+        finally:
+            server.body_release.set()
+            parent.close()
+            if first_process.poll() is None:
+                first_process.kill()
+            first_process.communicate(timeout=3)
+    else:
+        first = run_submit()
+    request_id = json.loads(first.stdout)["request_id"]
+    assert json.loads(first.stdout)["admission"] == "rate_limited"
+    assert row()["request_id"] == request_id
+    assert row()["retryable"] == 1 and row()["phase"] == "rate_limited"
+    assert len(server.uploads) == 1
+    server.rate_limit = False
+    resumed = subprocess.run([sys.executable, str(HELPER), "resume", request_id], capture_output=True, timeout=5)
+    assert json.loads(resumed.stdout)["admission"] == "rate_limited" and len(server.uploads) == 1
+    recovered = run_submit()
+    assert recovered.returncode == 0, recovered.stderr.decode()
+    assert json.loads(recovered.stdout)["request_id"] == request_id
+    assert server.uploads[0] == server.uploads[1]
+    assert sum(call[0] == "POST" for call in upstream.calls) == len(upstream.issues) == 1
+    assert worker.receipt(request_id)["state"] == "created"
+
+
+@pytest.mark.parametrize("post_status", [202, 302, 400, 503, "disconnect"])
+def test_no_rejection_is_inferred_from_non429_or_error_text(intake, post_status):
+    server, upstream, _ = intake
+    server.post_status, server.post_body = post_status, "nonjson"
+    first = run_submit()
+    request_id = json.loads(first.stdout)["request_id"]
+    assert json.loads(first.stdout)["state"] == "unknown"
+    assert row()["retryable"] == 0
+    assert all("redirected" not in path for path in server.status_calls)
+    server.status_mode = "busy"
+    assert json.loads(run_submit().stdout)["state"] == "unknown"
+    server.status_mode = "normal"
+    resumed = subprocess.run([sys.executable, str(HELPER), "resume", request_id], capture_output=True, timeout=5)
+    assert json.loads(resumed.stdout)["state"] == "unknown"
+    assert json.loads(run_submit().stdout)["state"] == "unknown"
+    assert len(server.uploads) == 1 and not upstream.issues and row()["retryable"] == 0
+
+
+def test_observed_429_survives_a_kill_before_status_poll(intake):
+    server, upstream, worker = intake
+    # Kill immediately after the real transaction commits, before response body
+    # consumption or the first GET. No timing assumption or file polling.
+    script = """
+import importlib.util, os, signal, sys
+spec = importlib.util.spec_from_file_location('client', sys.argv[1])
+client = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(client)
+original = client._record_rejection
+def recorded(*args):
+    original(*args)
+    os.kill(os.getpid(), signal.SIGKILL)
+client._record_rejection = recorded
+sys.argv = sys.argv[1:]
+client.main()
+"""
+    killed = subprocess.run([sys.executable, "-c", script, *COMMAND[1:]],
+                            input=BODY, capture_output=True, timeout=5)
+    assert killed.returncode == -signal.SIGKILL
+    request_id = row()["request_id"]
+    assert row()["retryable"] == 1 and row()["phase"] == "rate_limited"
+    assert server.status_calls == [] and len(server.uploads) == 1
+    assert worker._row(request_id) is None
+    resumed = subprocess.run([sys.executable, str(HELPER), "resume", request_id],
+                             capture_output=True, timeout=5)
+    assert json.loads(resumed.stdout)["admission"] == "rate_limited"
+    assert len(server.uploads) == 1
+    server.rate_limit = False
+    recovered = run_submit()
+    assert recovered.returncode == 0, recovered.stderr.decode()
+    assert json.loads(recovered.stdout)["request_id"] == request_id
+    assert server.uploads[0] == server.uploads[1]
+    assert sum(call[0] == "POST" for call in upstream.calls) == len(upstream.issues) == 1
+    assert worker.receipt(request_id)["state"] == "created" and row()["retryable"] == 0
+
+
+@pytest.mark.parametrize("status_mode", ["busy", "unavailable", "disconnect", "invalid_json",
+                                         "malformed", "malformed404", "redirect"])
+def test_interrupted_retry_recovery_requires_available_absent_receipt(intake, status_mode):
+    server, _, _ = intake
     run_submit()
-    client=load_client();db=client._database();request_id=row()["request_id"]
-    assert client._claim_recovery(db,request_id) is not None
+    client = load_client()
+    with client._database() as db:
+        assert client._claim_recovery(db, row()["request_id"]) is not None
     db.close()
-    server.rate_limit=False;server.status_mode=status_mode
-    result=run_submit()
+    server.rate_limit = False
+    server.status_mode = status_mode
+    result = run_submit()
     assert json.loads(result.stdout)["state"] == "unknown"
-    assert len(server.uploads)==1 and row()["retryable"]==1
+    assert len(server.uploads) == 1 and row()["retryable"] == 1
 
 
 @pytest.mark.parametrize("state",["pending","unknown","failed","created"])
@@ -368,42 +588,53 @@ def test_legacy_outbox_loads_conservatively(intake):
     assert len(server.uploads)==1 and row()["retryable"]==0
 
 
-def test_concurrent_status_process_settles_before_late_rejection(intake,tmp_path):
-    server,_,worker=intake
-    request_id=json.loads(run_submit().stdout)["request_id"]
-    # Pause one actual helper after it has read the old404 response but before
-    # saving its late429. Another process observes the real reserved receipt.
-    script='''
-import importlib.util,sys,pathlib,time
+@pytest.mark.parametrize("state", ["pending", "unknown", "failed", "created"])
+def test_concurrent_status_process_settles_before_late_rejection(intake, state):
+    server, upstream, worker = intake
+    request_id = json.loads(run_submit().stdout)["request_id"]
+    # Pause at the actual 429 persistence boundary; a separate status process
+    # observes a real receiver row before the late callback tries its CAS.
+    script = '''
+import importlib.util,sys,socket
 spec=importlib.util.spec_from_file_location('c',sys.argv[1]);c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
-marker=pathlib.Path(sys.argv[2]);release=pathlib.Path(sys.argv[3]);original=c._record_rejection
-def late(*a):
- marker.write_text('ready')
- while not release.exists():time.sleep(.01)
- return original(*a)
+channel=socket.socket(fileno=int(sys.argv[2]));channel.settimeout(8)
+original=c._record_rejection
+def late(*args):
+ channel.sendall(b'ready')
+ if channel.recv(1)!=b'1':raise RuntimeError('Missing release')
+ return original(*args)
 c._record_rejection=late
-sys.argv=[sys.argv[1],*sys.argv[4:]];sys.exit(c.main())
+sys.argv=[sys.argv[1],*sys.argv[3:]];sys.exit(c.main())
 '''
-    marker,release=tmp_path/'ready',tmp_path/'release'
-    late=subprocess.Popen([sys.executable,"-c",script,str(HELPER),str(marker),str(release),*COMMAND[2:]],
-                          stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    late.stdin.write(BODY);late.stdin.close();late.stdin=None
+    parent, child_socket = socket.socketpair()
+    parent.settimeout(5)
+    late = subprocess.Popen([sys.executable, "-c", script, str(HELPER), str(child_socket.fileno()), *COMMAND[2:]],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            pass_fds=(child_socket.fileno(),))
+    child_socket.close()
+    late.stdin.write(BODY); late.stdin.close(); late.stdin = None
     try:
-        import time
-        for _ in range(500):
-            if marker.exists():break
-            time.sleep(.01)
-        assert marker.exists()
-        payload=worker._parse_payload(server.uploads[0]);worker.reserve(payload)
-        worker._update(request_id,state='unknown')
-        observed=subprocess.run([sys.executable,str(HELPER),'resume',request_id],capture_output=True,timeout=10)
-        assert json.loads(observed.stdout)['state']=='unknown'
-        release.write_text('go')
-        late.communicate(timeout=5)
-        assert row()['retryable']==0 and row()['phase']=='observed'
-        assert json.loads(row()['receipt'])['state']=='unknown'
-        server.status_mode='unavailable';run_submit()
-        assert len(server.uploads)==2
+        assert parent.recv(5) == b"ready"
+        payload = worker._parse_payload(server.uploads[0])
+        token = worker.reserve(payload)
+        if state == "created":
+            subprocess.run([sys.executable, str(WORKER), "execute", request_id, token], check=True, timeout=5)
+        elif state != "pending":
+            worker._update(request_id, state=state)
+        observed = subprocess.run([sys.executable, str(HELPER), "resume", request_id], capture_output=True, timeout=5)
+        expected = worker.receipt(request_id)
+        assert json.loads(observed.stdout) == expected
+        server.status_mode = "busy"
+        parent.sendall(b"1")
+        stdout, stderr = late.communicate(timeout=5)
+        assert json.loads(stdout) == expected, stderr.decode()
+        assert row()["retryable"] == 0 and row()["phase"] == "observed"
+        server.status_mode = "unavailable"
+        assert json.loads(run_submit().stdout) == expected
+        assert len(server.uploads) == 2
+        assert len(upstream.issues) == int(state == "created")
     finally:
-        release.write_text('go')
-        if late.poll() is None:late.kill();late.wait()
+        parent.close()
+        if late.poll() is None:
+            late.kill()
+        late.communicate(timeout=3)

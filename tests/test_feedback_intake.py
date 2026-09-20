@@ -564,8 +564,8 @@ def test_runtime_manifest_validation_survives_optimized_python(tmp_path):
     assert not destination.exists()
 
 
-@pytest.mark.parametrize("receipt_state", ["failed", "created", "unavailable"])
-def test_429_requires_absent_receipt_and_terminal_receipt_wins(github, tmp_path, receipt_state):
+@pytest.mark.parametrize("receipt_state", ["pending", "unknown", "failed", "created", "unavailable"])
+def test_429_history_survives_unavailable_receipt_and_server_evidence_wins(github, tmp_path, receipt_state):
     class Handler(BaseHTTPRequestHandler):
         posts = 0
         def do_POST(self):  # noqa: N802
@@ -591,10 +591,14 @@ def test_429_requires_absent_receipt_and_terminal_receipt_wins(github, tmp_path,
     try:
         for _ in range(2):
             result = subprocess.run(command,input=b"body",env=env,capture_output=True)
-            assert json.loads(result.stdout)["state"] == ("unknown" if receipt_state == "unavailable" else receipt_state)
+            value = json.loads(result.stdout)
+            if receipt_state == "unavailable":
+                assert value["admission"] == "rate_limited" and value["retryable"] is True
+            else:
+                assert value["state"] == receipt_state
         assert Handler.posts == 1
         with sqlite3.connect(Path(env["AVIBE_HOME"]) / "state/feedback-intake/outbox.sqlite") as db:
-            assert db.execute("SELECT retryable FROM attempts").fetchone()[0] == 0
+            assert db.execute("SELECT retryable FROM attempts").fetchone()[0] == int(receipt_state == "unavailable")
     finally:
         server.shutdown()
         thread.join(2)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -42,7 +43,7 @@ def _share_base():
     return OFFICIAL_SHARE_BASE_URL
 
 
-def _request(path, *, body=None):
+def _request(path, *, body=None, on_status=None):
     req = urllib.request.Request(_share_base() + path, data=body,
                                  headers={"Content-Type": "application/json"})
     opener = urllib.request.build_opener(NoRedirect(), urllib.request.ProxyHandler({}))
@@ -51,10 +52,14 @@ def _request(path, *, body=None):
     except urllib.error.HTTPError as exc:
         response = exc
     with response:
+        # POST admission is conveyed by HTTP status. Persist observed rejection
+        # before reading an optional body or starting another network operation.
+        if on_status is not None:
+            on_status(response.code)
         raw = response.read(MAX_REQUEST_BYTES + 1)
         if len(raw) > MAX_REQUEST_BYTES:
             raise ValueError()
-        return response.code, json.loads(raw)
+        return response.code, None if body is not None else json.loads(raw)
 
 
 def _valid_receipt(receipt, request_id):
@@ -87,8 +92,9 @@ def _database():
         db.execute("ALTER TABLE attempts ADD COLUMN retryable INTEGER NOT NULL DEFAULT 0")
     if "phase" not in columns:
         db.execute("ALTER TABLE attempts ADD COLUMN phase TEXT NOT NULL DEFAULT 'unknown'")
-        # The old flag proves only a previous definitive 429+404. A missing flag
-        # or saved receipt cannot be promoted by a later 404 into replay rights.
+        # The old flag proves a previous 429+404, a safe subset of observed429.
+        # A missing flag or saved receipt cannot be promoted by a later 404
+        # into replay rights.
         db.execute("UPDATE attempts SET phase='rate_limited' WHERE retryable=1 AND receipt IS NULL")
         db.execute("UPDATE attempts SET retryable=0,phase='observed' WHERE receipt IS NOT NULL")
     if "generation" not in columns:
@@ -143,7 +149,8 @@ def _claim_recovery(db, request_id):
 
 def _record_rejection(db, request_id, generation):
     # A late response cannot overwrite newer sending intent or restore rights
-    # over another process's receipt. Only this exact send's 429+404 qualifies.
+    # over another process's receipt. Only this exact send's observed429 qualifies;
+    # it grants no send without a later explicit invocation's fresh minimal404.
     with db:
         db.execute("UPDATE attempts SET retryable=1,phase='rate_limited' WHERE request_id=? "
                    "AND generation=? AND phase='sending' AND receipt IS NULL", (request_id, generation))
@@ -228,18 +235,18 @@ def main():
                     _observe(db, request_id, found)
                 elif status == 404 and found == {}:
                     generation = _claim_recovery(db, request_id)
-        post_status = 0
         if generation is not None:
+            def admission(status):
+                if status == 429:
+                    _record_rejection(db, request_id, generation)
             try:
-                post_status, _ = _request("/api/feedback", body=payload)
-            except (OSError, ValueError, urllib.error.URLError):
+                _request("/api/feedback", body=payload, on_status=admission)
+            except (OSError, ValueError, urllib.error.URLError, HTTPException):
                 pass  # A possible write remains unknown, including retries.
         status, found = _poll(request_id)
         if status == 200:
             _observe(db, request_id, found)
-        elif generation is not None and post_status == 429 and status == 404 and found == {}:
-            _record_rejection(db, request_id, generation)
-    except (OSError, ValueError, urllib.error.URLError, RecursionError, TotalDeadline):
+    except (OSError, ValueError, urllib.error.URLError, HTTPException, RecursionError, TotalDeadline):
         pass
     finally:
         if hasattr(signal, "SIGALRM"):
@@ -250,7 +257,7 @@ def main():
         db.close()
     if rate_limited:
         print(json.dumps({"request_id": request_id, "admission": "rate_limited", "retryable": True}))
-        print("Last delivery was rate limited (429+404). Explicit identical submit may recover this same ID after a fresh receipt check; resume is GET-only.", file=sys.stderr)
+        print("Observed 429 for the last delivery; another delivery of this ID may exist. Explicit identical submit requires a fresh absent receipt before sending; resume is GET-only.", file=sys.stderr)
         return 3
     print(json.dumps(result, ensure_ascii=False))
     if result["state"] != "created":

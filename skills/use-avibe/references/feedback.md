@@ -287,12 +287,13 @@ for approval. For a feature use `feature`. Bounds are 200 title characters,
 20000 UTF-8 body bytes and 32768 encoded request bytes. It prints the request ID
 and only a validated receipt; exit 0 means verified `created`, exit 2 means keep
 this attempt and report its state. Exit 3 means the last delivery received a
-definitive POST429 plus minimal GET404. `resume <request_id>` always performs
-GET only, in every phase.
+directly observed POST429 without a saved server receipt. This local admission
+evidence does not prove that no concurrent delivery exists; `resume <request_id>`
+always performs GET only, in every phase.
 
 Only an explicit identical `submit` can recover a delivery with retained
-429+404 history. Before uploading, it checks the fixed receipt endpoint again:
-a fresh minimal404 permits one attempt with the same ID and exact bytes;
+observed429 history. Before uploading, it checks the fixed receipt endpoint
+again: a fresh minimal404 permits one attempt with the same ID and exact bytes;
 pending/unknown/created/failed permanently revoke this recovery permission.
 Unavailable, malformed, redirected or other replies suppress POST. A generic
 initial unknown attempt never becomes eligible from GET404 alone.
