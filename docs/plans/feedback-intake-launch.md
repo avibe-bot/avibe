@@ -240,3 +240,24 @@ are checked before extraction. The shared extractor supplies legacy Python3.10
 member/link containment, type and collision checks as well as modern data_filter.
 All acceptance/confinement checks remain explicit under -O. Local platform
 success is not Linux guest acceptance. The staged share is private revision2.
+
+## PM R3 independent test evidence reconciliation (2026-09-20)
+
+At exact head 6365f99dc, PM's independent archived-source run produced31passes
+and1failure: the race test queried final status after only the recovery helper
+finished. PM independently reproduced the diagnostic ordering: original handler
+owned the write, ledger held the201identity and unknown while readback was gated,
+and both handler/worker were incomplete. After explicit completion events,
+worker exit0 and verified created appeared, with one upstream POST/Issue throughout.
+The original failed run and diagnostic evidence remain preserved; that head's
+race acceptance was withdrawn pending correction. This is PM consumer evidence,
+not a third Codex findings-bearing head or a product state-model defect.
+
+PM authorized only the recovery fixture/test and this evidence wording to change.
+The test now controls both original-wins/recovery-wins reservation orders,
+observes legitimate unknown during real gated readback, and waits boundedly for
+both upload handlers and the owning worker before asserting verified created.
+It retains exact ID/bytes, one POST/Issue, actual readback and GET-only resume
+assertions; cleanup releases barriers and joins/reaps owned resources. Production
+bytes remain identical. No subsequent head is pushed during the pending6365f99
+Codex review; actual findings must first be reconciled against the two-head history.

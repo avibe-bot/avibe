@@ -61,29 +61,59 @@ def intake(github, monkeypatch):
             with self.server.lock:
                 self.server.uploads.append(raw)
                 index = len(self.server.uploads)
-            if self.server.rate_limit:
-                self.send(429,{})
-                return
-            if index >= 3:
-                self.server.recovery_arrived.set()
-            if self.server.delay_upload == index:
-                self.server.arrived.set()
-                self.server.release.wait(15)
-            payload = worker._parse_payload(raw)
-            token = worker.reserve(payload)
-            if token:
-                subprocess.run([sys.executable,str(WORKER),"execute",payload["request_id"],token],check=False,capture_output=True)
-            if self.server.disconnect:
-                self.server.status_mode = "unavailable"
-                self.close_connection = True
-            else:
-                self.send(202,{"ok":True})
+                record = dict(thread=threading.current_thread(), done=threading.Event(),
+                              worker_done=threading.Event(), worker_exit=None, owns_write=False)
+                self.server.handlers[index] = record
+            try:
+                if self.server.rate_limit:
+                    self.send(429,{})
+                    return
+                if index >= 3:
+                    self.server.recovery_arrived.set()
+                if self.server.delay_upload == index:
+                    self.server.arrived.set()
+                    if not self.server.release.wait(15):
+                        raise RuntimeError("Original delivery barrier timed out")
+                if self.server.reserve_winner and index != self.server.reserve_winner:
+                    if not self.server.reserved.wait(10):
+                        raise RuntimeError("Owning reservation barrier timed out")
+                payload = worker._parse_payload(raw)
+                token = worker.reserve(payload)
+                if index == self.server.reserve_winner:
+                    self.server.reserved.set()
+                if token:
+                    record["owns_write"] = True
+                    with subprocess.Popen([sys.executable,str(WORKER),"execute",payload["request_id"],token],
+                                          stdout=subprocess.PIPE,stderr=subprocess.PIPE) as child:
+                        try:
+                            child.communicate(timeout=25)
+                        finally:
+                            if child.poll() is None:
+                                child.kill()
+                            child.communicate(timeout=3)
+                            record["worker_exit"] = child.returncode
+                            record["worker_done"].set()
+                if self.server.disconnect:
+                    self.server.status_mode = "unavailable"
+                    self.close_connection = True
+                else:
+                    self.send(202,{"ok":True})
+            except Exception as exc:
+                self.server.errors.append(type(exc).__name__)
+                raise
+            finally:
+                record["done"].set()
 
         def log_message(self,*args):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1",0), Handler)
     server.uploads = []
+    server.handlers, server.errors = {}, []
+    server.reserve_winner = None
+    server.reserved = threading.Event()
+    server.gate_readback = False
+    server.readback_entered, server.readback_release = threading.Event(), threading.Event()
     server.lock = threading.Lock()
     server.rate_limit = True
     server.status_mode = "normal"
@@ -94,10 +124,34 @@ def intake(github, monkeypatch):
     thread = threading.Thread(target=server.serve_forever,daemon=True)
     thread.start()
     monkeypatch.setenv("AVIBE_FEEDBACK_TEST_SHARE_BASE_URL",f"http://127.0.0.1:{server.server_port}")
-    yield server, github, worker
-    server.release.set()
-    server.shutdown()
-    thread.join(2)
+    upstream_get = github.RequestHandlerClass.do_GET
+
+    def readback(self):
+        if server.gate_readback and self.path.startswith("/repos/avibe-bot/avibe/issues/"):
+            server.readback_entered.set()
+            if not server.readback_release.wait(10):
+                raise RuntimeError("Readback barrier timed out")
+        return upstream_get(self)
+
+    monkeypatch.setattr(github.RequestHandlerClass, "do_GET", readback)
+    try:
+        yield server, github, worker
+    finally:
+        # Stop accepting work, release every barrier, then join owned handlers.
+        # Their finally blocks reap worker subprocesses before signaling done.
+        server.release.set()
+        server.reserved.set()
+        server.readback_release.set()
+        server.shutdown()
+        thread.join(2)
+        with server.lock:
+            handlers = list(server.handlers.values())
+        for record in handlers:
+            record["thread"].join(28)
+            assert not record["thread"].is_alive(), "Intake handler did not terminate"
+        server.server_close()
+        assert not server.errors, server.errors
+
 
 
 COMMAND = [sys.executable,str(HELPER),"submit","bug","Recover delivery 中文", "--public-confirmed"]
@@ -149,35 +203,65 @@ sys.exit(c.main())
     assert len(upstream.issues) == 1 and row()["retryable"] == 0
 
 
-def test_original_delivery_races_explicit_recovery_one_github_write(intake):
+@pytest.mark.parametrize("winner", [2, 3], ids=["original-wins", "recovery-wins"])
+def test_original_delivery_races_explicit_recovery_one_github_write(intake, winner):
     server, upstream, worker = intake
     first=json.loads(run_submit().stdout)
     server.rate_limit=False
     server.delay_upload=2
+    server.reserve_winner=winner
+    server.gate_readback=True
     original=subprocess.Popen(COMMAND,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    recovery=None
     original.stdin.write(BODY);original.stdin.close()
     try:
         assert server.arrived.wait(5)
         original.kill();original.wait(3)
         assert worker._row(first["request_id"]) is None
         assert row()["phase"] == "sending" and row()["retryable"] == 1
-        # A later explicit recovery sees fresh404 while the original delivery is
-        # still pending in HTTP. Both go through the real reserve/claim ledger.
         recovery=subprocess.Popen(COMMAND,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         recovery.stdin.write(BODY);recovery.stdin.close();recovery.stdin=None
         assert server.recovery_arrived.wait(5)
         server.release.set()
-        stdout,stderr=recovery.communicate(timeout=15)
+        # Exactly one actual worker owns the reservation. The other handler can
+        # finish coalesced admission while the owner is still reading GitHub.
+        assert server.readback_entered.wait(5)
+        loser=3 if winner==2 else 2
+        assert server.handlers[loser]["done"].wait(5)
+        owner=server.handlers[winner]
+        assert owner["owns_write"] and not owner["worker_done"].is_set()
+        assert not owner["done"].is_set()
+        assert not server.handlers[loser]["owns_write"]
+        intermediate=subprocess.run([sys.executable,str(HELPER),"resume",first["request_id"]],capture_output=True,timeout=5)
+        assert json.loads(intermediate.stdout)["state"]=="unknown"
+        pending=worker._row(first["request_id"])
+        assert pending["state"]=="unknown" and pending["issue_id"]==10100
+        assert sum(call[0]=="POST" for call in upstream.calls)==1 and len(upstream.issues)==1
+        server.readback_release.set()
+        assert owner["worker_done"].wait(5) and owner["worker_exit"]==0
+        for index in (2,3):
+            assert server.handlers[index]["done"].wait(5)
+            server.handlers[index]["thread"].join(2)
+            assert not server.handlers[index]["thread"].is_alive()
+        stdout,stderr=recovery.communicate(timeout=5)
         assert recovery.returncode in (0,2),stderr.decode()
-        final=subprocess.run([sys.executable,str(HELPER),"resume",first["request_id"]],capture_output=True,timeout=10)
-        assert json.loads(final.stdout)["state"] == "created"
-        assert len(upstream.issues) == 1 and len(server.uploads) == 3
+        final=subprocess.run([sys.executable,str(HELPER),"resume",first["request_id"]],capture_output=True,timeout=5)
+        expected=dict(schema_version=1,request_id=first["request_id"],state="created",issue_number=100,
+                      issue_url="https://github.com/avibe-bot/avibe/issues/100")
+        assert json.loads(final.stdout)==expected
+        assert worker.receipt(first["request_id"])==expected
+        assert sum(call[0]=="POST" for call in upstream.calls)==1
+        assert len(upstream.issues)==1 and len(server.uploads)==3
         assert all(raw==server.uploads[0] for raw in server.uploads)
     finally:
-        server.release.set()
+        server.release.set();server.reserved.set();server.readback_release.set()
         if original.poll() is None:
-            original.kill();original.wait()
+            original.kill();original.wait(3)
         original.stdout.close();original.stderr.close()
+        if recovery is not None:
+            if recovery.poll() is None:
+                recovery.kill()
+            recovery.communicate(timeout=3)
 
 
 @pytest.mark.parametrize("status_mode",["unavailable","malformed","malformed404","redirect"])
