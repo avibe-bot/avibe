@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
     onMessageNew: (message: ReturnType<typeof projectedMessage>) => void;
     onTurnStart: (data: { session_id: string }) => void;
     onTurnEnd: (data: { session_id: string }) => void;
+    onQueueUpdated: (data: { session_id: string }) => void;
   },
   composer: null as ComposerProps | null,
   authorizationCapabilities: {
@@ -181,6 +182,11 @@ const projectedMessage = (id: string, text: string) => ({
   updated_at: '2026-08-15T00:00:00Z',
   delivered_at: '2026-08-15T00:00:01Z',
   read_at: null,
+});
+
+const queuedMessage = (id: string, text: string) => ({
+  ...projectedMessage(id, text),
+  type: 'queued' as const,
 });
 
 const SessionSwitcher = ({ sessionId = 'session-running', label = 'switch chat', search = '' }: {
@@ -407,6 +413,41 @@ describe('ChatPage transcript hydration', () => {
 
     await waitFor(() => expect(screen.getByText('chat.transcriptEmpty')).toBeTruthy());
     expect(screen.queryByText(projected.text)).toBeNull();
+  });
+
+  it('does not let an older queue refresh overwrite a newer queue snapshot', async () => {
+    const staleRefresh = deferred<{ queued: ReturnType<typeof queuedMessage>[] }>();
+    const currentRefresh = deferred<{ queued: ReturnType<typeof queuedMessage>[] }>();
+    const stale = queuedMessage('queued-stale', 'stale queued row');
+    const current = queuedMessage('queued-current', 'new queued row');
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listSessionQueue
+      .mockReset()
+      .mockReturnValueOnce(staleRefresh.promise)
+      .mockReturnValueOnce(currentRefresh.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.events).not.toBeNull());
+    act(() => {
+      mocks.events?.onQueueUpdated({ session_id: 'session-new' });
+      mocks.events?.onQueueUpdated({ session_id: 'session-new' });
+    });
+    await waitFor(() => expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(2));
+
+    await act(async () => currentRefresh.resolve({ queued: [current] }));
+    await waitFor(() => expect(screen.getByText(current.text)).toBeTruthy());
+
+    await act(async () => staleRefresh.resolve({ queued: [stale] }));
+    expect(screen.getByText(current.text)).toBeTruthy();
+    expect(screen.queryByText(stale.text)).toBeNull();
   });
 
   it.each([
