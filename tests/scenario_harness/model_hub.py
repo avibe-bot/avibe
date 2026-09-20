@@ -152,6 +152,9 @@ class ModelHubScenarioAdapter:
     async def gateway_token(self) -> str:
         return "scenario-engine-token"
 
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        return None
+
     async def provision_transient_credential(
         self,
         vendor: str,

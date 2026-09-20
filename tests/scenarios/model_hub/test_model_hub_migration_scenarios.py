@@ -84,6 +84,7 @@ class MigrationAdapter:
         self.activated: list[str] = []
         self.validated: list[str] = []
         self.keys: dict[str, tuple[str, str, str, str | None]] = {}
+        self.auth_schemes: dict[str, str | None] = {}
 
     async def start(self):
         return EngineStatus(EngineHealth.OK, "fixture", True, "127.0.0.1", 32199, None)
@@ -98,20 +99,29 @@ class MigrationAdapter:
         assert credential_ref in self.activated
         self.validated.append(credential_ref)
 
-    async def matches_api_key_credential(self, credential_ref, vendor, protocol, secret, base_url):
-        return self.keys.get(credential_ref) == (vendor, protocol, secret, base_url)
+    async def matches_api_key_credential(
+        self, credential_ref, vendor, protocol, secret, base_url, *, auth_scheme=None,
+    ):
+        return (
+            self.keys.get(credential_ref) == (vendor, protocol, secret, base_url)
+            and self.auth_schemes.get(credential_ref) == auth_scheme
+        )
+
+    async def credential_auth_scheme(self, credential_ref):
+        return self.auth_schemes.get(credential_ref)
 
     async def provision_transient_credential(
         self,
         vendor: str,
         secret: str,
         base_url: str | None,
-        *, on_reserved=None,
+        *, on_reserved=None, auth_scheme=None,
     ) -> str:
         credential_ref = f"cred_observation_{len(self.transient_refs) + 1}"
         if on_reserved:
             on_reserved(credential_ref)
         self.transient_refs.append(credential_ref)
+        self.auth_schemes[credential_ref] = auth_scheme
         return credential_ref
 
     async def observe_source(
@@ -146,13 +156,14 @@ class MigrationAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
-        *, on_reserved=None,
+        *, on_reserved=None, auth_scheme=None,
     ) -> str:
         credential_ref = f"cred_migration_{len(self.provisioned) + 1}"
         if on_reserved:
             on_reserved(credential_ref)
         self.provisioned.append((vendor, len(secret), credential_ref))
         self.keys[credential_ref] = (vendor, protocol, secret, base_url)
+        self.auth_schemes[credential_ref] = auth_scheme
         return credential_ref
 
     async def provision_oauth_credential(
@@ -907,9 +918,17 @@ def test_opencode_auth_only_custom_provider_without_base_url_is_visible_blocker(
     assert item.selected is False
 
 
-def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
+@pytest.mark.parametrize("base_url,token,allowed", [
+    ("https://bearer-relay.example/v1", "bearer-test-123456", True),
+    ("https://api.anthropic.com", "bearer-test-123456", False),
+    ("https://bearer-relay.example/v1", "sk-ant-oat-fixture", False),
+])
+def test_claude_auth_token_preserves_supported_static_header_semantics(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    base_url: str,
+    token: str,
+    allowed: bool,
 ) -> None:
     native_home = tmp_path / "native-home"
     _write(
@@ -917,8 +936,8 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
         json.dumps(
             {
                 "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "bearer-test-123456",
-                    "ANTHROPIC_BASE_URL": "https://bearer-relay.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN": token,
+                    "ANTHROPIC_BASE_URL": base_url,
                 }
             }
         ),
@@ -927,10 +946,20 @@ def test_claude_auth_token_requires_reauth_without_changing_header_semantics(
     service, store, adapter = _service(tmp_path)
 
     [item] = service.migration_scan()["items"]
+    assert item["selected"] is allowed
+    assert token not in json.dumps(item)
+    if allowed:
+        assert item["proposed_action"] == "import"
+        result = asyncio.run(service.migration_apply([item["id"]]))
+        assert result["applied"] == 1
+        [source] = store.config.sources
+        assert adapter.auth_schemes[source.credential_ref] == "bearer"
+        assert adapter.keys[source.credential_ref][2:] == (token, base_url)
+        assert service.migration_scan()["items"] == []
+        return
+
     assert item["proposed_action"] == "reauth"
-    assert item["selected"] is False
-    assert item["notes_key"] == "settings.models.migration.blocked.credential"
-    assert "bearer-test-123456" not in json.dumps(item)
+    assert item["notes_key"] == "settings.models.migration.blocked.token"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply([item["id"]]))

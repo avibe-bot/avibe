@@ -272,6 +272,9 @@ class FakeAdapter:
     async def credential_supports_refresh(self, credential_ref):
         return credential_ref in self.refreshable_credential_refs
 
+    async def credential_auth_scheme(self, credential_ref):
+        return None
+
     async def provision_transient_credential(self, vendor, secret, base_url):
         self.secret_lengths.append(len(secret))
         self.credential_count += 1

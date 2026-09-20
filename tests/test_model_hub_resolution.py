@@ -202,6 +202,9 @@ class FakeAdapter:
     async def gateway_token(self):
         return "local-test-token"
 
+    async def credential_auth_scheme(self, credential_ref):
+        return None
+
     async def provision_credential(self, vendor, protocol, secret, base_url):
         self.provisioned.append(secret)
         return f"cred_{len(self.provisioned):08d}"
