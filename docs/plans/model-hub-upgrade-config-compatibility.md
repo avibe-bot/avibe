@@ -20,10 +20,12 @@ writer during the upgrade overlap, not lost credentials or a Codex-only bug.
    existing data-directory service-instance lock and before constructing the
    controller. A candidate that cannot acquire that lock cannot migrate the
    live service's config.
-3. Keep the existing explicit `persist_migrations` API, in-memory compatibility
+3. Keep the existing explicit `persist_migrations` API, in-memory legacy-shape
    projection, strict validation, recovery evidence, backup/CAS transaction,
    and bounded stale-snapshot reread. A reread preserves the caller's explicit
-   migration-persistence choice.
+   migration-persistence choice. Non-persisting reads retain the stored runtime
+   intent, rather than activating the uncommitted pending default in memory.
+   This also prevents a store reload from bypassing a failed startup backup/CAS.
 4. Keep the shipped marker, fresh-install defaults, backend routing modes,
    source custody, and one-time runtime promotion unchanged. A subsequent
    deliberate Stop stays stopped across reads and new-service startups.
@@ -56,8 +58,9 @@ blanket unknown-field tolerance, or a gateway retry/fallback.
 
 ## Known-by-design boundaries
 
-- `persist_migrations=False` remains a compatibility projection, not a dump
-  of the raw file. Recoverable malformed files can still produce the existing
+- `persist_migrations=False` remains a legacy-shape compatibility projection,
+  not a dump of the raw file, but no longer previews runtime activation.
+  Recoverable malformed files can still produce the existing
   backup/warning evidence; no recovery default is silently written over them.
 - Existing explicit config mutations can serialize the current schema.
   Backward compatibility after such an authorized write, or a manual

@@ -1802,7 +1802,7 @@ def test_config_reload_does_not_replace_file_when_migration_backup_fails(monkeyp
     config_path.write_text(original, encoding="utf-8")
     monkeypatch.setattr(v2_config, "_backup_config_file", lambda *args, **kwargs: None)
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.model_hub.to_payload() != payload["model_hub"]
     assert config_path.read_text(encoding="utf-8") == original
@@ -2188,7 +2188,7 @@ def test_config_reload_defaults_omitted_legacy_backend_entries(monkeypatch, tmp_
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current), encoding="utf-8")
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.model_hub.agents["codex"].mode == "direct"
     assert loaded.load_warnings == ()
@@ -2354,7 +2354,7 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
         persist_after_concurrent_save,
     )
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2393,7 +2393,7 @@ def test_config_reload_does_not_overwrite_config_changed_before_replace(
         write_after_concurrent_save,
     )
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2808,7 +2808,7 @@ def test_config_reload_drops_valid_retired_consent_metadata(monkeypatch, tmp_pat
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.load_warnings == ()
     persisted = json.loads(config_path.read_text(encoding="utf-8"))

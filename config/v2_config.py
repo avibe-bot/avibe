@@ -3994,9 +3994,16 @@ class V2Config:
         cls,
         config_path: Optional[Path] = None,
         *,
-        persist_migrations: bool = True,
+        persist_migrations: bool = False,
         _migration_reload_depth: int = 0,
     ) -> "V2Config":
+        """Read/project config without implicitly upgrading the shared file.
+
+        A newly installed CLI can coexist with a still-running older service.
+        Only the replacement service's lock-owning startup opts into migration
+        persistence; incidental reads must not invalidate that older reader.
+        Explicit saves remain writes, and recovery keeps its backup evidence.
+        """
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with CONFIG_LOCK:
@@ -4054,7 +4061,10 @@ class V2Config:
         stored_hub = payload.get("model_hub")
         previous_runtime_enabled = isinstance(stored_hub, dict) and stored_hub.get("enabled") is True
         if runtime_default_pending:
-            config.model_hub.enabled = True
+            # Reading an old file is not permission to activate its pending
+            # default. In particular, a store reload after a failed startup
+            # backup/CAS must not undo the failure's disabled-runtime result.
+            config.model_hub.enabled = True if persist_migrations else previous_runtime_enabled
             config.model_hub.runtime_default_applied = True
             migrated = True
         elif migration_warnings or recovery_warnings:
@@ -4090,6 +4100,7 @@ class V2Config:
                 if "file changed" in persistence_warning and _migration_reload_depth == 0:
                     winning_config = cls.load(
                         config_path=path,
+                        persist_migrations=persist_migrations,
                         _migration_reload_depth=1,
                     )
                     winning_config.load_warnings = tuple(

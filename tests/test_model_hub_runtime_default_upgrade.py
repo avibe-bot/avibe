@@ -75,7 +75,7 @@ def test_old_install_promotes_once_and_backs_up_exact_snapshot(tmp_path, enabled
         original["model_hub"]["runtime_default_applied"] = False
     path, raw = write_config(tmp_path, original)
 
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
 
     assert loaded.load_warnings == ()
     assert loaded.model_hub.enabled is True
@@ -102,7 +102,7 @@ def test_default_upgrade_composes_with_existing_shape_migration(tmp_path, alread
     payload["model_hub"]["priority_order"] = []
     path, original = write_config(tmp_path, payload)
 
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
 
     assert loaded.load_warnings == ()
     assert loaded.model_hub.enabled is (not already_applied)
@@ -127,7 +127,7 @@ def test_legacy_omissions_never_consent_to_native_takeover(tmp_path, shape):
         original["model_hub"]["agents"]["claude"]["mode"] = "hub"
     path, _ = write_config(tmp_path, original)
 
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
 
     assert loaded.load_warnings == ()
     assert loaded.model_hub.enabled is True
@@ -141,7 +141,7 @@ def test_legacy_omissions_never_consent_to_native_takeover(tmp_path, shape):
 
 def test_runtime_stop_after_upgrade_survives_subsequent_loads(tmp_path):
     path, _ = write_config(tmp_path, legacy_payload(tmp_path))
-    V2Config.load(config_path=path)
+    V2Config.load(config_path=path, persist_migrations=True)
     # This is the real narrow config transaction used by the Model Hub store.
     stopped = update_config_fields(
         lambda cfg: setattr(cfg.model_hub, "enabled", False),
@@ -166,6 +166,8 @@ def test_service_runtime_stop_round_trips_real_store_with_fake_runtime(tmp_path,
     payload = legacy_payload(tmp_path)
     path, _ = write_config(tmp_path, payload)
     monkeypatch.setattr(v2_config.paths, "get_config_path", lambda: path)
+    # Real service startup commits the upgrade before constructing this store.
+    V2Config.load(config_path=path, persist_migrations=True)
     stop = AsyncMock(return_value=EngineStatus(
         health=EngineHealth.NOT_STARTED,
         installed_version=None,
@@ -279,10 +281,10 @@ def test_unrelated_recovery_defers_old_default_upgrade(tmp_path, shape):
     assert path.read_bytes() == original
 
 
-def test_read_only_preview_does_not_persist_or_create_upgrade_backup(tmp_path):
+def test_read_only_load_preserves_runtime_intent_without_upgrade_backup(tmp_path):
     path, original = write_config(tmp_path, legacy_payload(tmp_path))
     loaded = V2Config.load(config_path=path, persist_migrations=False)
-    assert loaded.model_hub.enabled is True
+    assert loaded.model_hub.enabled is False
     assert loaded.model_hub.runtime_default_applied is True
     assert path.read_bytes() == original
     assert not list(path.parent.glob("config.json.bak-*"))
@@ -301,7 +303,7 @@ def test_both_fields_are_written_in_one_compare_and_swap(tmp_path, monkeypatch):
         return write(target, upgraded, expected_raw)
 
     monkeypatch.setattr(v2_config, "_write_config_payload_if_unchanged", capture)
-    V2Config.load(config_path=path)
+    V2Config.load(config_path=path, persist_migrations=True)
     assert len(calls) == 1
     assert read_config(path) == calls[0]
 
@@ -319,7 +321,7 @@ def test_failed_persistence_does_not_activate_or_stamp_the_upgrade(tmp_path, mon
         monkeypatch.setattr(v2_config, "_backup_config_file", lambda *a, **kw: None)
     else:
         monkeypatch.setattr(v2_config, "_persist_migrated_config_payload", Mock(side_effect=OSError("fixture refusal")))
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
     assert loaded.model_hub.enabled is False
     assert loaded.model_hub.runtime_default_applied is False
     assert loaded.load_warnings
@@ -343,7 +345,7 @@ def test_concurrent_new_stop_wins_over_upgrade_snapshot(tmp_path, monkeypatch):
         return persist(target, expected_raw, upgraded)
 
     monkeypatch.setattr(v2_config, "_persist_migrated_config_payload", concurrent_save)
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
     assert loaded.model_hub.enabled is False
     assert loaded.model_hub.runtime_default_applied is True
     assert loaded.show_duration is True
