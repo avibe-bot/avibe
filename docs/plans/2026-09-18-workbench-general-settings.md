@@ -1,5 +1,52 @@
 # Shared Workbench and General Settings — issue #2012
 
+## PM ruling: queue snapshot ordering (2026-09-20, review 5259163447)
+
+The refreshed head `73a8556ddbcc41f13bb8434a2b4fe2d81aacb060` received one
+new actionable finding, inline `4055864365`, thread `PRRT_kwDOPbFPYs6kGUYR`.
+Independent complete inventory: ten reviews, twelve inline comments, three issue
+comments, eight threads with all nested pages exhausted; seven resolved and this
+one open. This is the sixth findings-bearing head and eighth historical finding.
+The current sixteen observed lint jobs have fourteen successes and two pending;
+CI is not the review gate and does not remove this finding.
+
+Causal diagnosis: send invocation identity protects one mutation's completion,
+but queue snapshots also come from initial/authorization bootstrap, SSE queue
+updates, reconnect recovery and mutation-triggered reads. An older successful
+read can overwrite a newer successful read because all these writes do not share
+an ordering owner. This is a repeated asynchronous stale-state class, so the PM
+has stopped blind patching and inspected every `setQueue`, `refreshQueue`, and
+`sendQueueNow` caller before authorizing the bounded repair below.
+
+The invariant is: within the active route lifetime, an older queue snapshot must
+not overwrite a newer successfully committed snapshot. A failed newer read must
+not by itself discard an older valid successful fallback. Bootstrap and ordinary
+refresh snapshots use the same queue ordering boundary; send-now keeps its
+additional invocation admission guard. Leaving and returning to the same Session
+must not re-admit an earlier route lifetime's reads or mutation completions.
+Inspect optimistic remove and successful recall writes as part of this same queue
+owner: a pre-mutation read must not resurrect a removed row; an explicit recovery
+read may restore the authoritative row when removal fails. Keep existing error,
+loading, Stop, spinner and server-authoritative queue behavior.
+
+Authorized implementation scope is `ChatPage.tsx`, its existing
+`ChatPage.hydration.test.tsx` consumer (and `ChatQueueRow.test.tsx` only if needed),
+and this plan. Reuse the adjacent transcript snapshot ordering pattern where
+appropriate; no shared hook, API, dependency, sidebar, Composer or backend change.
+The prior byte-parity assertion describes the mechanical refresh phase only;
+this separately recorded correctness fix is the sole newly authorized production
+delta over original #2058. No architecture rewrite or owner question is required.
+
+Acceptance requires a deterministic red reproduction on unchanged `73a8556dd`,
+then passing real ChatPage consumers for late post-send versus newer SSE reads,
+bootstrap overlap, route A-to-B-to-A lifetime rejection, and newer-read failure
+fallback; cover remove/recall boundaries if changed. Verify visible queue rows and
+their actions, not only helper internals. Run relevant existing tests, typechecks,
+repository lint and UI build. One implementation lane prepares a local committed
+candidate only; PM independently spot-checks code and consumer evidence before
+pushing. Keep the original PM Watch/cursor unchanged, no manual review trigger or
+CI rerun, and require new exact-head review/CI with this thread addressed afterward.
+
 ## Owner resolution: PR #2058 over #2061 (2026-09-20)
 
 At 10:30 Asia/Shanghai the owner explicitly selected the complete PR #2058
