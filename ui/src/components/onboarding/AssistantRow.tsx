@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, Download, RefreshCw, Sliders } from 'lucide-react';
+import { Check, Download, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -15,6 +15,9 @@ export interface AssistantRowProps {
   detecting: boolean;
   error?: { message: string; output?: string | null };
   lifecycle: ReactNode;
+  /** The action the lifecycle pill offers — update or upgrade-in-flight — drawn
+      opposite the pill on the state row, where the design puts it. */
+  upgrade?: ReactNode;
   enabledControl: ReactNode;
   onInstall: () => void;
   onDetect: () => void;
@@ -40,20 +43,24 @@ export interface AssistantRowProps {
  * being swapped for another. `geometry.spec.ts` holds both steps to the same boxes,
  * which is what keeps that true as either step changes.
  */
-export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, enabledControl,
+export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, upgrade, enabledControl,
   onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, connectionPending, connectionError }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
   return (
     <Card className="onboarding-assistant" aria-label={label}>
       <div className="onboarding-card-identity">
-        <BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" />
+        <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
         {/* A heading here and a `strong` on the welcome: the setup's three cards are
             a real document structure a person navigates, the welcome's are an
             illustration the card already labels. Same class, so same geometry. */}
         <h3 className="onboarding-card-name">{label}</h3>
         <div className="onboarding-assistant-enable">{enabledControl}</div>
       </div>
+      {/* The state row is where the story puts its caption: the lifecycle pill on the
+          left and, opposite it, the single action that pill offers — update or
+          install. Both stay on this row so the card body below is the note and the
+          two connection methods, exactly as the design stacks them. */}
       <div className="onboarding-assistant-state">
         {installing || detecting || status === 'unknown' ? (
           <Badge variant="secondary"><RefreshCw size={12} className={installing || detecting ? 'motion-safe:animate-spin' : ''} />
@@ -64,22 +71,47 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             {t(error ? 'onboarding.setup.installFailed' : 'onboarding.setup.notInstalled')}
           </Badge>
         )}
+        {upgrade}
+        {status === 'missing' && (
+          <Button type="button" variant="secondary" className="onboarding-life-action" onClick={onInstall} disabled={installing || detecting}>
+            {installing ? <RefreshCw size={14} className="motion-safe:animate-spin" /> : <Download size={14} />}
+            {t(installing ? 'agentDetection.installing' : error ? 'common.retry' : 'onboarding.setup.install')}
+          </Button>
+        )}
+        {status === 'unknown' && !detecting && (
+          <Button type="button" variant="secondary" className="onboarding-life-action" onClick={onDetect}>
+            <RefreshCw size={14} />{t('common.retry')}
+          </Button>
+        )}
       </div>
       <div className="onboarding-assistant-body">
         <p className="onboarding-assistant-note" title={t(`onboarding.setup.${backend}Description`)}>
           {t(connection ? `onboarding.setup.${connection}` : `onboarding.setup.${backend}Description`)}
         </p>
+        {/* One full-width row per connection method, subscription above API Key, and
+            the connected state wearing the same row with a mint check. */}
         <div className="onboarding-assistant-actions">
-          {status === 'missing' && <Button variant="secondary" size="sm" className="h-[34px]" onClick={onInstall} disabled={installing || detecting}>
-            {installing ? <RefreshCw size={14} className="motion-safe:animate-spin" /> : <Download size={14} />}
-            {t(installing ? 'agentDetection.installing' : error ? 'common.retry' : 'onboarding.setup.install')}
-          </Button>}
-          {status === 'unknown' && !detecting && <Button variant="secondary" size="sm" onClick={onDetect}><RefreshCw size={14} />{t('common.retry')}</Button>}
-          <Button variant="secondary" size="sm" className="h-[34px]" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
-            {connection ? <Check size={14} className="text-mint-ink" /> : <Sliders size={14} />}
-            {t(connection ? `onboarding.setup.${connection}Connected` : 'onboarding.connection.addSubscription')}
-          </Button>
-          {!connection && onAddKey && <Button variant="secondary" size="sm" className="h-[34px]" onClick={onAddKey} disabled={configuringDisabled || installing || detecting}>{t('onboarding.connection.addKey')}</Button>}
+          {connection ? (
+            /* A button wearing the connected row: it reads as the static receipt the
+               design draws, and clicking it still reopens the connection dialog,
+               which is the only way back into a settled connection from this card. */
+            <button type="button" className="onboarding-method-connected" onClick={onConfigure}
+              disabled={configuringDisabled || installing || detecting}>
+              <Check size={16} />
+              {t(`onboarding.setup.${connection}Connected`)}
+            </button>
+          ) : (
+            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
+              <SlidersHorizontal size={16} />
+              {t('onboarding.connection.addSubscription')}
+            </Button>
+          )}
+          {!connection && onAddKey && (
+            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onAddKey} disabled={configuringDisabled || installing || detecting}>
+              <KeyRound size={16} />
+              {t('onboarding.connection.addKey')}
+            </Button>
+          )}
         </div>
         {(connectionError || connectionPending) && <div className="onboarding-assistant-error" role={connectionError ? 'alert' : 'status'}>
           {connectionPending ? t('common.loading') : connectionError}

@@ -15,6 +15,8 @@ import { cn } from '@/lib/utils';
 type CliStatus = 'unknown' | 'ok' | 'missing';
 type Operation = 'idle' | 'upgrading' | 'restarting';
 type Visual = 'disabled' | 'ready' | 'updating' | 'update' | 'error' | 'loading';
+
+export type BackendLifecycleVisual = Visual;
 type BadgeVariant = 'secondary' | 'success' | 'info' | 'warning' | 'destructive';
 
 export type BackendChipChange = {
@@ -34,6 +36,15 @@ interface BackendLifecycleChipProps {
   readyLabel?: string;
   onChanged?: (info?: BackendChipChange) => void | Promise<void>;
   onOperationChange?: (pending: boolean) => void;
+  /** The setup card draws the action its lifecycle offers — update or install —
+      beside the pill, on the card's state row, so a host that owns those actions
+      needs to know which one the chip currently derives. Settings renders no
+      such row and passes nothing. */
+  onVisual?: (visual: Visual) => void;
+  /** Bumped by a host that applied an upgrade through its own affordance — the
+      setup card's state-row button — so the chip's projection, and with it the
+      pill, follows a change the chip did not make itself. */
+  refreshKey?: number;
 }
 
 // Map lifecycle visual states to canonical Badge variants from the design
@@ -99,6 +110,8 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   onChanged,
   onOperationChange,
   readyLabel,
+  onVisual,
+  refreshKey,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -162,7 +175,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
       return;
     }
     if (cliStatus === 'ok') void loadRuntime();
-  }, [enabled, cliStatus, loadRuntime]);
+  }, [enabled, cliStatus, loadRuntime, refreshKey]);
 
   // Opening asks for a fresh projection; closing is presentation-only and
   // must not mutate lifecycle state.
@@ -172,6 +185,10 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
 
   const visual = deriveVisual(enabled, cliStatus, runtime, operation);
   const busy = runtimeLoading || operation !== 'idle';
+
+  React.useEffect(() => {
+    onVisual?.(visual);
+  }, [visual, onVisual]);
 
   const handleUpgrade = async () => {
     setOperation('upgrading');

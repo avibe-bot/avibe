@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { Check, Languages } from 'lucide-react';
 import { Welcome } from './steps/Welcome';
 import { AgentDetection } from './steps/AgentDetection';
-import { BrandLogo } from './visual';
-import { LanguageSwitcher } from './LanguageSwitcher';
+import logoImg from '@/assets/logo.png';
+import { useLanguageSelection } from '../lib/useLanguageSelection';
 import { useApi, type VibeAgentBrief } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
@@ -16,6 +17,78 @@ import { readOpencodeSetupRoutes } from './onboarding/opencodeSetupRoutes';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
 
 /** Owns explicit setup completion; credential and lifecycle writes stay with their owners. */
+/**
+ * The setup's top bar, drawn as the design draws it at every size: the brand lockup —
+ * the logo asset, which already carries its white tile, beside the two-line wordmark —
+ * at the window's own gutter, and the language as a circular icon button opposite it.
+ * The switcher's own dropdown component wears a small square label the settings shell
+ * chose; this surface keeps that menu's behaviour in its own round control instead.
+ */
+function SetupHeader() {
+  const { t } = useTranslation();
+  const { languages, current, select } = useLanguageSelection();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('mousedown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [open]);
+  return (
+    <header>
+      <div className="onboarding-brand">
+        <span className="onboarding-brand-mark"><img src={logoImg} alt="avibe" /></span>
+        <span className="onboarding-brand-wordmark">
+          <strong>Avibe</strong>
+          <span>Agent OS</span>
+        </span>
+      </div>
+      <div className="onboarding-language" ref={wrapRef}>
+        <button
+          type="button"
+          className="onboarding-language-button"
+          aria-label={t('language.switchLanguage')}
+          title={current.label}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Languages size={22} />
+        </button>
+        {open && (
+          <div role="listbox" className="onboarding-language-menu">
+            {languages.map((language) => {
+              const active = language.code === current.code;
+              return (
+                <button
+                  key={language.code}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => { setOpen(false); void select(language.code); }}
+                >
+                  <span>{language.label}</span>
+                  {active && <Check size={15} />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </header>
+  );
+}
+
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
@@ -95,7 +168,7 @@ export function Wizard() {
     {error ? <><p role="alert">{error}</p><button onClick={() => void load()}>{t('common.retry')}</button></> : t('common.loading')}
   </div>;
   return <div className="onboarding-shell">
-    <header><BrandLogo size={36} /><LanguageSwitcher /></header>
+    <SetupHeader />
     <main className="onboarding-shell-content">
       {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
         : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}

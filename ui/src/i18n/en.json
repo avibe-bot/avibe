@@ -5302,6 +5302,7 @@
       "notInstalled": "Not installed",
       "installFailed": "Installation failed",
       "enabled": "Enabled",
+      "enableNamed": "Enable {{name}}",
       "subscription": "Subscription",
       "api_key": "API Key",
       "subscriptionConnected": "Subscription connected",

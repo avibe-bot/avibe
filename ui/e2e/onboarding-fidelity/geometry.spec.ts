@@ -36,8 +36,9 @@ const CAPTURE_STATES = ['complete', 'working', 'waiting'];
 /** The card's share of the content column: three 299s and two 39.5 gaps in 976, which is
  *  the same fraction as three 367s in 1200. One percentage, both authored rows. */
 const CARD_SHARE = 0.306352;
-/** The diagram is the card plus the return wire's band beneath it (271 drawn around 232). */
-const DIAGRAM_RATIO = 271 / 232;
+/** The wire box is the card times the reference's own 350/300, so the handoffs stay on
+ *  the cards' midline at every tier. */
+const WIRE_RATIO = 350 / 300;
 /** What the stage reserves beyond the card, spent by the introduction on the return band
  *  and by the connection on the 20 + 44 import capsule. */
 const STAGE_EXTRA = 64;
@@ -88,13 +89,19 @@ async function frame(page: Page) {
     };
   });
   const clamp = Math.min(Math.max(976, 0.625 * window.vw), 1200);
-  // Stacked, the three cards ARE the composition, so the phone band gives them the height
-  // the reference draws rather than a share of a window that should scroll instead.
+  // The card height is the tier the design authored for this window: 232 under an
+  // 800px-tall one, 262 under 900, 300 above 1000, 330 at the large 1920x1080 reading.
+  // Stacked, the three cards ARE the composition, so the phone band gives them the
+  // height the reference draws rather than a share of a window that should scroll.
   const stacked = window.vw < 760;
+  const card = stacked ? 258
+    : window.vw >= 1600 && window.vh >= 950 ? 330
+      : window.vh <= 800 ? 232
+        : window.vh <= 1000 ? 262 : 300;
   return {
     ...window,
     column: Math.min(clamp, window.available),
-    card: stacked ? 258 : Math.min(window.vh * 0.3, Math.min(window.available, clamp) * 0.3),
+    card,
     stacked,
   };
 }
@@ -111,7 +118,7 @@ test.describe('desktop reference geometry', () => {
     // column of three 299 cards with 39.5 between them. Stated once, here, so a reader
     // can see that the ratios below are the design and not an arbitrary proportion.
     expect(round(reference.column)).toBe(976);
-    expect(round(reference.card)).toBe(240);
+    expect(round(reference.card)).toBe(232);
 
     const welcome = await box(page, '.onboarding-welcome');
     expect(welcome.width).toBeCloseTo(reference.column, 1);
@@ -128,11 +135,14 @@ test.describe('desktop reference geometry', () => {
     // lands a hundredth away and a stricter claim would only be testing that.
     expect(gaps[0]).toBeCloseTo(39.5, 1);
 
-    // The diagram is sized from the card it contains, which is what keeps the handoff
-    // wire on the cards' midline at every window rather than only at the authored one.
+    // The diagram is the card plus the return band the stage floors, and the wire box
+    // inside it takes its own height from the card — which is what keeps the handoff
+    // wire on the cards' midline at every tier rather than only at the authored one.
     const collaboration = await box(page, '.onboarding-collaboration');
     expect(collaboration.width).toBeCloseTo(reference.column, 1);
-    expect(collaboration.height).toBeCloseTo(reference.card * DIAGRAM_RATIO, 1);
+    expect(collaboration.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
+    const wires = await box(page, '.onboarding-wires');
+    expect(wires.height).toBeCloseTo(reference.card * WIRE_RATIO, 1);
 
     // What has to be exact is that the wire endpoints sit on the card edges: the stretched
     // viewBox and the card grid answer to the same width, so a port cannot drift off. To
@@ -146,7 +156,7 @@ test.describe('desktop reference geometry', () => {
     onPixel(ports[2].x + ports[2].width / 2, cards[1].x + cards[1].width);
     onPixel(ports[3].x + ports[3].width / 2, cards[2].x);
     // And the handoff runs along the cards' shared midline.
-    const midline = cards[0].y + reference.card * 116 / 232;
+    const midline = cards[0].y + reference.card / 2;
     for (const port of ports) onPixel(port.y + port.height / 2, midline);
 
     await settleEffects(page);
@@ -170,7 +180,12 @@ test.describe('desktop reference geometry', () => {
     const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
     const access = await box(page, '.onboarding-access');
-    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(20, 0);
+    // The heading block carries its tier's own distance to the stage — 15 under an
+    // 800px window — while the stage's distance to the action is 20 in every row.
+    const headingGap = await page.evaluate(() =>
+      parseFloat(getComputedStyle(document.querySelector('.onboarding-heading')!).marginBottom));
+    expect(round(headingGap)).toBe(15);
+    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
     expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
     expect(stage.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
 
@@ -272,12 +287,15 @@ test.describe('desktop reference geometry', () => {
     const heading = await box(page, '.onboarding-heading');
     const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
-    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(20, 0);
+    const headingGap = await page.evaluate(() =>
+      parseFloat(getComputedStyle(document.querySelector('.onboarding-heading')!).marginBottom));
+    expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
     expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
-    // The card, and the whole composition with it, follows the window: 30% of 756.
+    // The card, and the whole composition with it, follows the window's tier: the
+    // 800px-tall reading draws a 232 card, not a share of whatever is left.
     const card = await box(page, '.onboarding-collaboration-card');
     expect(card.height).toBeCloseTo(reference.card, 1);
-    expect(round(card.height)).toBe(226.8);
+    expect(round(card.height)).toBe(232);
 
     // And at the reference's own frame the composition then fits it exactly: the card
     // paying for the window is what removes the scroll, not a shorter gap or smaller type.
@@ -293,38 +311,45 @@ test.describe('desktop reference geometry', () => {
     expect(await metrics()).toEqual(tall);
     const short = { heading: await box(page, '.onboarding-heading'), stage: await box(page, '.onboarding-stage') };
     const shortAction = await box(page, '.onboarding-primary-action');
-    expect(short.stage.y - (short.heading.y + short.heading.height)).toBeCloseTo(20, 0);
+    expect(short.stage.y - (short.heading.y + short.heading.height)).toBeCloseTo(headingGap, 0);
     expect(shortAction.y - (short.stage.y + short.stage.height)).toBeCloseTo(20, 0);
-    expect(round((await box(page, '.onboarding-collaboration-card')).height)).toBe(156);
+    // The tier, not the leftover: a 520px window still draws the 800-row's card and
+    // scrolls the rest.
+    expect(round((await box(page, '.onboarding-collaboration-card')).height)).toBe(232);
     expect(await overflows()).toBe(true);
     await page.locator('.onboarding-access').scrollIntoViewIfNeeded();
     await expect(page.locator('.onboarding-access')).toBeInViewport();
   });
 
   /**
-   * The reference's four headline rows are one rule, not four sizes: 32 at 1366, 34 at
-   * 1440, 50 at 1920 and 30 on a phone are all `3.333vw - 14` held between 30 and 50, with
-   * the tracking following the size proportionally so a larger headline is never tighter
-   * than the one drawn. Both steps read it from the same rule, so both are checked.
+   * The reference's headline rows are authored per tier, not interpolated: 32 at
+   * 1366x768 and 1200x800, 34 at 1440x900, 50 at 1920x1080 and 30 on a phone, each with
+   * its own line height and its own distance to the stage. Both steps read the same
+   * tier, so both are checked at the design's own viewports.
    */
-  for (const width of [1920, 1440, 1366, 1200, 390]) {
-    test(`the headline follows the design's own size rule at ${width}`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
+  for (const [viewport, size] of [
+    [{ width: 1920, height: 1080 }, 50],
+    [{ width: 1440, height: 900 }, 34],
+    [{ width: 1366, height: 768 }, 32],
+    [{ width: 1200, height: 800 }, 32],
+    [{ width: 390, height: 844 }, 30],
+  ] as const) {
+    test(`the headline is the tier's authored size at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
       await serveProduct(page);
       await openOnboarding(page);
       const type = () => page.evaluate(() => {
         const node = document.querySelector('.onboarding-heading :is(h1, h2)')!;
         const style = getComputedStyle(node);
         return {
-          vw: globalThis.innerWidth,
           size: parseFloat(style.fontSize),
           tracking: parseFloat(style.letterSpacing),
           weight: style.fontWeight,
         };
       });
       const intro = await type();
-      expect(intro.size).toBeCloseTo(Math.min(Math.max(30, 3.333 * intro.vw / 100 - 14), 50), 1);
-      expect(intro.tracking / intro.size).toBeCloseTo(-0.047, 3);
+      expect(intro.size).toBeCloseTo(size, 1);
+      expect(intro.tracking / intro.size).toBeCloseTo(-0.035, 3);
       expect(intro.weight).toBe('600');
       await openSetup(page, 'en');
       expect(await type()).toEqual(intro);
@@ -373,10 +398,12 @@ test.describe('capped fluid width', () => {
           expect(card.width).toBeCloseTo(reference.column * CARD_SHARE, 1);
           expect(card.height).toBeCloseTo(reference.card, 1);
         }
-        // The stretched wire box always covers the cards, so no pulse can detach.
+        // The stretched wire box always covers the cards, so no pulse can detach, and
+        // its height is the card's own share, which keeps the handoffs on the midline.
         const wires = await box(page, '.onboarding-wires');
         expect(round(wires.width)).toBe(round(collaboration.width));
-        expect(collaboration.height).toBeCloseTo(reference.card * DIAGRAM_RATIO, 1);
+        expect(wires.height).toBeCloseTo(reference.card * WIRE_RATIO, 1);
+        expect(collaboration.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
       }
 
       // The primary action stays reachable: short viewports scroll rather than clip.
@@ -394,10 +421,10 @@ test.describe('capped fluid width', () => {
 
   /**
    * "Six access points … using circular logo containers, compact spacing and names
-   * underneath", drawn as a centred 560 row. It is the one block here that does not grow
-   * with the window, and deliberately: stretching six destinations to 1200 turns a row of
-   * logos into a rule across the bottom of the page. So the span is checked at widths where
-   * everything else around it is a different size.
+   * underneath", drawn as a centred 560 row inside a block the reference grows in two
+   * steps — 740 on a standard desktop, 830 on a large one. Stretching the six circles
+   * themselves to the block turns a row of logos into a rule across the bottom of the
+   * page, so the grid keeps its 560 span and centres inside the block at every width.
    */
   for (const width of [1920, 1366, 1024, 768]) {
     test(`the access row is a centred 560 of six circles at ${width}`, async ({ page }) => {
@@ -407,15 +434,16 @@ test.describe('capped fluid width', () => {
 
       const access = await box(page, '.onboarding-access');
       const welcome = await box(page, '.onboarding-welcome');
-      expect(round(access.width)).toBe(560);
+      expect(access.width).toBeCloseTo(Math.min(740, welcome.width), 1);
       expect(access.x + access.width / 2).toBeCloseTo(welcome.x + welcome.width / 2, 0);
 
       const tiles = await boxes(page, '.onboarding-access-tile');
       expect(tiles).toHaveLength(6);
       // One row, on the 560/6 pitch the tracks produce rather than a gap someone typed.
       expect(spread(tiles.map((tile) => tile.y))).toBeLessThanOrEqual(1);
+      const grid = Math.min(560, welcome.width);
       for (let index = 1; index < tiles.length; index += 1) {
-        expect(tiles[index].x - tiles[index - 1].x).toBeCloseTo(560 / 6, 1);
+        expect(tiles[index].x - tiles[index - 1].x).toBeCloseTo(grid / 6, 1);
       }
       const icons = await page.locator('.onboarding-access-icon').evaluateAll((nodes) => nodes.map((node) => {
         const rect = node.getBoundingClientRect();
@@ -880,7 +908,7 @@ test.describe('theme', () => {
    * at build time — reading the custom property would pass on a theme override that
    * compiles to nothing.
    */
-  for (const [theme, geometry] of [['dark', '0px 0px 28px 0px'], ['light', '0px 0px 16px -4px']] as const) {
+  for (const [theme, geometry] of [['dark', '0px 2px 12px 0px'], ['light', '0px 2px 16px -4px']] as const) {
     test(`${theme} draws its own active-card halo, and idle cards none`, async ({ page }) => {
       await serveProduct(page);
       await openOnboarding(page, { theme });

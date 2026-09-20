@@ -49,7 +49,7 @@ describe('assistant installation presentation', () => {
     // same identity header as the name, not to a separate strip.
     for (const name of ['Claude Code', 'Codex', 'OpenCode']) {
       const identity = screen.getByRole('heading', { name }).closest('.onboarding-card-identity')!;
-      expect(within(identity as HTMLElement).getByRole('checkbox', { name: 'Enabled' })).toBeTruthy();
+      expect(within(identity as HTMLElement).getByRole('switch', { name: `Enable ${name}` })).toBeTruthy();
     }
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
@@ -108,7 +108,7 @@ describe('assistant installation presentation', () => {
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onBack={back} />));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
     await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
-    fireEvent.click(row('Codex').getByRole('checkbox'));
+    fireEvent.click(row('Codex').getByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(back).toHaveBeenCalledWith({ agents: expect.objectContaining({
       claude: expect.objectContaining({ status: 'ok', cli_path: '/isolated/bin/assistant' }),
@@ -203,12 +203,14 @@ describe('assistant installation presentation', () => {
 
 const pending = <T,>() => { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const stateFor = (backend: string, enabled = true, application: BackendConnectionState['application'] = 'applied') => ({ ok: true, backend, enabled, installed: true, auth: 'api_key', application, ready: backend === 'claude' && enabled && application === 'applied', entry_eligible: backend === 'claude' && enabled && application === 'applied' });
+/** The enable control is a `role="switch"` button, so its state is its aria-checked. */
+const checkedOf = (node: HTMLElement) => node.getAttribute('aria-checked') === 'true';
 describe('settled wizard enablement follows persistence and latest intent', () => {
   function mountReady() {
     const saved = data(); saved.agents.claude.status = 'ok';
     mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    return row('Claude Code').getByRole('checkbox') as HTMLInputElement;
+    return row('Claude Code').getByRole('switch') as HTMLElement;
   }
   it.each(['rejected', 'committed-failed', 'unreadable'] as const)('reconciles a single toggle (%s) and Retry repairs enabled without another write', async (outcome) => {
     const checkbox = mountReady();
@@ -222,11 +224,11 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     }
     fireEvent.click(checkbox);
     await row('Claude Code').findByRole('alert');
-    expect(checkbox.checked).toBe(outcome === 'rejected');
+    expect(checkedOf(checkbox)).toBe(outcome === 'rejected');
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(checkbox.checked).toBe(true));
+    await waitFor(() => expect(checkedOf(checkbox)).toBe(true));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
     expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
   });
@@ -241,14 +243,14 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     fireEvent.click(checkbox); fireEvent.click(checkbox);
     await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
     await act(async () => oldRead.resolve(stateFor('claude', false)));
-    expect(checkbox.checked).toBe(true);
+    expect(checkedOf(checkbox)).toBe(true);
     await act(async () => off.reject(new Error('old off rejected')));
-    expect(checkbox.checked).toBe(true);
+    expect(checkedOf(checkbox)).toBe(true);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
     await act(async () => on.resolve({ agents: { claude: { enabled: true } } }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
-    expect(checkbox.checked).toBe(true); expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2);
+    expect(checkedOf(checkbox)).toBe(true); expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2);
   });
   it('delayed modal config cannot undo a newer authoritative enablement result', async () => {
     const checkbox = mountReady(); await row('Claude Code').findByRole('button', { name: 'API Key connected' });
@@ -260,7 +262,7 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     fireEvent.click(checkbox);
     await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
     await act(async () => config.resolve(data()));
-    expect(checkbox.checked).toBe(false);
+    expect(checkedOf(checkbox)).toBe(false);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
 });

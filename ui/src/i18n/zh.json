@@ -5302,6 +5302,7 @@
       "notInstalled": "未安装",
       "installFailed": "安装失败",
       "enabled": "启用",
+      "enableNamed": "启用 {{name}}",
       "subscription": "订阅",
       "api_key": "API Key",
       "subscriptionConnected": "订阅已连接",
