@@ -71,9 +71,10 @@ blob with no way to reach the page the answer is based on.
   already ahead of it. A delivered message is never rewritten afterwards, and a
   superseded turn discards its queue exactly as it discards its result
   candidate.
-- **Untrusted input.** Titles and URLs come from search results: controls and
-  private-use characters are stripped, titles collapsed and bounded, only
-  http(s) with a host accepted, and link labels escaped. Whether a marker is
+- **Untrusted input.** Titles and URLs come from search results: a title has
+  its controls and private-use characters stripped and is collapsed and bounded,
+  a URL is cleaned the way a browser cleans one (see below), only http(s) with a
+  host is accepted, and link labels are escaped. Whether a marker is
   code is a CommonMark question — fence lengths nest, an unclosed fence runs to
   the end, a code span may cross lines, container indentation shifts all of it —
   so the rewrite reuses the offset-preserving mask already shipped for `$<NAME>`
@@ -86,10 +87,23 @@ blob with no way to reach the page the answer is based on.
   rendered `href` against the sidecar, so the persisted URL has to be the exact
   string the Markdown renderer produces. The backend therefore writes the
   canonical form up front: character references resolved once (a provider that
-  lifted the URL out of HTML sends `&amp;`), then percent-encoding that matches
-  `normalizeUri` — existing `%XX` escapes preserved, lone surrogates repaired to
-  `U+FFFD`, parentheses encoded so a Markdown destination cannot truncate, and
-  the result a fixed point of itself. Backslash escapes are deliberately *not*
+  lifted the URL out of HTML sends `&amp;`) using micromark's replacement table
+  rather than HTML's — micromark is the parser behind this renderer, and it
+  replaces the C1 range and the noncharacters with `U+FFFD` instead of applying
+  the Windows-1252 mapping that would make `&#x80;` a `€` the rendered link
+  never opens. What is left is cleaned exactly the way WHATWG's URL parser
+  cleans its own input, because that is what decides the page: an ASCII tab or
+  newline is removed wherever it sits, leading and trailing C0 controls and
+  spaces are trimmed, and everything else — a C1 control, a zero-width, a
+  private-use code point — survives to be percent-encoded rather than deleted.
+  Deleting it moved the destination silently
+  (`https://example.com/p&#x80;q` became `https://example.com/pq`). Then
+  percent-encoding that matches `normalizeUri` — existing `%XX` escapes
+  preserved, lone surrogates repaired to `U+FFFD`, parentheses encoded so a
+  Markdown destination cannot truncate, and the result a fixed point of itself —
+  and the scheme lowercased, since a renderer that only knows the lowercase
+  spelling sees no link at all (Telegram delivered
+  `[example.com](HTTPS://Example.com/X)` as raw Markdown). Backslash escapes are deliberately *not*
   resolved: WHATWG reads `\` as a host separator where `urlsplit` reads
   userinfo, so it is preserved as `%5C`, and a canonical URL whose host the two
   parsers could still read differently is rejected outright rather than
@@ -98,8 +112,17 @@ blob with no way to reach the page the answer is based on.
   `faß.de` → `xn--fa-hia.de`, where the standard library's IDNA 2003 codec would
   have said `fass.de` — a different domain than the link opens), with ASCII
   labels passed through as a browser passes them and a host that cannot be
-  canonicalized rejected rather than guessed at. So neither an unsafe URL nor an
-  ordinary unrelated link can become a fabricated citation. One fixture,
+  canonicalized rejected rather than guessed at. A host whose last label is a
+  number goes through WHATWG's IPv4 parser for the same reason, so
+  `2130706433`, `0x7f.1`, `127.1` and `017700000001` are all attributed to
+  `127.0.0.1` instead of hiding a loopback destination behind the digits that
+  spell it, and a form the parser refuses (`256.1.1.1`, `1.2.3.4.5`,
+  `example.com.0x1`) names no host and is rejected. A host too long for a label
+  is elided from the **left**, keeping the registrable suffix visible and whole
+  labels only: `developers.openai.com.<padding>.attacker.example` is shown as
+  `…attacker.example`, never as `developers.openai.com…`, which would name a
+  site the link never opens. So neither an unsafe URL nor an ordinary unrelated
+  link can become a fabricated citation. One fixture,
   `tests/fixtures/citation_url_identity.json`, is asserted by both the Python
   canonicalizer and the real renderer.
 - **Surface rules.** The badge is the link itself — hover or focus reveals the

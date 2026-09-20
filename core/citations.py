@@ -53,6 +53,13 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # C0/C1 controls, zero-width and line/paragraph separators, and the whole
 # private-use area (which is where the markers themselves live).
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\ue000-\uf8ff]")
+# What WHATWG's URL parser deletes from its input before parsing anything: a tab
+# or newline anywhere, and C0 controls or spaces at either end.
+_URL_REMOVED_RE = re.compile(r"[\t\n\r]")
+_URL_TRIMMED = "".join(chr(code) for code in range(0x21))
+_DECIMAL_DIGITS = frozenset("0123456789")
+_OCTAL_DIGITS = frozenset("01234567")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 # A CommonMark character reference, which is what a link destination resolves
 # before it becomes an href. Providers that lifted a URL out of HTML hand over
@@ -116,6 +123,31 @@ def clean_title(value: Any) -> str:
     return " ".join(_CONTROL_RE.sub(" ", value).split())[:_TITLE_MAX].strip()
 
 
+def _is_replaced_code_point(code: int) -> bool:
+    """Whether the renderer substitutes U+FFFD for the numeric reference *code*.
+
+    This is micromark's table (``micromark-util-decode-numeric-character-
+    reference``), because micromark is the parser behind the Web renderer and
+    the only table that can keep a persisted URL equal to the href drawn from
+    it. It is wider than CommonMark's own wording, which replaces just NUL,
+    surrogates and out-of-range values: micromark also replaces the C0 controls
+    a URL may not hold, the whole C1 range, and the noncharacters. Notably it
+    does *not* apply HTML's Windows-1252 mapping, so ``&#x80;`` becomes U+FFFD
+    rather than ``€`` - resolving it to ``€`` would name a page the rendered
+    link never opens.
+    """
+    return (
+        code < 9
+        or code == 11
+        or 13 < code < 32
+        or 126 < code < 160
+        or 55295 < code < 57344
+        or 64975 < code < 65008
+        or code & 0xFFFF in (0xFFFE, 0xFFFF)
+        or code > 0x10FFFF
+    )
+
+
 def _resolve_references(value: str) -> str:
     """Resolve one round of CommonMark character references."""
     if "&" not in value:
@@ -128,13 +160,87 @@ def _resolve_references(value: str) -> str:
                 code = int(body[2:], 16) if body[1] in "xX" else int(body[1:])
             except ValueError:
                 return match.group(0)
-            # CommonMark maps an out-of-range or surrogate code point to U+FFFD.
-            if code == 0 or code > 0x10FFFF or 0xD800 <= code <= 0xDFFF:
-                return "\ufffd"
-            return chr(code)
+            return "\ufffd" if _is_replaced_code_point(code) else chr(code)
         return HTML5_ENTITIES.get(f"{body};", match.group(0))
 
     return _REFERENCE_RE.sub(replace, value)
+
+
+def _normalize_destination(value: str) -> str:
+    """The provider's URL string as a browser reads it, before Markdown escaping.
+
+    Providers lift URLs out of HTML, so one round of character references is
+    resolved first; what is left is cleaned the way WHATWG's URL parser cleans
+    its own input - every ASCII tab or newline removed wherever it sits, and
+    leading or trailing C0 controls and spaces trimmed. Everything else survives
+    to be percent-encoded, because that is what the browser does with it.
+
+    Deleting the rest instead - which a blanket control scrub either side of the
+    reference pass used to do - silently moved the page a citation pointed at:
+    ``https://example.com/p&#x80;q`` became ``https://example.com/pq`` rather
+    than the ``p%EF%BF%BDq`` the renderer produces, so the stored URL no longer
+    identified the destination it was delivered as.
+    """
+    return _URL_REMOVED_RE.sub("", _resolve_references(value)).strip(_URL_TRIMMED)
+
+
+def _ipv4_number(part: str) -> Optional[int]:
+    """One dotted part as WHATWG's IPv4 number parser reads it, or ``None``.
+
+    A leading ``0x`` makes the part hexadecimal and a bare leading ``0`` makes
+    it octal, which is how ``0x7f.1`` and ``017700000001`` both reach
+    ``127.0.0.1``.
+    """
+    if not part:
+        return None
+    digits, radix = _DECIMAL_DIGITS, 10
+    if len(part) > 1 and part[0] == "0":
+        if part[1] in "xX":
+            part, radix, digits = part[2:], 16, _HEX_DIGITS
+            if not part:
+                return 0
+        else:
+            part, radix, digits = part[1:], 8, _OCTAL_DIGITS
+    if not all(char in digits for char in part):
+        return None
+    return int(part, radix)
+
+
+def _canonical_host(host: str) -> str:
+    """*host* as a browser serializes it, or ``""`` when it names no host.
+
+    WHATWG hands any host whose last label is a number to its IPv4 parser, so
+    ``2130706433``, ``0x7f.1``, ``127.1`` and ``017700000001`` all name
+    ``127.0.0.1``. An untrusted search result that spells a loopback or
+    private-network address that way would otherwise be attributed to the digits
+    themselves, hiding where the link goes; and a form the parser refuses
+    (``256.1.1.1``, ``1.2.3.4.5``, ``example.com.0x1``) names no host at all.
+    """
+    parts = host.split(".")
+    if parts[-1] == "" and len(parts) > 1:
+        # A trailing dot is not a label. A browser keeps it on a domain
+        # (``example.com.``) but ignores it when reading a number.
+        parts = parts[:-1]
+    last = parts[-1]
+    ends_in_number = bool(last) and all(char in _DECIMAL_DIGITS for char in last)
+    if not ends_in_number and _ipv4_number(last) is None:
+        return host
+    if len(parts) > 4:
+        return ""
+    numbers: list[int] = []
+    for part in parts:
+        number = _ipv4_number(part)
+        if number is None:
+            return ""
+        numbers.append(number)
+    if any(number > 255 for number in numbers[:-1]):
+        return ""
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return ""
+    address = numbers[-1]
+    for offset, number in enumerate(numbers[:-1]):
+        address += number * 256 ** (3 - offset)
+    return ".".join(str((address >> shift) & 0xFF) for shift in (24, 16, 8, 0))
 
 
 def _percent_encode(char: str) -> str:
@@ -179,6 +285,9 @@ def _canonical_uri(value: str) -> str:
 
 def _browser_host(url: str) -> str:
     """The host a browser resolves for *url*, or ``""`` if that is not knowable.
+
+    The result is the browser's own serialization: lowercase, punycode for an
+    internationalized label, dotted-quad for a numeric one.
 
     ``urlsplit`` and the WHATWG parser split an authority differently once it
     carries a character a URL may not hold literally - a backslash is the host
@@ -228,7 +337,7 @@ def _browser_host(url: str) -> str:
             # its unresolved label, which is the only safe direction - a label
             # that names a different domain than the link opens is the defect.
             return ""
-    return ".".join(labels)
+    return _canonical_host(".".join(labels))
 
 
 def safe_url(value: Any) -> str:
@@ -241,7 +350,7 @@ def safe_url(value: Any) -> str:
     """
     if not isinstance(value, str):
         return ""
-    raw = _CONTROL_RE.sub("", _resolve_references(_CONTROL_RE.sub("", value))).strip()
+    raw = _normalize_destination(value)
     if not raw:
         return ""
     url = _canonical_uri(raw)
@@ -251,15 +360,32 @@ def safe_url(value: Any) -> str:
         return ""
     if scheme not in _ALLOWED_SCHEMES or not _browser_host(url):
         return ""
-    return url
+    # A browser lowercases the scheme, and a renderer that only knows the
+    # lowercase spelling does not see a link at all: Telegram delivered
+    # ``[example.com](HTTPS://Example.com/X)`` as raw Markdown. ``urlsplit``
+    # already lowercased it, and case never changes a scheme's length.
+    return scheme + url[len(scheme) :]
 
 
 def source_label(url: str, title: str = "") -> str:
     """Short link text for a citation: its domain, which is what attributes it."""
-    host = _browser_host(url).lower()
+    host = _browser_host(url)
     if host.startswith("www."):
         host = host[4:]
-    return (host or title)[:_LABEL_MAX].strip()
+    if not host:
+        return title[:_LABEL_MAX].strip()
+    if len(host) <= _LABEL_MAX:
+        return host
+    # Shorten a long host from the LEFT. The registrable domain is its tail, so
+    # a label cut from the right names a site the link never opens:
+    # ``developers.openai.com.<padding>.attacker.example`` would be shown as
+    # ``developers.openai.com…`` in both the IM link text and the badge preview.
+    # Whole labels only, so the elision cannot invent one.
+    tail = host[-(_LABEL_MAX - 1) :]
+    boundary = tail.find(".")
+    if 0 <= boundary < len(tail) - 1:
+        tail = tail[boundary + 1 :]
+    return f"…{tail}"
 
 
 def _escape_label(value: str) -> str:

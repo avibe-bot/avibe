@@ -104,6 +104,48 @@
       "label": null
     },
     {
+      "why": "P1: a numeric host names the address a browser resolves, not the digits it spells",
+      "raw": "https://2130706433/p",
+      "url": "https://2130706433/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "P1: hexadecimal and shortened IPv4 forms reach the same loopback address",
+      "raw": "https://0x7f.1/p",
+      "url": "https://0x7f.1/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "an octal host is still the address it encodes",
+      "raw": "https://017700000001/p",
+      "url": "https://017700000001/p",
+      "label": "127.0.0.1"
+    },
+    {
+      "why": "a leading zero makes a part octal, so the label is not the digits read as decimal",
+      "raw": "https://010.0.0.1/p",
+      "url": "https://010.0.0.1/p",
+      "label": "8.0.0.1"
+    },
+    {
+      "why": "an already canonical address is left exactly as it is",
+      "raw": "https://1.2.3.4/p",
+      "url": "https://1.2.3.4/p",
+      "label": "1.2.3.4"
+    },
+    {
+      "why": "a numeric host the IPv4 parser refuses names no host a browser will reach",
+      "raw": "https://256.1.1.1/p",
+      "url": null,
+      "label": null
+    },
+    {
+      "why": "a trailing number turns the whole host numeric, and this one does not parse",
+      "raw": "https://example.com.0x1/p",
+      "url": null,
+      "label": null
+    },
+    {
       "why": "CommonMark resolves an entity in a destination, so the stored URL is the resolved one",
       "raw": "https://example.com/s?a=1&amp;b=2",
       "url": "https://example.com/s?a=1&b=2",
@@ -113,6 +155,36 @@
       "why": "a destination that would resolve twice is pinned after the first resolution",
       "raw": "https://example.com/s?a=1&amp;amp;b=2",
       "url": "https://example.com/s?a=1%26amp;b=2",
+      "label": "example.com"
+    },
+    {
+      "why": "P2: the renderer replaces a C1 reference with U+FFFD, so the stored URL carries that",
+      "raw": "https://example.com/p&#x80;q",
+      "url": "https://example.com/p%EF%BF%BDq",
+      "label": "example.com"
+    },
+    {
+      "why": "a noncharacter reference is replaced the same way rather than kept",
+      "raw": "https://example.com/p&#xFFFE;q",
+      "url": "https://example.com/p%EF%BF%BDq",
+      "label": "example.com"
+    },
+    {
+      "why": "a zero-width reference is escaped, not deleted, so the path still matches",
+      "raw": "https://example.com/p&#x200B;q",
+      "url": "https://example.com/p%E2%80%8Bq",
+      "label": "example.com"
+    },
+    {
+      "why": "a reference spelling a marker delimiter is escaped out of harm rather than dropped",
+      "raw": "https://example.com/p&#xE200;q",
+      "url": "https://example.com/p%EE%88%80q",
+      "label": "example.com"
+    },
+    {
+      "why": "a named tab reference is removed exactly as a literal tab is",
+      "raw": "https://example.com/p&Tab;q",
+      "url": "https://example.com/pq",
       "label": "example.com"
     },
     {
@@ -146,9 +218,21 @@
       "label": "example.com"
     },
     {
+      "why": "P1: a host too long to show is elided from the left, keeping the registrable suffix",
+      "raw": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
+      "url": "https://developers.openai.com.padding.padding.padding.padding.padding.padding.attacker.example/x",
+      "label": "\u2026padding.padding.padding.padding.padding.attacker.example"
+    },
+    {
       "why": "a browser lowercases the host but not the path, so the label is lowercase and the URL is not",
       "raw": "https://Example.COM/X",
       "url": "https://Example.COM/X",
+      "label": "example.com"
+    },
+    {
+      "why": "P2: a scheme is case-insensitive, and only its lowercase spelling is recognized everywhere",
+      "raw": "HTTPS://Example.com/X",
+      "url": "https://Example.com/X",
       "label": "example.com"
     },
     {

@@ -80,7 +80,12 @@ class TelegramFormatter(BaseMarkdownFormatter):
                 continue
 
             url_start = label_end + 2
-            if not text.startswith(("http://", "https://"), url_start):
+            # A scheme is case-insensitive, and a link whose scheme is spelled
+            # ``HTTPS://`` is still a link: missing it here left the raw
+            # Markdown in the message instead of a hyperlink.
+            if not text[url_start : url_start + 8].lower().startswith(
+                ("http://", "https://")
+            ):
                 rendered_parts.append(self._apply_inline_formatting(text[cursor : start + 1]))
                 cursor = start + 1
                 continue

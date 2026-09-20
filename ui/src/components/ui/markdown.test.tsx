@@ -150,11 +150,38 @@ describe('Markdown source citations', () => {
   });
 
   it.each(urlIdentity)('labels a citation with the host a browser resolves ($why)', ({ url, label }) => {
-    // Attribution names the host the browser reaches - punycode included - not
-    // the bytes the URL spells.
+    // Attribution names the host the browser reaches - punycode included, and
+    // an IPv4 form serialized the way the URL parser serializes it - not the
+    // bytes the URL spells. A host too long for a badge is elided from the
+    // LEFT, so what is shown must still be a suffix of that host: a label cut
+    // from the right would read as a domain the link never opens.
     const host = new URL(url).host;
+    const elided = label.startsWith('…');
+    const shown = elided ? label.slice(1) : label;
 
-    expect(host === label || host === `www.${label}`).toBe(true);
+    expect(label.length).toBeLessThanOrEqual(64);
+    if (elided) {
+      expect(host.endsWith(shown)).toBe(true);
+      expect(host).not.toBe(shown);
+    } else {
+      expect(host === shown || host === `www.${shown}`).toBe(true);
+    }
+  });
+
+  it('resolves a C1 numeric reference in a destination the way the backend does', () => {
+    // Measured rather than assumed: micromark - the parser behind this renderer
+    // - replaces the whole C1 range with U+FFFD, so `&#x80;` is NOT HTML's
+    // Windows-1252 `€`. The backend stores what this renderer produces, and the
+    // badge only appears when the two agree, so this is the assertion.
+    const citation = guide({ url: 'https://example.com/p%EF%BF%BDq' });
+    const { container } = renderMarkdown(
+      `Cited. [${citation.label}](https://example.com/p&#x80;q)`,
+      [citation],
+    );
+    const [badge] = badges(container);
+
+    expect(badge).toBeDefined();
+    expect(badge.getAttribute('href')).toBe(citation.url);
   });
 
   it('renders a cited link as a numbered badge that is itself the link', () => {

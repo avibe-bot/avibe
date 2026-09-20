@@ -203,10 +203,99 @@ class TestUntrustedMetadata:
 
     @pytest.mark.parametrize(
         "url",
-        ["http://example.com/x", "https://example.com/x", "HTTPS://Example.com/X"],
+        ["http://example.com/x", "https://example.com/x"],
     )
     def test_http_and_https_are_accepted_verbatim(self, url):
         assert safe_url(url) == url
+
+    def test_an_uppercase_scheme_is_normalized_rather_than_carried(self):
+        """A scheme is case-insensitive, but a renderer that only knows its
+        lowercase spelling sees no link at all: Telegram delivered
+        ``[example.com](HTTPS://Example.com/X)`` as raw Markdown."""
+        assert safe_url("HTTPS://Example.com/X") == "https://Example.com/X"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://2130706433/p",
+            "https://0x7f.1/p",
+            "https://127.1/p",
+            "https://017700000001/p",
+        ],
+        ids=["decimal", "hexadecimal", "shortened", "octal"],
+    )
+    def test_a_numeric_host_is_named_by_the_address_a_browser_reaches(self, url):
+        """Every one of these opens the loopback address. Attributing the
+        citation to the digits instead would hide that from the reader."""
+        assert source_label(safe_url(url)) == "127.0.0.1"
+
+    @pytest.mark.parametrize(
+        "url",
+        ["https://256.1.1.1/p", "https://1.2.3.4.5/p", "https://example.com.0x1/p"],
+        ids=["out-of-range", "too-many-parts", "domain-shaped"],
+    )
+    def test_a_numeric_host_the_ipv4_parser_refuses_names_no_source(self, url):
+        """A browser will not navigate to these, so there is no host to name."""
+        assert safe_url(url) == ""
+
+    @pytest.mark.parametrize(
+        "code,replaced",
+        [
+            (0x08, True),
+            (0x09, False),
+            (0x0A, False),
+            (0x0B, True),
+            (0x0C, False),
+            (0x0D, False),
+            (0x0E, True),
+            (0x1F, True),
+            (0x20, False),
+            (0x7E, False),
+            (0x7F, True),
+            (0x80, True),
+            (0x9F, True),
+            (0xA0, False),
+            (0xD7FF, False),
+            (0xD800, True),
+            (0xDFFF, True),
+            (0xE000, False),
+            (0xFDCF, False),
+            (0xFDD0, True),
+            (0xFDEF, True),
+            (0xFDF0, False),
+            (0xFFFE, True),
+            (0xFFFF, True),
+            (0x1FFFE, True),
+            (0x10FFFD, False),
+            (0x10FFFF, True),
+            (0x110000, True),
+        ],
+    )
+    def test_the_replacement_table_is_the_one_the_renderer_uses(self, code, replaced):
+        """micromark's table, boundary by boundary.
+
+        The persisted URL has to equal the href drawn from it, so a numeric
+        reference has to resolve the way the parser behind the Web renderer
+        resolves it - which is not HTML's Windows-1252 mapping: ``&#x80;`` is
+        U+FFFD there, never ``€``.
+        """
+        from core.citations import _is_replaced_code_point
+
+        assert _is_replaced_code_point(code) is replaced
+
+    def test_a_long_host_is_elided_from_the_left(self):
+        """A label cut from the right reads as a site the link never opens."""
+        host = "developers.openai.com." + "padding." * 6 + "attacker.example"
+
+        label = source_label(f"https://{host}/x")
+
+        assert label.startswith("…")
+        assert label.endswith(".attacker.example")
+        assert not label.startswith("developers.openai.com")
+        assert host.endswith(label[1:])
+        assert len(label) <= 64
+        # Whole labels only: an elision may not invent one out of a fragment.
+        assert "." + label[1:] in "." + host
 
     def test_markdown_punctuation_in_a_url_is_percent_encoded(self):
         """An unencoded ``)`` would truncate the link and leave prose behind it."""

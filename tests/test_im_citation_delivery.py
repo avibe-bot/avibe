@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import CitationSource, resolve_citations
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from modules.im import MessageContext
 from modules.im.formatters.avibe_formatter import AvibeFormatter
@@ -116,6 +117,32 @@ class CitationRenderingPerPlatformTests(unittest.TestCase):
 
         self.assertIn("developers.openai.com](https", rendered)
         self.assertNotIn("<a href", rendered)
+
+    def test_telegram_recognizes_a_link_whose_scheme_is_not_lowercase(self):
+        """A scheme is case-insensitive. The link parser only knew the lowercase
+        spelling, so an uppercase one was delivered as raw Markdown - which any
+        link the agent writes in its own prose hits too, not only a citation."""
+        rendered = TelegramFormatter().render("See [example.com](HTTPS://Example.com/X)")
+
+        self.assertIn('<a href="HTTPS://Example.com/X">example.com</a>', rendered)
+
+    def test_a_source_that_shouted_its_scheme_is_still_delivered_as_an_anchor(self):
+        """The whole path, not just the formatter: an untrusted result spells
+        the scheme in uppercase, and Telegram still shows a labeled hyperlink."""
+        text, citations = resolve_citations(
+            "Claimed.\ue200cite\ue202turn0view0\ue201",
+            {
+                "turn0view0": CitationSource(
+                    ref_id="turn0view0", title="T", url="HTTPS://Example.com/X"
+                )
+            },
+            unresolved_label="[source unavailable]",
+        )
+
+        rendered = TelegramFormatter().render(text)
+
+        self.assertEqual(citations[0]["url"], "https://Example.com/X")
+        self.assertIn('<a href="https://Example.com/X">example.com</a>', rendered)
 
     def test_markdown_native_platforms_pass_the_link_through(self):
         for formatter in (DiscordFormatter(), FeishuFormatter(), AvibeFormatter()):
