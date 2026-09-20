@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,52 @@ from .migration_journal import NativeFileEdit, TakeoverStateError, _read_regular
 
 if TYPE_CHECKING:
     from .migration import NativeMigrationItem
+
+
+class NativeReferenceError(TakeoverStateError):
+    """A planned native configuration still consumes selected authentication."""
+
+    def __init__(self, references: dict[str, tuple[str, ...]]) -> None:
+        super().__init__("native configuration still references selected authentication")
+        self.references = references
+
+
+def env_reference(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    match = re.fullmatch(r"\{env:([A-Za-z_][A-Za-z_0-9]*)\}", value)
+    return match[1] if match else None
+
+
+def env_references(value: object) -> tuple[str, ...]:
+    """Inventory references even in unsupported header templates."""
+    if isinstance(value, str):
+        return tuple(re.findall(r"\{env:([A-Za-z_][A-Za-z_0-9]*)\}", value))
+    if isinstance(value, dict):
+        return tuple(dict.fromkeys(name for child in value.values() for name in env_references(child)))
+    if isinstance(value, list):
+        return tuple(dict.fromkeys(name for child in value for name in env_references(child)))
+    return ()
+
+
+def native_config_references(backend: str, payload: dict) -> frozenset[str]:
+    """The native interpreters' references, independent of credential rows."""
+    if backend == "opencode":
+        return frozenset(env_references(payload))
+    names: set[str] = set()
+    if backend == "codex":
+        providers = payload.get("model_providers", {})
+        for provider in providers.values() if isinstance(providers, dict) else ():
+            if not isinstance(provider, dict):
+                continue
+            name = provider.get("env_key")
+            if isinstance(name, str) and name:
+                names.add(name)
+            headers = provider.get("env_http_headers", {})
+            if isinstance(headers, dict):
+                names.update(value for value in headers.values() if isinstance(value, str))
+    return frozenset(names)
+
 
 def _object(content: bytes, *, jsonc: bool = False) -> dict:
     try:
@@ -110,11 +157,46 @@ def read_native_config(path: Path, *, jsonc: bool = False) -> dict | None:
     return None if content is None else _object(content, jsonc=jsonc)
 
 
+def planned_native_references(
+    edits: dict[Path, NativeFileEdit], *, home: Path | None,
+    project_roots: tuple[Path, ...] = (),
+) -> dict[str, tuple[str, ...]]:
+    """Read the exact after images, including layers with no migration row.
+
+    Unselected layers become no-op guards so a new consumer introduced during
+    proof cannot invalidate the decision to remove a shell assignment.
+    """
+    references: dict[str, list[str]] = {}
+    for backend, paths in (
+        ("claude", claude_settings_paths(home, project_roots)),
+        ("codex", codex_config_paths(home, project_roots)),
+        ("opencode", opencode_config_paths(home, project_roots)),
+    ):
+        for path in paths:
+            if path not in edits:
+                before = _read_regular(path)
+                edits[path] = NativeFileEdit(path, before, before)
+            content = edits[path].after
+            if content is None:
+                continue
+            try:
+                payload = (
+                    tomllib.loads(content.decode()) if backend == "codex"
+                    else _object(content, jsonc=backend == "opencode")
+                )
+            except (ValueError, UnicodeError):
+                raise TakeoverStateError("native configuration cannot be parsed") from None
+            for name in native_config_references(backend, payload):
+                references.setdefault(name, []).append(str(path))
+    return {name: tuple(paths) for name, paths in references.items()}
+
+
 def plan_native_cleanup(
     items: list[NativeMigrationItem],
     *,
     home: Path | None,
     project_roots: tuple[Path, ...] = (),
+    _include_shell: bool = True,
 ) -> list[NativeFileEdit]:
     """One before/after image per path, even when providers share a file.
 
@@ -306,7 +388,7 @@ def plan_native_cleanup(
                 payload.pop(vendor, None)
 
         edit_json(opencode_auth_path(home), clear_provider_auth, guard_unchanged=True)
-    if backends:
+    if backends and _include_shell:
         from .migration_shell import cleanup_shell_profile, read_shell_profiles
 
         selected_values: dict[str, str] = {}
@@ -315,6 +397,21 @@ def plan_native_cleanup(
                 if name in selected_values and selected_values[name] != value:
                     raise TakeoverStateError("conflicting native credential snapshots")
                 selected_values[name] = value
+        if selected_values:
+            references = planned_native_references(edits, home=home, project_roots=project_roots)
+            auth_names = {name for item in items for name in item.shell_auth_variables}
+            live_auth = {
+                name: references[name]
+                for name in selected_values.keys() & auth_names & references.keys()
+            }
+            if live_auth:
+                raise NativeReferenceError(live_auth)
+            # A Base URL may still serve a provider that had no credential to
+            # import. Retain its assignment, even in a selected backend.
+            selected_values = {
+                name: value for name, value in selected_values.items()
+                if name not in references
+            }
         for profile in read_shell_profiles(home, frozenset(selected_values)):
             previous = edits.get(profile.path)
             if previous and previous.before != profile.before:

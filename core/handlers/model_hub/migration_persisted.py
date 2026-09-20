@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from .migration_files import (
     _object,
     claude_settings_paths,
     codex_config_paths,
+    native_config_references,
     opencode_auth_path,
     opencode_catalog_path,
     opencode_config_paths,
@@ -26,24 +26,6 @@ BUILTIN_NAMES = frozenset({
     "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
     "OPENAI_BASE_URL", "OPENROUTER_API_KEY",
 })
-
-
-def env_reference(value: object) -> str | None:
-    if not isinstance(value, str):
-        return None
-    match = re.fullmatch(r"\{env:([A-Za-z_][A-Za-z_0-9]*)\}", value)
-    return match[1] if match else None
-
-
-def env_references(value: object) -> tuple[str, ...]:
-    """Inventory references even in unsupported header templates."""
-    if isinstance(value, str):
-        return tuple(re.findall(r"\{env:([A-Za-z_][A-Za-z_0-9]*)\}", value))
-    if isinstance(value, dict):
-        return tuple(dict.fromkeys(name for child in value.values() for name in env_references(child)))
-    if isinstance(value, list):
-        return tuple(dict.fromkeys(name for child in value for name in env_references(child)))
-    return ()
 
 
 @dataclass(frozen=True, repr=False)
@@ -96,23 +78,7 @@ class PersistedInventory:
                     continue
                 if not payload:
                     continue
-                providers = payload.get("model_providers" if backend == "codex" else "provider", {})
-                if not isinstance(providers, dict):
-                    continue
-                for provider in providers.values():
-                    if not isinstance(provider, dict):
-                        continue
-                    if backend == "codex":
-                        name = provider.get("env_key")
-                        if isinstance(name, str) and name:
-                            references[backend].add(name)
-                        headers = provider.get("env_http_headers", {})
-                        if isinstance(headers, dict):
-                            references[backend].update(v for v in headers.values() if isinstance(v, str))
-                    elif backend == "opencode":
-                        options = provider.get("options", {})
-                        if isinstance(options, dict):
-                            references[backend].update(env_references(options))
+                references[backend].update(native_config_references(backend, payload))
         # Native stores still own their read/permission policy. These snapshots
         # only bind file changes; no OS credential API is invoked here.
         credential_paths = {

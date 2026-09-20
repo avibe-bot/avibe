@@ -3,13 +3,19 @@
 import asyncio
 import json
 import os
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from config.v2_config import ModelHubConfig
 from core.handlers.model_hub.migration import scan_native_configs
-from core.handlers.model_hub.migration_files import plan_native_cleanup
+from core.handlers.model_hub.migration_files import (
+    NativeReferenceError,
+    native_config_references,
+    plan_native_cleanup,
+)
 from core.handlers.model_hub.migration_journal import NativeFileEdit, TakeoverStateError
 from core.handlers.model_hub.service import ModelHubError
 from tests.scenarios.model_hub.test_model_hub_migration_scenarios import (
@@ -37,6 +43,11 @@ def home(tmp_path, monkeypatch):
 
     for name in ("metadata", "read", "write", "delete"):
         monkeypatch.setattr(native_oauth_store._SecurityKeychainStore, name, forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess.Popen, "__init__", forbidden)
+    monkeypatch.setattr(os, "system", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
     return result
 
 
@@ -375,3 +386,122 @@ def test_absent_profile_created_during_native_key_proof_blocks_cleanup(home, tmp
     assert path.read_bytes() == before
     assert not store.config.sources
     assert len(adapter.revoked) == len(adapter.provisioned) == 1
+
+
+@pytest.mark.parametrize("selected_opencode_vendor", [False, True])
+def test_live_base_reference_survives_actual_planned_cleanup(home, tmp_path, selected_opencode_vendor):
+    shell = home / ".profile"
+    key_line = b"export OPENAI_API_KEY=fixture-codex\r\n"
+    base_line = b"export OPENAI_BASE_URL=https://fixture.example/v1\r\n"
+    shell.write_bytes(key_line + base_line)
+    providers = {"openai": {"options": {"baseURL": "{env:OPENAI_BASE_URL}"}}}
+    if selected_opencode_vendor:
+        providers["zhipuai"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"apiKey": "fixture-zhipu", "baseURL": "https://fixture-zhipu.example/v1"},
+        }
+    path = config(home, "opencode", providers)
+    original = path.read_bytes()
+    service, _, adapter = _service(tmp_path, migration_home=home)
+    rows = service.migration_scan()["items"]
+    assert len(rows) == 1 + selected_opencode_vendor
+    assert all(row["proposed_action"] == "import" for row in rows)
+    assert all("shell_auth_variables" not in row for row in rows)
+    assert asyncio.run(service.migration_apply([row["id"] for row in rows]))["applied"] == len(rows)
+    assert shell.read_bytes() == base_line
+    after = json.loads(path.read_bytes())
+    assert after["provider"]["openai"] == providers["openai"]
+    if selected_opencode_vendor:
+        assert "options" not in after["provider"]["zhipuai"]
+    else:
+        assert path.read_bytes() == original
+    assert len(adapter.provisioned) == len(rows)
+
+
+@pytest.mark.parametrize("root_reference", [False, True])
+def test_live_auth_reference_without_a_row_blocks_before_any_write(home, tmp_path, root_reference):
+    shell = home / ".profile"
+    shell.write_text("export OPENAI_API_KEY=fixture-codex\n")
+    if root_reference:
+        path = config(home, "opencode", {})
+        _write(path, json.dumps({"instructions": ["{env:OPENAI_API_KEY}"]}))
+    else:
+        path = config(home, "opencode", {"openai": {"options": {"baseURL": "{env:OPENAI_API_KEY}"}}})
+    original = shell.read_bytes(), path.read_bytes()
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    [row] = service.migration_scan()["items"]
+    assert row["backend"] == "codex"
+    assert row["notes_key"].endswith(".reference")
+    assert str(path) in row["source_paths"]
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.migration_apply([row["id"]]))
+    assert (shell.read_bytes(), path.read_bytes()) == original
+    assert not adapter.provisioned and not adapter.transient_refs
+    assert not store.config.sources
+
+
+@pytest.mark.parametrize("same_name_for_base", [False, True])
+def test_same_backend_surviving_reference_uses_auth_role_over_base_role(home, same_name_for_base):
+    shell = home / ".profile"
+    shell.write_text("export CUSTOM_FIXTURE_KEY=https://fixture.example/v1\n")
+    selected_options = {"apiKey": "{env:CUSTOM_FIXTURE_KEY}"}
+    if same_name_for_base:
+        selected_options["baseURL"] = "{env:CUSTOM_FIXTURE_KEY}"
+    path = config(home, "opencode", {
+        "openai": {"options": selected_options},
+        "orphan": {"options": {"baseURL": "{env:CUSTOM_FIXTURE_KEY}"}},
+    })
+    [row] = scan(home)
+    assert row.shell_auth_variables == ("CUSTOM_FIXTURE_KEY",)
+    assert row.notes_key.endswith(".reference")
+    original = shell.read_bytes(), path.read_bytes()
+    # Planner enforcement is independent of scan presentation and backend
+    # selection: selecting OpenCode does not remove the orphan provider.
+    with pytest.raises(NativeReferenceError) as error:
+        plan_native_cleanup([replace(row, proposed_action="import", selected=True)], home=home)
+    assert error.value.references == {"CUSTOM_FIXTURE_KEY": (str(path),)}
+    assert (shell.read_bytes(), path.read_bytes()) == original
+
+
+def test_only_base_variable_with_live_reference_is_retained_for_same_backend(home):
+    shell = home / ".profile"
+    key_line = "export CUSTOM_FIXTURE_KEY=fixture-key\n"
+    base_line = "export CUSTOM_FIXTURE_BASE=https://fixture.example/v1\n"
+    shell.write_text(key_line + base_line)
+    path = config(home, "opencode", {
+        "openai": {"options": {
+            "apiKey": "{env:CUSTOM_FIXTURE_KEY}", "baseURL": "{env:CUSTOM_FIXTURE_BASE}",
+        }},
+        "orphan": {"options": {"baseURL": "{env:CUSTOM_FIXTURE_BASE}"}},
+    })
+    [row] = scan(home)
+    assert row.proposed_action == "import"
+    assert row.shell_auth_variables == ("CUSTOM_FIXTURE_KEY",)
+    edits = plan_native_cleanup([row], home=home)
+    config_edit = next(edit for edit in edits if edit.path == path)
+    references = native_config_references("opencode", json.loads(config_edit.after))
+    assert references == {"CUSTOM_FIXTURE_BASE"}
+    for edit in edits:
+        edit.apply()
+    assert shell.read_text() == base_line
+    assert "CUSTOM_FIXTURE_KEY" not in references
+
+
+def test_cross_project_reference_with_no_row_is_also_preserved(home, tmp_path):
+    shell = home / ".profile"
+    shell.write_text(
+        "export OPENAI_API_KEY=fixture-key\n"
+        "export OPENAI_BASE_URL=https://fixture.example/v1\n"
+    )
+    project = tmp_path / "project"
+    path = project / "opencode.jsonc"
+    _write(path, '{"provider":{"openai":{"options":{"baseURL":"{env:OPENAI_BASE_URL}"}}}}')
+    original = path.read_bytes()
+    rows = scan_native_configs(
+        ModelHubConfig(), home=home, project_roots=(project,), mask_credential=lambda _: "masked",
+    )
+    assert len(rows) == 1
+    for edit in plan_native_cleanup(rows, home=home, project_roots=(project,)):
+        edit.apply()
+    assert shell.read_text() == "export OPENAI_BASE_URL=https://fixture.example/v1\n"
+    assert path.read_bytes() == original

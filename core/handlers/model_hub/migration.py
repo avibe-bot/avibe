@@ -31,9 +31,12 @@ from core.handlers.model_hub.reasoning_tiers import resolve_reasoning_tiers
 from core.handlers.model_hub.migration_files import (
     claude_settings_paths,
     codex_config_paths,
+    env_reference,
+    env_references,
     opencode_auth_path,
     opencode_config_paths,
     plan_native_cleanup,
+    planned_native_references,
     read_native_config,
 )
 from core.handlers.model_hub.migration_journal import (
@@ -41,7 +44,7 @@ from core.handlers.model_hub.migration_journal import (
     NativeTakeoverJournal,
     TakeoverStateError,
 )
-from core.handlers.model_hub.migration_persisted import PersistedInventory, env_reference, env_references
+from core.handlers.model_hub.migration_persisted import PersistedInventory
 from vibe.backend_model_catalog import (
     backend_model_entries,
     bundled_catalog_reasoning_efforts_by_model,
@@ -224,6 +227,7 @@ class NativeMigrationItem:
     source_paths: tuple[str, ...] = ()
     required_backends: tuple[str, ...] = ()
     shell_variables: tuple[str, ...] = field(default=(), repr=False)
+    shell_auth_variables: tuple[str, ...] = field(default=(), repr=False)
     shell_values: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     file_snapshots: tuple[NativeFileEdit, ...] = field(default=(), repr=False)
     auth_scheme: str | None = field(default=None, repr=False)
@@ -512,6 +516,7 @@ def _blocked_item(
     backend: str, identity: str, reason: str = "config", *,
     source_paths: tuple[str, ...] = (),
     shell_variables: tuple[str, ...] = (),
+    shell_auth_variables: tuple[str, ...] = (),
 ) -> NativeMigrationItem:
     item_id, source_id = _ids(backend, "api_key", identity, "reauth")
     return NativeMigrationItem(
@@ -522,6 +527,7 @@ def _blocked_item(
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
         source_paths=source_paths, shell_variables=shell_variables,
+        shell_auth_variables=shell_auth_variables,
     )
 
 
@@ -655,7 +661,7 @@ def _codex_items(
                 # reinterpreted as an ordinary Authorization bearer grant.
                 items.append(_blocked_item(
                     "codex", f"{path}:{provider_id}", "headers",
-                    source_paths=paths, shell_variables=names,
+                    source_paths=paths, shell_variables=names, shell_auth_variables=names,
                 ))
                 continue
             shell_values: tuple[tuple[str, str], ...] = ()
@@ -664,14 +670,14 @@ def _codex_items(
                 if resolved.reason or not resolved.value:
                     items.append(_blocked_item(
                         "codex", f"{path}:{provider_id}", resolved.reason or "reference",
-                        source_paths=paths, shell_variables=names,
+                        source_paths=paths, shell_variables=names, shell_auth_variables=names,
                     ))
                     continue
                 if key and key != resolved.value:
                     # Two credential mechanisms must not silently discard one.
                     items.append(_blocked_item(
                         "codex", f"{path}:{provider_id}", "credential",
-                        source_paths=paths, shell_variables=names,
+                        source_paths=paths, shell_variables=names, shell_auth_variables=names,
                     ))
                     continue
                 key = resolved.value
@@ -693,6 +699,7 @@ def _codex_items(
                 secret=key, base_url=base_url, masked_credential=masked,
                 native_provider_id=provider_id,
                 source_paths=paths, shell_variables=names, shell_values=shell_values,
+                shell_auth_variables=names,
             ))
     return items
 
@@ -820,10 +827,12 @@ def _opencode_candidates(
     for provider_id in sorted(provider_ids):
         paths = (locator,)
         names: tuple[str, ...] = ()
+        auth_names: tuple[str, ...] = ()
 
         def blocked(identity: str, reason: str = "config") -> NativeMigrationItem:
             return _blocked_item(
                 "opencode", identity, reason, source_paths=paths, shell_variables=names,
+                shell_auth_variables=auth_names,
             )
 
         if (
@@ -844,6 +853,9 @@ def _opencode_candidates(
             options = {}
         key_setting = options.get("apiKey")
         names = env_references(options)
+        auth_names = tuple(dict.fromkeys([
+            *env_references(key_setting), *env_references(options.get("headers")),
+        ]))
         paths = tuple(dict.fromkeys([
             locator, *(source for name in names for source in persisted.resolve(name).paths),
             *([str(auth_path)] if provider_id in auth_entries else []),
@@ -946,6 +958,7 @@ def _opencode_candidates(
                 manual_models=manual_models,
                 masked_credential=masked_secret,
                 source_paths=paths, shell_variables=names, shell_values=tuple(shell_values),
+                shell_auth_variables=auth_names,
             )
         )
         if auth_key and auth_key != secret:
@@ -964,6 +977,7 @@ def _opencode_candidates(
 
 def _shell_items(
     persisted: PersistedInventory, mask_credential: Callable[[str], str],
+    native_items: list[NativeMigrationItem],
 ) -> list[NativeMigrationItem]:
     """Import literal credentials only with a single, persisted target."""
     items: list[NativeMigrationItem] = []
@@ -976,7 +990,7 @@ def _shell_items(
         ("opencode", "OPENROUTER_API_KEY", None, "openrouter", "openai_chat"),
     )
     for backend, name, base_name, vendor, protocol in specs:
-        if name in persisted.references[backend]:
+        if any(item.backend == backend and name in item.shell_auth_variables for item in native_items):
             # A native provider reference owns the target and transport.
             continue
         value = persisted.resolve(name)
@@ -1007,7 +1021,7 @@ def _shell_items(
         if reason or not value.value:
             items.append(_blocked_item(
                 backend, f"shell:{name}", reason or "reference",
-                source_paths=paths, shell_variables=names,
+                source_paths=paths, shell_variables=names, shell_auth_variables=(name,),
             ))
             continue
         if vendor == "openrouter":
@@ -1025,6 +1039,7 @@ def _shell_items(
             vendor=vendor, protocol=cast(Any, protocol), display_name=vendor,
             base_url=base_url, secret=value.value, masked_credential=masked,
             source_paths=paths, shell_variables=names,
+            shell_auth_variables=(name,),
             shell_values=(
                 (name, value.value),
                 *(((base_name, base_url),) if base and base.value else ()),
@@ -1032,6 +1047,46 @@ def _shell_items(
             auth_scheme=scheme,
         ))
     return items
+
+
+def _surface_surviving_auth_references(
+    items: list[NativeMigrationItem], *, home: Path | None,
+    project_roots: tuple[Path, ...],
+) -> list[NativeMigrationItem]:
+    """Preview the same native after images used by the cleanup transaction."""
+    selected = [item for item in items if item.proposed_action == "import"]
+    auth_names = {
+        name for item in selected for name, _ in item.shell_values
+        if name in item.shell_auth_variables
+    }
+    if not auth_names:
+        return items
+    try:
+        edits = {
+            edit.path: edit for edit in plan_native_cleanup(
+                selected, home=home, project_roots=project_roots, _include_shell=False,
+            )
+        }
+        references = planned_native_references(edits, home=home, project_roots=project_roots)
+    except (OSError, TakeoverStateError):
+        # Store permissions and unsupported credentials have their own rows.
+        # A preview cannot replace the consent-time native-store resolution.
+        return items
+    return [
+        replace(
+            item, proposed_action="reauth", selected=False,
+            notes_key="settings.models.migration.blocked.reference",
+            source_paths=tuple(dict.fromkeys([
+                *item.source_paths,
+                *(path for name in item.shell_auth_variables if name in references
+                  for path in references[name]),
+            ])),
+        ) if (
+            item.proposed_action == "import"
+            and set(item.shell_auth_variables) & auth_names & references.keys()
+        ) else item
+        for item in items
+    ]
 
 
 def _bind_persisted_inventory(
@@ -1131,6 +1186,9 @@ def _deduplicate_opencode_items(
             manual_models=tuple(models.values()),
             source_paths=tuple(dict.fromkeys(path for item in group for path in item.source_paths)),
             shell_variables=tuple(dict.fromkeys(name for item in group for name in item.shell_variables)),
+            shell_auth_variables=tuple(dict.fromkeys(
+                name for item in group for name in item.shell_auth_variables
+            )),
             shell_values=tuple(dict.fromkeys(pair for item in group for pair in item.shell_values)),
         )
         duplicates.update(item.id for item in group[1:])
@@ -1169,8 +1227,8 @@ def scan_native_configs(
             home=home, mask_credential=mask_credential, project_roots=project_roots,
             persisted=persisted,
         ),
-        *_shell_items(persisted, mask_credential),
     ]
+    items.extend(_shell_items(persisted, mask_credential, items))
     for backend, auth in (legacy_auth or {}).items():
         if backend not in {"claude", "codex"}:
             continue
@@ -1238,6 +1296,9 @@ def scan_native_configs(
             ))
             continue
         candidates.append(item)
+    candidates = _surface_surviving_auth_references(
+        candidates, home=home, project_roots=project_roots,
+    )
     return _bind_persisted_inventory(candidates, persisted)
 
 
