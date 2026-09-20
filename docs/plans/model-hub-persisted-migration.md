@@ -73,7 +73,12 @@ is authorized by this implementation task.
   describe a missing persistent value, not a permission failure.
 - Saved API keys use the existing whitespace-normalization policy once at
   inventory construction. Proof, identity reuse and permanent custody consume
-  that same value; exact raw shell assignments remain separate cleanup evidence.
+  that same value. Cleanup compares static API-key fields using that same
+  canonical value, while exact raw file snapshots and shell assignments remain
+  separate consent/cleanup evidence. Canonical equality never substitutes for
+  an exact snapshot check, including whitespace-only concurrent changes.
+  Unsupported OAuth fields and environment references are not reinterpreted
+  as normalized static credentials.
 - Every credential keeps its original target and authentication semantics.
   A static bearer token is not assumed to be an API-key header or an OAuth grant.
   Any unsupported transport must have an honest, actionable row-level reason.
