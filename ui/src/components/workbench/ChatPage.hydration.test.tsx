@@ -450,6 +450,90 @@ describe('ChatPage transcript hydration', () => {
     expect(screen.queryByText(stale.text)).toBeNull();
   });
 
+  it('does not let delayed bootstrap erase a newer queue refresh', async () => {
+    const delayedBootstrap = deferred<ReturnType<typeof bootstrapPayload>>();
+    const current = queuedMessage('bootstrap-current', 'current queued row');
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockReset().mockReturnValue(delayedBootstrap.promise);
+    mocks.api.listSessionQueue.mockReset().mockResolvedValue({ queued: [current] });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.api.getSessionBootstrap).toHaveBeenCalledTimes(1));
+    await act(async () => mocks.events?.onQueueUpdated({ session_id: 'session-new' }));
+    expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(1);
+
+    await act(async () => delayedBootstrap.resolve(bootstrapPayload('session-new')));
+    expect(screen.getByText(current.text)).toBeTruthy();
+  });
+
+  it('does not let an older queue refresh erase a newer bootstrap snapshot', async () => {
+    const staleRefresh = deferred<{ queued: ReturnType<typeof queuedMessage>[] }>();
+    const current = queuedMessage('bootstrap-current', 'current bootstrap row');
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listSessionQueue.mockReset().mockReturnValue(staleRefresh.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.queryByText('common.loading')).toBeNull());
+    act(() => mocks.events?.onQueueUpdated({ session_id: 'session-new' }));
+    await waitFor(() => expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(1));
+
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [current],
+    });
+    act(() => mocks.events?.onAuthorizationChanged({ resource_kinds: [] }));
+    await waitFor(() => expect(screen.getByText(current.text)).toBeTruthy());
+
+    await act(async () => staleRefresh.resolve({ queued: [] }));
+    expect(screen.getByText(current.text)).toBeTruthy();
+  });
+
+  it('keeps an older successful queue read after a newer read fails', async () => {
+    const olderRead = deferred<{ queued: ReturnType<typeof queuedMessage>[] }>();
+    const newerRead = deferred<{ queued: ReturnType<typeof queuedMessage>[] }>();
+    const current = queuedMessage('queue-fallback', 'fallback queued row');
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listSessionQueue
+      .mockReset()
+      .mockReturnValueOnce(olderRead.promise)
+      .mockReturnValueOnce(newerRead.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route path="/chat/:sessionId" element={<ChatPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(mocks.events).not.toBeNull());
+    act(() => {
+      mocks.events?.onQueueUpdated({ session_id: 'session-new' });
+      mocks.events?.onQueueUpdated({ session_id: 'session-new' });
+    });
+    await waitFor(() => expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(2));
+
+    await act(async () => newerRead.reject(new Error('newer queue read failed')));
+    await act(async () => olderRead.resolve({ queued: [current] }));
+    expect(screen.getByText(current.text)).toBeTruthy();
+  });
+
   it.each([
     { kind: 'detached', type: 'result', metadata: { detached: true, activity_id: 'background-1' } },
     {

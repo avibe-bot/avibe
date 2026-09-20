@@ -893,6 +893,19 @@ export const ChatPage: React.FC = () => {
   // rows.
   const queueReadGenerationRef = useRef(0);
   const committedQueueReadGenerationRef = useRef(0);
+  const beginQueueSnapshotRead = useCallback((requestSessionId: string) => {
+    const generation = ++queueReadGenerationRef.current;
+    return () => {
+      if (
+        requestSessionId !== sessionIdRef.current
+        || generation < committedQueueReadGenerationRef.current
+      ) {
+        return false;
+      }
+      committedQueueReadGenerationRef.current = generation;
+      return true;
+    };
+  }, []);
   const [initialDraft, setInitialDraft] = useState<string | null>(null);
   const draftTimerRef = useRef<number | null>(null);
   // The debounced draft save still owed to the server, tagged with the session
@@ -1269,18 +1282,17 @@ export const ChatPage: React.FC = () => {
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
     if (!sessionId) return;
-    const generation = ++queueReadGenerationRef.current;
+    const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
       if (isCurrentRequest && !isCurrentRequest()) return;
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
-      if (generation < committedQueueReadGenerationRef.current) return;
-      committedQueueReadGenerationRef.current = generation;
+      if (!claimQueueSnapshot()) return;
       setQueue(res.queued ?? []);
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
     }
-  }, [api, sessionId]);
+  }, [api, beginQueueSnapshotRead, sessionId]);
 
   // Returns false only when the fetch itself failed, so the transcript scroller can
   // re-arm and let a later scroll retry; true for success / no-op / stale session.
@@ -1473,6 +1485,7 @@ export const ChatPage: React.FC = () => {
       // payload so remote links don't pay a tunnel round-trip per widget.
       const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const epochAtRequest = turnEpochRef.current;
+      const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Drop a response if the user switched chats or a newer bootstrap for
       // this route began while it was in flight.
@@ -1530,7 +1543,7 @@ export const ChatPage: React.FC = () => {
       }
       setHydratedTranscriptSessionId(sessionId);
       setFailedBootstrapSessionId(null);
-      setQueue(bootstrap.queued ?? []);
+      if (claimQueueSnapshot()) setQueue(bootstrap.queued ?? []);
       setInitialDraft(bootstrap.draft?.text ?? '');
       // Restore Stop for a turn that is still running (e.g. opened in another tab
       // or reloaded mid-turn). markWorking on the live branch so a racing
@@ -1570,7 +1583,7 @@ export const ChatPage: React.FC = () => {
       // of its own loading state into a premature not-found / error view.
       if (requestIsCurrent()) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, installServerSession]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow, beginTranscriptSnapshotRead, beginQueueSnapshotRead, installServerSession]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
