@@ -26,12 +26,26 @@ SHELL_PROFILE_NAMES = (
 _NAME = r"[a-zA-Z_][a-zA-Z_0-9]*"
 _ASSIGNMENT = re.compile(rf"^({_NAME})=")
 _WRITER = re.compile(rf"^({_NAME})(?:\[[^]]*\])?\+?=")
-_OPERATORS = ("<<<", "<<-", "&&", "||", ";;", ";&", "<<", ">>", "<&", ">&", "|&", "((", "))")
+_OPERATORS = ("<<<", "<<-", "&&", "||", ";;", ";&", "<<", ">>", "<&", ">&", "<>", ">|", "|&", "((", "))")
 _SEPARATORS = {";", ";;", ";&", "&", "&&", "||", "|", "|&", "(", ")", "((", "))"}
 _DECLARATIONS = {"export", "readonly", "declare", "typeset", "local"}
+_ZSH_DECLARATIONS = {
+    # Flags, optional numeric options, implicit numeric attribute. The aliases
+    # share bin_typeset, but not its entire option alphabet.
+    "typeset": ("AHTUafghklmrtuxz", "EFLRZip", ""),
+    "declare": ("AHTUafghklmrtuxz", "EFLRZip", ""),
+    "local": ("AHTUahlrtux", "EFLRZip", ""),
+    "export": ("HTUafhlrtu", "EFLRZip", ""),
+    "readonly": ("AHTUafghlptux", "EFLRZi", ""),
+    "integer": ("Hghlrtux", "LRZip", "i"),
+    "float": ("Hghlrtux", "EFLRZp", "E"),
+}
 _COMMAND_PREFIXES = {"if", "then", "elif", "else", "while", "until", "do", "!", "time", "always"}
 _ZSH_PROFILES = frozenset({".zshenv", ".zprofile", ".zshrc", ".zlogin"})
 _DYNAMIC_STARTS = "$`~{*?["
+# Src/options.c zshletters, plus bin_set's own -s sorting option. -A/-o
+# consume values; -b/-c are not ordinary set options.
+_ZSH_OPTION_FLAGS = "0123456789BCDEFGHIJKLMNOPQRSTUVWXYZadefghiklmnprstuvwxy"
 
 
 @dataclass(frozen=True, repr=False)
@@ -75,6 +89,7 @@ class _Token:
     literal: bool = True
     operator: bool = False
     expansions: tuple[tuple[str, str], ...] = ()
+    fd_name: str | None = None
 
     def is_code(self, word: str) -> bool:
         return self.raw == word
@@ -240,6 +255,12 @@ def _statements(text: str, *, heredocs: bool = True) -> Iterator[_Statement]:
                 start = index
             continue
         if char in ";&|()<>":
+            fd_name = None
+            if char in "<>" and tokens and text[index - 1:index] == "}":
+                match = re.fullmatch(rf"\{{({_NAME})\}}", tokens[-1].raw)
+                if match:
+                    fd_name = match[1]
+                    tokens.pop()
             if (
                 char in "<>" and tokens and tokens[-1].raw.isascii()
                 and tokens[-1].raw.isdigit() and text[index - 1:index].isdigit()
@@ -248,7 +269,7 @@ def _statements(text: str, *, heredocs: bool = True) -> Iterator[_Statement]:
                 # command word. Quoted numbers and whitespace do not qualify.
                 tokens.pop()
             operator = next((op for op in _OPERATORS if text.startswith(op, index)), char)
-            tokens.append(_Token(operator, operator, operator=True))
+            tokens.append(_Token(operator, operator, operator=True, fd_name=fd_name))
             index += len(operator)
             continue
         token, index = _word(text, index)
@@ -262,6 +283,8 @@ def _segments(tokens: tuple[_Token, ...]) -> list[list[_Token]]:
     current: list[_Token] = []
     for token in tokens:
         if token.operator and token.raw in _SEPARATORS:
+            if current and current[0].is_code("coproc") and token.raw in {"(", "(("}:
+                current.append(token)  # Retain the named compound introducer.
             if current:
                 segments.append(current)
                 current = []
@@ -290,29 +313,56 @@ def _arithmetic_writers(text: str, names: frozenset[str]) -> set[str]:
     }
 
 
-def _embedded_writers(token: _Token, names: frozenset[str], depth: int, dialect: str) -> set[str]:
-    found: set[str] = set()
-    for kind, body in token.expansions:
-        if kind == "parameter":
-            match = re.match(rf"^({_NAME}):?=", body)
-            if match and match[1] in names:
-                found.add(match[1])
-            if depth < 12:
-                # A fallback is data, but substitutions inside it can write.
-                for statement in _statements(body):
-                    for nested in statement.tokens:
-                        found.update(_embedded_writers(nested, names, depth + 1, dialect))
+class _WrittenCode:
+    """One finite, deduplicated owner for written code, expansion text and argv.
+
+    A child is a written operand/subexpression, never expansion output, an
+    included file or a resolved function. No recursion/analysis cutoff turns
+    recognized code into safe data. Role and local dialect are part of identity.
+    """
+
+    def __init__(self, names: frozenset[str]):
+        self.names = names
+        self.found: set[str] = set()
+        self.pending: list[tuple[str, str | tuple[_Token, ...], str]] = []
+        self.seen: set[tuple[str, str | tuple[_Token, ...], str]] = set()
+
+    def add(self, role: str, body: str | tuple[_Token, ...], dialect: str) -> None:
+        key = (role, body, dialect)
+        if body and key not in self.seen:
+            self.seen.add(key)
+            self.pending.append(key)
+
+    def embedded(self, token: _Token, dialect: str) -> None:
+        for kind, body in token.expansions:
+            if kind == "parameter":
+                match = re.match(rf"^({_NAME}):?=", body)
+                if match:
+                    self.found.update({match[1]} & self.names)
+                self.add("expansion", body, dialect)
+            elif kind == "arithmetic":
+                self.found.update(_arithmetic_writers(body, self.names))
             else:
-                found.update(_arithmetic_writers(body, names))
-        elif kind == "arithmetic":
-            found.update(_arithmetic_writers(body, names))
-        elif depth < 12:
-            found.update(_written_names(body, names, depth + 1, dialect))
-        else:
-            # Beyond this bounded grammar, retain explicit writer evidence
-            # rather than silently ignoring a deeply nested assignment.
-            found.update(_arithmetic_writers(body, names))
-    return found
+                self.add("source", body, dialect)
+
+    def run(self) -> set[str]:
+        while self.pending and not self.found >= self.names:
+            self.visit(*self.pending.pop())
+        return self.found
+
+    def visit(self, role: str, body: str | tuple[_Token, ...], dialect: str) -> None:
+        if role == "argv":
+            _argv_writers(list(body), self, dialect)
+            return
+        for statement in _statements(body):
+            if role == "expansion":
+                for token in statement.tokens:
+                    self.embedded(token, dialect)
+                continue
+            for segment in _segments(statement.tokens):
+                _command_writers(segment, self, dialect)
+            if any(token.raw == "((" for token in statement.tokens):
+                self.found.update(_arithmetic_writers(body[statement.start:statement.end], self.names))
 
 
 @dataclass(frozen=True, repr=False)
@@ -330,6 +380,7 @@ def _options(
     plus: bool = False,
     long: Mapping[str, tuple[str, str]] | None = None,
     stop_after: str = "",
+    stop_unless: str = "",
 ) -> tuple[dict[str, _Token | None], list[_Token]] | _UnknownOptions | None:
     """Decode argument roles, not values; the last occurrence of an option wins.
 
@@ -372,7 +423,7 @@ def _options(
                 operand = arguments[index]
             options[flag] = operand
             index += 1
-            if flag in stop_after:
+            if flag in stop_after and not options.keys() & set(stop_unless):
                 return options, arguments[index:]
             continue
         position = 1
@@ -399,9 +450,13 @@ def _options(
             options.pop(flag, None)
             options.pop("+" + flag, None)
             options[("+" if argument[0] == "+" else "") + flag] = operand
-            if flag in stop_after:
+            if flag in stop_after and (flag in required or flag in numeric) and not options.keys() & set(stop_unless):
                 return options, arguments[index + 1:]
         index += 1
+        # Zsh print changes to echo's option grammar after the complete -R
+        # word, not halfway through a bundle such as -RvNAME or -Rf FORMAT.
+        if options.keys() & set(stop_after) and not options.keys() & set(stop_unless):
+            return options, arguments[index:]
     return options, []
 
 
@@ -409,7 +464,8 @@ def _option_cases(
     arguments: list[_Token], flags: str = "", required: str = "", *,
     numeric: str = "", plus: bool = False,
     long: Mapping[str, tuple[str, str]] | None = None, stop_after: str = "",
-    writer_flags: str = "", state_flags: str = "", state_values: str = "",
+    stop_unless: str = "",
+    writer_flags: str | tuple[str, ...] = "", state_flags: str = "", state_values: str = "",
     zero_values: str = "",
 ) -> Iterator[tuple[dict[str, _Token | None], list[_Token]]]:
     """Project an unknown option onto this builtin's existing argument roles.
@@ -443,7 +499,8 @@ def _option_cases(
         seen.add(key)
         parsed = _options(
             remaining, flags, required, numeric=numeric, plus=plus,
-            long=long, stop_after=stop_after,
+            long=long, stop_after="" if prefix.keys() & set(stop_unless) else stop_after,
+            stop_unless=stop_unless,
         )
         if parsed is None:
             continue
@@ -465,8 +522,8 @@ def _option_cases(
             # A dynamic +/- bundle may remove existing query attributes.
             options = {key: value for key, value in options.items() if key not in {"f", "F", "p", "+"}}
             pending.append((tail, options))
-        for flag in writer_flags:
-            pending.append((tail, {**options, flag: None}))
+        for bundle in writer_flags:
+            pending.append((tail, {**options, **dict.fromkeys(bundle)}))
         if tail:
             for flag in required + numeric:
                 changed = dict(options)
@@ -499,27 +556,28 @@ def _assignment_writers(value: str, names: frozenset[str], *, arithmetic: bool =
 
 
 def _array_reader_writers(
-    arguments: list[_Token], names: frozenset[str], depth: int, dialect: str,
+    arguments: list[_Token], analysis: _WrittenCode, dialect: str,
 ) -> set[str]:
+    names = analysis.names
     found: set[str] = set()
     for options, operands in _option_cases(arguments, "t", "dnOsuCc", state_values="C"):
         found.update(_destination(operands[0].value if operands else "MAPFILE", names))
         callback = options.get("C")
         if callback is not None:
             # Only an explicit callback is code. Named functions are never followed.
-            found.update(
-                _written_names(callback.value, names, depth + 1, dialect)
-                if depth < 12 else _arithmetic_writers(callback.value, names)
-            )
+            analysis.add("source", callback.value, dialect)
         if found >= names:
             break
     return found
 
 
-def _read_writers(arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
+def _read_writers(
+    arguments: list[_Token], names: frozenset[str], dialect: str, *, getln: bool = False,
+) -> set[str]:
     cases = (
         _option_cases(
-            arguments, "rszpqAclneE", "du", numeric="kt", writer_flags="A", state_flags="eAkqz",
+            arguments, "ecnAlE" if getln else "rszpqAclneE", "" if getln else "du",
+            numeric="" if getln else "kt", writer_flags="A", state_flags="eAkqz", state_values="t",
         )
         if dialect == "zsh" else _option_cases(
             arguments, "ersE", "adinNptu", writer_flags="t", state_values="a", zero_values="t",
@@ -528,11 +586,14 @@ def _read_writers(arguments: list[_Token], names: frozenset[str], dialect: str) 
     found: set[str] = set()
     for options, operands in cases:
         if dialect == "zsh":
+            timeout = options.get("t")
+            if timeout is not None:
+                found.update(_arithmetic_writers(timeout.value, names))
             if "e" in options:
                 continue  # Echo-only, unlike Bash's Readline -e.
             targets = [arg.value for arg in operands] or ["reply" if "A" in options else "REPLY"]
             targets[0] = targets[0].partition("?")[0] or ("reply" if "A" in options else "REPLY")
-            if options.keys() & {"A", "k", "q", "z"}:
+            if getln or options.keys() & {"A", "k", "q", "z"}:
                 targets = targets[:1]
         else:
             timeout = options.get("t")
@@ -548,9 +609,12 @@ def _read_writers(arguments: list[_Token], names: frozenset[str], dialect: str) 
 
 def _declaration_writers(command: str, arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
     if dialect == "zsh":
+        flags, numeric_options, default = _ZSH_DECLARATIONS[command]
+        if default:
+            arguments = [_Token("-" + default, "-" + default)] + arguments
         cases = _option_cases(
-            arguments, "AHUafghlmrtuxT", numeric="EFLRZip", plus=True,
-            writer_flags="i", state_flags="fFpi+E",
+            arguments, flags, numeric=numeric_options, plus=True,
+            writer_flags="iT", state_flags="fFpi+ET",
         )
     elif command in {"export", "readonly"}:
         cases = _option_cases(arguments, "afAnp", state_flags="fFp")
@@ -564,12 +628,18 @@ def _declaration_writers(command: str, arguments: list[_Token], names: frozenset
             continue
         if ("p" in options or "+" in options) and (dialect == "zsh" or command not in {"export", "readonly"}):
             continue
+        numeric = "i" in options or (dialect == "zsh" and bool(options.keys() & {"E", "F"}))
+        if dialect == "zsh" and numeric:
+            found.update(arg.value for arg in operands if arg.value in names)
+        if dialect == "zsh" and "T" in options and 2 <= len(operands) <= 3:
+            for arg in operands[:2]:
+                found.update(_destination(arg.value.partition("=")[0], names))
         # Attribute-only declarations are not newly stored credentials. An explicit
         # integer RHS or array subscript is an evaluation context, quoted or not.
         found.update(set().union(*(
             _assignment_writers(
                 arg.value, names,
-                arithmetic="i" in options or (dialect == "zsh" and bool(options.keys() & {"E", "F"})),
+                arithmetic=numeric,
             )
             for arg in operands
         )))
@@ -800,14 +870,21 @@ def _env_writers(arguments: list[_Token], names: frozenset[str]) -> set[str]:
     return found
 
 
-def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, dialect: str) -> set[str]:
-    found = set().union(*(_embedded_writers(token, names, depth, dialect) for token in tokens))
-    if found >= names:
-        return found
+def _command_writers(tokens: list[_Token], analysis: _WrittenCode, dialect: str) -> None:
+    if len(tokens) == 1 and tokens[0].operator:
+        return  # A statement separator is syntax, never a command name.
+    names, found = analysis.names, analysis.found
+    for token in tokens:
+        analysis.embedded(token, dialect)
     words: list[_Token] = []
     redirect = False
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if token.operator and token.raw not in _SEPARATORS:
+            target = tokens[index + 1] if index + 1 < len(tokens) else None
+            if token.fd_name and target and not target.operator and not (
+                token.raw in {"<&", ">&"} and target.literal and target.value == "-"
+            ):
+                found.update({token.fd_name} & names)
             redirect = True
         elif redirect:
             redirect = False
@@ -816,11 +893,19 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, di
     while words and words[0].raw in {"if", "then", "elif", "else", "while", "until", "do", "!"}:
         words = words[1:]
     if not words:
-        return found
+        return
     if words[0].raw in {"for", "select"}:
         if len(words) > 1 and words[1].value in names:
             found.add(words[1].value)
-        return found
+        return
+    if dialect != "zsh" and words[0].is_code("coproc") and len(words) > 1:
+        compound = {"{", "(", "((", "if", "while", "until", "for", "select", "case", "[["}
+        named = len(words) > 2 and words[2].raw in compound and re.fullmatch(_NAME, words[1].raw)
+        target = words[1].value if named else "COPROC"
+        found.update({target, target + "_PID"} & names)
+        words = words[2 if named else 1:]
+        analysis.add("source", " ".join(word.raw for word in words), dialect)
+        return
     while words:
         match = _WRITER.match(words[0].raw.replace("\\\r\n", "").replace("\\\n", ""))
         if not match:
@@ -829,39 +914,254 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, di
         words = words[1:]
     # Wrappers select argv, not fresh shell source. In particular an assignment
     # word after `command` is a command name, not a prefix assignment.
-    pending = [words] if words else []
-    seen = set()
-    while pending:
-        words = pending.pop()
-        key = tuple(words)
-        if key in seen:
-            continue
-        seen.add(key)
-        if words[0].value in {"command", "builtin"}:
-            for options, operands in _option_cases(
-                words[1:], "pvV" if words[0].value == "command" else "", state_flags="vV",
-            ):
-                if not options.keys() & {"v", "V"} and operands:
-                    pending.append(operands)
+    analysis.add("argv", tuple(words), dialect)
+
+
+def _argv_writers(words: list[_Token], analysis: _WrittenCode, dialect: str) -> None:
+    command = words[0].value
+    if command in {"command", "builtin"}:
+        for options, operands in _option_cases(
+            words[1:], "pvV" if command == "command" else "", state_flags="vV",
+        ):
+            if not options.keys() & {"v", "V"}:
+                analysis.add("argv", tuple(operands), dialect)
+    elif dialect == "zsh" and words[0].raw in {"noglob", "-", "exec"}:
+        if command != "exec":
+            analysis.add("argv", tuple(words[1:]), dialect)
         else:
-            found.update(_builtin_writers(words, names, depth, dialect))
-        if found >= names:
-            break
+            for _, operands in _option_cases(words[1:], "cl", "a"):
+                analysis.add("argv", tuple(operands), dialect)
+    else:
+        analysis.found.update(_builtin_writers(words, analysis, dialect))
+
+
+def _trap_writers(arguments: list[_Token], analysis: _WrittenCode, dialect: str) -> None:
+    if dialect == "zsh":
+        # Zsh has only the optional --, not Bash's query flags.
+        operands = arguments[1:] if arguments and arguments[0].value == "--" else arguments
+        cases = [({}, operands)]
+    else:
+        cases = _option_cases(arguments, "lpP", state_flags="lpP")
+    for options, operands in cases:
+        if not options and len(operands) >= 2 and operands[0].value not in {"", "-"}:
+            analysis.add("source", operands[0].value, dialect)
+
+
+def _bind_source(text: str) -> str:
+    """Readline's explicit -x delimiter grammar, not ordinary binding macros."""
+    text = text.lstrip()
+    if not text.startswith('"'):
+        return ""
+    end = _quoted_end(text, 0, '"')
+    tail = text[end:]
+    if not tail or tail[0] not in ": \t":
+        return ""
+    colon = tail.startswith(":")
+    tail = tail[1:].lstrip()
+    if tail.startswith('"'):
+        end = _quoted_end(tail, 0, '"')
+        return tail[1:end - 1] if tail[end - 1:end] == '"' else ""
+    return tail if colon else ""
+
+
+def _completion_writers(command: str, arguments: list[_Token], analysis: _WrittenCode, dialect: str) -> set[str]:
+    found: set[str] = set()
+    flags = "abcdefgjksuv" + ("prDEI" if command == "complete" else "")
+    required = "oAGWPSXFC" + ("V" if command == "compgen" else "")
+    parsed = _options(arguments, flags, required)
+    if parsed is None:
+        return found
+    if not isinstance(parsed, _UnknownOptions):
+        options = parsed[0]
+        # These options are validated before query/registration in Bash.
+        if (target := options.get("V")) is not None and not re.fullmatch(_NAME, target.value):
+            return found
+        if (function := options.get("F")) is not None and not re.fullmatch(_NAME, function.value):
+            return found
+        if (action := options.get("A")) is not None and action.literal and action.value not in {
+            "alias", "arrayvar", "binding", "builtin", "command", "directory", "disabled", "enabled",
+            "export", "file", "function", "group", "helptopic", "hostname", "job", "keyword",
+            "running", "service", "setopt", "shopt", "signal", "stopped", "user", "variable",
+        }:
+            return found
+        if (option := options.get("o")) is not None and option.literal and option.value not in {
+            "bashdefault", "default", "dirnames", "filenames", "noquote", "nosort", "nospace", "plusdirs",
+        }:
+            return found
+    # Independent roles must not retain a Cartesian product of callback,
+    # word-list, target and unrelated option values under dynamic options.
+    for flag, role in (("V", "target"), ("C", "source"), ("W", "expansion")):
+        if flag == "V" and command == "complete":
+            continue
+        for options, operands in _option_cases(
+            arguments, flags, required, state_flags="prDEI", state_values=flag,
+            writer_flags="D" if command == "complete" else "",
+        ):
+            if command == "complete" and (
+                options.keys() & {"p", "r"} or not (operands or options.keys() & {"D", "E", "I"})
+            ):
+                continue
+            if (token := options.get(flag)) is not None:
+                if role == "target":
+                    found.update({token.value} & analysis.names)
+                else:
+                    analysis.add(role, token.value, dialect)
     return found
 
 
-def _builtin_writers(words: list[_Token], names: frozenset[str], depth: int, dialect: str) -> set[str]:
+def _jobs_writers(arguments: list[_Token], analysis: _WrittenCode, dialect: str) -> None:
+    # -x is rejected if a display format was already set, but -xl is valid.
+    form = False
+    for token in arguments:
+        if not token.literal or not token.value.startswith("-") or token.value == "--":
+            break
+        for flag in token.value[1:]:
+            if flag == "x" and form:
+                return
+            form |= flag in "lpn"
+    for options, operands in _option_cases(arguments, "lpnxrs", writer_flags="x", state_flags="x"):
+        if "x" in options:
+            analysis.add("argv", tuple(operands), dialect)
+
+
+def _fc_writers(arguments: list[_Token], analysis: _WrittenCode, dialect: str) -> None:
+    zsh = dialect == "zsh"
+    for options, _ in _option_cases(
+        arguments, "aAdDEfiIlLmnpPrRWs" if zsh else "lnrs",
+        "et" if zsh else "e", state_flags="lspPRWA" if zsh else "ls", state_values="e",
+    ):
+        editor = options.get("e")
+        if editor is not None and editor.value != "-" and not options.keys() & {"l", "s", "p", "P", "R", "W", "A"}:
+            analysis.add("source", editor.value, dialect)
+
+
+def _zsh_print_writers(arguments: list[_Token], names: frozenset[str]) -> set[str]:
+    found: set[str] = set()
+    for role in ("v", "f"):
+        for options, operands in _option_cases(
+            arguments, "abcDilmnNoOpPrRsSz", "CfuvxX",
+            stop_after="R", stop_unless="f", state_values=role, state_flags="zsScCpuvf",
+        ):
+            special = options.keys() & {"z", "s", "S", "v"}
+            if (
+                len(special) > 1
+                or (options.keys() & {"z", "s", "S"} and options.keys() & {"c", "C"})
+                or (special and options.keys() & {"p", "u"})
+            ):
+                continue
+            if (token := options.get(role)) is not None:
+                if role == "v":
+                    found.update(_destination(token.value, names))
+                elif "S" not in options:
+                    found.update(_printf_operand_writers({}, [token, *operands], names, "zsh"))
+            if found >= names:
+                return found
+    return found
+
+
+def _zsh_test_writers(arguments: list[_Token], names: frozenset[str], bracket: bool) -> set[str]:
+    if bracket:
+        if not arguments or arguments[-1].value != "]":
+            return set()
+        arguments = arguments[:-1]
+    # Only -t has a numeric-evaluation operand. Binary comparisons consume
+    # their two data operands (including -eq's decimal input), not shell code.
+    words = [arg.value for arg in arguments]
+    found: set[str] = set()
+    index = 0
+    nesting = 0
+    primary = True
+    binary = {"=", "==", "!=", "<", ">", "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-nt", "-ot", "-ef"}
+    while index < len(words):
+        if not primary:
+            if words[index] == ")" and nesting:
+                nesting -= 1
+            elif words[index] in {"-a", "-o"}:
+                primary = True
+            else:
+                return set()
+            index += 1
+            continue
+        if index + 2 < len(words) and words[index + 1] in binary:
+            index += 3
+        elif words[index] in {"!", "("}:
+            nesting += words[index] == "("
+            index += 1
+            continue
+        elif re.fullmatch(r"-[abcdefghkLnpOrRsStuvwxzUGNHSV]", words[index]) and index + 1 < len(words):
+            if words[index] == "-t":
+                found.update(_arithmetic_writers(words[index + 1], names))
+            index += 2
+        else:
+            index += 1
+        primary = False
+    return found if not primary and not nesting else set()
+
+
+def _zsh_writers(command: str, arguments: list[_Token], analysis: _WrittenCode) -> set[str]:
+    names = analysis.names
+    found: set[str] = set()
+    if command == "print":
+        return _zsh_print_writers(arguments, names)
+    if command == "set":
+        for options, _ in _option_cases(
+            arguments, _ZSH_OPTION_FLAGS, "Ao", plus=True, stop_after="A", state_values="A",
+        ):
+            target = options.get("A") or options.get("+A")
+            if target is not None:
+                found.update(_destination(target.value, names))
+    elif command == "shift":
+        for _, operands in _option_cases(arguments, "p"):
+            if operands:
+                found.update(_arithmetic_writers(operands[0].value, names))
+                # The first word may be an array instead of a count. Inspect
+                # written names, never look up the variable's runtime type.
+                found.update(arg.value for arg in operands if arg.value in names)
+    elif command in {"break", "continue", "return", "exit", "bye", "logout"}:
+        if arguments and arguments[0].value == "--":
+            arguments = arguments[1:]
+        if len(arguments) == 1:
+            found.update(_arithmetic_writers(arguments[0].value, names))
+    elif command in {"test", "["}:
+        found.update(_zsh_test_writers(arguments, names, command == "["))
+    elif command == "emulate":
+        for options, operands in _option_cases(arguments, "lLR", state_flags="lL"):
+            if options.keys() & {"l", "L"} or not operands:
+                continue
+            for local, rest in _option_cases(
+                operands[1:], _ZSH_OPTION_FLAGS, "co", state_values="c",
+            ):
+                if not rest and (body := local.get("c")) is not None:
+                    # bin_emulate changes options then calls bin_eval; it does
+                    # not replace Zsh's builtin table with the named shell's.
+                    analysis.add("source", body.value, "zsh")
+    elif command == "zmodload":
+        for options, operands in _option_cases(
+            arguments, "AFRILabcfdilmsue", "P", writer_flags=("FL",),
+            state_flags="FRALleubcfpd", state_values="P",
+        ):
+            if (
+                operands and "F" in options and options.keys() & {"l", "L"}
+                and not options.keys() & {"e", "u", "b", "c", "f", "p", "A", "R"}
+                and (target := options.get("P")) is not None
+            ):
+                found.update({target.value} & names)
+    return found
+
+
+def _builtin_writers(words: list[_Token], analysis: _WrittenCode, dialect: str) -> set[str]:
+    names = analysis.names
     found: set[str] = set()
     command = words[0].value
     arguments = words[1:]
-    if command in _DECLARATIONS:
+    if command in _DECLARATIONS or (dialect == "zsh" and command in {"integer", "float"}):
         found.update(_declaration_writers(command, arguments, names, dialect))
     elif command == "env":
         found.update(_env_writers(arguments, names))
-    elif command == "read":
-        found.update(_read_writers(arguments, names, dialect))
-    elif command in {"mapfile", "readarray"}:
-        found.update(_array_reader_writers(arguments, names, depth, dialect))
+    elif command == "read" or (dialect == "zsh" and command == "getln"):
+        found.update(_read_writers(arguments, names, dialect, getln=command == "getln"))
+    elif dialect != "zsh" and command in {"mapfile", "readarray"}:
+        found.update(_array_reader_writers(arguments, analysis, dialect))
     elif command == "unset":
         for options, operands in _option_cases(arguments, "fmv" if dialect == "zsh" else "fnv", state_flags="f"):
             if "f" not in options:
@@ -878,25 +1178,35 @@ def _builtin_writers(words: list[_Token], names: frozenset[str], depth: int, dia
         found.update(_printf_writers(arguments, names, dialect))
     elif command == "let":
         found.update(_arithmetic_writers(" ".join(arg.value for arg in arguments), names))
-    elif command in {"eval", "source", "."}:
-        # Do not follow includes, infer their contents, or turn variable
-        # references into credentials. Only explicitly embedded writers count.
-        body = " ".join(arg.value for arg in arguments)
-        found.update(
-            _written_names(body, names, depth + 1, dialect)
-            if depth < 12 else _arithmetic_writers(body, names)
-        )
+    elif command == "eval":
+        for _, operands in _option_cases(arguments):
+            analysis.add("source", " ".join(arg.value for arg in operands), dialect)
+    elif command == "trap":
+        _trap_writers(arguments, analysis, dialect)
+    elif command == "fc":
+        _fc_writers(arguments, analysis, dialect)
+    elif dialect != "zsh":
+        if command == "wait":
+            for options, _ in _option_cases(arguments, "fn", "p", state_values="p"):
+                if (target := options.get("p")) is not None:
+                    found.update(_destination(target.value, names))
+        elif command == "bind":
+            for options, _ in _option_cases(arguments, "lvpVPsSX", "fmqurx", state_flags="r", state_values="x"):
+                if "r" not in options and (body := options.get("x")) is not None:
+                    analysis.add("source", _bind_source(body.value), dialect)
+        elif command in {"complete", "compgen"}:
+            found.update(_completion_writers(command, arguments, analysis, dialect))
+        elif command == "jobs":
+            _jobs_writers(arguments, analysis, dialect)
+    else:
+        found.update(_zsh_writers(command, arguments, analysis))
     return found
 
 
-def _written_names(text: str, names: frozenset[str], depth: int = 0, dialect: str = "bash") -> set[str]:
-    found: set[str] = set()
-    for statement in _statements(text):
-        for segment in _segments(statement.tokens):
-            found.update(_command_writers(segment, names, depth, dialect))
-        if any(token.raw == "((" for token in statement.tokens):
-            found.update(_arithmetic_writers(text[statement.start:statement.end], names))
-    return found
+def _written_names(text: str, names: frozenset[str], *, dialect: str = "bash") -> set[str]:
+    analysis = _WrittenCode(names)
+    analysis.add("source", text, dialect)
+    return analysis.run()
 
 
 def _parse(path: Path, before: bytes, names: frozenset[str]) -> ShellProfile:
@@ -935,14 +1245,13 @@ def _parse(path: Path, before: bytes, names: frozenset[str]) -> ShellProfile:
             values[name] = value
             continuation = False
             continue
-        written: set[str] = set()
+        written = _written_names(raw, names, dialect=dialect)
         arithmetic = "))" in stack or any(token.raw == "((" for token in tokens)
         segments = _segments(tokens)
         index = 0
         while index < len(segments):
             segment = segments[index]
             first = segment[0].raw
-            written.update(_command_writers(segment, names, 0, dialect))
             if statement.data:
                 index += 1
                 continue
