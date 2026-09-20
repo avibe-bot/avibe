@@ -35,6 +35,7 @@ import {
   closeSettingsOverlay,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
+import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
 import { AccountMenu } from '../AccountMenu';
 import { VersionBadge } from '../VersionBadge';
 import { modelHubEnabledFromConfig } from './models/featureFlags';
@@ -139,12 +140,13 @@ const SettingsNavLink: React.FC<{ item: SettingsItem }> = ({ item }) => {
       )}
     >
       <Icon className={clsx('size-3.5 shrink-0', active ? 'text-mint-ink' : 'text-muted')} />
-      {/* The rail is a fixed 196 and a section name is not optional detail: an
-          ellipsis here hides which of two neighbouring pages a row leads to
-          ("Messaging Platforms" / "Platform Connections" both cut to "Platform…"
-          in English). Wrapping keeps every label readable in any language, and
-          two lines at this size still fit the row's min height, so nothing moves
-          for the labels that already fitted. */}
+      {/* The rail's width is the layout's to decide and a section name is not
+          optional detail: an ellipsis here hides which of two neighbouring pages
+          a row leads to ("Messaging Platforms" / "Platform Connections" both cut
+          to "Platform…" in English at the inline width). Wrapping keeps every
+          label readable in any language and at either width, and two lines at
+          this size still fit the row's min height, so nothing moves for the
+          labels that already fitted. */}
       <span className="min-w-0 leading-[1.3] break-words">{t(item.labelKey)}</span>
     </NavLink>
   );
@@ -234,6 +236,7 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  const standaloneMenu = useStandaloneSettingsMenu();
   const setupOrigin = useSettingsOverlayContext()?.location.pathname === '/setup';
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
@@ -401,11 +404,17 @@ export const SettingsLayout: React.FC = () => {
       </header>
 
       <div className="flex min-h-0 flex-1">
+        {/* Standalone Settings replaces the app sidebar, so this rail has to be
+            the same width the sidebar was — including a width the owner dragged
+            it to — or the left column jumps the moment Settings opens. Inline
+            Settings sits BESIDE that sidebar, where matching it would spend a
+            second full-width column on a secondary nav, so it keeps 196. */}
         <nav
           aria-label={t('settings.navigationLabel')}
           className={clsx(
             'min-h-0 shrink-0 border-r border-border bg-surface/70 px-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 md:pb-3',
-            'w-full flex-col md:w-[196px]',
+            'w-full flex-col',
+            standaloneMenu ? 'md:w-[var(--app-sidebar-w)]' : 'md:w-[196px]',
             atRoot ? 'flex' : 'hidden md:flex',
           )}
         >

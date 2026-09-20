@@ -80,10 +80,12 @@ DialogContent.displayName = DialogPrimitive.Content.displayName;
 // Route-sized modal: the transparent backdrop preserves visual context while Radix owns focus,
 // outside interaction, and accessibility isolation for the foreground surface.
 //
-// The `md:left-[240px]` default is the historical offset every existing caller
-// inherits; a caller whose shell differs overrides it with its own `md:left-[…]`
-// (tailwind-merge keeps the caller's). The primitive cannot see the shell, so
-// the default is a starting point, not an authority on the sidebar's width.
+// The default clears the app sidebar by reading the same `--app-sidebar-w` the
+// shell lays itself out with, so a dragged sidebar and this surface cannot drift
+// apart. It was a literal `240px` — a number the sidebar had not used since it
+// became a variable — which was only invisible because the one caller overrode
+// it. A caller that owns the whole viewport still overrides with `md:left-0`
+// (tailwind-merge keeps the caller's).
 export const DialogSurfaceContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
@@ -96,7 +98,7 @@ export const DialogSurfaceContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed inset-y-0 left-0 right-0 z-30 overflow-hidden border-l border-border bg-background shadow-2xl focus:outline-none md:left-[240px]',
+        'fixed inset-y-0 left-0 right-0 z-30 overflow-hidden border-l border-border bg-background shadow-2xl focus:outline-none md:left-[var(--app-sidebar-w)]',
         className,
       )}
       {...props}

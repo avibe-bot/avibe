@@ -39,6 +39,7 @@ import {
   isSettingsEntryPath,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
+import { useStandaloneSettingsMenu } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 
 type ShellNavItem = {
@@ -191,6 +192,15 @@ export const AppShell: React.FC = () => {
     && isSettingsEntryPath(location.pathname)
     && settingsOverlayOrigin !== null;
   const surfaceLocation = settingsOverlayOpen ? settingsOverlayOrigin.location : location;
+  // Two different questions wear the same name if you let them. `settingsOpen`
+  // asks whether Settings is the foreground route — that is what the toggle in
+  // the sidebar reads, so it stays on that. This asks whether Settings has TAKEN
+  // OVER the shell, and it is the one everything BEHIND Settings must read:
+  // standalone Settings stands in for the sidebar, so the shell retires; inline
+  // Settings opens beside a live sidebar, so the shell stays awake, navigable
+  // and able to own its windows and palettes.
+  const standaloneSettingsMenu = useStandaloneSettingsMenu();
+  const settingsCoversSidebar = settingsOpen && standaloneSettingsMenu;
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
@@ -229,7 +239,7 @@ export const AppShell: React.FC = () => {
   // consume the same user-configured chord first; otherwise search owns it.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || settingsOpen) return;
+      if (e.defaultPrevented || settingsCoversSidebar) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setSearchOpen((prev) => !prev);
@@ -237,7 +247,7 @@ export const AppShell: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [settingsOpen]);
+  }, [settingsCoversSidebar]);
 
   // Close the mobile Dock drawer on navigation.
   useEffect(() => {
@@ -374,19 +384,21 @@ export const AppShell: React.FC = () => {
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, shared with Workbench
-          content. Settings owns the viewport and never reads this offset. */}
+          content — and, when Settings stands in for this column, with the
+          Settings rail, so the two never swap at different widths. Standalone
+          Settings retires this whole aside; inline Settings leaves it live. */}
       {!chromeless && (
       <aside
-        aria-hidden={settingsOpen || undefined}
-        inert={settingsOpen || undefined}
+        aria-hidden={settingsCoversSidebar || undefined}
+        inert={settingsCoversSidebar || undefined}
         className={clsx(
           'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-2.5 pb-4 md:flex',
-          settingsOpen && 'invisible pointer-events-none',
+          settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
-            <RouteSurfaceActivityBoundary active={!settingsOpen}>
+            <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
               <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
             </RouteSurfaceActivityBoundary>
           )}
@@ -399,7 +411,7 @@ export const AppShell: React.FC = () => {
         <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
             {canUseApps && (
-              <RouteSurfaceActivityBoundary active={!settingsOpen}>
+              <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
                 <AppsLauncher />
               </RouteSurfaceActivityBoundary>
             )}
@@ -489,7 +501,7 @@ export const AppShell: React.FC = () => {
             // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
-            : settingsOpen
+            : settingsCoversSidebar
               ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
@@ -539,12 +551,12 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {!settingsOpen && canUseApps && (
+      {!settingsCoversSidebar && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
       {capabilities.can_chat && (
-        <RouteSurfaceActivityBoundary active={!settingsOpen}>
+        <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
           <NewSessionSheet
             open={newSessionOpen}
             onClose={() => setNewSessionOpen(false)}
@@ -555,15 +567,19 @@ export const AppShell: React.FC = () => {
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}
-      <RouteSurfaceActivityBoundary active={!settingsOpen}>
+      <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
         <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
       </RouteSurfaceActivityBoundary>
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
       {canUseApps && (
-        <div hidden={settingsOpen} inert={settingsOpen || undefined} aria-hidden={settingsOpen || undefined}>
-          <WindowLayer active={!settingsOpen} />
+        <div
+          hidden={settingsCoversSidebar}
+          inert={settingsCoversSidebar || undefined}
+          aria-hidden={settingsCoversSidebar || undefined}
+        >
+          <WindowLayer active={!settingsCoversSidebar} />
         </div>
       )}
     </div>

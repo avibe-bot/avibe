@@ -11,6 +11,7 @@ import {
   settingsOverlayOpenState,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -174,6 +175,24 @@ describe('SettingsLayout', () => {
     expect(shell?.className).toContain('md:h-[var(--app-shell-h)]');
     expect(shell?.className).not.toContain('md:h-auto');
     expect(shell?.className).not.toContain('min-h-full');
+  });
+
+  // Opening standalone Settings swaps this rail IN FOR the app sidebar, so it
+  // has to be the width that sidebar was — a width the owner dragged it to
+  // included — or the left column jumps as Settings opens. Inline Settings sits
+  // beside that sidebar, where matching it would spend a second full-width
+  // column on a secondary nav, so it stays 196.
+  it.each([
+    ['standalone', 'md:w-[var(--app-sidebar-w)]', 'md:w-[196px]'],
+    ['inline', 'md:w-[196px]', 'md:w-[var(--app-sidebar-w)]'],
+  ] as const)('sizes the rail for a %s menu', (placement, expected, rejected) => {
+    media.matches = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderLayout('/settings/general');
+
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(navigation.className).toContain(expected);
+    expect(navigation.className).not.toContain(rejected);
   });
 
   it.each(['/settings/models', '/settings/models/'])(

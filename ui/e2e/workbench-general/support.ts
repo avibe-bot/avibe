@@ -4,9 +4,10 @@ export const ORIGIN = 'http://127.0.0.1:5213';
 
 /**
  * 1200 is the width the design was staged at; the others are what prove the
- * claim the packet actually makes — sidebar 248 and settings rail 196 are the
- * only fixed measurements, and everything to their right is fluid. A capture at
- * the staging width alone cannot tell a fluid column from a 856-wide one.
+ * claim the packet actually makes — the 248 left column (the sidebar, or the
+ * standalone Settings rail standing in for it) is the only fixed measurement,
+ * and everything to its right is fluid. A capture at the staging width alone
+ * cannot tell a fluid column from a 856-wide one.
  */
 export const DESKTOP = { width: 1200, height: 900 };
 export const WIDE = { width: 1600, height: 900 };

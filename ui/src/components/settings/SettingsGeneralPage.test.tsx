@@ -56,6 +56,7 @@ import { ToastProvider } from '../../context/ToastProvider';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import { LanguageSwitcher } from '../LanguageSwitcher';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '../../lib/settingsMenuPlacement';
 import { SettingsGeneralPage } from './SettingsGeneralPage';
 
 // One per test, not one per file: the language operation is owned by the i18n
@@ -108,6 +109,7 @@ const authorityBecomes = (canManage: boolean, refresh: () => void) => {
 };
 
 const themeCard = (name: string) => screen.getByRole('radio', { name: new RegExp(name) });
+const placementCard = (name: string) => screen.getByRole('radio', { name: new RegExp(name) });
 // Located by role, not by label: the label is itself translated the moment the
 // pick lands, which is part of what these tests are checking.
 const languageSelect = () => screen.getByRole('combobox') as HTMLSelectElement;
@@ -542,5 +544,71 @@ describe('General settings — appearance', () => {
     for (const card of [light, system, dark]) {
       expect(card.querySelector('[aria-hidden="true"]')).toBeTruthy();
     }
+  });
+});
+
+describe('General settings — menu placement', () => {
+  it('opens on Standalone and records a pick where the shell reads it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // Nothing stored yet still selects a choice: the shipped layout.
+    expect(placementCard(en.settings.general.menuPlacementStandalone).getAttribute('aria-checked'))
+      .toBe('true');
+    expect(window.localStorage.getItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY)).toBeNull();
+
+    await user.click(placementCard(en.settings.general.menuPlacementInline));
+
+    expect(window.localStorage.getItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY)).toBe('inline');
+    expect(placementCard(en.settings.general.menuPlacementInline).getAttribute('aria-checked'))
+      .toBe('true');
+    expect(placementCard(en.settings.general.menuPlacementStandalone).getAttribute('aria-checked'))
+      .toBe('false');
+  });
+
+  it('shows the stored choice on a later visit, and falls back on an unknown one', () => {
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const { leave, comeBack } = renderPage();
+    expect(placementCard(en.settings.general.menuPlacementInline).getAttribute('aria-checked'))
+      .toBe('true');
+
+    // A value this build does not know (an older build, a hand edit) selects
+    // the default rather than leaving the group with nothing checked.
+    leave();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'floating');
+    comeBack();
+    expect(placementCard(en.settings.general.menuPlacementStandalone).getAttribute('aria-checked'))
+      .toBe('true');
+    expect(placementCard(en.settings.general.menuPlacementInline).getAttribute('aria-checked'))
+      .toBe('false');
+  });
+
+  it('is its own radiogroup, arrowed and drawn like the theme one beside it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const groups = screen.getAllByRole('radiogroup');
+    expect(groups.map((group) => group.getAttribute('aria-label'))).toEqual([
+      en.settings.general.appearanceTitle,
+      en.settings.general.menuPlacementTitle,
+    ]);
+
+    const standalone = placementCard(en.settings.general.menuPlacementStandalone);
+    expect(standalone.getAttribute('tabindex')).toBe('0');
+    standalone.focus();
+    await user.keyboard('{ArrowRight}');
+
+    expect(document.activeElement)
+      .toBe(placementCard(en.settings.general.menuPlacementInline));
+    expect(window.localStorage.getItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY)).toBe('inline');
+    // The theme pick is a separate group and this must not have moved it.
+    expect(window.localStorage.getItem('vibe-remote-theme')).toBeNull();
+
+    // Each card draws its own layout; only the inline one has the app sidebar
+    // standing beside the Settings rail, which is the whole difference.
+    const columns = (card: HTMLElement) =>
+      card.querySelector('[aria-hidden="true"]')?.childElementCount;
+    expect(columns(placementCard(en.settings.general.menuPlacementStandalone))).toBe(2);
+    expect(columns(placementCard(en.settings.general.menuPlacementInline))).toBe(3);
   });
 });

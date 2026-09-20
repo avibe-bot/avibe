@@ -15,6 +15,7 @@ import {
   settingsOverlayStateForOrigin,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
 
 type SettingsOverlayRouteSurfaceProps = {
   children: ReactNode;
@@ -47,6 +48,7 @@ export const SettingsOverlayRouteSurface = ({
   const location = useLocation();
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
+  const standaloneMenu = useStandaloneSettingsMenu();
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -123,16 +125,32 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
-              // Settings owns the whole viewport. The retained Workbench origin
-              // remains mounted behind this portal for drafts and return state,
-              // but its sidebar is not part of the Settings surface at any width.
-              className="left-0 border-l-0 md:left-0 md:border-l-0"
+              data-settings-menu-placement={standaloneMenu ? 'standalone' : 'inline'}
+              // Standalone: Settings owns the whole viewport, so it starts at the
+              // screen edge and draws no left border — there is nothing on that
+              // side to divide from. The retained Workbench origin stays mounted
+              // behind this portal for drafts and return state, but its sidebar
+              // is not part of the surface at any width.
+              //
+              // Inline: the app sidebar is still there and still live, so the
+              // surface starts at its trailing edge and takes the primitive's
+              // own `--app-sidebar-w` offset — the same variable the sidebar
+              // sizes itself with, which is what keeps the two edges together
+              // while that sidebar is being dragged. Below md there is no
+              // sidebar to divide from, so the border only applies from md up.
+              className={standaloneMenu
+                ? 'left-0 border-l-0 md:left-0 md:border-l-0'
+                : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
                 const target = event.target;
                 if (
                   target instanceof Element
-                  && target.closest('[data-settings-toggle="true"]')
+                  // The toggle closes the overlay itself. The sidebar's resize
+                  // edge is not a dismissal at all: inline, it moves this
+                  // surface's own left edge, so grabbing it must not close what
+                  // the drag is laying out.
+                  && target.closest('[data-settings-toggle="true"], [data-sidebar-resizer="true"]')
                 ) {
                   event.preventDefault();
                 }

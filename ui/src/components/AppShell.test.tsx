@@ -15,6 +15,7 @@ import {
   readMobileProjectsListSnapshot,
 } from '../lib/mobileProjectsListMemory';
 import { selectLanguage } from '../lib/useLanguageSelection';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '../lib/settingsMenuPlacement';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -142,6 +143,7 @@ const SettingsExit = ({ testId }: { testId: string }) => {
 
 beforeEach(() => {
   viewport.isDesktop = false;
+  window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
   instanceAuth.instanceKind = null;
@@ -332,6 +334,51 @@ describe('AppShell sidebar width', () => {
 
     expect(screen.queryAllByRole('separator', { name: 'appShell.resizeSidebar' }))
       .toHaveLength(expected);
+  });
+
+  // Standalone Settings stands IN FOR this column, so the two have to agree on
+  // one width or the left edge jumps as Settings opens. Inline Settings opens
+  // beside the column, which therefore has to stay live — navigable, keyboard
+  // reachable, still owning its windows.
+  it.each([
+    ['standalone', true],
+    ['inline', false],
+  ] as const)('retires the sidebar only where Settings replaces it (%s)', async (
+    placement,
+    covered,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    const aside = document.querySelector('aside');
+    expect(aside?.hasAttribute('inert')).toBe(covered);
+    expect(aside?.className.includes('invisible')).toBe(covered);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className
+      .includes('md:ml-[var(--app-sidebar-w)]')).toBe(!covered);
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(covered);
+
+    // ⌘K belongs to whichever surface owns the shell.
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    })));
+    expect(screen.getByTestId('search-palette').getAttribute('data-open')).toBe(String(!covered));
+  });
+
+  it('covers the shell below md even when inline is the stored preference', async () => {
+    viewport.isDesktop = false;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    // A phone has no room for two rails, so the preference is not in force.
+    expect(document.querySelector('aside')?.hasAttribute('inert')).toBe(true);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className)
+      .not.toContain('md:ml-[var(--app-sidebar-w)]');
   });
 
   it('leaves a standalone app tab without a sidebar to resize', async () => {

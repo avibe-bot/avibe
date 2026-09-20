@@ -311,6 +311,10 @@
       "appearanceSystem": "System",
       "appearanceLight": "Light",
       "appearanceDark": "Dark",
+      "menuPlacementTitle": "Settings menu",
+      "menuPlacementDescription": "Let Settings take over the window, or open it beside the app sidebar. Saved in this browser.",
+      "menuPlacementStandalone": "Standalone",
+      "menuPlacementInline": "Inline",
       "autosaved": "Changes are saved automatically",
       "languageSaveFailed": "The language changed here, but could not be saved for this instance"
     },

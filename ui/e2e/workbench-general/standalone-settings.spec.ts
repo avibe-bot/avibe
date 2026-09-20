@@ -59,8 +59,7 @@ for (const width of [1200, 1366, 1920]) {
     const denied = await serveProduct(page);
     await page.setViewportSize({ width, height: 768 });
     await open(page, '/');
-    await page.getByRole('separator').focus();
-    await page.keyboard.press('End');
+    const sidebarWidth = (await page.locator('aside.fixed').boundingBox())!.width;
     await textarea(page).fill(draft);
     await toggle(page).click();
     await expect(settings(page)).toBeVisible();
@@ -70,7 +69,9 @@ for (const width of [1200, 1366, 1920]) {
     await expect(textarea(page)).toBeHidden();
     expect(await textarea(page).evaluate((node) => Boolean(node.closest('[inert][aria-hidden="true"]')))).toBe(true);
     const retained = await frame(page);
-    expect(retained.rail?.width).toBe(196);
+    // Standalone Settings stands in for the sidebar, so its rail is that
+    // sidebar's width: the left column cannot move when Settings opens.
+    expect(retained.rail?.width).toBe(sidebarWidth);
     expect(retained.content?.width).toBe(944);
     // Keyboard focus may only visit foreground controls; Ctrl+K may not awaken
     // the Workbench palette behind Settings or change its state for the return.
@@ -82,12 +83,26 @@ for (const width of [1200, 1366, 1920]) {
     await settings(page).getByRole('button', { name: 'Close Settings' }).click();
     await expect(textarea(page)).toHaveValue(draft);
     await expect(toggle(page)).toBeFocused();
-    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
     await open(page, '/settings/general');
     await expect(rail(page)).toBeVisible();
     expect(await frame(page)).toEqual(retained);
     expect(await page.locator('main#app-shell-scroll').boundingBox()).toMatchObject({ x: 0, width });
     await expect(page.locator('aside.fixed')).toBeHidden();
+
+    // A width the owner dragged the sidebar to is still the width Settings has
+    // to stand in at — a default-only match would jump for everyone who resized
+    // — and the divider's own value has to survive Settings taking the column.
+    await open(page, '/');
+    await page.getByRole('separator').focus();
+    await page.keyboard.press('End');
+    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
+    const dragged = (await page.locator('aside.fixed').boundingBox())!.width;
+    expect(dragged).toBe(496);
+    await toggle(page).click();
+    await expect(settings(page)).toBeVisible();
+    expect((await frame(page)).rail?.width).toBe(dragged);
+    await settings(page).getByRole('button', { name: 'Close Settings' }).click();
+    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
     expect(denied).toEqual([]);
   });
 }
@@ -135,14 +150,14 @@ for (const width of [320, 375, 390]) {
     await page.setViewportSize({ width, height: 568 });
     await open(page, '/settings/appearance');
     await expect(page).toHaveURL(/\/settings\/general$/);
-    await expect(page.getByRole('radiogroup')).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
     await expect(page.locator('aside.fixed')).toBeHidden();
     expect(await page.locator('main#app-shell-scroll').boundingBox()).toMatchObject({ x: 0, width });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     await page.getByRole('link', { name: 'All settings' }).click();
     await expect(rail(page)).toBeVisible();
     await rail(page).getByRole('link', { name: 'General', exact: true }).click();
-    await expect(page.getByRole('radiogroup')).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
     await page.getByRole('link', { name: 'All settings' }).click();
     await page.getByRole('link', { name: 'Back to Workbench' }).click();
     await expect(textarea(page)).toBeVisible();

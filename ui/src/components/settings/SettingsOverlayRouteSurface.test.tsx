@@ -23,6 +23,7 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
@@ -227,6 +228,12 @@ const SettingsToggle = () => {
 const Harness = ({ desktop }: { desktop: boolean }) => (
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
+    {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
+        still on screen beside Settings, so what an outside interaction means
+        stops being hypothetical: the resize edge lays this surface out and the
+        rest of the sidebar is a way out of it. */}
+    <button type="button" data-sidebar-resizer="true">shell-resizer</button>
+    <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
       <Route path="/chat/:sessionId" element={<ChatProbe />} />
@@ -258,6 +265,7 @@ const settleDeferredFocus = async () => {
 beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
+  window.localStorage.clear();
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     matches: true,
     addEventListener: vi.fn(),
@@ -526,6 +534,63 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(document.querySelector('[data-dialog-surface-backdrop="true"]')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
 
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  // Standalone Settings replaces the app sidebar, so it starts at the screen
+  // edge with nothing on that side to divide from. Inline Settings opens beside
+  // a sidebar that is still there, so it takes the primitive's own
+  // `--app-sidebar-w` offset — the same variable the sidebar sizes itself with,
+  // which is what keeps the two edges together while it is dragged.
+  it.each([
+    ['standalone', 'md:left-0', 'md:left-[var(--app-sidebar-w)]', false],
+    ['inline', 'md:left-[var(--app-sidebar-w)]', 'md:left-0', true],
+  ] as const)('starts the %s surface at the right edge', async (
+    placement,
+    offset,
+    rejected,
+    dividedFromSidebar,
+  ) => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe(placement);
+    // Exact class tokens: `md:border-l-0` would satisfy a substring match for
+    // `md:border-l` and quietly invert what this asserts.
+    expect(surface.classList.contains(offset)).toBe(true);
+    expect(surface.classList.contains(rejected)).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(dividedFromSidebar);
+  });
+
+  it('treats the sidebar resize edge as layout, and the rest of the shell as a way out', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+
+    // Grabbing the divider moves this surface's OWN left edge. Dismissing on it
+    // would close the thing the drag is laying out.
+    await user.click(screen.getByRole('button', { name: 'shell-resizer' }));
+    expect(document.querySelector('[data-settings-overlay="true"]')).toBeTruthy();
+
+    // Everything else in a live sidebar is the user leaving Settings, which is
+    // the whole point of keeping that sidebar reachable.
+    await user.click(screen.getByRole('button', { name: 'shell-elsewhere' }));
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
   });
