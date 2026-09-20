@@ -15,7 +15,10 @@ import {
   readMobileProjectsListSnapshot,
 } from '../lib/mobileProjectsListMemory';
 import { selectLanguage } from '../lib/useLanguageSelection';
-import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '../lib/settingsMenuPlacement';
+import {
+  SETTINGS_MENU_PLACEMENT_STORAGE_KEY,
+  useStandaloneSettingsMenu,
+} from '../lib/settingsMenuPlacement';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -140,6 +143,12 @@ const SettingsExit = ({ testId }: { testId: string }) => {
     <button onClick={() => { if (origin) closeSettingsOverlay(navigate, origin); }}>settings.close</button>
   </div>;
 };
+
+// Stands in for the Settings surfaces, which read this and nothing else to
+// decide whether their menu replaces the app sidebar or opens beside it.
+const StandaloneMenuProbe = () => (
+  <span data-testid="standalone-menu">{String(useStandaloneSettingsMenu())}</span>
+);
 
 beforeEach(() => {
   viewport.isDesktop = false;
@@ -391,6 +400,35 @@ describe('AppShell sidebar width', () => {
 
       expect(document.querySelector('aside')).toBeNull();
       expect(screen.queryByRole('separator', { name: 'appShell.resizeSidebar' })).toBeNull();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // The same tab, asked the question Settings actually asks. `inline` is a claim
+  // about the app sidebar being on screen to open beside; here there is none, so
+  // Settings has to come up standalone however the owner set the preference for
+  // the windows that do have one. The shell states that, because only the shell
+  // can: standalone mode comes from a document flag frozen at mount, which no
+  // pathname predicate can recover — and the route Settings lands on says
+  // nothing about the shell it opened over anyway, as with the config-recovery
+  // banner's Diagnostics link in a single-app tab.
+  it('publishes a sidebar-free shell to the Settings surfaces above it', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    window.history.replaceState({}, '', `/apps/editor?${APP_TAB_PARAM}=1`);
+    try {
+      render(
+        <MemoryRouter initialEntries={['/apps/editor']}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="*" element={<StandaloneMenuProbe />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      expect((await screen.findByTestId('standalone-menu')).textContent).toBe('true');
     } finally {
       window.history.replaceState({}, '', '/');
     }

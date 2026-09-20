@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { ShellSidebarContext } from '../context/ShellSidebarContext';
 import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -40,7 +41,7 @@ import {
   isSettingsEntryPath,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
-import { useStandaloneSettingsMenu } from '../lib/settingsMenuPlacement';
+import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 
 type ShellNavItem = {
@@ -193,6 +194,36 @@ export const AppShell: React.FC = () => {
     && isSettingsEntryPath(location.pathname)
     && settingsOverlayOrigin !== null;
   const surfaceLocation = settingsOverlayOpen ? settingsOverlayOrigin.location : location;
+  // Whether THIS document was opened as a single-app tab (⌘/Ctrl-click on an app icon,
+  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
+  // navigating deeper inside the tab can't suddenly restore the workbench window layout
+  // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  const [standaloneAppTab] = useState(() =>
+    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+  );
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench.
+  //
+  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
+  // publishes is the mount-frozen document flag instead, because the window controls
+  // that read it must stay decided for the tab's whole life (see the context doc). The
+  // app pages read the same context and mount only on these routes, so for them the two
+  // agree anyway.
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(surfaceLocation.pathname);
+  // The setup wizard owns the whole window — the shell hands it the outlet and
+  // draws nothing else. True for a retained setup origin too, so that Settings
+  // opened from the wizard is measured against the wizard, not the route the
+  // overlay happens to be on.
+  const setupShell = isChromelessShellPath(location.pathname)
+    || (settingsOverlayOrigin !== null && isChromelessShellPath(settingsOverlayOrigin.location.pathname));
+  // The one fact the Settings surfaces cannot work out for themselves, so the
+  // shell states it here, next to the two conditions that actually decide
+  // whether an `<aside>` is rendered at all, and publishes it below.
+  const shellDrawsSidebar = !chromeless && !setupShell;
   // Two different questions wear the same name if you let them. `settingsOpen`
   // asks whether Settings is the foreground route — that is what the toggle in
   // the sidebar reads, so it stays on that. This asks whether Settings has TAKEN
@@ -200,7 +231,14 @@ export const AppShell: React.FC = () => {
   // standalone Settings stands in for the sidebar, so the shell retires; inline
   // Settings opens beside a live sidebar, so the shell stays awake, navigable
   // and able to own its windows and palettes.
-  const standaloneSettingsMenu = useStandaloneSettingsMenu();
+  //
+  // The rule, not the hook: the shell is what publishes `ShellSidebarContext`,
+  // so it cannot read its own broadcast and feeds the same function directly.
+  const standaloneSettingsMenu = isStandaloneSettingsMenu(
+    useSettingsMenuPlacement(),
+    isDesktop,
+    shellDrawsSidebar,
+  );
   const settingsCoversSidebar = settingsOpen && standaloneSettingsMenu;
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
@@ -211,13 +249,6 @@ export const AppShell: React.FC = () => {
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
-  // Whether this DOCUMENT was opened as a single-app tab (⌘/Ctrl-click on an app icon,
-  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
-  // navigating deeper inside the tab can't suddenly restore the workbench window layout
-  // this tab exists to stay out of — nor re-enable the save that would clobber it.
-  const [standaloneAppTab] = useState(() =>
-    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
-  );
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -254,20 +285,6 @@ export const AppShell: React.FC = () => {
   useEffect(() => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
-
-  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
-  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
-  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
-  // and hands the whole viewport to the app. Both halves matter: the flag alone would
-  // strip the chrome off any page such a tab later navigates to, and the route alone
-  // would strip it inside the normal workbench.
-  //
-  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
-  // publishes is the mount-frozen document flag instead, because the window controls
-  // that read it must stay decided for the tab's whole life (see the context doc). The
-  // app pages read the same context and mount only on these routes, so for them the two
-  // agree anyway.
-  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(surfaceLocation.pathname);
 
   // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
   // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
@@ -306,17 +323,14 @@ export const AppShell: React.FC = () => {
     return <Navigate to="/" replace />;
   }
 
-  if (
-    isChromelessShellPath(location.pathname)
-    || (settingsOverlayOrigin !== null && isChromelessShellPath(settingsOverlayOrigin.location.pathname))
-  ) {
+  if (setupShell) {
     return (
-      <>
+      <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <Outlet />
         </SettingsOverlayNavigationBoundary>
-      </>
+      </ShellSidebarContext.Provider>
     );
   }
 
@@ -367,6 +381,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
@@ -595,5 +610,6 @@ export const AppShell: React.FC = () => {
     </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
     </SettingsOverlayNavigationBoundary>
+    </ShellSidebarContext.Provider>
   );
 };

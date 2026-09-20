@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 
+import { useShellHasSidebar } from '../context/ShellSidebarContext';
 import { useIsDesktop } from './useIsDesktop';
 
 /**
@@ -85,32 +86,43 @@ export function useSettingsMenuPlacement(): SettingsMenuPlacement {
   );
 }
 
-type StandaloneSettingsMenuOptions = {
-  /**
-   * Whether the shell BEHIND this Settings surface actually draws the app
-   * sidebar. Defaults to true, which is what every ordinary shell route does;
-   * pass false from a context that renders none.
-   */
-  shellHasSidebar?: boolean;
-};
-
 /**
  * Whether the Settings menu stands IN FOR the app sidebar rather than opening
  * beside it — the one question the shell, the overlay frame and the Settings
- * rail each have to answer, so it is answered once here.
+ * rail each have to answer, so it is answered once, here, for all three.
  *
  * `inline` is a claim about something else being on screen: it only means
- * anything where an app sidebar is there to sit beside. Two things can take
- * that away. The viewport: below md there is no room for two rails, so Settings
- * covers the shell and the preference is simply not in force. The shell itself:
- * the setup wizard owns the whole window and draws no sidebar, so inline there
- * would offset Settings past an empty strip and narrow its rail for a neighbour
- * that does not exist. Either way the answer is standalone, and neither one
- * forgets what the owner picked for the windows that do have a sidebar.
+ * anything where an app sidebar is there to sit beside. Two things take that
+ * away, and both make the answer standalone without forgetting what the owner
+ * picked for the windows that do have a sidebar.
+ *
+ * - The viewport: below `md` there is no room for two rails.
+ * - The shell: some shells draw no sidebar at all, and inline over one of those
+ *   would offset Settings past an empty strip and narrow its rail for a
+ *   neighbour that does not exist.
+ *
+ * Kept as a plain function of three facts, with no defaultable parameter: the
+ * shell fact is not something a call site may forget to supply, because a
+ * missing answer here is indistinguishable from "there is a sidebar" and fails
+ * silently. Every consumer inside the shell should call the hook below instead.
  */
-export function useStandaloneSettingsMenu(options?: StandaloneSettingsMenuOptions): boolean {
-  const placement = useSettingsMenuPlacement();
-  const isDesktop = useIsDesktop();
-  if (options?.shellHasSidebar === false) return true;
-  return placement === 'standalone' || !isDesktop;
+export function isStandaloneSettingsMenu(
+  placement: SettingsMenuPlacement,
+  isDesktop: boolean,
+  shellHasSidebar: boolean,
+): boolean {
+  return !shellHasSidebar || placement === 'standalone' || !isDesktop;
+}
+
+/**
+ * The rule above, fed from the three sources that own its inputs. This is what
+ * every surface *inside* the shell calls — the shell itself publishes
+ * `ShellSidebarContext` and so has to feed `isStandaloneSettingsMenu` directly.
+ */
+export function useStandaloneSettingsMenu(): boolean {
+  return isStandaloneSettingsMenu(
+    useSettingsMenuPlacement(),
+    useIsDesktop(),
+    useShellHasSidebar(),
+  );
 }

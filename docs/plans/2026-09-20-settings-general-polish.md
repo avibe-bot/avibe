@@ -62,17 +62,41 @@ beside. Two things take that away, and the hook folds in both:
 
 - **The viewport.** Below `md` there is no room for two rails, so Settings
   covers the shell.
-- **The shell.** The setup wizard owns the whole window and draws no sidebar at
-  all, so a caller passes `shellHasSidebar: false` and gets standalone on a full
-  desktop window too. Without it, inline would offset Settings past an empty
-  strip and narrow its rail for a neighbour that does not exist.
+- **The shell.** Some shells draw no sidebar at all, so there is nothing to open
+  beside and the answer is standalone on a full desktop window too. Without this,
+  inline would offset Settings past an empty strip and narrow its rail for a
+  neighbour that does not exist.
 
 Either way the answer is standalone, and neither one forgets what the owner
-picked for the windows that do have a sidebar. That `/setup` is the chromeless
-shell is stated once, as `isChromelessShellPath` in `settingsOverlay.ts`, because
-three separate decisions turn on it: whether `AppShell` draws its chrome, and —
-for a Settings surface opened from there — the overlay's own offset and its
-rail's width.
+picked for the windows that do have a sidebar.
+
+*Which* shells those are is the shell's own business, so `AppShell` **publishes**
+the answer through `ShellSidebarContext` rather than letting each Settings surface
+recognise them by pathname. Two shells draw no sidebar and they disagree on what
+the answer even depends on: the setup wizard is a matter of the route, while a
+single-app tab (`?standalone=1`) turns on a document flag frozen at mount and
+deliberately *not* re-read from the URL the shell rewrites underneath it. No
+pathname predicate can recover that second one, and the route a Settings surface
+lands on says nothing about the shell it opened over anyway — the config-recovery
+banner's Diagnostics link opens Settings from a single-app tab onto an ordinary
+settings route. So the shell states `shellDrawsSidebar = !chromeless && !setupShell`
+beside the two conditions that actually decide whether an `<aside>` renders, and
+both consumers read it.
+
+`isStandaloneSettingsMenu(placement, isDesktop, shellHasSidebar)` is the pure rule
+and takes no defaultable parameter — a forgotten optional boolean is
+indistinguishable from "there is a sidebar" and fails silently. Everything inside
+the shell calls the zero-argument `useStandaloneSettingsMenu()`; `AppShell`, being
+the publisher, feeds the rule directly.
+
+> Scope note: this publication model replaced a first attempt that re-derived the
+> question from `isChromelessShellPath(pathname)` at each call site. Two review
+> heads produced findings of one root-cause class — the derivation could only ever
+> cover the cases someone remembered to enumerate — which tripped the review-loop
+> circuit breaker. The diagnosis was that `AppShell` already owned a concept for
+> this (`chromeless`) and the pathname predicate was a second, parallel one
+> answering the same question; making the existing owner publish it is the smallest
+> complete fix, and it is reversible and contract-preserving.
 
 ### What each consumer does with it
 
@@ -137,12 +161,13 @@ edited into `design.pen`.
   fold-ins: the viewport, and a shell that draws no sidebar.
 - `SettingsGeneralPage.test.tsx` — the placement radiogroup is its own group,
   arrowed and drawn like the theme one beside it, and does not touch the theme key.
-- `AppShell.test.tsx` — the shell retires only where Settings replaces it, and
-  covers the shell below `md` even when inline is stored.
-- `SettingsLayout.test.tsx` — rail width per placement, including standalone from
-  a setup origin while `inline` is stored.
+- `AppShell.test.tsx` — the shell retires only where Settings replaces it, covers
+  the shell below `md` even when inline is stored, and publishes a sidebar-free
+  shell to the Settings surfaces above it in a single-app tab.
+- `SettingsLayout.test.tsx` — rail width per placement, including standalone where
+  the shell draws no sidebar while `inline` is stored.
 - `SettingsOverlayRouteSurface.test.tsx` — the surface's left edge and border per
-  placement, standalone from a setup origin, and what an outside interaction
+  placement, standalone where the shell draws no sidebar, and what an outside interaction
   means: a live sidebar keeps its own affordances (the resize edge lays this
   surface out, a sidebar link navigates and lands on the route it names), while
   the rest of the shell is still a way out.

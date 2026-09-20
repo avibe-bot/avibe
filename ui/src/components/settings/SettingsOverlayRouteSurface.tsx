@@ -9,7 +9,6 @@ import { Dialog, DialogSurfaceContent, DialogTitle } from '@/components/ui/dialo
 import { useSetupHandoffDeparture } from '@/components/workbench/backendReadiness';
 import {
   closeSettingsOverlay,
-  isChromelessShellPath,
   isSettingsEntryPath,
   locationPath,
   SettingsOverlayOriginContext,
@@ -49,9 +48,7 @@ export const SettingsOverlayRouteSurface = ({
   const location = useLocation();
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
-  const standaloneMenu = useStandaloneSettingsMenu({
-    shellHasSidebar: !(origin && isChromelessShellPath(origin.location.pathname)),
-  });
+  const standaloneMenu = useStandaloneSettingsMenu();
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);

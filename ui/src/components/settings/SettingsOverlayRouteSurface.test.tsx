@@ -23,6 +23,7 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { ShellSidebarContext } from '@/context/ShellSidebarContext';
 import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
@@ -615,20 +616,26 @@ describe('SettingsOverlayRouteSurface', () => {
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
   });
 
-  // The setup wizard's shell renders its outlet alone — no app sidebar at all.
-  // Inline there would offset Settings past an empty strip and narrow its rail
-  // for a neighbour that does not exist, so the stored preference is simply not
-  // in force on that origin.
-  it('opens standalone from a setup origin even when inline is stored', async () => {
+  // Some shells draw no app sidebar at all — the setup wizard, a single-app tab.
+  // Inline over one of those would offset Settings past an empty strip and give
+  // it a rail narrowed for a neighbour that does not exist, so the stored
+  // preference is simply not in force there. Which shells those are is the
+  // shell's own business: this surface reads the answer it publishes rather
+  // than trying to recognise them by pathname.
+  it('opens standalone where the shell draws no sidebar, even when inline is stored', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
     render(
-      <MemoryRouter initialEntries={['/setup']}>
-        <RoutedHarness />
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <ShellSidebarContext.Provider value={false}>
+          <RoutedHarness />
+        </ShellSidebarContext.Provider>
       </MemoryRouter>,
     );
 
-    await user.click(screen.getByRole('link', { name: 'open-model-hub' }));
+    // An ordinary workbench route, so nothing about the path suggests the
+    // answer: only the shell's own claim does.
+    await user.click(screen.getByRole('link', { name: 'open-settings' }));
     const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
 
     expect(surface.getAttribute('data-settings-menu-placement')).toBe('standalone');

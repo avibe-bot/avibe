@@ -237,11 +237,13 @@ export const SettingsLayout: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const isDesktop = useIsDesktop();
+  // Specifically the setup wizard, and only for the mobile back affordance
+  // below: coming from the wizard makes Back mean Back. That is a different
+  // question from whether a sidebar is on screen, which the rail reads from the
+  // shell instead.
   const setupOriginPath = useSettingsOverlayContext()?.location.pathname;
   const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
-  // The setup wizard draws no app sidebar, so there is nothing for an inline
-  // rail to sit beside and nothing for it to be narrower than.
-  const standaloneMenu = useStandaloneSettingsMenu({ shellHasSidebar: !setupOrigin });
+  const standaloneMenu = useStandaloneSettingsMenu();
   const [modelHubVisible, setModelHubVisible] = useState(false);
   const [memoryVisible, setMemoryVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);

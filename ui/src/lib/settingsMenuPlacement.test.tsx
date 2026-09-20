@@ -3,6 +3,7 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { ShellSidebarContext } from '../context/ShellSidebarContext';
 import {
   DEFAULT_SETTINGS_MENU_PLACEMENT,
   readSettingsMenuPlacement,
@@ -35,8 +36,15 @@ const resizeTo = (isDesktop: boolean) => act(() => {
 });
 
 const Placement = () => <span data-testid="placement">{useSettingsMenuPlacement()}</span>;
-const Standalone = ({ shellHasSidebar }: { shellHasSidebar?: boolean } = {}) => (
-  <span data-testid="standalone">{String(useStandaloneSettingsMenu({ shellHasSidebar }))}</span>
+const Standalone = () => (
+  <span data-testid="standalone">{String(useStandaloneSettingsMenu())}</span>
+);
+// What the shell publishes. Absent a provider the context defaults to true,
+// which is what the ordinary cases below render against.
+const InShell = ({ hasSidebar }: { hasSidebar: boolean }) => (
+  <ShellSidebarContext.Provider value={hasSidebar}>
+    <Standalone />
+  </ShellSidebarContext.Provider>
 );
 
 const shown = (testId: string) => screen.getByTestId(testId).textContent;
@@ -130,10 +138,16 @@ describe('useStandaloneSettingsMenu', () => {
     writeSettingsMenuPlacement('inline');
 
     // `inline` is a claim about something else being on screen. A shell that
-    // renders no app sidebar — the setup wizard — leaves it nothing to sit
-    // beside, so the answer is standalone on a full desktop window too.
-    render(<Standalone shellHasSidebar={false} />);
+    // renders no app sidebar — the setup wizard, a single-app tab — leaves it
+    // nothing to sit beside, so the answer is standalone on a full desktop
+    // window too. Which shells those are is the shell's business, not this
+    // rule's: it reads the answer rather than re-deriving it from a pathname.
+    render(<InShell hasSidebar={false} />);
     expect(shown('standalone')).toBe('true');
     expect(readSettingsMenuPlacement()).toBe('inline');
+
+    cleanup();
+    render(<InShell hasSidebar />);
+    expect(shown('standalone')).toBe('false');
   });
 });
