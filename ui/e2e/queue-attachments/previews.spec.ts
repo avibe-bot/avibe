@@ -145,6 +145,7 @@ test('a single-line queued message is vertically centred in its row', async ({ p
   const rowCentre = queuedRow.y + queuedRow.height / 2;
   const textCentre = text.y + text.height / 2;
 
+  await expect(row(page, 'q-text')).toHaveCSS('align-items', 'center');
   expect(Math.abs(textCentre - rowCentre)).toBeLessThanOrEqual(1);
 });
 

@@ -3052,7 +3052,7 @@ export const QueueRow: React.FC<{
     <div
       data-queue-row="true"
       className={clsx(
-        'relative flex items-start gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
+        'relative flex items-center gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         // Wrapping is enabled only while the remainder is disclosed. A collapsed
         // row therefore cannot wrap at any width — the one thing that could make
         // it taller than a text-only row is off unless the reader asked for it.
@@ -3073,7 +3073,7 @@ export const QueueRow: React.FC<{
         aria-expanded={expanded}
         className={clsx(
           'min-w-0 flex-1 cursor-pointer select-text text-left text-[12px] text-foreground',
-          expanded ? 'self-start whitespace-pre-wrap break-words' : 'self-center truncate',
+          expanded ? 'self-start whitespace-pre-wrap break-words' : 'truncate leading-6',
         )}
       >
         {annotationView && (
