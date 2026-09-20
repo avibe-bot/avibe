@@ -15,6 +15,7 @@ import {
   settingsOverlayStateForOrigin,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
 
 type SettingsOverlayRouteSurfaceProps = {
   children: ReactNode;
@@ -47,6 +48,7 @@ export const SettingsOverlayRouteSurface = ({
   const location = useLocation();
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
+  const standaloneMenu = useStandaloneSettingsMenu();
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -123,17 +125,51 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
-              // Settings owns the whole viewport. The retained Workbench origin
-              // remains mounted behind this portal for drafts and return state,
-              // but its sidebar is not part of the Settings surface at any width.
-              className="left-0 border-l-0 md:left-0 md:border-l-0"
+              data-settings-menu-placement={standaloneMenu ? 'standalone' : 'inline'}
+              // Standalone: Settings owns the whole viewport, so it starts at the
+              // screen edge and draws no left border — there is nothing on that
+              // side to divide from. The retained Workbench origin stays mounted
+              // behind this portal for drafts and return state, but its sidebar
+              // is not part of the surface at any width.
+              //
+              // Inline: the app sidebar is still there and still live, so the
+              // surface starts at its trailing edge and takes the primitive's
+              // own `--app-sidebar-w` offset — the same variable the sidebar
+              // sizes itself with, which is what keeps the two edges together
+              // while that sidebar is being dragged. Below md there is no
+              // sidebar to divide from, so the border only applies from md up.
+              className={standaloneMenu
+                ? 'left-0 border-l-0 md:left-0 md:border-l-0'
+                : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
+                // Inline has no outside in the sense this handler assumes. It is
+                // a pane beside a live shell, not a popup over an inert one, and
+                // everything still reachable belongs to that shell: the sidebar
+                // column left of this surface, plus the launcher, Dock, menus and
+                // floating details it portals to `document.body` above this
+                // layer. Each of those already owns what it does. The resize edge
+                // moves this surface's own left edge, so grabbing it must not
+                // close what the drag is laying out; a sidebar link navigates,
+                // and that navigation IS the way out — were dismissal to fire
+                // too, `closeSettingsOverlay`'s asynchronous history traversal
+                // would race the link's synchronous push and could land on the
+                // retained origin instead of the route that was clicked.
+                //
+                // Naming those surfaces is what a portal defeats: they are not
+                // DOM descendants of the column they belong to, so any ancestry
+                // test can only cover the ones someone remembered. Inline is left
+                // by Escape, by the Settings toggle, or by navigating — never by
+                // clicking its neighbour — so it simply does not dismiss.
+                if (!standaloneMenu) {
+                  event.preventDefault();
+                  return;
+                }
+                // Standalone does own the whole viewport, and keeps the dismissal
+                // that shipped with it. Only the toggle is exempt there, because
+                // it closes this surface itself and must not do it twice.
                 const target = event.target;
-                if (
-                  target instanceof Element
-                  && target.closest('[data-settings-toggle="true"]')
-                ) {
+                if (target instanceof Element && target.closest('[data-settings-toggle="true"]')) {
                   event.preventDefault();
                 }
               }}

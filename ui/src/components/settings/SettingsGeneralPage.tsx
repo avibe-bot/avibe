@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, CircleCheck, Monitor, Moon, Sun } from 'lucide-react';
+import { Check, CircleCheck, Columns3, Monitor, Moon, PanelLeft, Sun } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -10,6 +10,11 @@ import { Select } from '../ui/select';
 import { useTheme } from '../../context/ThemeContext';
 import type { ThemeMode } from '../../context/ThemeContext';
 import { useLanguageSelection } from '../../lib/useLanguageSelection';
+import {
+  useSettingsMenuPlacement,
+  writeSettingsMenuPlacement,
+} from '../../lib/settingsMenuPlacement';
+import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
 
 // The 88px miniature is a drawing OF a theme, not a preview rendered IN one:
@@ -63,10 +68,161 @@ const ThemeMiniature: React.FC<{ mode: ThemeMode }> = ({ mode }) => (
   </div>
 );
 
-const THEME_CHOICES: { mode: ThemeMode; icon: LucideIcon; labelKey: TranslationKey }[] = [
-  { mode: 'system', icon: Monitor, labelKey: 'settings.general.appearanceSystem' },
-  { mode: 'light', icon: Sun, labelKey: 'settings.general.appearanceLight' },
-  { mode: 'dark', icon: Moon, labelKey: 'settings.general.appearanceDark' },
+/**
+ * Where the Settings menu sits, drawn from live tokens rather than the literal
+ * palette above: this miniature is about layout, so unlike the theme cards it
+ * SHOULD repaint with the active theme. Mint marks the Settings menu itself, so
+ * the eye can follow that one column between the two cards — the neutral column
+ * that appears before it in `inline` is the app sidebar the choice preserves.
+ */
+const PlacementMiniature: React.FC<{ placement: SettingsMenuPlacement }> = ({ placement }) => (
+  <div
+    aria-hidden="true"
+    className="flex h-[88px] w-full overflow-hidden rounded-sm border border-border bg-background"
+  >
+    {placement === 'inline' && (
+      <div className="flex w-[26px] shrink-0 flex-col gap-[5px] border-r border-border bg-[var(--sidebar-background)] p-1.5">
+        <div className="h-[4px] w-full rounded-sm bg-muted/40" />
+        <div className="h-[4px] w-[70%] rounded-sm bg-muted/40" />
+        <div className="h-[4px] w-[85%] rounded-sm bg-muted/40" />
+      </div>
+    )}
+    <div
+      className={clsx(
+        'flex shrink-0 flex-col gap-[5px] border-r border-mint/30 bg-mint-soft p-1.5',
+        placement === 'inline' ? 'w-[30px]' : 'w-[38px]',
+      )}
+    >
+      <div className="h-[4px] w-[80%] rounded-sm bg-mint-ink/50" />
+      <div className="h-[4px] w-full rounded-sm bg-mint-ink/25" />
+      <div className="h-[4px] w-[65%] rounded-sm bg-mint-ink/25" />
+      <div className="h-[4px] w-[75%] rounded-sm bg-mint-ink/25" />
+    </div>
+    <div className="flex min-w-0 flex-1 flex-col gap-[6px] p-2.5">
+      <div className="h-[6px] w-[55%] rounded-sm bg-muted/60" />
+      <div className="h-[13px] w-full rounded border border-border" />
+      <div className="h-[13px] w-full rounded border border-border" />
+    </div>
+  </div>
+);
+
+type ChoiceCard<T extends string> = {
+  value: T;
+  icon: LucideIcon;
+  labelKey: TranslationKey;
+  miniature: React.ReactNode;
+};
+
+type ChoiceCardsProps<T extends string> = {
+  label: string;
+  choices: readonly ChoiceCard<T>[];
+  value: T;
+  onChange: (value: T) => void;
+  className?: string;
+};
+
+/**
+ * The drawn-choice control the page uses twice. A radiogroup is one tab stop
+ * that arrows through its options; separately tabbable buttons would only look
+ * like radios.
+ */
+function ChoiceCards<T extends string>({
+  label,
+  choices,
+  value,
+  onChange,
+  className,
+}: ChoiceCardsProps<T>) {
+  const { t } = useTranslation();
+  const cardRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  const moveTo = (index: number) => {
+    const next = (index + choices.length) % choices.length;
+    onChange(choices[next].value);
+    cardRefs.current[next]?.focus();
+  };
+
+  const onCardKeyDown = (event: React.KeyboardEvent, index: number) => {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') moveTo(index + 1);
+    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') moveTo(index - 1);
+    else if (event.key === 'Home') moveTo(0);
+    else if (event.key === 'End') moveTo(choices.length - 1);
+    else return;
+    event.preventDefault();
+  };
+
+  return (
+    <div role="radiogroup" aria-label={label} className={clsx('grid gap-3.5', className)}>
+      {choices.map(({ value: choice, icon: Icon, labelKey, miniature }, index) => {
+        const selected = value === choice;
+        return (
+          <button
+            key={choice}
+            ref={(node) => { cardRefs.current[index] = node; }}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onChange(choice)}
+            onKeyDown={(event) => onCardKeyDown(event, index)}
+            className={clsx(
+              'flex flex-col gap-2.5 rounded-xl text-left transition-colors',
+              // The selected border is 2px in the source; padding absorbs the
+              // extra pixel so picking a card never nudges the row.
+              selected
+                ? 'border-2 border-mint bg-mint-soft p-[9px]'
+                : 'border border-border-strong bg-surface p-2.5 hover:bg-foreground/[0.03]',
+            )}
+          >
+            {miniature}
+            <span className="flex items-center gap-2">
+              <Icon className={clsx('size-3.5 shrink-0', selected ? 'text-mint-ink' : 'text-muted')} />
+              <span className={clsx('flex-1 text-[12px] font-medium', selected ? 'text-foreground' : 'text-muted')}>
+                {t(labelKey)}
+              </span>
+              {selected && <CircleCheck className="size-3.5 shrink-0 text-mint-ink" />}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const THEME_CHOICES: readonly ChoiceCard<ThemeMode>[] = [
+  {
+    value: 'system',
+    icon: Monitor,
+    labelKey: 'settings.general.appearanceSystem',
+    miniature: <ThemeMiniature mode="system" />,
+  },
+  {
+    value: 'light',
+    icon: Sun,
+    labelKey: 'settings.general.appearanceLight',
+    miniature: <ThemeMiniature mode="light" />,
+  },
+  {
+    value: 'dark',
+    icon: Moon,
+    labelKey: 'settings.general.appearanceDark',
+    miniature: <ThemeMiniature mode="dark" />,
+  },
+];
+
+const PLACEMENT_CHOICES: readonly ChoiceCard<SettingsMenuPlacement>[] = [
+  {
+    value: 'standalone',
+    icon: PanelLeft,
+    labelKey: 'settings.general.menuPlacementStandalone',
+    miniature: <PlacementMiniature placement="standalone" />,
+  },
+  {
+    value: 'inline',
+    icon: Columns3,
+    labelKey: 'settings.general.menuPlacementInline',
+    miniature: <PlacementMiniature placement="inline" />,
+  },
 ];
 
 // design r6G6P — ordinary Settings: interface language and appearance, both
@@ -76,24 +232,7 @@ export const SettingsGeneralPage: React.FC = () => {
   const { t } = useTranslation();
   const { languages, current, select } = useLanguageSelection();
   const { mode, setMode } = useTheme();
-  const cardRefs = useRef<(HTMLButtonElement | null)[]>([]);
-
-  // A radiogroup is one tab stop that arrows through its options; three
-  // separately tabbable buttons would only look like radios.
-  const moveTo = (index: number) => {
-    const next = (index + THEME_CHOICES.length) % THEME_CHOICES.length;
-    setMode(THEME_CHOICES[next].mode);
-    cardRefs.current[next]?.focus();
-  };
-
-  const onCardKeyDown = (event: React.KeyboardEvent, index: number) => {
-    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') moveTo(index + 1);
-    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') moveTo(index - 1);
-    else if (event.key === 'Home') moveTo(0);
-    else if (event.key === 'End') moveTo(THEME_CHOICES.length - 1);
-    else return;
-    event.preventDefault();
-  };
+  const placement = useSettingsMenuPlacement();
 
   return (
     <SettingsPageShell
@@ -129,44 +268,31 @@ export const SettingsGeneralPage: React.FC = () => {
           title={t('settings.general.appearanceTitle')}
           description={t('settings.general.appearanceDescription')}
         >
-          <div
-            role="radiogroup"
-            aria-label={t('settings.general.appearanceTitle')}
-            className="grid grid-cols-1 gap-3.5 sm:grid-cols-3"
-          >
-            {THEME_CHOICES.map(({ mode: choice, icon: Icon, labelKey }, index) => {
-              const selected = mode === choice;
-              return (
-                <button
-                  key={choice}
-                  ref={(node) => { cardRefs.current[index] = node; }}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  tabIndex={selected ? 0 : -1}
-                  onClick={() => setMode(choice)}
-                  onKeyDown={(event) => onCardKeyDown(event, index)}
-                  className={clsx(
-                    'flex flex-col gap-2.5 rounded-xl text-left transition-colors',
-                    // The selected border is 2px in the source; padding absorbs
-                    // the extra pixel so picking a card never nudges the row.
-                    selected
-                      ? 'border-2 border-mint bg-mint-soft p-[9px]'
-                      : 'border border-border-strong bg-surface p-2.5 hover:bg-foreground/[0.03]',
-                  )}
-                >
-                  <ThemeMiniature mode={choice} />
-                  <span className="flex items-center gap-2">
-                    <Icon className={clsx('size-3.5 shrink-0', selected ? 'text-mint-ink' : 'text-muted')} />
-                    <span className={clsx('flex-1 text-[12px] font-medium', selected ? 'text-foreground' : 'text-muted')}>
-                      {t(labelKey)}
-                    </span>
-                    {selected && <CircleCheck className="size-3.5 shrink-0 text-mint-ink" />}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <ChoiceCards
+            label={t('settings.general.appearanceTitle')}
+            choices={THEME_CHOICES}
+            value={mode}
+            onChange={setMode}
+            className="grid-cols-1 sm:grid-cols-3"
+          />
+        </SettingsPanel>
+
+        {/* Settings menu placement. Hidden below md: the Settings surface is
+            full-screen on a phone whatever this says, and a control that
+            changes nothing on the viewport you are holding is not a choice. */}
+        <SettingsPanel
+          variant="preference"
+          className="hidden md:block"
+          title={t('settings.general.menuPlacementTitle')}
+          description={t('settings.general.menuPlacementDescription')}
+        >
+          <ChoiceCards
+            label={t('settings.general.menuPlacementTitle')}
+            choices={PLACEMENT_CHOICES}
+            value={placement}
+            onChange={writeSettingsMenuPlacement}
+            className="grid-cols-1 sm:grid-cols-2"
+          />
         </SettingsPanel>
 
         {/* i3LvLl — the autosave contract, stated once for the whole page. */}

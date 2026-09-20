@@ -11,6 +11,8 @@ import {
   settingsOverlayOpenState,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { ShellSidebarContext } from '@/context/ShellSidebarContext';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -80,8 +82,15 @@ type SettingsTestEntry = string | {
   state?: unknown;
 };
 
-const renderLayout = (entry: SettingsTestEntry) => render(
+// `shellHasSidebar` stands in for what AppShell publishes around this layout.
+// It defaults to the context's own default — an ordinary shell route, which is
+// what every case but the sidebar-less one below is about.
+const renderLayout = (
+  entry: SettingsTestEntry,
+  { shellHasSidebar = true }: { shellHasSidebar?: boolean } = {},
+) => render(
   <MemoryRouter initialEntries={[entry]}>
+    <ShellSidebarContext.Provider value={shellHasSidebar}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="general" element={<div>general-body</div>} />
@@ -98,6 +107,7 @@ const renderLayout = (entry: SettingsTestEntry) => render(
       </Route>
       <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
+    </ShellSidebarContext.Provider>
   </MemoryRouter>,
 );
 
@@ -174,6 +184,39 @@ describe('SettingsLayout', () => {
     expect(shell?.className).toContain('md:h-[var(--app-shell-h)]');
     expect(shell?.className).not.toContain('md:h-auto');
     expect(shell?.className).not.toContain('min-h-full');
+  });
+
+  // Opening standalone Settings swaps this rail IN FOR the app sidebar, so it
+  // has to be the width that sidebar was — a width the owner dragged it to
+  // included — or the left column jumps as Settings opens. Inline Settings sits
+  // beside that sidebar, where matching it would spend a second full-width
+  // column on a secondary nav, so it stays 196.
+  it.each([
+    ['standalone', 'md:w-[var(--app-sidebar-w)]', 'md:w-[196px]'],
+    ['inline', 'md:w-[196px]', 'md:w-[var(--app-sidebar-w)]'],
+  ] as const)('sizes the rail for a %s menu', (placement, expected, rejected) => {
+    media.matches = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderLayout('/settings/general');
+
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(navigation.className).toContain(expected);
+    expect(navigation.className).not.toContain(rejected);
+  });
+
+  // The inline rail is 196px because it sits beside a 248px sidebar. Where the
+  // shell draws none — the setup wizard, a single-app tab — that rail would be
+  // narrowed for a neighbour that is not there, so the stored preference is not
+  // in force, and is not forgotten for the windows that do have one.
+  it('sizes the rail standalone where the shell draws no sidebar, even when inline is stored', () => {
+    media.matches = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+
+    renderLayout('/settings/models', { shellHasSidebar: false });
+
+    const navigation = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(navigation.className).toContain('md:w-[var(--app-sidebar-w)]');
+    expect(navigation.className).not.toContain('md:w-[196px]');
   });
 
   it.each(['/settings/models', '/settings/models/'])(

@@ -14,8 +14,8 @@ type SettingsPanelProps = {
   /**
    * `panel` (default) is the machine-management section: a header ruled off from
    * a list of rows. `preference` is the quieter single-preference card used by
-   * ordinary Settings (design.pen le5QU / Q8zxF1) — surface-2, one 22px pad, and
-   * no internal divider, because its header and its control are one statement.
+   * ordinary Settings (design.pen le5QU / Q8zxF1) — one 22px pad and no internal
+   * divider, because its header and its control are one statement.
    */
   variant?: 'panel' | 'preference';
 };
@@ -56,9 +56,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   // radius 12 (`rounded-lg` here), not the 16 the `panel` variant renders:
   // le5QU and Q8zxF1 both draw this card at 12.
+  //
+  // The fill is `bg-background`, not the surface-2 those two boards draw. A card
+  // is one concept across Settings, and every other page (Backends,
+  // Dependencies, Service) renders it as border-only on the page fill; a white
+  // card on General alone read as a different kind of object rather than as the
+  // same card holding a quieter control. Deliberate divergence from the boards,
+  // recorded in the PR rather than silently reconciled here.
   if (variant === 'preference') {
     return (
-      <section className={clsx('rounded-lg border border-border bg-surface-2', className)}>
+      <section className={clsx('rounded-lg border border-border bg-background', className)}>
         <div className="flex flex-col gap-5 p-[22px]">
           {header}
           {children}

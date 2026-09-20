@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Link,
   MemoryRouter,
@@ -23,6 +24,8 @@ import {
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { ShellSidebarContext } from '@/context/ShellSidebarContext';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
@@ -172,6 +175,11 @@ const ChatProbe = () => {
 
 const SetupProbe = () => <Link to="/settings/models">open-model-hub</Link>;
 
+const PortaledShellControl = () => createPortal(
+  <button type="button">sidebar-portaled</button>,
+  document.body,
+);
+
 const SettingsFrame = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -227,6 +235,19 @@ const SettingsToggle = () => {
 const Harness = ({ desktop }: { desktop: boolean }) => (
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
+    {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
+        still on screen beside Settings and still live, so what an outside
+        interaction means stops being hypothetical. */}
+    <aside>
+      <button type="button" data-sidebar-resizer="true">shell-resizer</button>
+      <button type="button">sidebar-idle</button>
+      <Link to="/chat/ses_2">sidebar-chat-link</Link>
+    </aside>
+    {/* The launcher and its Dock keep a layout slot in that column but portal
+        themselves to `document.body` to clear the route panel's stacking
+        context, so they belong to the sidebar without descending from it. */}
+    <PortaledShellControl />
+    <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
       <Route path="/chat/:sessionId" element={<ChatProbe />} />
@@ -258,6 +279,7 @@ const settleDeferredFocus = async () => {
 beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
+  window.localStorage.clear();
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     matches: true,
     addEventListener: vi.fn(),
@@ -523,11 +545,150 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     expect(document.body.style.pointerEvents).not.toBe('none');
-    expect(document.querySelector('[data-dialog-surface-backdrop="true"]')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
 
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  // Standalone Settings replaces the app sidebar, so it starts at the screen
+  // edge with nothing on that side to divide from. Inline Settings opens beside
+  // a sidebar that is still there, so it takes the primitive's own
+  // `--app-sidebar-w` offset — the same variable the sidebar sizes itself with,
+  // which is what keeps the two edges together while it is dragged.
+  it.each([
+    ['standalone', 'md:left-0', 'md:left-[var(--app-sidebar-w)]', false],
+    ['inline', 'md:left-[var(--app-sidebar-w)]', 'md:left-0', true],
+  ] as const)('starts the %s surface at the right edge', async (
+    placement,
+    offset,
+    rejected,
+    dividedFromSidebar,
+  ) => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe(placement);
+    // Exact class tokens: `md:border-l-0` would satisfy a substring match for
+    // `md:border-l` and quietly invert what this asserts.
+    expect(surface.classList.contains(offset)).toBe(true);
+    expect(surface.classList.contains(rejected)).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(dividedFromSidebar);
+  });
+
+  it('never dismisses inline on an outside interaction, and still lets the user leave', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    const open = async () => {
+      await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+      expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+      // Inline's whole premise is that the shell behind stays reachable, so
+      // this dialog must never go modal: Radix's modal path inerts the page
+      // behind it. Whether a layer *covers* the sidebar is a hit test, which
+      // only a browser can run — `geometry.spec.ts` settles that half.
+      expect(document.body.style.pointerEvents).not.toBe('none');
+    };
+    const stillOpen = () => expect(
+      document.querySelector('[data-settings-overlay="true"]'),
+    ).toBeTruthy();
+
+    await open();
+
+    // Grabbing the divider moves this surface's OWN left edge. Dismissing on it
+    // would close the thing the drag is laying out.
+    await user.click(screen.getByRole('button', { name: 'shell-resizer' }));
+    stillOpen();
+
+    // Nor is the sidebar's own quiet space a dismissal: inline puts these two
+    // surfaces side by side, so the sidebar is a neighbour, not "outside".
+    await user.click(screen.getByRole('button', { name: 'sidebar-idle' }));
+    stillOpen();
+
+    // The launcher and Dock belong to that column but portal above this layer,
+    // so they are not descendants of it. Anything deciding this by DOM ancestry
+    // passes the two cases above and fails here — which is the whole point of
+    // not deciding it that way.
+    await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
+    stillOpen();
+
+    // Not even the rest of the shell: inline covers everything right of the
+    // sidebar, so there is no neutral background left to click at.
+    await user.click(screen.getByRole('button', { name: 'shell-elsewhere' }));
+    stillOpen();
+
+    // Leaving is never in doubt, though. Escape still closes to the retained
+    // origin...
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+
+    // ...and a sidebar link takes the user out by its own navigation, which is
+    // exactly ONE navigation. Were dismissal to fire too, `closeSettingsOverlay`
+    // would traverse history asynchronously and race this synchronous push back
+    // to the retained origin.
+    await open();
+    await user.click(screen.getByRole('link', { name: 'sidebar-chat-link' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
+  });
+
+  it('keeps the shipped outside dismissal for the standalone surface', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    // Standalone really does own the viewport — anything that floats above it is
+    // outside in the ordinary sense, and closes it back to the retained origin.
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  // Some shells draw no app sidebar at all — the setup wizard, a single-app tab.
+  // Inline over one of those would offset Settings past an empty strip and give
+  // it a rail narrowed for a neighbour that does not exist, so the stored
+  // preference is simply not in force there. Which shells those are is the
+  // shell's own business: this surface reads the answer it publishes rather
+  // than trying to recognise them by pathname.
+  it('opens standalone where the shell draws no sidebar, even when inline is stored', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <ShellSidebarContext.Provider value={false}>
+          <RoutedHarness />
+        </ShellSidebarContext.Provider>
+      </MemoryRouter>,
+    );
+
+    // An ordinary workbench route, so nothing about the path suggests the
+    // answer: only the shell's own claim does.
+    await user.click(screen.getByRole('link', { name: 'open-settings' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe('standalone');
+    expect(surface.classList.contains('md:left-0')).toBe(true);
+    expect(surface.classList.contains('md:left-[var(--app-sidebar-w)]')).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(false);
   });
 
   it('keeps legacy redirects out of origins while preserving real ingress origins', async () => {

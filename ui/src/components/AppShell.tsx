@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { ShellSidebarContext } from '../context/ShellSidebarContext';
 import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -36,9 +37,11 @@ import {
 } from '../lib/adminNavigation';
 import {
   closeSettingsOverlay,
+  isChromelessShellPath,
   isSettingsEntryPath,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
+import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
 
 type ShellNavItem = {
@@ -191,6 +194,57 @@ export const AppShell: React.FC = () => {
     && isSettingsEntryPath(location.pathname)
     && settingsOverlayOrigin !== null;
   const surfaceLocation = settingsOverlayOpen ? settingsOverlayOrigin.location : location;
+  // Whether THIS document was opened as a single-app tab (⌘/Ctrl-click on an app icon,
+  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
+  // navigating deeper inside the tab can't suddenly restore the workbench window layout
+  // this tab exists to stay out of — nor re-enable the save that would clobber it.
+  const [standaloneAppTab] = useState(() =>
+    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
+  );
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench.
+  //
+  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
+  // publishes is the mount-frozen document flag instead, because the window controls
+  // that read it must stay decided for the tab's whole life (see the context doc). The
+  // app pages read the same context and mount only on these routes, so for them the two
+  // agree anyway.
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(surfaceLocation.pathname);
+  // The setup wizard owns the whole window — the shell hands it the outlet and
+  // draws nothing else. True for a retained setup origin too, so that Settings
+  // opened from the wizard is measured against the wizard, not the route the
+  // overlay happens to be on.
+  const setupShell = isChromelessShellPath(location.pathname)
+    || (settingsOverlayOrigin !== null && isChromelessShellPath(settingsOverlayOrigin.location.pathname));
+  // The one fact the Settings surfaces cannot work out for themselves, so the
+  // shell states it here, next to the two conditions that actually decide
+  // whether an `<aside>` is rendered at all, and publishes it below.
+  const shellDrawsSidebar = !chromeless && !setupShell;
+  // Two different questions wear the same name if you let them. `settingsOpen`
+  // asks whether Settings is the foreground route — that is what the toggle in
+  // the sidebar reads, so it stays on that. This asks whether Settings has TAKEN
+  // OVER the shell, and it is the one everything BEHIND Settings must read:
+  // standalone Settings stands in for the sidebar, so the shell retires; inline
+  // Settings opens beside a live sidebar, so that column stays awake and
+  // navigable, and so do the palettes, which float above the surface.
+  //
+  // "Beside", not "behind": inline's surface is opaque from the sidebar's
+  // trailing edge rightwards, so anything it covers is live-but-invisible,
+  // which is worse than retired. The window layer is the one such thing, and
+  // it reads `settingsOpen` instead.
+  //
+  // The rule, not the hook: the shell is what publishes `ShellSidebarContext`,
+  // so it cannot read its own broadcast and feeds the same function directly.
+  const standaloneSettingsMenu = isStandaloneSettingsMenu(
+    useSettingsMenuPlacement(),
+    isDesktop,
+    shellDrawsSidebar,
+  );
+  const settingsCoversSidebar = settingsOpen && standaloneSettingsMenu;
   useEffect(() => {
     forgetMobileProjectsListUnlessPreserved(location.pathname);
   }, [location.pathname]);
@@ -200,13 +254,6 @@ export const AppShell: React.FC = () => {
   // The mobile Dock drawer (opened from the workbench Apps tab). Like the admin
   // sheet it closes on any route change — tapping a tile navigates + dismisses.
   const [appsDrawerOpen, setAppsDrawerOpen] = useState(false);
-  // Whether this DOCUMENT was opened as a single-app tab (⌘/Ctrl-click on an app icon,
-  // §7.1m). Frozen at mount from the landing URL rather than tracked off `location`, so
-  // navigating deeper inside the tab can't suddenly restore the workbench window layout
-  // this tab exists to stay out of — nor re-enable the save that would clobber it.
-  const [standaloneAppTab] = useState(() =>
-    typeof window === 'undefined' ? false : isStandaloneAppTab(window.location.search),
-  );
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -229,7 +276,7 @@ export const AppShell: React.FC = () => {
   // consume the same user-configured chord first; otherwise search owns it.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || settingsOpen) return;
+      if (e.defaultPrevented || settingsCoversSidebar) return;
       if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
         e.preventDefault();
         setSearchOpen((prev) => !prev);
@@ -237,26 +284,12 @@ export const AppShell: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [settingsOpen]);
+  }, [settingsCoversSidebar]);
 
   // Close the mobile Dock drawer on navigation.
   useEffect(() => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
-
-  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
-  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
-  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
-  // and hands the whole viewport to the app. Both halves matter: the flag alone would
-  // strip the chrome off any page such a tab later navigates to, and the route alone
-  // would strip it inside the normal workbench.
-  //
-  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
-  // publishes is the mount-frozen document flag instead, because the window controls
-  // that read it must stay decided for the tab's whole life (see the context doc). The
-  // app pages read the same context and mount only on these routes, so for them the two
-  // agree anyway.
-  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(surfaceLocation.pathname);
 
   // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
   // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
@@ -295,14 +328,14 @@ export const AppShell: React.FC = () => {
     return <Navigate to="/" replace />;
   }
 
-  if (location.pathname === '/setup' || settingsOverlayOrigin?.location.pathname === '/setup') {
+  if (setupShell) {
     return (
-      <>
+      <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <Outlet />
         </SettingsOverlayNavigationBoundary>
-      </>
+      </ShellSidebarContext.Provider>
     );
   }
 
@@ -353,6 +386,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
@@ -374,19 +408,21 @@ export const AppShell: React.FC = () => {
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
           The width is SidebarResizer's --app-sidebar-w, shared with Workbench
-          content. Settings owns the viewport and never reads this offset. */}
+          content — and, when Settings stands in for this column, with the
+          Settings rail, so the two never swap at different widths. Standalone
+          Settings retires this whole aside; inline Settings leaves it live. */}
       {!chromeless && (
       <aside
-        aria-hidden={settingsOpen || undefined}
-        inert={settingsOpen || undefined}
+        aria-hidden={settingsCoversSidebar || undefined}
+        inert={settingsCoversSidebar || undefined}
         className={clsx(
           'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 border-r border-border bg-[var(--sidebar-background)] px-4 pt-2.5 pb-4 md:flex',
-          settingsOpen && 'invisible pointer-events-none',
+          settingsCoversSidebar && 'invisible pointer-events-none',
         )}
       >
         <div className="flex min-h-0 flex-1 flex-col">
           {isDesktop && (
-            <RouteSurfaceActivityBoundary active={!settingsOpen}>
+            <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
               <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />
             </RouteSurfaceActivityBoundary>
           )}
@@ -398,6 +434,12 @@ export const AppShell: React.FC = () => {
             floats above app windows. */}
         <div className="relative flex shrink-0 flex-col gap-2">
           <div className="flex h-[39px] items-stretch gap-2">
+            {/* `settingsOpen`, not `settingsCoversSidebar`: this control lives in
+                the sidebar column, but what it produces lives in the window
+                layer, which Settings covers in BOTH placements (see below). A
+                launcher whose every result is invisible is not a live control,
+                so it retires with the windows it opens rather than with the
+                column it sits in. Its Dock goes with it — same component. */}
             {canUseApps && (
               <RouteSurfaceActivityBoundary active={!settingsOpen}>
                 <AppsLauncher />
@@ -489,7 +531,7 @@ export const AppShell: React.FC = () => {
             // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
             // is the only thing in the viewport and sizes itself to this box (h-full).
             ? 'min-h-0 flex-1 overflow-hidden'
-            : settingsOpen
+            : settingsCoversSidebar
               ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
               ? 'min-h-0 flex-1 overflow-hidden md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
@@ -539,12 +581,12 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {!settingsOpen && canUseApps && (
+      {!settingsCoversSidebar && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
       {capabilities.can_chat && (
-        <RouteSurfaceActivityBoundary active={!settingsOpen}>
+        <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
           <NewSessionSheet
             open={newSessionOpen}
             onClose={() => setNewSessionOpen(false)}
@@ -555,14 +597,29 @@ export const AppShell: React.FC = () => {
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}
-      <RouteSurfaceActivityBoundary active={!settingsOpen}>
+      <RouteSurfaceActivityBoundary active={!settingsCoversSidebar}>
         <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
       </RouteSurfaceActivityBoundary>
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
-          and the AppsLauncher bridge open windows via the WindowManager. */}
+          and the AppsLauncher bridge open windows via the WindowManager.
+
+          `settingsOpen`, not `settingsCoversSidebar` — the one thing behind
+          Settings that retires in BOTH placements. This layer deliberately
+          spans the whole viewport at z-20, above the sidebar's z-10, so a
+          window can be dragged over the sidebar and maximize can fill the
+          screen. Inline Settings is opaque from the sidebar's trailing edge
+          rightwards at z-30, so leaving the layer live there shows a window as
+          a strip over the sidebar with its title bar, controls and content all
+          hidden behind Settings: visible, unusable, and covering the one column
+          inline exists to keep. Inline keeps the sidebar column live, not
+          everything its surface covers. */}
       {canUseApps && (
-        <div hidden={settingsOpen} inert={settingsOpen || undefined} aria-hidden={settingsOpen || undefined}>
+        <div
+          hidden={settingsOpen}
+          inert={settingsOpen || undefined}
+          aria-hidden={settingsOpen || undefined}
+        >
           <WindowLayer active={!settingsOpen} />
         </div>
       )}
@@ -572,5 +629,6 @@ export const AppShell: React.FC = () => {
     </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
     </SettingsOverlayNavigationBoundary>
+    </ShellSidebarContext.Provider>
   );
 };

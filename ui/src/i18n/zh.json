@@ -311,6 +311,10 @@
       "appearanceSystem": "跟随系统",
       "appearanceLight": "浅色",
       "appearanceDark": "深色",
+      "menuPlacementTitle": "设置菜单",
+      "menuPlacementDescription": "让设置占满窗口，或者展开在应用侧栏旁边。保存在当前浏览器。",
+      "menuPlacementStandalone": "独立",
+      "menuPlacementInline": "内联",
       "autosaved": "修改会自动保存",
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例"
     },

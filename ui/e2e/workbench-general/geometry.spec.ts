@@ -5,8 +5,9 @@ import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './sup
 /**
  * The packet's geometry claims, measured in a browser rather than inferred from
  * class names. Workbench keeps its adjustable 248px default/sidebar offset;
- * standalone Settings has a 196px rail and a 944px outer content frame with
- * 880px of common content at the desktop reference width.
+ * standalone Settings stands in for that sidebar, so its rail is the same 248px
+ * and the left column cannot jump when Settings opens. The 944px outer content
+ * frame still carries 880px of common content at the desktop reference width.
  */
 
 const SIDEBAR = 'aside.fixed';
@@ -15,7 +16,10 @@ const SHELL_CONTENT = 'main#app-shell-scroll > div';
 const SETTINGS_RAIL = 'nav[aria-label="Settings sections"]';
 const SETTINGS_PAGE = 'nav[aria-label="Settings sections"] + section';
 const SETTINGS_CONTENT = 'nav[aria-label="Settings sections"] + section > div';
-const APPEARANCE_CARD = 'section.bg-surface-2:has([role="radiogroup"])';
+// General now has two preference cards drawn the same way, so name the one the
+// geometry claims are about by the selector it owns.
+const APPEARANCE_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Appearance"])';
+const PLACEMENT_CARD = 'section.bg-background:has([role="radiogroup"][aria-label="Settings menu"])';
 // The home's own project row, not the sidebar tree row: it is the selection the
 // overlay has to hand back, and the fixture names it in non-ASCII on purpose.
 const PROJECT_CHIP = '中文项目';
@@ -348,14 +352,14 @@ test.describe('page background family', () => {
 });
 
 test.describe('general settings geometry', () => {
-  test('keeps the rail at 196 and the common content at 880px', async ({ page }) => {
+  test('keeps the standalone rail on the sidebar width and the common content at 880px', async ({ page }) => {
     const denied = await serveProduct(page);
 
     await page.setViewportSize(DESKTOP);
     await open(page, '/settings/general');
     await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
 
-    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(248);
     const cardAtStaging = await widthOf(page, APPEARANCE_CARD);
 
     // The desktop Settings frame is 944px wide with 32px horizontal padding,
@@ -363,7 +367,7 @@ test.describe('general settings geometry', () => {
     await page.setViewportSize(ULTRA);
     await page.waitForFunction(() => window.innerWidth === 1920);
 
-    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(248);
     const cardAtUltra = await widthOf(page, APPEARANCE_CARD);
     expect(cardAtStaging).toBe(880);
     expect(cardAtUltra).toBe(880);
@@ -402,15 +406,15 @@ test.describe('general settings geometry', () => {
   });
 
   // A rail label is the only thing that says where a row goes, and English has
-  // two neighbours that both ended in "Platform…" at 196. The rail width is the
-  // source's, so the labels wrap instead.
+  // two neighbours that both ended in "Platform…" when the rail was narrower.
+  // The rail width is the sidebar's, so the labels wrap rather than widen it.
   test('shows every rail label in full without widening the rail', async ({ page }) => {
     await serveProduct(page);
     await page.setViewportSize(DESKTOP);
     await open(page, '/settings/platforms');
     await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
 
-    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(248);
 
     // Measured, not eyeballed: a wrapped label's scrollWidth equals its
     // clientWidth; a clipped one exceeds it.
@@ -501,13 +505,13 @@ test.describe('general settings geometry', () => {
         await open(page, path);
         await settleSettingsFrame(page);
         const frame = await frameGeometry(page);
-        expect(frame.width).toBe(viewport.width >= 944 + 196 ? 944 : viewport.width);
-        expect(frame.paddingLeft).toBe(viewport.width >= 944 + 196 ? 32 : 16);
+        expect(frame.width).toBe(viewport.width >= 944 + 248 ? 944 : viewport.width);
+        expect(frame.paddingLeft).toBe(viewport.width >= 944 + 248 ? 32 : 16);
         expect(frame.paddingRight).toBe(frame.paddingLeft);
-        expect(frame.contentWidth).toBe(viewport.width >= 944 + 196 ? 880 : viewport.width - 32);
+        expect(frame.contentWidth).toBe(viewport.width >= 944 + 248 ? 880 : viewport.width - 32);
         const pane = await page.locator(SETTINGS_PAGE).boundingBox();
         expect(pane).not.toBeNull();
-        if (viewport.width >= 944 + 196) {
+        if (viewport.width >= 944 + 248) {
           expect(Math.abs(frame.x - pane!.x - (pane!.width - frame.width) / 2)).toBeLessThanOrEqual(0.5);
           await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
         } else {
@@ -546,15 +550,25 @@ test.describe('general settings geometry', () => {
     expect(cardStyle.pad).toBe('22px');
     expect(cardStyle.gap).toBe('20px');
 
-    const surface2 = await page.evaluate(() => {
+    // Every other settings page draws its cards as an outline on the page, and
+    // General is not a different kind of page. The source fills this card with
+    // surface-2; matching its neighbours is worth more than matching that fill,
+    // so the card carries the page background and keeps its border.
+    const background = await page.evaluate(() => {
       const probe = document.createElement('div');
-      probe.style.backgroundColor = 'var(--surface-2)';
+      probe.style.backgroundColor = 'var(--background)';
       document.body.appendChild(probe);
       const value = getComputedStyle(probe).backgroundColor;
       probe.remove();
       return value;
     });
-    expect(cardStyle.bg).toBe(surface2);
+    expect(cardStyle.bg).toBe(background);
+    // …and "the same as its neighbours" is the claim, so read a neighbour.
+    await open(page, '/settings/shortcuts', { theme: 'dark' });
+    const neighbour = page.locator(`${SETTINGS_PAGE} section.border`).first();
+    await expect(neighbour).toBeVisible();
+    expect(await neighbour.evaluate((node) => getComputedStyle(node).backgroundColor)).toBe(background);
+    await open(page, '/settings/general', { theme: 'dark' });
 
     const select = page.getByLabel('Language', { exact: true });
     const selectBox = await select.boundingBox();
@@ -582,18 +596,84 @@ test.describe('general settings geometry', () => {
 
     // Picking a card must not nudge the row: the extra border pixel is absorbed
     // by padding, so every card in the group stays the same size.
-    const boxes = await page.getByRole('radio').evaluateAll((nodes) =>
+    const appearance = page.getByRole('radiogroup', { name: 'Appearance' });
+    const boxes = await appearance.getByRole('radio').evaluateAll((nodes) =>
       nodes.map((node) => node.getBoundingClientRect().width));
     expect(new Set(boxes.map((w) => Math.round(w))).size).toBe(1);
 
     // Q8zxF1: a 14 gutter between the three choices, and an 88-tall preview at
     // radius 6 inside each one.
-    expect(await page.locator('[role="radiogroup"]').evaluate((n) => getComputedStyle(n).columnGap)).toBe('14px');
+    expect(await appearance.evaluate((n) => getComputedStyle(n).columnGap)).toBe('14px');
     const preview = await dark.locator('[aria-hidden="true"]').first().evaluate((node) => ({
       height: node.getBoundingClientRect().height,
       radius: getComputedStyle(node).borderRadius,
     }));
     expect(preview.height).toBe(88);
     expect(preview.radius).toBe('6px');
+
+    // The menu-placement card is the same kind of control drawn the same way,
+    // which is the point of the shared choice-card component.
+    const placement = page.getByRole('radiogroup', { name: 'Settings menu' });
+    expect(await widthOf(page, PLACEMENT_CARD)).toBe(await widthOf(page, APPEARANCE_CARD));
+    const placementPreview = await placement.getByRole('radio').first()
+      .locator('[aria-hidden="true"]').first()
+      .evaluate((node) => node.getBoundingClientRect().height);
+    expect(placementPreview).toBe(preview.height);
+  });
+
+  // Inline puts Settings beside a sidebar that stays live, so both columns are
+  // on screen at once. That is a layout claim a class name cannot settle.
+  test('opens Settings beside a live sidebar once inline is picked', async ({ page }) => {
+    const denied = await serveProduct(page);
+    await page.setViewportSize(ULTRA);
+    await open(page, '/');
+    await page.locator(`${SIDEBAR} [data-settings-toggle="true"]`).click();
+
+    const overlay = page.locator('[data-settings-overlay="true"]');
+    await expect(overlay).toHaveAttribute('data-settings-menu-placement', 'standalone');
+    await expect(page.locator(SIDEBAR)).toBeHidden();
+    expect(await overlay.boundingBox()).toMatchObject({ x: 0, width: ULTRA.width });
+    const standaloneRail = await widthOf(page, SETTINGS_RAIL);
+
+    await page.getByRole('radio', { name: 'Inline' }).click();
+    await expect(overlay).toHaveAttribute('data-settings-menu-placement', 'inline');
+
+    // The app sidebar is back, and Settings starts exactly where it ends.
+    const sidebar = await page.locator(SIDEBAR).boundingBox();
+    expect(sidebar).toMatchObject({ x: 0, width: standaloneRail });
+    expect(await overlay.boundingBox()).toMatchObject({ x: standaloneRail, width: ULTRA.width - standaloneRail });
+    // A secondary nav beside the real one does not deserve a second full column.
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+
+    // Live, not a picture of a sidebar. `toBeEnabled` only reads the element;
+    // whether anything is stacked over it is a hit test, and a hit test is the
+    // one thing a class name, a bounding box and jsdom all cannot settle. So
+    // ask the browser what is actually under the pointer there — a transparent
+    // full-viewport layer would answer here and nowhere else.
+    const toggle = page.locator(`${SIDEBAR} [data-settings-toggle="true"]`);
+    await expect(toggle).toBeEnabled();
+    const toggleBox = (await toggle.boundingBox())!;
+    expect(await page.evaluate(([x, y]) => {
+      const hit = document.elementFromPoint(x, y);
+      return {
+        sidebar: Boolean(hit?.closest('[data-settings-toggle="true"]')),
+        covered: Boolean(hit?.closest('[data-settings-overlay="true"]')),
+      };
+    }, [toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2])).toEqual({
+      sidebar: true,
+      covered: false,
+    });
+
+    // The preference outlives the surface that set it.
+    await toggle.click();
+    await expect(overlay).toHaveCount(0);
+    await open(page, '/settings/general');
+    await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
+
+    await page.getByRole('radio', { name: 'Standalone' }).click();
+    await expect(page.locator(SIDEBAR)).toBeHidden();
+    expect(await widthOf(page, SETTINGS_RAIL)).toBe(standaloneRail);
+    expect(denied).toEqual([]);
   });
 });

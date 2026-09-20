@@ -15,6 +15,10 @@ import {
   readMobileProjectsListSnapshot,
 } from '../lib/mobileProjectsListMemory';
 import { selectLanguage } from '../lib/useLanguageSelection';
+import {
+  SETTINGS_MENU_PLACEMENT_STORAGE_KEY,
+  useStandaloneSettingsMenu,
+} from '../lib/settingsMenuPlacement';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -106,7 +110,15 @@ vi.mock('../context/WindowManagerProvider', () => ({
 vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock('./AppsLauncher', () => ({ AppsLauncher: () => <div data-testid="apps-launcher" /> }));
+// Stands down when its boundary suspends it, exactly as the real launcher does
+// (`useRouteSurfaceActive() ? … : null`) — a stub that always rendered would
+// report a live Apps button in every state the shell retires it.
+vi.mock('./AppsLauncher', async () => {
+  const { useRouteSurfaceActive } = await import('../lib/routeSurfaceActivity');
+  return {
+    AppsLauncher: () => (useRouteSurfaceActive() ? <div data-testid="apps-launcher" /> : null),
+  };
+});
 vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
 vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
 vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
@@ -114,7 +126,11 @@ vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
-vi.mock('./apps/WindowLayer', () => ({ WindowLayer: () => <div data-testid="window-layer" /> }));
+vi.mock('./apps/WindowLayer', () => ({
+  WindowLayer: ({ active }: { active: boolean }) => (
+    <div data-testid="window-layer" data-active={String(active)} />
+  ),
+}));
 vi.mock('./workbench/NewSessionSheet', () => ({
   NewSessionSheet: () => null,
 }));
@@ -140,8 +156,15 @@ const SettingsExit = ({ testId }: { testId: string }) => {
   </div>;
 };
 
+// Stands in for the Settings surfaces, which read this and nothing else to
+// decide whether their menu replaces the app sidebar or opens beside it.
+const StandaloneMenuProbe = () => (
+  <span data-testid="standalone-menu">{String(useStandaloneSettingsMenu())}</span>
+);
+
 beforeEach(() => {
   viewport.isDesktop = false;
+  window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
   instanceAuth.instanceKind = null;
@@ -334,6 +357,84 @@ describe('AppShell sidebar width', () => {
       .toHaveLength(expected);
   });
 
+  // Standalone Settings stands IN FOR this column, so the two have to agree on
+  // one width or the left edge jumps as Settings opens. Inline Settings opens
+  // beside the column, which therefore has to stay live — navigable, keyboard
+  // reachable, and able to raise the palettes, which float above the surface.
+  it.each([
+    ['standalone', true],
+    ['inline', false],
+  ] as const)('retires the sidebar only where Settings replaces it (%s)', async (
+    placement,
+    covered,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    const aside = document.querySelector('aside');
+    expect(aside?.hasAttribute('inert')).toBe(covered);
+    expect(aside?.className.includes('invisible')).toBe(covered);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className
+      .includes('md:ml-[var(--app-sidebar-w)]')).toBe(!covered);
+
+    // ⌘K belongs to whichever surface owns the shell.
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    })));
+    expect(screen.getByTestId('search-palette').getAttribute('data-open')).toBe(String(!covered));
+  });
+
+  // The exception to the rule above, and the reason the two flags exist at all.
+  // The window layer spans the whole viewport at z-20 so a window can be dragged
+  // over the sidebar; inline Settings is opaque from the sidebar's trailing edge
+  // at z-30. Left live, a window would show as a strip over the very column
+  // inline exists to keep, with everything that makes it a window — title bar,
+  // controls, content — behind Settings. Live-but-invisible is worse than
+  // retired, so this one retires in both placements. Its launcher goes with it:
+  // a control whose every result is hidden is not a live control.
+  it.each(['standalone', 'inline'] as const)(
+    'retires the window layer and its launcher under %s Settings',
+    async (placement) => {
+      viewport.isDesktop = true;
+      window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+      renderShell('/settings/general');
+      await screen.findByTestId('surface');
+
+      expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
+      expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('false');
+      expect(screen.queryByTestId('apps-launcher')).toBeNull();
+    },
+  );
+
+  // ...and comes back, so retiring it is not a way of losing it.
+  it('restores the window layer and its launcher once Settings closes', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    renderShell('/');
+    await screen.findByTestId('surface');
+
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+    expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('true');
+    expect(screen.getByTestId('apps-launcher')).toBeTruthy();
+  });
+
+  it('covers the shell below md even when inline is the stored preference', async () => {
+    viewport.isDesktop = false;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    // A phone has no room for two rails, so the preference is not in force.
+    expect(document.querySelector('aside')?.hasAttribute('inert')).toBe(true);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className)
+      .not.toContain('md:ml-[var(--app-sidebar-w)]');
+  });
+
   it('leaves a standalone app tab without a sidebar to resize', async () => {
     viewport.isDesktop = true;
     // The shell reads standalone mode from the document URL, once, at mount.
@@ -344,6 +445,35 @@ describe('AppShell sidebar width', () => {
 
       expect(document.querySelector('aside')).toBeNull();
       expect(screen.queryByRole('separator', { name: 'appShell.resizeSidebar' })).toBeNull();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // The same tab, asked the question Settings actually asks. `inline` is a claim
+  // about the app sidebar being on screen to open beside; here there is none, so
+  // Settings has to come up standalone however the owner set the preference for
+  // the windows that do have one. The shell states that, because only the shell
+  // can: standalone mode comes from a document flag frozen at mount, which no
+  // pathname predicate can recover — and the route Settings lands on says
+  // nothing about the shell it opened over anyway, as with the config-recovery
+  // banner's Diagnostics link in a single-app tab.
+  it('publishes a sidebar-free shell to the Settings surfaces above it', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    window.history.replaceState({}, '', `/apps/editor?${APP_TAB_PARAM}=1`);
+    try {
+      render(
+        <MemoryRouter initialEntries={['/apps/editor']}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="*" element={<StandaloneMenuProbe />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      expect((await screen.findByTestId('standalone-menu')).textContent).toBe('true');
     } finally {
       window.history.replaceState({}, '', '/');
     }
