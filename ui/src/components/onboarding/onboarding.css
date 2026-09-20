@@ -548,11 +548,11 @@
 /* The tier's own logo size has to win over the inline size `BackendIcon` writes on
    its span — the mark is authored per tier (28 / 30 / 32 / 35), not per call site —
    so this is the one place the sheet overrides an inline style. */
-.onboarding-card-logo {
+.onboarding-card-logo, .onboarding-card-logo > span {
   width: var(--ob-card-logo) !important;
   height: var(--ob-card-logo) !important;
-  flex-shrink: 0;
 }
+.onboarding-card-logo { flex-shrink: 0; }
 .onboarding-card-logo svg {
   width: 100%;
   height: 100%;

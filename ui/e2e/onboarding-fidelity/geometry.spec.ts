@@ -158,6 +158,17 @@ test.describe('desktop reference geometry', () => {
     onPixel(ports[1].x + ports[1].width / 2, cards[1].x);
     onPixel(ports[2].x + ports[2].width / 2, cards[1].x + cards[1].width);
     onPixel(ports[3].x + ports[3].width / 2, cards[2].x);
+    // The identity header's mark takes its tier's authored size — 28 under a 900px
+    // window and below, 32 at 1001+, 35 at the large reading — including the nested
+    // span `BackendIcon` sizes inline, or the visible mark stays at one tier while
+    // its slot grows.
+    const logos = await boxes(page, '.onboarding-card-logo > span');
+    const logoSize = reference.card >= 330 ? 35 : reference.card >= 300 ? 32 : 28;
+    for (const logo of logos) {
+      expect(logo.width).toBeCloseTo(logoSize, 0);
+      expect(logo.height).toBeCloseTo(logoSize, 0);
+    }
+
     // And the handoff runs along the cards' shared midline.
     const midline = cards[0].y + reference.card / 2;
     for (const port of ports) onPixel(port.y + port.height / 2, midline);
