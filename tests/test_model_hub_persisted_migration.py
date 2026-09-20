@@ -49,6 +49,7 @@ def test_runtime_auth_alone_is_not_a_saved_configuration(monkeypatch, tmp_path):
 def test_mh_mig_005_runtime_auth_cannot_disable_saved_opencode_keys(
     monkeypatch, tmp_path, isolated_native_boundary,
 ):
+    """MH-MIG-005: runtime auth cannot supply or block saved file migration."""
     home = isolated_native_boundary
     path = home / ".config/opencode/opencode.json"
     write(path, {"provider": {
@@ -207,3 +208,41 @@ def test_external_noop_guard_change_never_owns_rollback_bytes(
         assert store.config.agents["claude"].mode == "direct"
         assert not service.migration_blocked_backends
         assert (settings.read_bytes() if settings.exists() else None) == before_settings
+
+
+@pytest.mark.parametrize("changed_identity", ["new-grant", "new-target", "replaced-hub-ref"])
+def test_receipt_replay_requires_same_grant_target_and_current_hub_ref(
+    monkeypatch, tmp_path, isolated_native_boundary, changed_identity,
+):
+    home = isolated_native_boundary
+    path = home / ".claude/settings.json"
+    payload = {"env": {
+        "ANTHROPIC_API_KEY": "fixture-original",
+        "ANTHROPIC_BASE_URL": "https://fixture-original.example",
+    }}
+    write(path, payload)
+    service, store, adapter = _service(tmp_path, migration_home=home)
+    [original] = service.migration_scan()["items"]
+    asyncio.run(service.migration_apply([original["id"]]))
+    original_ref = store.config.sources[0].credential_ref
+    if changed_identity == "new-grant":
+        payload["env"]["ANTHROPIC_API_KEY"] = "fixture-new"
+    elif changed_identity == "new-target":
+        payload["env"]["ANTHROPIC_BASE_URL"] = "https://fixture-changed.example"
+    else:
+        store.config.sources[0].credential_ref = "cred_changedfixture"
+    write(path, payload)
+    [current] = service.migration_scan()["items"]
+    if changed_identity == "replaced-hub-ref":
+        with pytest.raises(ModelHubError):
+            asyncio.run(service.migration_apply([current["id"]]))
+        assert len(adapter.provisioned) == 1
+        assert json.loads(path.read_text()) == payload
+    else:
+        assert current["id"] != original["id"]
+        with pytest.raises(ModelHubError):
+            asyncio.run(service.migration_apply([original["id"]]))
+        asyncio.run(service.migration_apply([current["id"]]))
+        assert len(adapter.provisioned) == 2
+        assert store.config.sources[0].credential_ref == original_ref
+        assert len(store.config.sources) == 2

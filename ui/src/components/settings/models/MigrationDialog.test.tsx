@@ -351,7 +351,7 @@ describe('MigrationDialog — the settings default', () => {
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. Model Hub will manage the selected authentication after migration.'],
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.'],
     ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证，不读取运行中的环境变量。迁移后，所选认证由模型网关管理。'],
   ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
     await i18n.changeLanguage(language);

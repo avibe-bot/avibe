@@ -1600,7 +1600,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. Model Hub will manage the selected authentication after migration.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores, without reading runtime environment values. After migration, Model Hub will manage the selected authentication.",
         "empty": "No configuration found to migrate.",
         "sharedFiles": "These backends share authentication saved in files and must migrate together: {{backends}}. Changing one selection updates the others.",
         "scanFailed": "Couldn't scan native configs, please retry",

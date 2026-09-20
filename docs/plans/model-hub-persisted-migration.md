@@ -52,6 +52,13 @@ is authorized by this implementation task.
   lines, preserves unrelated bytes, and uses existing `NativeFileEdit` recovery.
   A changed file, new relevant layer, or ambiguous assignment fails closed
   before exposure. Already exposed grants never roll back to old credentials.
+  Compare-only guards do not represent a native write or grant exposure, and
+  rollback never restores their bytes. Recheck them after runtime start as well.
+  Completed receipts retain optional opaque `inventory_ids`, distinct from
+  snapshot-bound consent IDs. Fresh consent for the exact restored old
+  credential/target may clean it again only while the receipt's current Hub
+  Source/ref ownership still matches; it must never reprovision an old OAuth
+  grant. Legacy receipts remain readable and keep exact-selection behavior.
 - Public scan adds `source_paths: list[str]` (display-safe file locators, never
   secret content). Existing payload fields remain compatible. Blocked rows
   use specific `settings.models.migration.blocked.*` keys; UI shows every
@@ -64,6 +71,11 @@ is authorized by this implementation task.
   rejects partial consent before provisioning, and guards against a new consumer
   appearing during proof. This reuses backend custody rather than creating
   another transaction owner.
+  Backend grouping is not proof that every reference was removed. Cleanup
+  checks the planned native after-images: preserve endpoint-only shell values
+  still referenced by another configuration; refuse removal of an authentication
+  variable with surviving consumers, with a source-specific reason on its
+  existing row. No fake credential is created for a base-only provider.
 - Do not loosen actual Keychain permission errors or silently discard an
   unsupported persisted credential to make an entire backend selectable.
 
