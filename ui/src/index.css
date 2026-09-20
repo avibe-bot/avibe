@@ -208,6 +208,15 @@
 
   --shadow-glow-xl-mint: 0 0 48px -12px rgba(91, 255, 160, 0.44);
 
+  /* The onboarding active/hover card halo: the design draws an OFFSET drop shadow,
+     not a centred one, so this role is excused from the scale's centring rule and
+     `glowScale.test.mjs` pins its own geometry per theme. The parts that differ per
+     theme are named numbers re-anchored beside each palette, like `--brand-glow-blur`;
+     the hue follows the declared mint through the mix. */
+  --shadow-glow-onboarding-mint:
+    0 2px var(--onboarding-glow-blur) var(--onboarding-glow-spread)
+    color-mix(in srgb, var(--mint) var(--onboarding-glow-alpha), transparent);
+
   --shadow-glow-cta-mint: 0 0 var(--brand-glow-blur) -4px rgba(91, 255, 160, 0.6);
   --shadow-glow-cta-cyan: 0 0 var(--brand-glow-blur) -4px rgba(63, 224, 229, 0.6);
   --shadow-glow-cta-violet: 0 0 var(--brand-glow-blur) -4px rgba(124, 91, 255, 0.6);
@@ -328,6 +337,10 @@
      because it is the one part of that glow that differs per theme. */
   --brand-glow-blur: 16px;
 
+  /* Per-theme geometry and alpha of the onboarding card halo; see the token above. */
+  --onboarding-glow-blur: 12px;
+  --onboarding-glow-spread: 0px;
+  --onboarding-glow-alpha: 22%;
   /* Colour of the card wash shadows (`--shadow-mint-card*`). design.pen writes it
      as the frame's own brand mint at 0.078, which is why it is the one part of
      those shadows that moves between themes. */
@@ -496,6 +509,11 @@
     /* Wider CTA glow than dark: the same neon spreads far less over a white card,
        so 16px read as almost nothing here (owner decision 2026-08-14). */
     --brand-glow-blur: 20px;
+
+    /* Light's own onboarding halo: tighter, inset, and fainter over white. */
+    --onboarding-glow-blur: 16px;
+    --onboarding-glow-spread: -4px;
+    --onboarding-glow-alpha: 14.1%;
   }
 }
 
@@ -610,6 +628,12 @@
   /* Wider CTA glow than dark: the same neon spreads far less over a white card,
      so 16px read as almost nothing here (owner decision 2026-08-14). */
   --brand-glow-blur: 20px;
+
+  /* Light's own onboarding halo - see the prefers-color-scheme block above.
+     Both light blocks must stay value-identical. */
+  --onboarding-glow-blur: 16px;
+  --onboarding-glow-spread: -4px;
+  --onboarding-glow-alpha: 14.1%;
 }
 
 html,

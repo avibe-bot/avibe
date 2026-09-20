@@ -45,6 +45,10 @@ interface BackendLifecycleChipProps {
       setup card's state-row button — so the chip's projection, and with it the
       pill, follows a change the chip did not make itself. */
   refreshKey?: number;
+  /** A host-owned lifecycle operation in flight — the setup card draws its own
+      upgrade affordance on the state row — so the chip's popover cannot launch a
+      second one against the same backend. */
+  externallyBusy?: boolean;
 }
 
 // Map lifecycle visual states to canonical Badge variants from the design
@@ -112,6 +116,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   readyLabel,
   onVisual,
   refreshKey,
+  externallyBusy = false,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -184,7 +189,7 @@ export const BackendLifecycleChip: React.FC<BackendLifecycleChipProps> = ({
   }, [enabled, isOpen, loadRuntime]);
 
   const visual = deriveVisual(enabled, cliStatus, runtime, operation);
-  const busy = runtimeLoading || operation !== 'idle';
+  const busy = runtimeLoading || operation !== 'idle' || externallyBusy;
 
   React.useEffect(() => {
     onVisual?.(visual);

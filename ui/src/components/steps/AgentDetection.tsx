@@ -14,6 +14,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { BackendIcon } from '../visual';
 import { AssistantRow } from '../onboarding/AssistantRow';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
@@ -81,6 +82,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const routeSurfaceActive = useRouteSurfaceActive();
   const modelHubEnabled = useModelHubCapability();
@@ -273,16 +275,26 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // changed, without the card duplicating the chip's lifecycle knowledge.
   const upgradeAgent = async (name: string) => {
     setRefreshingAgents((current) => ({ ...current, [name]: true }));
+    // The chip's own upgrade handler owns the toast contract for lifecycle
+    // operations; the card's affordance is the same operation drawn on the state
+    // row, so it settles failures the same way rather than swallowing them, and
+    // `refreshingAgents` is handed to the chip as externally busy so its popover
+    // cannot launch a second install against the same backend.
     try {
       const result = await api.installAgent(name);
       if (result.ok) {
+        showToast(t('backendLifecycle.upgradeSuccess'), 'success');
         const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
         if (installedPath) {
           setAgents((prev) => ({ ...prev, [name]: { ...prev[name], cli_path: installedPath } }));
         }
         setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
         await detect(name, installedPath || agents[name]?.cli_path || name);
+      } else {
+        showToast(result.message || t('backendLifecycle.upgradeFailed'), 'error');
       }
+    } catch (cause) {
+      showToast(String(cause), 'error');
     } finally {
       setRefreshingAgents((current) => ({ ...current, [name]: false }));
     }
@@ -331,7 +343,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const opencodeAgent = agents['opencode'];
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
-    && !pendingWrites[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
+    && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
   const handlePrimaryAction = async () => {
     if (entering) return;
@@ -577,7 +589,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}
-            configuringDisabled={syncing || pendingWrites[name] || !agent.enabled || agent.status !== 'ok'}
+            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !agent.enabled || agent.status !== 'ok'}
             enabledControl={<button type="button" role="switch" aria-checked={agent.enabled}
               aria-label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               className="onboarding-enable-switch"
@@ -587,6 +599,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
               readyLabel={t('onboarding.setup.installed')}
               refreshKey={chipRefresh[name]}
+              externallyBusy={!!refreshingAgents[name]}
               onVisual={(visual) => setVisuals((current) => (current[name] === visual ? current : { ...current, [name]: visual }))}
               onOperationChange={(pending) => {
                 setPendingWrites((current) => ({ ...current, [name]: pending }));

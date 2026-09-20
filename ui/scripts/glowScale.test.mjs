@@ -81,6 +81,18 @@ const OFF_RULE = {
     why: 'the approved sidebar selection halo: the scale\'s own 16/-4 and 0.44, themed through var(--mint) for #10B98170 in light and #5BFFA070 in dark',
     holds: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
   },
+  // The onboarding card's active and hovered halo is the one shadow the design
+  // draws with an offset, so centring cannot describe it: `0 2px 12px #5BFFA038`
+  // in dark and `0 2px 16px -4px #10B98124` in light. Blur stays asserted from
+  // ROLE_BLUR; the y offset, the spread and the alpha are pinned here, per theme,
+  // because an exception that named one theme would leave the other unasserted.
+  onboarding: {
+    why: 'the approved active/hover card halo: an offset drop shadow, not a centred glow',
+    holds: {
+      dark: /^0 2px \d+px 0px color-mix\(in srgb, var\(--[a-z]+\) 22%, transparent\)$/,
+      light: /^0 2px \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 14\.1%, transparent\)$/,
+    },
+  },
 };
 
 // What each role's blur IS, rather than which blurs the scale happens to
@@ -98,6 +110,7 @@ const OFF_RULE = {
 const ROLE_BLUR = {
   dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48, nav: 16,
   cta: { dark: 16, light: 20 },
+  onboarding: { dark: 12, light: 16 },
 };
 
 const blurOf = (role, theme) => {
@@ -328,7 +341,11 @@ describe('the accent glow scale', () => {
   it.each(rungs)('$token has its role\'s blur in $theme', ({ role, theme, value }) => {
     const blur = blurOf(role, theme);
     expect(blur, `${role} names no blur for the ${theme} theme it is declared in`).toBeDefined();
-    expect(Number(value.match(/^0 0 (\d+)px/)?.[1])).toBe(blur);
+    // The blur is the third length of a box shadow whatever its offset: `0 0 12px …`
+    // for the centred rungs and `0 2px 12px …` for the one offset role. Reading it by
+    // position keeps an offset from being mistaken for an absence of blur.
+    const blurLength = value.split(/\s+/)[2];
+    expect(Number(blurLength?.replace(/px$/, ''))).toBe(blur);
   });
 
   it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, { why }) => {

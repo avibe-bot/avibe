@@ -30,7 +30,7 @@
      not a spreadless 28px bloom. The same shadow names the working card in the
      introduction and the hovered card in the connection, which is the whole
      point of one composition seen twice. */
-  --ob-active-shadow: 0 2px 12px #5bffa038;
+  --ob-active-shadow: var(--shadow-glow-onboarding-mint);
   --ob-divider: #ffffff14;
   /* The enable switch the connection puts in the role's slot: a 42x24 track with
      a 2px border and a 16px thumb, drawn per theme by the reference (eq9QT) —
@@ -152,7 +152,7 @@
        #10B98124 halo, and no inset highlight — that top line is the dark card's
        lit rim, and on white it reads as a seam. */
     --ob-active-border: #10b981;
-    --ob-active-shadow: 0 2px 16px -4px #10b98124;
+    --ob-active-shadow: var(--shadow-glow-onboarding-mint);
     --ob-divider: #08081214;
     --ob-switch-off: #d7dce5;
     --ob-switch-off-border: #00000000;
@@ -192,7 +192,7 @@
   --ob-card: #ffffff;
   --ob-card-border: #08081212;
   --ob-active-border: #10b981;
-  --ob-active-shadow: 0 2px 16px -4px #10b98124;
+  --ob-active-shadow: var(--shadow-glow-onboarding-mint);
   --ob-divider: #08081214;
   --ob-switch-off: #d7dce5;
   --ob-switch-off-border: #00000000;

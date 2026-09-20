@@ -498,7 +498,7 @@ test.describe('shared action anchor', () => {
         const subtitle = await box(page, '.onboarding-heading p');
         const stage = await box(page, '.onboarding-stage');
         const action = await box(page, '.onboarding-primary-action');
-        await expect(page.getByRole('img', { name: 'avibe', exact: true })).toBeVisible();
+        await expect(page.getByText('Avibe', { exact: true })).toBeVisible();
 
         await openSetup(page, lang);
         await toTop(page);

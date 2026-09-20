@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, Languages } from 'lucide-react';
 import { Welcome } from './steps/Welcome';
 import { AgentDetection } from './steps/AgentDetection';
 import logoImg from '@/assets/logo.png';
-import { useLanguageSelection } from '../lib/useLanguageSelection';
+import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi, type VibeAgentBrief } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
@@ -16,75 +15,24 @@ import { SetupModelRecovery } from './onboarding/SetupModelRecovery';
 import { readOpencodeSetupRoutes } from './onboarding/opencodeSetupRoutes';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
 
-/** Owns explicit setup completion; credential and lifecycle writes stay with their owners. */
 /**
  * The setup's top bar, drawn as the design draws it at every size: the brand lockup —
  * the logo asset, which already carries its white tile, beside the two-line wordmark —
- * at the window's own gutter, and the language as a circular icon button opposite it.
- * The switcher's own dropdown component wears a small square label the settings shell
- * chose; this surface keeps that menu's behaviour in its own round control instead.
+ * at the window's own gutter, and the shared language switcher wearing its round
+ * trigger opposite it.
  */
 function SetupHeader() {
   const { t } = useTranslation();
-  const { languages, current, select } = useLanguageSelection();
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const outside = (event: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) setOpen(false);
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', outside);
-    document.addEventListener('keydown', escape);
-    return () => {
-      document.removeEventListener('mousedown', outside);
-      document.removeEventListener('keydown', escape);
-    };
-  }, [open]);
   return (
     <header>
       <div className="onboarding-brand">
-        <span className="onboarding-brand-mark"><img src={logoImg} alt="avibe" /></span>
+        <span className="onboarding-brand-mark"><img src={logoImg} alt="" /></span>
         <span className="onboarding-brand-wordmark">
-          <strong>Avibe</strong>
-          <span>Agent OS</span>
+          <strong>{t('onboarding.brand.name')}</strong>
+          <span>{t('onboarding.brand.tagline')}</span>
         </span>
       </div>
-      <div className="onboarding-language" ref={wrapRef}>
-        <button
-          type="button"
-          className="onboarding-language-button"
-          aria-label={t('language.switchLanguage')}
-          title={current.label}
-          aria-haspopup="listbox"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-        >
-          <Languages size={22} />
-        </button>
-        {open && (
-          <div role="listbox" className="onboarding-language-menu">
-            {languages.map((language) => {
-              const active = language.code === current.code;
-              return (
-                <button
-                  key={language.code}
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  onClick={() => { setOpen(false); void select(language.code); }}
-                >
-                  <span>{language.label}</span>
-                  {active && <Check size={15} />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      <LanguageSwitcher variant="icon-round" />
     </header>
   );
 }
