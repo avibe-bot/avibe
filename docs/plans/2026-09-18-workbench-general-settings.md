@@ -385,6 +385,21 @@ and queue-row consumers), UI test typechecks, the UI lint baseline, and the
 production build. The existing project-order suite also passed once with
 `retries: 0` (16 passed, 2 declared skips); no drag source or test was changed.
 
+The remaining CI failure in the expanded desktop drag case was then reproduced
+on the synthetic merge with the same product and fixture source. At the default
+`1280x720` viewport, expanding project 0 makes the next header's center land at
+`y=722`, outside the viewport; pointer-held sidebar auto-scroll moves rows under
+that fixed destination. Controlled holds produced final project-0 indices 2, 5,
+7, and 7. The same coordinates at `1280x1000`, where the list has no overflow,
+produced the intended index 1 in all four holds. This is a test geometry and
+auto-scroll timing issue, not evidence of a product drag defect; manual dragging
+also behaved normally. The existing desktop case now keeps its device width,
+uses height 1000, and asserts the destination header is fully inside the visible
+tree and viewport before pickup. Mobile behavior and the exact index/session
+assertions remain unchanged. The complete project-order suite passed once after
+this correction with `retries: 0`: 16 passed and 2 declared skips. No product
+drag source or unrelated browser test changed.
+
 ## Producer integration — what the end-to-end run found
 
 Wiring the merged producer into the home was one function body, as planned. Driving it end to end was not, and

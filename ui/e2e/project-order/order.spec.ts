@@ -113,10 +113,22 @@ test('keyboard movement and cancellation use the existing header', async ({ page
 });
 
 test('an expanded project carries its sessions through a drag', async ({ page, isMobile }) => {
+  if (!isMobile) {
+    // Keep this desktop case about reordering an expanded project, rather than
+    // testing the sidebar's auto-scroll behavior while the pointer is outside
+    // the viewport. Preserve the device width so the responsive layout stays
+    // the same as the normal Desktop Chrome project.
+    const viewport = page.viewportSize();
+    await page.setViewportSize({ width: viewport?.width ?? 1280, height: 1000 });
+  }
   await header(page, 0).click();
   await expect(rows(page).first().getByText('Conversation 1', { exact: true })).toBeVisible();
   const source = (await header(page, 0).boundingBox())!;
   const target = (await header(page, 1).boundingBox())!;
+  const treeBox = (await tree(page).boundingBox())!;
+  expect(target.y).toBeGreaterThanOrEqual(treeBox.y);
+  expect(target.y + target.height).toBeLessThanOrEqual(treeBox.y + treeBox.height);
+  expect(target.y + target.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   const x = source.x + source.width / 2;
   const y = source.y + source.height / 2;
   const dest = target.y + target.height / 2;
