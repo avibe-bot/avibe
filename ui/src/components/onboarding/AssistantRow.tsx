@@ -107,8 +107,8 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             /* A hub-supplied credential is managed in Model Gateway, so the row names
                where it lives and clicking it goes there. */
             <button type="button" className="onboarding-method-connected" onClick={onConfigure}
-              disabled={configuringDisabled || installing || detecting}>
-              <ExternalLink size={16} />
+              disabled={configuringDisabled || installing || detecting || !!connectionPending}>
+              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ExternalLink size={16} />}
               {t('settings.backends.openModelHub')}
             </button>
           ) : connection ? (
@@ -116,26 +116,31 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
                design draws, and clicking it still reopens the connection dialog,
                which is the only way back into a settled connection from this card. */
             <button type="button" className="onboarding-method-connected" onClick={onConfigure}
-              disabled={configuringDisabled || installing || detecting}>
-              <Check size={16} />
+              disabled={configuringDisabled || installing || detecting || !!connectionPending}>
+              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Check size={16} />}
               {t(`onboarding.setup.${connection}Connected`)}
             </button>
           ) : (
-            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onConfigure} disabled={configuringDisabled || installing || detecting}>
-              <SlidersHorizontal size={16} />
+            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onConfigure} disabled={configuringDisabled || installing || detecting || !!connectionPending}>
+              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <SlidersHorizontal size={16} />}
               {t('onboarding.connection.addSubscription')}
             </Button>
           )}
           {!connection && onAddKey && (
-            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onAddKey} disabled={configuringDisabled || installing || detecting}>
-              <KeyRound size={16} />
+            <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onAddKey} disabled={configuringDisabled || installing || detecting || !!connectionPending}>
+              {connectionPending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <KeyRound size={16} />}
               {t('onboarding.connection.addKey')}
             </Button>
           )}
         </div>
-        {(connectionError || connectionPending) && <div className="onboarding-assistant-error" role={connectionError ? 'alert' : 'status'}>
-          {connectionPending ? t('common.loading') : connectionError}
-          {!connectionPending && onRefreshConnection && <Button variant="link" size="xs" onClick={onRefreshConnection}>{t('common.retry')}</Button>}
+        {/* A pending read must not add a row: the cards hold a fixed height, and a
+            line that appears while a connection settles and vanishes when it lands
+            is a jump under the person's pointer. Pending reads as the action rows
+            spinning and disabling instead; a failure is the one thing worth an
+            extra line, because it says what to do next. */}
+        {connectionError && <div className="onboarding-assistant-error" role="alert">
+          {connectionError}
+          {onRefreshConnection && <Button variant="link" size="xs" onClick={onRefreshConnection}>{t('common.retry')}</Button>}
         </div>}
         {error && <div className="onboarding-assistant-error" role="alert">
           <p>{error.message}</p>

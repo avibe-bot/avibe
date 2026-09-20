@@ -589,7 +589,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}
-            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !agent.enabled || agent.status !== 'ok'}
+            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name] || !agent.enabled || agent.status !== 'ok'}
             enabledControl={<button type="button" role="switch" aria-checked={agent.enabled}
               aria-label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               className="onboarding-enable-switch"

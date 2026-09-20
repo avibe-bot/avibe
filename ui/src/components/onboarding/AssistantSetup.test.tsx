@@ -83,6 +83,9 @@ describe('assistant installation presentation', () => {
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
     expect(screen.queryByText('Subscription connected')).toBeNull();
     expect(screen.queryByText('API Key connected')).toBeNull();
+    // The method rows disable while the initial connection read is in flight, so
+    // the click that opens the dialog has to wait for the read to settle.
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }));
     expect(await screen.findByRole('dialog')).toBeTruthy();
   });
@@ -174,6 +177,7 @@ describe('assistant installation presentation', () => {
     const saved = data(); saved.agents.claude.status = 'ok';
     const back = vi.fn();
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onBack={back} />));
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected/ }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected/ }));
     fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' });
     expect(screen.getByRole('button', { name: 'Back' }).hasAttribute('disabled')).toBe(true);
@@ -216,6 +220,7 @@ describe('assistant installation presentation', () => {
     mock.api.installAgent.mockImplementation(() => new Promise((resolve) => { finishInstall = resolve; }));
     const saved = data(); saved.agents.claude.status = 'ok';
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }).hasAttribute('disabled')).toBe(false));
     fireEvent.click(row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }));
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
