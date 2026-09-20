@@ -5,6 +5,14 @@
 > current master, preserving #2058 correctness and current collapse behavior.
 > [The scoped reapplication contract](2026-09-20-sidebar-2061-presentation-reapply.md)
 > supersedes the older sidebar presentation choice below; other behavior stays current.
+>
+> Home presentation update (2026-09-20 13:03 Asia/Shanghai): the owner extended
+> that same change to the Workbench home — the bounded welcome card, its three
+> action pills, the PROJECT chip row, the separate AGENT picker and the
+> single-row composer, restored from v3.1.0 as presentation only. The same
+> contract now governs both surfaces and supersedes the home presentation
+> described below; the home's current send, readiness, attachment and
+> authorization behavior stays exactly as this plan left it.
 
 ## Current PM scope and acceptance (2026-09-20)
 

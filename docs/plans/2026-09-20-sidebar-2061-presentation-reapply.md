@@ -1,4 +1,9 @@
-# Reapply the approved sidebar presentation after PR #2058
+# Reapply the approved sidebar and home presentation after PR #2058
+
+The owner approved this work in two steps. The sidebar contract below was given
+first; the Workbench home was added to the same change at 13:03:52 and is
+specified in "Owner amendment: restore the Workbench home". Both surfaces ship
+in one branch and one PR.
 
 ## Owner decision and precedence
 
@@ -92,6 +97,86 @@ combined PR/CI Watch once the PR exists; this local-only lane needs no Watch.
 Retain exact-head Codex review, all expected CI and zero unresolved whole-PR
 threads; no manual review trigger or CI rerun. Never touch retired #2058 or
 unrelated Watches. No merge authority.
+
+## Owner amendment: restore the Workbench home (2026-09-20 13:03)
+
+At 13:03:52 Asia/Shanghai the owner authorized restoring the Workbench home to
+the attached reference
+`/Users/max/.avibe/attachments/avibe/sesqn7etypwey/0fc9e661-a496-4183-903f-9f76a6270ad4_image.png`
+and asked for it in the same change as the sidebar, not a second PR.
+
+Precedence: this amendment supersedes only the sidebar-only outcome above and
+the earlier "no home, no translation" boundary. It does not replace the sidebar
+contract and authorizes no other revert of #2058. Presentation reference is
+v3.1.0 commit `0e5a672ad183ac56f5ee8df7bcb770754840b3d9` at the then-current
+`ui/src/components/Workbench.tsx` — evidence for layout and copy, never a file
+to restore wholesale over the current home.
+
+### Outcome and visual contract
+
+- A centered, bounded welcome card: rounded corners, a fine border over the
+  raised surface, a mint outlined Sparkles tile, the heading "What should we
+  build today?" and the body "Describe what you want and an agent will run it.
+  Or start with one of the suggestions below." Chinese is recovered from the
+  v3.1.0 locale (or translated accurately where it does not exist) and lives in
+  the existing `workbench.home` keys — no new namespace, no hardcoded copy.
+- Three rounded outline pills inside the card: Open project (FolderPlus),
+  Manage agents (Bot), Schedule background work (Activity). Their owners stay
+  the current ones: the directory/new-project path, the capability-gated agents
+  route, and the current `CreateViaChatDialog` task initiation. The historical
+  `/harness` navigation is not restored and no permission check is dropped.
+- Below the card, in order: a visible PROJECT section of real selectable
+  horizontal project chips through the existing `ProjectPicker`; an AGENT label
+  with a separate, normally bordered `AgentRoutePicker`; then the existing
+  `Composer` in its supported single-row mode — no embedded action row, the
+  component itself unchanged.
+- The old reference's column is 640 CSS px. The supplied screenshot is a 2x
+  capture, so its pixel dimensions are not a spec; no 1544px fixed geometry.
+- Narrow widths stay in normal flow: wrapping, horizontal chip scrolling, no
+  page overflow and nothing obstructed by the mobile tab bar.
+- The composer placeholder is "Tell the agent what you want…" through the
+  existing home key. Project names, Agent, model and reasoning effort are
+  whatever the instance actually has; nothing in the screenshot is faked.
+- The current ReadyBanner/setup handoff and the conditional owner continuation
+  links are retained, fitted unobtrusively outside the hero.
+
+### Behavior that remains current
+
+`useNewSession` keeps ownership of projects, Agent route and send. Errors and
+the uncertain-send inspect link, `stageMedia` with staged attachments passed
+through to `ns.send`, and deferred navigation that only runs while the surface
+is active all stay as they are — the old `initialMessage` replay is NOT revived.
+The authorization gate, setup readiness and its one-time handoff, ordinary
+departure semantics, retained Settings drafts and pickers, real folder
+find/create/select, and the empty and permission-restricted project flows are
+unchanged. No queue or data-model rewrite.
+
+### Additional file scope
+
+Primary: `ui/src/components/Workbench.tsx`, its existing consumer
+`ui/src/components/Workbench.test.tsx`, and existing `workbench.home` leaf
+values in `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`.
+
+Focused locator migrations only, where an existing case names home copy or an
+affordance this change moves: `ui/e2e/workbench-general/setup-handoff.spec.ts`,
+`mobile-continuation.spec.ts` and `ui/e2e/home-media/media.spec.ts`; the same
+allowance covers `geometry.spec.ts` and `standalone-settings.spec.ts` if they
+turn out to name one. Keep each scenario's claim; migrate the locator, not the
+assertion. `Composer.tsx`, `AgentRoutePicker.tsx`, `ProjectPicker.tsx`,
+`useNewSession.ts` and `ChatPage.tsx` stay unchanged unless a specific gap is
+reproduced and PM rules on it.
+
+### Acceptance
+
+Both surfaces are judged together against their two approved references in one
+bounded hermetic visual batch (EN/ZH, light/dark, desktop and narrow), plus at
+most one targeted confirmation batch. Home acceptance additionally requires:
+real project chips selectable and reflected in the send target, the Agent picker
+readable and separate, a single-row composer that still sends with staged
+attachments, no horizontal overflow at narrow widths, and the readiness banner
+and continuation links still behaving as they do today. Validation extends to
+the home's own consumers — focused Vitest, UI typecheck, test typecheck, lint,
+production build, and the browser cases whose locators moved.
 
 ## Implementation and evidence
 
