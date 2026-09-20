@@ -13,6 +13,7 @@ import {
   locationPath,
   SettingsOverlayOriginContext,
   settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
 import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
@@ -56,6 +57,7 @@ export const SettingsOverlayRouteSurface = ({
   const locationRef = useRef(location);
   const settingsVisitRef = useRef(0);
   const focusFrameRef = useRef<number | null>(null);
+  const focusHandoffRef = useSettingsFocusHandoff();
   useLayoutEffect(() => {
     settingsSurfaceOpenRef.current = settingsSurfaceOpen;
     locationRef.current = location;
@@ -186,6 +188,15 @@ export const SettingsOverlayRouteSurface = ({
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
+                // This close IS a focus handoff: the shell left Settings because
+                // a window came forward, and that window has already claimed DOM
+                // focus. Returning it to the control that opened Settings would
+                // take the window chords away from the window the user just
+                // asked for. One-shot, so it is cleared as it is spent.
+                if (focusHandoffRef?.current) {
+                  focusHandoffRef.current = false;
+                  return;
+                }
                 const visit = settingsVisitRef.current;
                 const expectedOrigin = origin;
                 const target = returnFocusRef.current;

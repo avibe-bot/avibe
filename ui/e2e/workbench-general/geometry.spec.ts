@@ -713,6 +713,15 @@ test.describe('general settings geometry', () => {
     await dock.getByRole('button', { name: 'Files', exact: true }).click();
     await expect(overlay).toHaveCount(0);
     await expect(page.locator('[data-window-id]').first()).toBeVisible();
+
+    // And the window keeps the focus it just took. The window chords resolve
+    // their target from DOM focus, so Settings restoring focus to the toggle it
+    // was opened from — its ordinary way out — would leave this window on
+    // screen and deaf, with ⌘W falling through to the browser's close-tab.
+    // Polled: the restore Settings would attempt is deferred a frame.
+    await expect
+      .poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[data-window-id]'))))
+      .toBe(true);
     expect(denied).toEqual([]);
   });
 });

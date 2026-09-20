@@ -3,9 +3,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { closeSettingsOverlay, useSettingsOverlayOrigin } from '../lib/settingsOverlay';
+import {
+  closeSettingsOverlay,
+  settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
+  useSettingsOverlayOrigin,
+} from '../lib/settingsOverlay';
 
 import { APP_TAB_PARAM } from '../apps/appLaunch';
 import {
@@ -166,6 +172,21 @@ const SettingsExit = ({ testId }: { testId: string }) => {
   </div>;
 };
 
+// Stands in for a background route the shell can land back on, and for the one
+// thing the real Settings surface reads from the shell on its way out: whether
+// this close is handing focus to a window (`SettingsFocusHandoffContext`).
+const chatProbe = { handoff: null as boolean | null };
+const ChatProbe = () => {
+  const { sessionId } = useParams();
+  const handoffRef = useSettingsFocusHandoff();
+  // Child effects run before the shell's own, so this reads the flag as the
+  // Settings surface's deferred close callback would find it on this commit.
+  useEffect(() => {
+    chatProbe.handoff = handoffRef?.current ?? null;
+  });
+  return <div data-testid="chat">{sessionId}</div>;
+};
+
 // Stands in for the Settings surfaces, which read this and nothing else to
 // decide whether their menu replaces the app sidebar or opens beside it.
 const StandaloneMenuProbe = () => (
@@ -175,6 +196,7 @@ const StandaloneMenuProbe = () => (
 beforeEach(() => {
   viewport.isDesktop = false;
   windowManager.foreground = null;
+  chatProbe.handoff = null;
   window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
@@ -482,6 +504,96 @@ describe('AppShell sidebar width', () => {
 
     expect(await screen.findByTestId('chat')).toBeTruthy();
     expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+  });
+
+  // Coming forward is announced per window, and one gesture can raise many: the
+  // Dock's "Show all windows" restores every minimized window in a loop, so the
+  // announcements all land before React can re-render with Settings closed.
+  // Leaving is not per window — it is per gesture. Answering each would run the
+  // exit's history traversal once per window and land that many entries before
+  // the origin, on a route the user never asked to see.
+  it('leaves Settings once however many windows come forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    // The exit walks history back to the origin when it can tell where that is,
+    // which is the path a repeat overshoots; the fallback replace is idempotent
+    // and would hide the defect.
+    const origin = {
+      historyIndex: 1,
+      location: {
+        pathname: '/chat/session-2', search: '', hash: '', state: null, key: 'origin',
+      },
+    };
+    window.history.replaceState({ idx: 2 }, '');
+    try {
+      render(
+        <MemoryRouter
+          initialEntries={[
+            '/chat/session-1',
+            '/chat/session-2',
+            { pathname: '/settings/general', state: settingsOverlayStateForOrigin(origin, null) },
+          ]}
+          initialIndex={2}
+        >
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="chat/:sessionId" element={<ChatProbe />} />
+              <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByTestId('settings')).toBeTruthy();
+
+      // One gesture, three windows: the same synchronous batch the Dock produces.
+      act(() => {
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+      });
+
+      // The origin, not two entries further back.
+      expect((await screen.findByTestId('chat')).textContent).toBe('session-2');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  // Who holds DOM focus after this exit is not the Settings surface's usual
+  // answer. The window that caused it has already taken focus, and the window
+  // chords read their target from focus, so handing it back to the control that
+  // opened Settings would put a window on screen that ⌘W no longer closes. Only
+  // the shell knows this close had a cause, so the shell is what says so.
+  it('marks the window exit as a focus handoff, and spends it only there', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<ChatProbe />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(true);
+
+    // The same flag, one visit later. Nothing about the toggle's own close hands
+    // focus anywhere, so a flag still standing from the previous exit would take
+    // the return focus away from the control that asked for it.
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    await user.click(await screen.findByRole('button', { name: 'settings.close' }));
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(false);
   });
 
   // The window it opens is the foreground, not a reason to leave one route for

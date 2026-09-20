@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -39,6 +39,7 @@ import {
   closeSettingsOverlay,
   isChromelessShellPath,
   isSettingsEntryPath,
+  SettingsFocusHandoffContext,
   useSettingsOverlayOrigin,
 } from '../lib/settingsOverlay';
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
@@ -311,6 +312,28 @@ export const AppShell: React.FC = () => {
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
 
+  // One gesture, one exit. Announcements are per window: the Dock's "Show all
+  // windows" restores every minimized window in a single loop and each restore
+  // comes forward, so N of them arrive before React can re-render with Settings
+  // closed. Answering each would run `closeSettingsOverlay`'s history delta N
+  // times over and land well past the origin. Cleared after every commit, so
+  // the latch covers exactly the synchronous batch it is for and cannot outlive
+  // a navigation that never happened.
+  const leavingSettingsRef = useRef(false);
+  useEffect(() => { leavingSettingsRef.current = false; });
+  // Read by the Settings surface below the outlet, on the close this exit
+  // causes. See `SettingsFocusHandoffContext`.
+  //
+  // Cleared on any commit that still shows Settings, which is every commit
+  // except the one this exit produces: a flag raised for a close that then did
+  // not happen — or one the surface never came back to spend — would otherwise
+  // sit here and eat the return focus of the next, ordinary close. Radix defers
+  // its close callback past this effect, so the successful exit still finds it.
+  const settingsFocusHandoffRef = useRef(false);
+  useEffect(() => {
+    if (settingsOpen) settingsFocusHandoffRef.current = false;
+  });
+
   // A window coming forward is a way out of Settings, and has to be: the window
   // layer is hidden for as long as Settings is open, so a window opened or
   // focused from behind it would arrive invisible. The sidebar's links already
@@ -320,7 +343,10 @@ export const AppShell: React.FC = () => {
   //
   // Above the access redirects below, because it is a hook and they are returns.
   const leaveSettingsForWindow = useCallback(() => {
-    if (!settingsOpen) return;
+    if (!settingsOpen || leavingSettingsRef.current) return;
+    leavingSettingsRef.current = true;
+    // The window that caused this exit owns the focus that comes with it.
+    settingsFocusHandoffRef.current = true;
     if (settingsOverlayOrigin) closeSettingsOverlay(navigate, settingsOverlayOrigin);
     else navigate('/');
   }, [navigate, settingsOpen, settingsOverlayOrigin]);
@@ -404,6 +430,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
+    <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider enabled={canUseApps}>
@@ -651,6 +678,7 @@ export const AppShell: React.FC = () => {
     </DockProvider>
     </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
+    </SettingsFocusHandoffContext.Provider>
     </SettingsOverlayNavigationBoundary>
     </ShellSidebarContext.Provider>
   );

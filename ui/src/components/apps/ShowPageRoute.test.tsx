@@ -1,9 +1,10 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
+import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import { ShowPageRoute } from './ShowPageRoute';
 
 const api = vi.hoisted(() => ({
@@ -12,19 +13,24 @@ const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(),
 }));
 const shareControl = vi.hoisted(() => ({ canManageInstance: undefined as boolean | undefined }));
+const viewport = vi.hoisted(() => ({ isDesktop: false }));
+const wm = vi.hoisted(() => ({
+  windows: [] as unknown[],
+  openApp: vi.fn(),
+  focus: vi.fn(),
+  restore: vi.fn(),
+}));
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/DockContext', () => ({ useDock: () => ({ unpin: vi.fn() }) }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({
-  useWindowManager: () => ({ windows: [], openApp: vi.fn(), focus: vi.fn(), restore: vi.fn() }),
-}));
+vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => wm }));
 vi.mock('../../context/showPageDrag', () => ({
   useShowPageDrag: () => ({ active: false, begin: vi.fn(), end: vi.fn(), dropToDock: vi.fn() }),
 }));
-vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => false }));
+vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.isDesktop }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../workbench/ShowPageShareControl', () => ({
   ShowPageShareControl: ({ canManageInstance }: { canManageInstance?: boolean }) => {
@@ -37,6 +43,11 @@ const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid="location">{location.pathname}{location.search}</output>;
 };
+
+beforeEach(() => {
+  viewport.isDesktop = false;
+  wm.windows = [];
+});
 
 afterEach(() => {
   cleanup();
@@ -100,5 +111,58 @@ describe('mobile Show Page app route', () => {
     expect(screen.queryByRole('button', { name: 'chat.showPage.annotate.unavailable' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'chat.showPage.backToChat' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'chat.showPage.share' })).toBeNull();
+  });
+});
+
+// Desktop turns this route into a handoff: open the window, then get out of the
+// way. Both halves are foreground gestures, so both belong to the surface that
+// is actually in front. This route is lazily loaded, so Settings can take the
+// foreground while its chunk is still arriving — and a retired surface may do
+// neither half: its boundary refuses the redirect, and a window brought forward
+// under Settings would arrive behind an opaque overlay.
+describe('desktop Show Page window handoff', () => {
+  const renderRoute = (active: boolean) => render(
+    <MemoryRouter initialEntries={['/apps/show/session-1']}>
+      <RouteSurfaceActivityBoundary active={active}>
+        <Routes>
+          <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
+          <Route path="/" element={<div data-testid="canvas" />} />
+        </Routes>
+      </RouteSurfaceActivityBoundary>
+      <LocationProbe />
+    </MemoryRouter>,
+  );
+
+  it('waits while the surface is retired, then runs whole once it is live', () => {
+    viewport.isDesktop = true;
+    const { rerender } = renderRoute(false);
+
+    expect(wm.openApp).not.toHaveBeenCalled();
+    expect(screen.getByTestId('location').textContent).toBe('/apps/show/session-1');
+
+    // Same mounted route, now the foreground one: the half that was skipped is
+    // still owed, so it must not have been spent by the render that skipped it.
+    rerender(
+      <MemoryRouter initialEntries={['/apps/show/session-1']}>
+        <RouteSurfaceActivityBoundary active>
+          <Routes>
+            <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
+            <Route path="/" element={<div data-testid="canvas" />} />
+          </Routes>
+        </RouteSurfaceActivityBoundary>
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+
+    expect(wm.openApp).toHaveBeenCalledWith('showpage', { params: { sessionId: 'session-1' } });
+    expect(screen.getByTestId('location').textContent).toBe('/');
+  });
+
+  it('opens the window and hands back to the canvas on the live surface', () => {
+    viewport.isDesktop = true;
+    renderRoute(true);
+
+    expect(wm.openApp).toHaveBeenCalledWith('showpage', { params: { sessionId: 'session-1' } });
+    expect(screen.getByTestId('location').textContent).toBe('/');
   });
 });

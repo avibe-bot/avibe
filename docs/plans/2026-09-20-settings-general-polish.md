@@ -328,3 +328,61 @@ interaction; that build would also show the missing Apps button.
   standalone, back under inline, and the pointer actually lands on it rather than
   on the surface above it; opening a Dock tile from there closes Settings and
   shows the window.
+
+### Review round: three consequences of the new exit
+
+Codex review of `9bf337e2` found three, all real, all the same shape — a
+foreground announcement crossing from the window manager into a surface that
+does not own it. One announcement per window meets one exit per gesture; a
+close meets a focus decision; and a lazily-loaded route meets a surface that has
+already been retired. Keeping the announcement at the manager stays right — the
+Dock, ⌘K search, a deep link and a restored window all reach the same layer, and
+none of them should have to ask what is covering it — so each consequence is
+answered where it lands.
+
+**One gesture, one exit.** The Dock's "Show all windows" restores every
+minimized window in a loop, so N announcements arrive in one synchronous batch,
+before React can re-render with Settings closed. Announcing stays per window and
+truthful; *leaving* becomes per gesture. `AppShell` holds a latch cleared after
+every commit, so it covers exactly the batch it is for. Without it the exit's
+history traversal runs N times and lands N-1 entries before the origin — on a
+route the user never asked to see.
+
+**The window keeps the focus it took.** Settings hands focus back to the control
+that opened it. Not on this exit: the window that caused it has already claimed
+DOM focus, and the window chords (⌘W / ⌘M) resolve their target from
+`document.activeElement`, so restoring the sidebar toggle would leave that window
+on screen and deaf, with ⌘W falling through to the browser's close-tab. Only the
+shell knows the close had a cause and only the surface owns the focus decision,
+so the shell publishes a one-shot `SettingsFocusHandoffContext` ref and the
+surface spends it in Radix's deferred close callback. A ref, not state: nothing
+renders differently for it, and the callback runs after the render that closed
+the surface. The shell clears it on any commit that still shows Settings — every
+commit except the one this exit produces — so a flag raised for a close that then
+did not happen cannot eat the next, ordinary close's return focus.
+
+**A retired route does not launch.** `RouteSurfaceActivityBoundary` scopes
+navigation, not the window manager, so `/apps/show/:sessionId` resolving its lazy
+chunk after Settings took the foreground would bring a window forward behind an
+opaque overlay — and half-handle itself, since the boundary refuses the redirect
+while the route's once-only latch is already spent. Both halves of that handoff
+are foreground gestures, so the whole effect waits on `useRouteSurfaceActive()`
+and runs whole when the surface is live again.
+
+### Validation (review round)
+
+- `AppShell.test.tsx` — three announcements in one batch land on the origin, not
+  two entries past it; the window exit raises the handoff flag and the next
+  visit's ordinary close does not see it. Non-vacuous: dropping the latch lands
+  on `session-1`, dropping the raise reads `false`, dropping the clear reads
+  `true` on the second close.
+- `SettingsOverlayRouteSurface.test.tsx` — a retained app window keeps DOM focus
+  when it is what closed Settings, against the neighbouring rule that the same
+  window loses it on an ordinary close. Non-vacuous: dropping the early return
+  moves focus to the toggle.
+- `ShowPageRoute.test.tsx` — a retired surface neither opens the window nor
+  redirects, and still owes both once it is live. Non-vacuous: dropping the gate
+  opens the window while retired.
+- `e2e/workbench-general/geometry.spec.ts` — in a browser, opening a Dock tile
+  beside inline Settings leaves focus inside the window. Non-vacuous: dropping
+  the early return fails it.

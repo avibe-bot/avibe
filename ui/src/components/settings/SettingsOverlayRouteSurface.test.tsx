@@ -20,6 +20,7 @@ import {
 
 import {
   closeSettingsOverlay,
+  SettingsFocusHandoffContext,
   useSettingsOverlayOrigin,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
@@ -232,9 +233,37 @@ const SettingsToggle = () => {
   );
 };
 
-const Harness = ({ desktop }: { desktop: boolean }) => (
+// Stands in for the shell's own way out of Settings when a window comes
+// forward: it raises the one-shot handoff flag and then leaves, in that order,
+// exactly as AppShell does. Driven by `fireEvent.click` rather than a user
+// gesture, because the real caller is not a control at all — the window manager
+// announces the foreground change — so there is no pointer, nothing outside the
+// surface is pressed, and nothing here becomes the origin's new focus owner.
+const WindowForegroundExit = ({ handoffRef }: { handoffRef: { current: boolean } }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!origin) return;
+        handoffRef.current = true;
+        closeSettingsOverlay(navigate, origin);
+      }}
+    >
+      leave-for-window
+    </button>
+  );
+};
+
+const Harness = ({ desktop }: { desktop: boolean }) => {
+  const handoffRef = useRef(false);
+  return (
+  <SettingsFocusHandoffContext.Provider value={handoffRef}>
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
+    <WindowForegroundExit handoffRef={handoffRef} />
     {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
         still on screen beside Settings and still live, so what an outside
         interaction means stops being hypothetical. */}
@@ -257,7 +286,9 @@ const Harness = ({ desktop }: { desktop: boolean }) => (
       <Route path="/" element={<div>workbench</div>} />
     </SettingsOverlayRouteSurface>
   </SettingsOverlayNavigationBoundary>
-);
+  </SettingsFocusHandoffContext.Provider>
+  );
+};
 
 const RoutedHarness = ({ desktop = true }: { desktop?: boolean }) => (
   <Routes>
@@ -422,6 +453,29 @@ describe('SettingsOverlayRouteSurface', () => {
       screen.getByRole('link', { name: 'shell-settings' }),
     ));
     expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: inputName }));
+  });
+
+  // The exception to the rule above, and the only one. A retained window that
+  // refocuses itself does not get to outrank the control that opened Settings —
+  // unless that window is why Settings is closing. The window chords read their
+  // target from DOM focus, so taking focus back here would leave the window the
+  // user just asked for on screen and deaf to ⌘W, which would then fall through
+  // to the browser's close-tab.
+  it('leaves focus with the window that closed Settings', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-app-window' }));
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-app-window' }));
+    fireEvent.click(screen.getByRole('button', { name: 'leave-for-window' }));
+
+    const input = await screen.findByRole('textbox', { name: 'retained app-window input' });
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(input);
   });
 
   it('does not let a stale close callback focus the old origin after Settings reopens', async () => {

@@ -9,6 +9,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Button } from '../ui/button';
 import { ShowPageAnnotateControl } from '../workbench/ShowPageAnnotateControl';
 import { ShowPageLaunchControl } from '../workbench/ShowPageLaunchControl';
@@ -27,14 +28,22 @@ import { useShowPageAnnotation } from '../workbench/useShowPageAnnotation';
 export const ShowPageRoute: React.FC = () => {
   const { sessionId = '' } = useParams();
   const isDesktop = useIsDesktop();
+  const surfaceActive = useRouteSurfaceActive();
   const wm = useWindowManager();
   const navigate = useNavigate();
   const handledRef = useRef(false);
 
   // Desktop: open (or focus) the Show Page window for this session and hand back
   // to the canvas. Guarded so the effect runs once even as window state ticks.
+  //
+  // Only while this surface is the live one. Both halves of the handoff are
+  // foreground gestures: the window comes to the top, and the route redirects to
+  // the canvas. A retired surface — Settings took over while this route's chunk
+  // was still loading — may do neither, and the boundary already refuses the
+  // redirect, which used to leave the launch half done with the latch spent. It
+  // waits instead, and runs whole when the surface is live again.
   useEffect(() => {
-    if (!isDesktop || handledRef.current || !sessionId) return;
+    if (!surfaceActive || !isDesktop || handledRef.current || !sessionId) return;
     handledRef.current = true;
     const own = wm.windows.filter((w) => w.appId === 'showpage' && w.params?.sessionId === sessionId);
     const target = own.find((w) => !w.minimized) ?? own[0];
@@ -45,7 +54,7 @@ export const ShowPageRoute: React.FC = () => {
       wm.openApp('showpage', { params: { sessionId } });
     }
     navigate('/', { replace: true });
-  }, [isDesktop, sessionId, wm, navigate]);
+  }, [surfaceActive, isDesktop, sessionId, wm, navigate]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   // Key by sessionId: React Router keeps this route element mounted across param
