@@ -1015,14 +1015,15 @@
   font-size: var(--ob-method-fs);
   font-weight: 500;
   gap: 8px;
-  padding: 0 17px;
-  height: var(--ob-method-h);
+  padding: 4px 17px;
+  height: auto;
   min-height: var(--ob-method-h);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
 }
+/* The label is the only visible description of a settled connection, so in the
+   narrow band that still draws three columns it wraps rather than truncates; the
+   card's min-height absorbs the extra line the way it absorbs an error line. */
+.onboarding-method-row > span, .onboarding-method-connected > span { min-width: 0; }
 .onboarding-method-connected > svg { color: var(--mint-ink); flex-shrink: 0; }
 /* The card's body reads top to bottom the way the story's does: the identity header,
    then the state line, then the note and the work. The body is the flexible one, so an
@@ -1060,18 +1061,18 @@
 }
 .onboarding-method-row {
   width: 100%;
-  height: var(--ob-method-h);
+  height: auto;
   min-height: var(--ob-method-h);
   border-radius: 8px;
-  padding: 0 17px;
+  padding: 4px 17px;
   font-size: var(--ob-method-fs);
   font-weight: 500;
   gap: 8px;
   justify-content: flex-start;
   text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* The shared button base forbids wrapping; in the narrow three-column band the
+     label is the only description of the method, so wrapping wins over clipping. */
+  white-space: normal !important;
 }
 .onboarding-assistant-error { font-size: 12px; color: var(--destructive-ink); overflow-wrap: anywhere; margin-top: 8px; }
 .onboarding-assistant-error pre { margin-top: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; }

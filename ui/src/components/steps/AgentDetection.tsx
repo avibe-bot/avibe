@@ -116,6 +116,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [visuals, setVisuals] = useState<Partial<Record<string, BackendLifecycleVisual>>>({});
   const [refreshingAgents, setRefreshingAgents] = useState<Record<string, boolean>>({});
   const [chipRefresh, setChipRefresh] = useState<Record<string, number>>({});
+  // A successful upgrade leaves the chip's own runtime probe in flight while this
+  // handler has already finished, so the pill still reads `update` for a moment and
+  // would re-arm the card's upgrade button against a backend that was just upgraded.
+  // The lock holds the button disabled until the chip's reported visual leaves
+  // `update`, which is the probe confirming what the upgrade did.
+  const [upgradeLocks, setUpgradeLocks] = useState<Record<string, boolean>>({});
   const pendingInstalls = useRef(new Set<string>());
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
@@ -273,8 +279,23 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // chip renders, while the chip still owns the probe and the write. Bumping
   // `chipRefresh` is what lets the chip re-probe a runtime the card's own button
   // changed, without the card duplicating the chip's lifecycle knowledge.
+  useEffect(() => {
+    setUpgradeLocks((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [name, locked] of Object.entries(current)) {
+        if (locked && visuals[name] !== 'update' && visuals[name] !== 'updating') {
+          next[name] = false;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [visuals]);
+
   const upgradeAgent = async (name: string) => {
     setRefreshingAgents((current) => ({ ...current, [name]: true }));
+    setUpgradeLocks((current) => ({ ...current, [name]: true }));
     // The chip's own upgrade handler owns the toast contract for lifecycle
     // operations; the card's affordance is the same operation drawn on the state
     // row, so it settles failures the same way rather than swallowing them, and
@@ -613,7 +634,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             upgrade={agent.status === 'ok' && (visuals[name] === 'update' || visuals[name] === 'updating' || refreshingAgents[name]) ? (
               <Button type="button" variant="secondary" className="onboarding-life-action"
                 onClick={() => void upgradeAgent(name)}
-                disabled={refreshingAgents[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
+                disabled={refreshingAgents[name] || !!upgradeLocks[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
                 {refreshingAgents[name] || visuals[name] === 'updating'
                   ? <RefreshCw size={14} className="motion-safe:animate-spin" />
                   : <ArrowUpToLine size={14} />}
