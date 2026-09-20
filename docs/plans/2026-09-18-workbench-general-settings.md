@@ -1,6 +1,32 @@
 # Shared Workbench and General Settings — issue #2012
 
-## PM ruling: queue snapshot ordering (2026-09-20, review 5259163447)
+## Current PM scope and acceptance (2026-09-20)
+
+The 11:24 PM continuation ruling supersedes the broader exploratory queue scope
+recorded below. Two real `ChatPage` probes on unchanged peer head `7450fd669`
+reproduced bootstrap/refresh overwrites in both arrival directions. The bounded
+repair shares successful snapshot ordering between those readers, retains the
+peer refresh-generation regression and existing send/session guards, and verifies
+that a newer failed read still permits an older successful fallback. Route-lifetime,
+optimistic remove and recall behavior are unchanged; this continuation does not
+claim new repairs or acceptance evidence for those broader hypotheses.
+
+After controlled reproduction of the CI drag failure, PM additionally authorized
+the existing desktop expanded-project test's viewport and visibility precondition
+correction described under "Review round 3 repair". The final scope relative to
+peer head `f227722436` is `ChatPage.tsx`, `ChatPage.hydration.test.tsx`,
+`ui/e2e/project-order/order.spec.ts`, and this plan. Product sidebar, Composer and
+drag behavior remain unchanged. Local candidate `430c5c630` passed 97 focused
+tests, typecheck, lint and build, the two affected browser cases, and the full
+project-order suite (16 passed, two declared platform skips, zero retries).
+PM independently reran six selected queue regressions successfully. These local
+results require fresh exact-head remote review and CI before PR acceptance.
+
+## Historical PM diagnosis: queue snapshot ordering (review 5259163447)
+
+This records the initial diagnosis at `73a8556dd`; its exploratory scope and
+acceptance list were narrowed by the current PM ruling above. Counts and CI state
+in this section are observations from that earlier checkpoint.
 
 The refreshed head `73a8556ddbcc41f13bb8434a2b4fe2d81aacb060` received one
 new actionable finding, inline `4055864365`, thread `PRRT_kwDOPbFPYs6kGUYR`.
@@ -382,8 +408,9 @@ bootstrap/refresh directions through the real `ChatPage` consumer, and the
 newer-read failure fallback; the queue row consumer remains covered by its
 existing tests. The continuation candidate passed 97 focused tests (hydration
 and queue-row consumers), UI test typechecks, the UI lint baseline, and the
-production build. The existing project-order suite also passed once with
-`retries: 0` (16 passed, 2 declared skips); no drag source or test was changed.
+production build. Before the later fixture correction, the existing project-order
+suite also passed once with `retries: 0` (16 passed, 2 declared skips); at that
+earlier checkpoint no drag source or test had changed.
 
 The remaining CI failure in the expanded desktop drag case was then reproduced
 on the synthetic merge with the same product and fixture source. At the default
