@@ -396,6 +396,19 @@ def test_legacy_edit_default_mode_is_not_before_mode_evidence(home):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_reverse_uses_captured_before_mode_when_target_mode_differs(home):
+    path = home / ".profile"
+    path.write_bytes(b"before\n")
+    path.chmod(0o640)
+    edit = NativeFileEdit(path, b"before\n", b"after\n", 0o600, 0o640)
+    edit.apply()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    NativeFileEdit.from_payload(edit.to_payload()).apply(reverse=True)
+    assert path.read_bytes() == b"before\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    NativeFileEdit.from_payload(edit.to_payload()).apply(reverse=True)
+
+
 def test_deleted_target_replay_completes_directory_durability(home, monkeypatch):
     path = home / ".fixture"
     path.write_bytes(b"fixture\n")

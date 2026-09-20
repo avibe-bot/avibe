@@ -11,7 +11,6 @@ import base64
 import json
 import os
 import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,6 +107,7 @@ class NativeFileEdit:
     def apply(self, *, reverse: bool = False) -> None:
         """Compare before writing; replay accepts only either recorded state."""
         source, target = (self.after, self.before) if reverse else (self.before, self.after)
+        target_mode = self.before_mode if reverse and self.before_mode is not None else self.mode
         actual = _read_regular(self.path)
         if actual == target:
             if self.before != self.after:
@@ -128,32 +128,14 @@ class NativeFileEdit:
                 raise TakeoverStateError("native cleanup did not persist")
             _fsync_directory(self.path.parent)
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Unlike agent-owned state (write_atomic, always 0600), this transaction
-        # edits user files. Publish captured permissions WITH the target bytes;
-        # never widen a path after publication. Recheck consent before swapping.
-        descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", dir=self.path.parent)
-        unpublished: str | None = temporary
-        try:
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor = -1
-                handle.write(target)
-                handle.flush()
-                if hasattr(os, "fchmod"):
-                    os.fchmod(handle.fileno(), self.mode)
-                else:  # pragma: no cover - Windows permission fallback
-                    os.chmod(temporary, self.mode)
-                os.fsync(handle.fileno())
-            self._verify(source, source_mode)
-            os.replace(temporary, self.path)
-            unpublished = None
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            if unpublished is not None:
-                Path(unpublished).unlink(missing_ok=True)
+        # Keep one publication owner. The caller owns source consent and
+        # strict durability; the primitive publishes captured mode WITH bytes.
+        write_atomic(
+            self.path, target, mode=target_mode,
+            before_replace=lambda: self._verify(source, source_mode),
+        )
         _fsync_directory(self.path.parent)
-        self._verify(target, self.mode)
+        self._verify(target, target_mode)
 
     def _verify(self, expected: bytes | None, mode: int | None, *, sync: bool = False) -> None:
         if expected is None:
