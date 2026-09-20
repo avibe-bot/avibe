@@ -130,8 +130,10 @@ to restore wholesale over the current home.
   with a separate, normally bordered `AgentRoutePicker`; then the existing
   `Composer` in its supported single-row mode — no embedded action row, the
   component itself unchanged.
-- The old reference's column is 640 CSS px. The supplied screenshot is a 2x
-  capture, so its pixel dimensions are not a spec; no 1544px fixed geometry.
+- The old reference's column is 640 CSS px, and the screenshot's proportions
+  correspond to it. Its pixel dimensions are not a spec and imply no capture
+  device pixel ratio; no 1544px fixed geometry. Responsive renders, not capture
+  metadata, decide whether the column is right.
 - Narrow widths stay in normal flow: wrapping, horizontal chip scrolling, no
   page overflow and nothing obstructed by the mobile tab bar.
 - The composer placeholder is "Tell the agent what you want…" through the
@@ -177,6 +179,63 @@ attachments, no horizontal overflow at narrow widths, and the readiness banner
 and continuation links still behaving as they do today. Validation extends to
 the home's own consumers — focused Vitest, UI typecheck, test typecheck, lint,
 production build, and the browser cases whose locators moved.
+
+## Owner resolution: the screenshots govern (2026-09-20 13:20)
+
+Between 13:14 and 13:20 the contract was clarified twice, and the second
+clarification settles it.
+
+At 13:14:59 the owner asked whether the home was a revert or a reimplementation
+and answered it themselves: it is a restoration. The old presentation hunks —
+layout structure, tokens and classes, card proportions and spacing, the Sparkles
+treatment, pill shape and icons, project chips with a standalone Agent picker,
+the single-row composer and the old localized copy — are reapplied onto the
+current home. No new visual abstraction, component or approximation from
+scratch.
+
+At 13:16:18 the owner was unsure which version to revert to, and work on the
+home paused while that was resolved. At 13:20:14 the owner resolved it:
+"以截图为准，sidebar 和首页回退放到一个 PR 里". **That resolution supersedes the
+13:16 hold in full**, and this section supersedes any earlier wording here that
+reads as a release identification.
+
+What the resolution fixes:
+
+- The two attached screenshots are the authoritative visual targets. #2061
+  `05904ee80595e14f1d0fd44398ff4798bec9a597` and v3.1.0
+  `0e5a672ad183ac56f5ee8df7bcb770754840b3d9` are matching source references for
+  restoring existing presentation hunks. Neither identifies the release the
+  screenshots came from, and neither authorizes resetting a release.
+- No release selection is needed or pending. There is no open version question.
+- Both surfaces ship in one branch and one PR. The sidebar is already committed;
+  the home lands on the same branch.
+- Screenshot appearance governs appearance only. It is not a licence to roll
+  back business logic: background work still starts through
+  `CreateViaChatDialog`, permission filters, retained Settings drafts and
+  pickers, readiness and continuations, staged media and voice, send-exactly-once
+  and the merged queue/invocation repairs all stay as master has them.
+- The capability group still defaults to expanded with no localStorage. The
+  collapsed sidebar in the screenshot is a render state, not a new default.
+- `ProjectPicker`, the standalone `AgentRoutePicker` and `Composer`'s single-row
+  mode are reused unchanged.
+
+### Sidebar colour ruling (PM, 13:22)
+
+The first sidebar commit kept `--nav-selected-bg` / `--nav-selected-border` /
+`--nav-hover-bg` / `--shadow-glow-nav-mint` for the capability rows,
+`--logo-well-background` for the brand chip and the nav hover token for the Inbox
+row. Those are not equivalent to the reference: the dark selected fill differs in
+alpha, the light selected border differs in alpha, and the logo well is grey
+instead of mint. `bg-mint/[0.08]`, `border-mint/30` and `hover:bg-foreground/[0.04]`
+are themed mint and foreground at a deliberate opacity, not hard-coded colours,
+so "the reference hard-codes values" never justified substituting them.
+
+Ruled: restore the reference's capability default/hover/selected classes and the
+mint logo well exactly, and give the Inbox row the same `foreground/[0.04]` hover.
+State, accessibility, permission and lifecycle behavior stay current; differences
+from the reference in those dimensions are intended, colour differences without a
+reference are not. No `index.css` or token cleanup is in scope. Both themes are
+checked once in the final visual batch.
 
 ## Implementation and evidence
 

@@ -9,10 +9,13 @@
 > Home presentation update (2026-09-20 13:03 Asia/Shanghai): the owner extended
 > that same change to the Workbench home — the bounded welcome card, its three
 > action pills, the PROJECT chip row, the separate AGENT picker and the
-> single-row composer, restored from v3.1.0 as presentation only. The same
-> contract now governs both surfaces and supersedes the home presentation
-> described below; the home's current send, readiness, attachment and
-> authorization behavior stays exactly as this plan left it.
+> single-row composer, as presentation only. At 13:20 the owner settled the
+> reference question: the two attached screenshots govern, #2061 and v3.1.0 are
+> matching sources for restoring presentation hunks rather than a release to
+> reset to, and both surfaces ship in one PR. The same contract now governs both
+> surfaces and supersedes the home presentation described below; the home's
+> current send, readiness, attachment and authorization behavior stays exactly
+> as this plan left it.
 
 ## Current PM scope and acceptance (2026-09-20)
 
