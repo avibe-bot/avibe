@@ -2559,8 +2559,8 @@
     "placeholderTitle": "Your AI workbench is coming together",
     "placeholderBody": "Agents, Skills, Harness, and Vaults will live here. For now, jump into the control panel to configure platforms and backends.",
     "home": {
-      "heroTitle": "What would you like to build today?",
-      "heroBody": "Pick a starting point, or describe your own task",
+      "heroTitle": "What should we build today?",
+      "heroBody": "Describe what you want and an agent will run it. Or start with one of the suggestions below.",
       "suggestions": {
         "exploreTitle": "Explore a project",
         "exploreBody": "Get to know your project's structure",
@@ -2572,12 +2572,10 @@
         "planBody": "Turn your goal into a step-by-step plan",
         "planDraft": "Help me turn this goal into a concrete step-by-step plan"
       },
-      "inputPlaceholder": "Describe a task or ask a question...",
+      "inputPlaceholder": "Tell the agent what you want…",
       "openProject": "Open project",
-      "manageAgents": "Manage Agents",
-      "createTask": "Create background task",
-      "chooseWorkspace": "Choose a workspace",
-      "workspaceAria": "Workspace: {{path}}",
+      "manageAgents": "Manage agents",
+      "createTask": "Schedule background work",
       "noProjectForChat": "No projects yet — add one before starting a chat",
       "ready": "{{backend}} is ready to go",
       "readyDismiss": "Dismiss",

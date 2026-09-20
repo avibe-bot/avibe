@@ -44,6 +44,7 @@ const LONG_IMAGE = 'q3-2026-customer-onboarding-migration-runbook-screenshot-fin
 // is what keeps the image-only rows — which have no text of their own — reachable.
 const ORDER = [
   'q-text',
+  'q-long-text',
   'q-image',
   'q-mixed',
   'q-broken',
@@ -137,6 +138,33 @@ test('a queued image is visible, 20px, centred, and costs the row no height', as
   await expect
     .poll(() => img.evaluate((el: HTMLImageElement) => el.naturalWidth))
     .toBeGreaterThan(0);
+});
+
+test('a single-line queued message is vertically centred in its row', async ({ page }) => {
+  const queuedRow = await boxOf(row(page, 'q-text'), 'the text-only row');
+  const text = await boxOf(row(page, 'q-text').locator('div[role="button"]'), 'the queued message text');
+  const rowCentre = queuedRow.y + queuedRow.height / 2;
+  const textCentre = text.y + text.height / 2;
+
+  await expect(row(page, 'q-text')).toHaveCSS('align-items', 'center');
+  expect(Math.abs(textCentre - rowCentre)).toBeLessThanOrEqual(1);
+});
+
+test('expanded rows keep short text centred and actions at the first line', async ({ page }) => {
+  const shortRow = row(page, 'q-text');
+  await activate(page, shortRow.locator('div[role="button"]'));
+  const shortRowBox = await boxOf(shortRow, 'the expanded short row');
+  const shortTextBox = await boxOf(shortRow.locator('div[role="button"]'), 'the expanded short text');
+  expect(Math.abs(shortTextBox.y + shortTextBox.height / 2 - (shortRowBox.y + shortRowBox.height / 2))).toBeLessThanOrEqual(1);
+
+  const longRow = row(page, 'q-long-text');
+  await activate(page, longRow.locator('div[role="button"]'));
+  const longRowBox = await boxOf(longRow, 'the expanded long row');
+  const removeBox = await boxOf(
+    longRow.getByRole('button', { name: 'Remove from queue' }),
+    'the expanded long row action',
+  );
+  expect(Math.abs(removeBox.y - (longRowBox.y + 6))).toBeLessThanOrEqual(1);
 });
 
 test('an image-only queued message still says what it is', async ({ page }) => {

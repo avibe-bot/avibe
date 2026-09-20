@@ -27,7 +27,7 @@ import { DESKTOP, config, open, serveProduct } from './support';
  * come from. Each test asserts nothing was refused.
  */
 
-const COMPOSER = 'Describe a task or ask a question...';
+const COMPOSER = 'Tell the agent what you want…';
 const DRAFT = '整理一下这周的发布说明';
 
 /**
@@ -137,9 +137,12 @@ const withSetupApi = async (page: Page) => {
 
 const composer = (page: Page) => page.getByPlaceholder(COMPOSER);
 const agentTrigger = (page: Page) => page.getByRole('button', { name: /codex|claude/ }).first();
-const workspaceChip = (page: Page) => page.getByRole('button', { name: /^Workspace: / });
+// The home's own project row, not the sidebar tree; the mint fill is how the
+// shared picker marks the resolved target.
+const projectChip = (page: Page) =>
+  page.locator('main#app-shell-scroll').getByRole('button', { name: '中文项目', exact: true });
 const banner = (page: Page) => page.getByText('Codex is ready to go');
-const heroTitle = (page: Page) => page.getByRole('heading', { name: 'What would you like to do?' });
+const heroTitle = (page: Page) => page.getByRole('heading', { name: 'What should we build today?' });
 
 /** `gpt-5` is a prefix of `gpt-5-codex`, so "the trigger shows the Agent's own
  *  default model" has to include the picked one being absent from it. */
@@ -201,7 +204,7 @@ test.describe('Setup handoff to the Workbench home', () => {
     // the only one this flow has made.
     await expect(agentTrigger(page)).toHaveText(/codex/);
     await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
-    await expect(workspaceChip(page)).toContainText('中文项目');
+    await expect(projectChip(page)).toHaveClass(/bg-mint-soft/);
     expect(setup.writes).toEqual([{ setup_completed: true }]);
 
     // Dismissing is about the banner and nothing else: the home the user has
@@ -212,7 +215,7 @@ test.describe('Setup handoff to the Workbench home', () => {
     await expect(composer(page)).toHaveValue(DRAFT);
     await expect(agentTrigger(page)).toHaveText(/codex/);
     await expect(agentTrigger(page)).toContainText(PICKED_MODEL);
-    await expect(workspaceChip(page)).toContainText('中文项目');
+    await expect(projectChip(page)).toHaveClass(/bg-mint-soft/);
 
     // The completion was consumed, not read: reloading restores the entry as it
     // now stands, which no longer claims a setup just finished. So the home says
@@ -255,7 +258,9 @@ test.describe('Setup handoff to the Workbench home', () => {
 
     // Away, through the shell's own nav — and really away: the home's composer
     // is gone, not covered.
-    await page.getByRole('link', { name: 'Agents' }).click();
+    // Exact, because the home's own "Manage agents" pill points at the same
+    // route: leaving through the shell's nav is the claim here.
+    await page.getByRole('link', { name: 'Agents', exact: true }).click();
     await expect(page).toHaveURL(/\/agents$/);
     await expect(composer(page)).toHaveCount(0);
 
@@ -263,7 +268,10 @@ test.describe('Setup handoff to the Workbench home', () => {
     // announced — and nothing is asked either, which is the assertion that
     // separates "said nothing" from "said nothing yet".
     const readsBeforeReturn = setup.homeReads.length;
-    await page.getByRole('link', { name: 'New chat' }).click();
+    // Back through the shell's own brand row — the control that opens the
+    // new-conversation home. Anchored, so the phone header's "avibe logo
+    // Avibe" could never stand in for it.
+    await page.getByRole('link', { name: /^Avibe/ }).click();
     await expect(heroTitle(page)).toBeVisible();
     await expect(composer(page)).toBeVisible();
     await expect(banner(page)).toHaveCount(0);

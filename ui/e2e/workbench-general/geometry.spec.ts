@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './support';
 
@@ -16,10 +16,11 @@ const SETTINGS_RAIL = 'nav[aria-label="Settings sections"]';
 const SETTINGS_PAGE = 'nav[aria-label="Settings sections"] + section';
 const SETTINGS_CONTENT = 'nav[aria-label="Settings sections"] + section > div';
 const APPEARANCE_CARD = 'section.bg-surface-2:has([role="radiogroup"])';
-// The composer's own workspace chip, not the sidebar tree row: it is the
-// selection the overlay has to hand back, and its label carries the fixture's
-// non-ASCII path.
-const WORKSPACE_CHIP = 'Workspace: /Users/max/工作区/中文项目';
+// The home's own project row, not the sidebar tree row: it is the selection the
+// overlay has to hand back, and the fixture names it in non-ASCII on purpose.
+const PROJECT_CHIP = '中文项目';
+const projectChip = (page: Page) =>
+  page.locator(SHELL_SCROLL).getByRole('button', { name: PROJECT_CHIP, exact: true });
 const MOBILE_NAV = 'nav.fixed.bottom-0';
 const ULTRA = { width: 1920, height: 1000 };
 // A short phone that still requires scrolling after the composer spacing was
@@ -181,15 +182,17 @@ test.describe('workbench home geometry', () => {
   });
 
   /**
-   * The phone home is taller than the screen, so whatever ends the page sits
-   * under the fixed tab bar until someone scrolls. What ends the page is the
-   * composer's own action row — Agent, workspace, Send — so the defect is a
-   * dead primary button on first paint, not a cropped screenshot. Both
-   * languages, because the row's left side is translated text whose width moves.
+   * The phone home flows from the top: nothing is pinned above the tab bar, so
+   * a crowded screen is reached by scrolling. That makes the defect a primary
+   * button you cannot press once you get to it — the end of the page left
+   * sitting under the fixed bar — rather than a cropped screenshot. Checked on
+   * a normal phone, where it fits without scrolling, and on a short one, where
+   * it does not. Both languages, because the controls sit beside translated
+   * text whose width moves.
    */
   const PHONE_COMPOSER: { lang: 'en' | 'zh'; placeholder: string; send: string; lastRow: string }[] = [
-    { lang: 'en', placeholder: 'Describe a task or ask a question...', send: 'Send', lastRow: 'Continue on your phone' },
-    { lang: 'zh', placeholder: '给你的助手安排任务…', send: '发送', lastRow: '在手机 APP 上继续' },
+    { lang: 'en', placeholder: 'Tell the agent what you want…', send: 'Send', lastRow: 'Continue on your phone' },
+    { lang: 'zh', placeholder: '和 Agent 聊点什么…', send: '发送', lastRow: '在手机 APP 上继续' },
   ];
 
   for (const { lang, placeholder, send, lastRow } of PHONE_COMPOSER) {
@@ -249,17 +252,27 @@ test.describe('workbench home geometry', () => {
         await sendButton.click({ trial: true });
 
         // Continue the typed draft on the existing short phone. Here overflow
-        // must be real: the controls clear the bar even in a crowded layout.
+        // must be real, and it must be vertical only: the column wraps and the
+        // project chips scroll inside their own row, so the page itself never
+        // goes sideways.
         await page.setViewportSize(NARROW_SHORT);
         await page.waitForFunction((height) => window.innerHeight === height, NARROW_SHORT.height);
         const overflow = await page.locator(SHELL_SCROLL).evaluate((node) => ({
           top: node.scrollTop,
           hidden: node.scrollHeight - node.clientHeight,
+          sideways: node.scrollWidth - node.clientWidth,
         }));
         expect(overflow.top).toBe(0);
         expect(overflow.hidden).toBeGreaterThan(0);
+        expect(overflow.sideways).toBe(0);
         await expect(composer).toHaveValue(draft);
         await expect(composer).toBeFocused();
+
+        // Scroll to the end the way a reader would. What the scroll arrives at
+        // has to be usable: the shell's own clearance keeps the last row and
+        // the primary button off the bar instead of parking them underneath it.
+        await page.locator(SHELL_SCROLL).evaluate((node) => { node.scrollTop = node.scrollHeight; });
+        await expect(composer).toHaveValue(draft);
         expect(await topmostOver(page, sendButton)).toBe(send);
         expect(await bottomOf(page.getByRole('link', { name: lastRow })))
           .toBeLessThanOrEqual((await nav.boundingBox())!.y);
@@ -287,10 +300,10 @@ test.describe('settings overlay geometry', () => {
     // A draft and a project selection are what the overlay exists to preserve,
     // so the assertion starts by creating both. Non-ASCII on purpose.
     const draft = '给中文项目写一份说明';
-    const composer = page.getByPlaceholder('Describe a task or ask a question...');
+    const composer = page.getByPlaceholder('Tell the agent what you want…');
     await composer.fill(draft);
     await expect(composer).toHaveValue(draft);
-    await expect(page.getByLabel(WORKSPACE_CHIP)).toBeVisible();
+    await expect(projectChip(page)).toBeVisible();
 
     await page.locator('aside [data-settings-toggle="true"]').click();
     await expect(page).toHaveURL(/\/settings\/general$/);
@@ -309,8 +322,8 @@ test.describe('settings overlay geometry', () => {
     await page.getByRole('button', { name: 'Close Settings' }).click();
     await expect(page).toHaveURL(`${ORIGIN}/`);
     await expect(overlay).toHaveCount(0);
-    await expect(page.getByPlaceholder('Describe a task or ask a question...')).toHaveValue(draft);
-    await expect(page.getByLabel(WORKSPACE_CHIP)).toBeVisible();
+    await expect(page.getByPlaceholder('Tell the agent what you want…')).toHaveValue(draft);
+    await expect(projectChip(page)).toBeVisible();
 
     expect(denied).toEqual([]);
   });
