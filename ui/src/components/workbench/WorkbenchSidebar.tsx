@@ -71,8 +71,8 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
 
 // One capability row, in the approved compact treatment: a 13px medium label
 // behind a 16px icon on a rounded-lg row, with mint reserved for the selected
-// state. Selected / hover / default each keep their own nav token so Light and
-// Dark follow the table instead of a hard-coded neon.
+// state. The mint and foreground opacities are the approved reference's own and
+// already follow the theme; they are not interchangeable with the nav tokens.
 const SidebarNavRow: React.FC<{
   to: string;
   end?: boolean;
@@ -86,8 +86,8 @@ const SidebarNavRow: React.FC<{
       clsx(
         'group flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-colors',
         isActive
-          ? 'border-[var(--nav-selected-border)] bg-[var(--nav-selected-bg)] text-foreground shadow-[var(--shadow-glow-nav-mint)]'
-          : 'border-transparent text-muted hover:bg-[var(--nav-hover-bg)] hover:text-foreground',
+          ? 'border-mint/30 bg-mint/[0.08] text-foreground shadow-glow-sm-mint'
+          : 'border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
       )
     }
   >
@@ -809,8 +809,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2.5">
       {/* Brand row tLDP1 — the whole brand opens the new-conversation home. The
-          mark keeps the approved chip treatment (32px, mint hairline over the
-          brand well, resting glow that strengthens on hover) inside this
+          mark keeps the approved chip treatment (32px, mint hairline over a
+          mint well, resting glow that strengthens on hover) inside this
           sidebar's own padding, so the adjustable width still governs the
           column. Search is a compact icon in the Projects header below. */}
       <div className="flex shrink-0 items-center py-2">
@@ -824,7 +824,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             src={logoImg}
             alt=""
             aria-hidden="true"
-            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-[var(--logo-well-background)] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
+            className="size-8 shrink-0 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-glow-sm-mint transition-shadow group-hover:shadow-glow-md-mint"
           />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
@@ -851,7 +851,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   // for sessions / projects so the two reads stay distinct.
                   isActive
                     ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-glow-sm-cyan'
-                    : 'border-border-strong text-foreground hover:bg-[var(--nav-hover-bg)]',
+                    : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
                 )
               }
             >
