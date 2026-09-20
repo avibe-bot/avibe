@@ -25,6 +25,109 @@ def case(label, line, writer, *, name=KEY, path=".profile"):
 
 
 CASES = [
+    # Unknown option roles are not proof of invalid syntax. These strings are
+    # never expanded; each writer is supported by an explicit possible slot.
+    *[
+        case(f"dynamic-option-{command}", line, True)
+        for command, line in [
+            ("read", 'read "-$FLAGS" OPENAI_API_KEY'),
+            ("printf", 'printf "-$FLAGS" OPENAI_API_KEY %s new'),
+            ("declare", 'declare "-$FLAGS" OPENAI_API_KEY=new'),
+            ("typeset", 'typeset "-$FLAGS" OPENAI_API_KEY=new'),
+            ("export", 'export "-$FLAGS" OPENAI_API_KEY=new'),
+            ("readonly", 'readonly "-$FLAGS" OPENAI_API_KEY=new'),
+            ("mapfile", 'mapfile "-$FLAGS" OPENAI_API_KEY'),
+            ("readarray", 'readarray "-$FLAGS" OPENAI_API_KEY'),
+            ("unset", 'unset "-$FLAGS" OPENAI_API_KEY'),
+            ("getopts", 'getopts "-$FLAGS" a OPENAI_API_KEY -a'),
+            ("command", 'command "-$FLAGS" printf -vOPENAI_API_KEY %s new'),
+            ("env", 'env "-$FLAGS" OPENAI_API_KEY=new command'),
+        ]
+    ],
+    *[
+        case(f"dynamic-whole-{command}", line, True)
+        for command, line in [
+            ("read", 'read "$FLAGS" OPENAI_API_KEY'),
+            ("printf", 'printf "$FLAGS" OPENAI_API_KEY %s new'),
+            ("declare", 'declare "$FLAGS" OPENAI_API_KEY=new'),
+            ("typeset", 'typeset "$FLAGS" OPENAI_API_KEY=new'),
+            ("export", 'export "$FLAGS" OPENAI_API_KEY=new'),
+            ("readonly", 'readonly "$FLAGS" OPENAI_API_KEY=new'),
+            ("mapfile", 'mapfile "$FLAGS" OPENAI_API_KEY'),
+            ("readarray", 'readarray "$FLAGS" OPENAI_API_KEY'),
+            ("unset", 'unset "$FLAGS" OPENAI_API_KEY'),
+            ("getopts", 'getopts "$FLAGS" a OPENAI_API_KEY -a'),
+            ("command", 'command "$FLAGS" printf -vOPENAI_API_KEY %s new'),
+            ("builtin", 'builtin "$FLAGS" printf -vOPENAI_API_KEY %s new'),
+            ("env", 'env "$FLAGS" OPENAI_API_KEY=new command'),
+        ]
+    ],
+    case("dynamic-integer-role", 'declare "$FLAGS" other="OPENAI_API_KEY=1"', True),
+    case("dynamic-local-role", 'f() { local "-$FLAGS" OPENAI_API_KEY=new; }', True),
+    case("dynamic-callback-role", 'mapfile "$FLAGS" "OPENAI_API_KEY=1" unrelated', True),
+    case("dynamic-array-index-role", 'read "$FLAGS" "other[OPENAI_API_KEY=1]"', True),
+    case("dynamic-zsh-read", 'read "-$FLAGS" OPENAI_API_KEY', True, path=".zshrc"),
+    case("dynamic-zsh-integer", 'typeset "$FLAGS" other="OPENAI_API_KEY=1"', True, path=".zshrc"),
+    case("dynamic-default-read", 'read "$FLAGS"', True, name="REPLY"),
+    case("dynamic-default-mapfile", 'mapfile "$FLAGS"', True, name="MAPFILE"),
+    case("dynamic-default-getopts", 'getopts "$FLAGS" a other -a x', True, name="OPTARG"),
+    # Literal invalid options, explicit --, and already anchored data remain
+    # nonwriters. In particular a possible option is not arbitrary shell code.
+    case("dynamic-control-static-read", "read '-$FLAGS' OPENAI_API_KEY", False),
+    case("dynamic-control-static-printf", "printf '-$FLAGS' OPENAI_API_KEY %s new", False),
+    case("dynamic-control-static-declare", "declare '-$FLAGS' OPENAI_API_KEY=new", False),
+    case("dynamic-control-format", 'printf %s "-$FLAGS" OPENAI_API_KEY', False),
+    case("dynamic-control-echo", 'echo "read -$FLAGS OPENAI_API_KEY"', False),
+    case("dynamic-control-unrelated", 'read "-$FLAGS" unrelated', False),
+    case("dynamic-control-prompt", 'read -p "$PROMPT" unrelated', False),
+    case("dynamic-control-prompt-name", 'read -p "$OPENAI_API_KEY" unrelated', False),
+    case("dynamic-control-env-command", 'env echo "$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-wrapper-command", 'command echo "$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-wrapper-assignment-data", 'command "$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-builtin-assignment-data", 'builtin "$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-static-wrapper-assignment-data", 'command OPENAI_API_KEY=new', False),
+    case("dynamic-control-wrapper-query", 'command -v "$FLAGS" printf -vOPENAI_API_KEY %s new', False),
+    case("dynamic-control-wrapper-end", 'command -- "$FLAGS" printf -vOPENAI_API_KEY %s new', False),
+    case("dynamic-control-env-end", 'env -- "$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-printf-end", 'printf -- "-$FLAGS" %s OPENAI_API_KEY', True),
+    case("dynamic-control-getopts-end", 'getopts -- "$FLAGS" unrelated OPENAI_API_KEY', False),
+    case("dynamic-control-declare-end", 'declare -- "$FLAGS" other="OPENAI_API_KEY=1"', False),
+    case("dynamic-control-declare-query", 'declare -p OPENAI_API_KEY="$VALUE"', False),
+    case("dynamic-control-unset-query", 'unset -f OPENAI_API_KEY', False),
+    case("dynamic-control-data-not-code", 'read "$FLAGS" "printf -vOPENAI_API_KEY %s new"', False),
+    case("dynamic-control-callback-echo", 'mapfile "$FLAGS" "echo OPENAI_API_KEY" unrelated', False),
+    case("dynamic-control-env-data", 'env -a "$FLAGS" echo OPENAI_API_KEY=new', False),
+    case("dynamic-control-static-invalid-first", 'read -Q "$FLAGS" OPENAI_API_KEY', False),
+    case("dynamic-control-attached-mapfile-data", 'mapfile "-d$DELIMITER" "OPENAI_API_KEY=1" unrelated', False),
+    case("dynamic-control-attached-mapfile-callback-data", 'mapfile "-C$CALLBACK" "OPENAI_API_KEY=1"', False),
+    case("dynamic-control-attached-env-data", 'env "-a$ARGV0" echo OPENAI_API_KEY=new', False),
+    case("dynamic-control-attached-env-long-data", 'env "--chdir=$DIR" echo OPENAI_API_KEY=new', False),
+    case("dynamic-control-attached-query", 'command "-v$FLAGS" printf -vOPENAI_API_KEY %s new', False),
+    case("dynamic-control-static-operand", 'printf "literal$FORMAT" OPENAI_API_KEY', True),
+    case("dynamic-control-static-command", 'command "echo$SUFFIX" printf -vOPENAI_API_KEY %s new', False),
+    case("dynamic-control-anchored-env-assignment", 'env OTHER="$VALUE" echo OPENAI_API_KEY=new', False),
+    case("dynamic-control-anchored-declare-data", 'declare other="$VALUE" unrelated="OPENAI_API_KEY=1"', False),
+    case("dynamic-control-static-query-plus", 'declare -p +x OPENAI_API_KEY=new', False),
+    case("dynamic-control-static-query-dash", 'declare -p "-$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-static-query-attached", 'declare "-p$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-static-invalid-prefix-read", 'read "-Q$FLAGS" OPENAI_API_KEY', False),
+    case("dynamic-control-static-invalid-prefix-printf", 'printf "-Q$FLAGS" OPENAI_API_KEY %s new', False),
+    case("dynamic-control-static-invalid-prefix-declare", 'declare "-Q$FLAGS" OPENAI_API_KEY=new', False),
+    case("dynamic-control-known-read-timeout", 'read -t0 OPENAI_API_KEY', False),
+    case("dynamic-control-zsh-known-echo", 'read -e "$FLAGS" OPENAI_API_KEY', False, path=".zshrc"),
+    case("dynamic-overrides-timeout-default", 'read -t0 "$FLAGS"', True, name="REPLY"),
+    case("dynamic-zsh-format-evaluation", 'printf "$FLAGS" "OPENAI_API_KEY=1"', True, path=".zshrc"),
+    case("dynamic-bash-format-data", 'printf "$FLAGS" "OPENAI_API_KEY=1"', False, path=".bashrc"),
+    *[
+        case(
+            f"dynamic-repeated-{command}-{'writer' if writer else 'data'}",
+            command + " " + " ".join(f'"-$FLAGS{index}"' for index in range(10))
+            + (" OPENAI_API_KEY" if writer else " unrelated"),
+            writer,
+        )
+        for command in ("read", "mapfile")
+        for writer in (True, False)
+    ],
     case("printf-compact", "printf -vOPENAI_API_KEY '%s' fixture-new", True),
     case("printf-separate", "printf -v OPENAI_API_KEY '%s' fixture-new", True),
     case("printf-array", "printf -v 'OPENAI_API_KEY[0]' '%s' fixture-new", True),
@@ -261,6 +364,9 @@ def test_profile_dialect_never_comes_from_runtime_shell(home, monkeypatch):
     "printf '%n' OPENAI_API_KEY",
     "declare -i unrelated='OPENAI_API_KEY=1'",
     "env -S 'OPENAI_API_KEY=fixture-new command'",
+    'read "-$FLAGS" OPENAI_API_KEY',
+    'printf "$FLAGS" OPENAI_API_KEY %s new',
+    'declare "$FLAGS" other="OPENAI_API_KEY=1"',
 ])
 def test_unrelated_consented_backend_can_still_migrate(home, tmp_path, writer):
     path = home / ".profile"
@@ -274,3 +380,54 @@ def test_unrelated_consented_backend_can_still_migrate(home, tmp_path, writer):
     assert result["applied"] == 1
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert path.read_text() == kept
+
+
+@pytest.mark.parametrize("command", ["read", "mapfile"])
+@pytest.mark.parametrize("count", [4, 6, 8, 10, 20, 40])
+@pytest.mark.parametrize("writer", [False, True])
+def test_dynamic_option_states_keep_only_writer_roles(monkeypatch, command, count, writer):
+    from core.handlers.model_hub import migration_shell as shell
+
+    original = shell._options
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        # A deterministic quadratic ceiling, including the negative case in
+        # which no writer result can short-circuit. No production budget exists.
+        assert calls <= (count + 2) ** 2
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shell, "_options", counted)
+    arguments = " ".join(f'"-$FLAGS{index}"' for index in range(count))
+    target = KEY if writer else "unrelated"
+    assert shell._written_names(f"{command} {arguments} {target}", frozenset({KEY})) == (
+        {KEY} if writer else set()
+    )
+
+
+@pytest.mark.parametrize("command", ["read", "mapfile", "printf"])
+def test_dynamic_option_complete_result_short_circuits(monkeypatch, command):
+    from core.handlers.model_hub import migration_shell as shell
+
+    original = shell._options
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert calls <= 2
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(shell, "_options", counted)
+    line = f'{command} "$FLAGS" {KEY} %s new'
+    assert shell._written_names(line, frozenset({KEY})) == {KEY}
+
+
+def test_command_wrappers_keep_argv_roles_without_recursion():
+    from core.handlers.model_hub import migration_shell as shell
+
+    prefix = "command " * 1100
+    assert shell._written_names(prefix + f"{KEY}=new", frozenset({KEY})) == set()
+    assert shell._written_names(prefix + f"read {KEY}", frozenset({KEY})) == {KEY}

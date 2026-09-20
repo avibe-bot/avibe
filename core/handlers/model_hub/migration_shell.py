@@ -31,6 +31,7 @@ _SEPARATORS = {";", ";;", ";&", "&", "&&", "||", "|", "|&", "(", ")", "((", "))"
 _DECLARATIONS = {"export", "readonly", "declare", "typeset", "local"}
 _COMMAND_PREFIXES = {"if", "then", "elif", "else", "while", "until", "do", "!", "time", "always"}
 _ZSH_PROFILES = frozenset({".zshenv", ".zprofile", ".zshrc", ".zlogin"})
+_DYNAMIC_STARTS = "$`~{*?["
 
 
 @dataclass(frozen=True, repr=False)
@@ -314,6 +315,12 @@ def _embedded_writers(token: _Token, names: frozenset[str], depth: int, dialect:
     return found
 
 
+@dataclass(frozen=True, repr=False)
+class _UnknownOptions:
+    options: dict[str, _Token | None]
+    remaining: list[_Token]
+
+
 def _options(
     arguments: list[_Token],
     flags: str = "",
@@ -323,20 +330,23 @@ def _options(
     plus: bool = False,
     long: Mapping[str, tuple[str, str]] | None = None,
     stop_after: str = "",
-) -> tuple[dict[str, _Token | None], list[_Token]] | None:
+) -> tuple[dict[str, _Token | None], list[_Token]] | _UnknownOptions | None:
     """Decode argument roles, not values; the last occurrence of an option wins.
 
     A required short argument may be attached, separate, or end a bundle.
     Zsh's optional numeric arguments consume only a digit-leading word/suffix.
     Long optional arguments are attached-only. Stop at the first operand/--.
-    Invalid known syntax cannot invoke the builtin (expansions are inventoried
-    separately, before this function). No argv is ever expanded or executed.
+    Invalid literal syntax cannot invoke the builtin; a dynamic word in option
+    position instead leaves its role unknown. Required option arguments and
+    words after an operand/-- never pass through that uncertainty boundary.
     """
     options: dict[str, _Token | None] = {}
     index = 0
     while index < len(arguments):
         token = arguments[index]
         argument = token.value
+        if not token.literal and (not argument or argument[0] in _DYNAMIC_STARTS):
+            return _UnknownOptions(options, arguments[index:])
         if argument == "--":
             return options, arguments[index + 1:]
         if plus and argument == "+":
@@ -348,7 +358,7 @@ def _options(
             name, separator, value = argument[2:].partition("=")
             spec = (long or {}).get(name)
             if spec is None:
-                return None
+                return None if token.literal else _UnknownOptions(options, arguments[index:])
             flag, arity = spec
             operand = None
             if separator:
@@ -383,6 +393,8 @@ def _options(
                 elif flag in required:
                     return None
             elif flag not in flags:
+                if not token.literal and flag in _DYNAMIC_STARTS:
+                    return _UnknownOptions(options, arguments[index:])
                 return None
             options.pop(flag, None)
             options.pop("+" + flag, None)
@@ -391,6 +403,78 @@ def _options(
                 return options, arguments[index + 1:]
         index += 1
     return options, []
+
+
+def _option_cases(
+    arguments: list[_Token], flags: str = "", required: str = "", *,
+    numeric: str = "", plus: bool = False,
+    long: Mapping[str, tuple[str, str]] | None = None, stop_after: str = "",
+    writer_flags: str = "", state_flags: str = "", state_values: str = "",
+    zero_values: str = "",
+) -> Iterator[tuple[dict[str, _Token | None], list[_Token]]]:
+    """Project an unknown option onto this builtin's existing argument roles.
+
+    This is an existential safety check, not an expansion guess. An unknown
+    word can end options, leave flags unchanged, enable a writer attribute, or
+    consume one following word in a known option's argument role. Static data
+    boundaries still terminate parsing. Retain only options the consumer
+    actually inspects, not combinations of irrelevant prompts/fds/delimiters.
+    Equivalent states are visited once.
+    """
+    def remember(options: dict[str, _Token | None], flag: str, value: _Token | None) -> None:
+        base = flag.removeprefix("+") if flag != "+" else flag
+        if base not in state_flags + state_values + zero_values:
+            return
+        options.pop(base, None)
+        options.pop("+" + base, None)
+        if base in zero_values:
+            value = _Token("0", "0") if value is not None and re.fullmatch(r"0+(?:\.0*)?", value.value) else None
+        elif base not in state_values:
+            value = None
+        options[flag] = value
+
+    pending = [(arguments, {})]
+    seen = set()
+    while pending:
+        remaining, prefix = pending.pop()
+        key = (tuple(remaining), tuple(sorted(prefix.items())))
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed = _options(
+            remaining, flags, required, numeric=numeric, plus=plus,
+            long=long, stop_after=stop_after,
+        )
+        if parsed is None:
+            continue
+        current = parsed.options if isinstance(parsed, _UnknownOptions) else parsed[0]
+        options = dict(prefix)
+        for flag, value in current.items():
+            remember(options, flag, value)
+        if not isinstance(parsed, _UnknownOptions):
+            yield options, parsed[1]
+            continue
+        token, *tail = parsed.remaining
+        # A whole dynamic word can itself be an operand (e.g. printf's
+        # format). A visibly option-prefixed word cannot provide a format.
+        if not token.value.startswith(("-", "+") if plus else ("-",)):
+            yield options, parsed.remaining
+        yield options, tail  # The dynamic word could be --.
+        pending.append((tail, options))
+        if plus and not token.value.startswith("-"):
+            # A dynamic +/- bundle may remove existing query attributes.
+            options = {key: value for key, value in options.items() if key not in {"f", "F", "p", "+"}}
+            pending.append((tail, options))
+        for flag in writer_flags:
+            pending.append((tail, {**options, flag: None}))
+        if tail:
+            for flag in required + numeric:
+                changed = dict(options)
+                remember(changed, flag, tail[0])
+                if flag in stop_after:
+                    yield changed, tail[1:]
+                else:
+                    pending.append((tail[1:], changed))
 
 
 def _destination(value: str, names: frozenset[str]) -> set[str]:
@@ -417,70 +501,81 @@ def _assignment_writers(value: str, names: frozenset[str], *, arithmetic: bool =
 def _array_reader_writers(
     arguments: list[_Token], names: frozenset[str], depth: int, dialect: str,
 ) -> set[str]:
-    parsed = _options(arguments, "t", "dnOsuCc")
-    if parsed is None:
-        return set()
-    options, operands = parsed
-    found = _destination(operands[0].value if operands else "MAPFILE", names)
-    callback = options.get("C")
-    if callback is not None:
-        # Only an explicit callback is code. Named functions are never followed.
-        found.update(
-            _written_names(callback.value, names, depth + 1, dialect)
-            if depth < 12 else _arithmetic_writers(callback.value, names)
-        )
+    found: set[str] = set()
+    for options, operands in _option_cases(arguments, "t", "dnOsuCc", state_values="C"):
+        found.update(_destination(operands[0].value if operands else "MAPFILE", names))
+        callback = options.get("C")
+        if callback is not None:
+            # Only an explicit callback is code. Named functions are never followed.
+            found.update(
+                _written_names(callback.value, names, depth + 1, dialect)
+                if depth < 12 else _arithmetic_writers(callback.value, names)
+            )
+        if found >= names:
+            break
     return found
 
 
 def _read_writers(arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
-    parsed = (
-        _options(arguments, "rszpqAclneE", "du", numeric="kt")
-        if dialect == "zsh" else _options(arguments, "ersE", "adinNptu")
+    cases = (
+        _option_cases(
+            arguments, "rszpqAclneE", "du", numeric="kt", writer_flags="A", state_flags="eAkqz",
+        )
+        if dialect == "zsh" else _option_cases(
+            arguments, "ersE", "adinNptu", writer_flags="t", state_values="a", zero_values="t",
+        )
     )
-    if parsed is None:
-        return set()
-    options, operands = parsed
-    if dialect == "zsh":
-        if "e" in options:
-            return set()  # Echo-only, unlike Bash's Readline -e.
-        targets = [arg.value for arg in operands] or ["reply" if "A" in options else "REPLY"]
-        targets[0] = targets[0].partition("?")[0] or ("reply" if "A" in options else "REPLY")
-        if options.keys() & {"A", "k", "q", "z"}:
-            targets = targets[:1]
-    else:
-        timeout = options.get("t")
-        if timeout is not None and re.fullmatch(r"0+(?:\.0*)?", timeout.value):
-            return set()  # Bash's -t 0 checks availability without assigning.
-        array = options.get("a")
-        targets = [array.value] if array is not None else [arg.value for arg in operands] or ["REPLY"]
-    return set().union(*(_destination(value, names) for value in targets))
+    found: set[str] = set()
+    for options, operands in cases:
+        if dialect == "zsh":
+            if "e" in options:
+                continue  # Echo-only, unlike Bash's Readline -e.
+            targets = [arg.value for arg in operands] or ["reply" if "A" in options else "REPLY"]
+            targets[0] = targets[0].partition("?")[0] or ("reply" if "A" in options else "REPLY")
+            if options.keys() & {"A", "k", "q", "z"}:
+                targets = targets[:1]
+        else:
+            timeout = options.get("t")
+            if timeout is not None and re.fullmatch(r"0+(?:\.0*)?", timeout.value):
+                continue  # Bash's -t 0 checks availability without assigning.
+            array = options.get("a")
+            targets = [array.value] if array is not None else [arg.value for arg in operands] or ["REPLY"]
+        found.update(set().union(*(_destination(value, names) for value in targets)))
+        if found >= names:
+            break
+    return found
 
 
 def _declaration_writers(command: str, arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
     if dialect == "zsh":
-        parsed = _options(arguments, "AHUafghlmrtuxT", numeric="EFLRZip", plus=True)
-    elif command in {"export", "readonly"}:
-        parsed = _options(arguments, "afAnp")
-    else:
-        parsed = _options(arguments, "aAfFgIilnprtux", plus=True)
-    if parsed is None:
-        return set()
-    options, operands = parsed
-    if options.keys() & {"f", "+f"}:
-        return set()
-    if dialect != "zsh" and options.keys() & {"F", "+F"}:
-        return set()
-    if ("p" in options or "+" in options) and (dialect == "zsh" or command not in {"export", "readonly"}):
-        return set()
-    # Attribute-only declarations are not newly stored credentials. An explicit
-    # integer RHS or array subscript is an evaluation context, quoted or not.
-    return set().union(*(
-        _assignment_writers(
-            arg.value, names,
-            arithmetic="i" in options or (dialect == "zsh" and bool(options.keys() & {"E", "F"})),
+        cases = _option_cases(
+            arguments, "AHUafghlmrtuxT", numeric="EFLRZip", plus=True,
+            writer_flags="i", state_flags="fFpi+E",
         )
-        for arg in operands
-    ))
+    elif command in {"export", "readonly"}:
+        cases = _option_cases(arguments, "afAnp", state_flags="fFp")
+    else:
+        cases = _option_cases(arguments, "aAfFgIilnprtux", plus=True, writer_flags="i", state_flags="fFpi+")
+    found: set[str] = set()
+    for options, operands in cases:
+        if options.keys() & {"f", "+f"}:
+            continue
+        if dialect != "zsh" and options.keys() & {"F", "+F"}:
+            continue
+        if ("p" in options or "+" in options) and (dialect == "zsh" or command not in {"export", "readonly"}):
+            continue
+        # Attribute-only declarations are not newly stored credentials. An explicit
+        # integer RHS or array subscript is an evaluation context, quoted or not.
+        found.update(set().union(*(
+            _assignment_writers(
+                arg.value, names,
+                arithmetic="i" in options or (dialect == "zsh" and bool(options.keys() & {"E", "F"})),
+            )
+            for arg in operands
+        )))
+        if found >= names:
+            break
+    return found
 
 
 def _printf_slots(format: str, dialect: str) -> list[tuple[int, str]]:
@@ -554,19 +649,31 @@ def _printf_slots(format: str, dialect: str) -> list[tuple[int, str]]:
 
 
 def _printf_writers(arguments: list[_Token], names: frozenset[str], dialect: str) -> set[str]:
-    parsed = _options(arguments, required="v")
-    if parsed is None:
-        return set()
-    options, operands = parsed
+    found: set[str] = set()
+    for options, operands in _option_cases(arguments, required="v", state_values="v"):
+        found.update(_printf_operand_writers(options, operands, names, dialect))
+        if found >= names:
+            break
+    return found
+
+
+def _printf_operand_writers(
+    options: dict[str, _Token | None], operands: list[_Token], names: frozenset[str], dialect: str,
+) -> set[str]:
     if not operands:
         return set()
     destination = options.get("v")
     found = _destination(destination.value, names) if destination is not None else set()
     format, values = operands[0], operands[1:]
     if not format.literal:
-        # A dynamic format might use %n. Only explicit name operands can be
-        # destinations; this does not infer a format from the environment.
-        return found | {arg.value for arg in values if arg.value in names}
+        # A dynamic format might use %n or an existing Zsh numeric slot.
+        # Inspect explicit writers only, never infer the format's value.
+        found.update(arg.value for arg in values if arg.value in names)
+        if dialect == "zsh":
+            for arg in values:
+                if arg.value[:1] not in {"'", '"'}:
+                    found.update(_arithmetic_writers(arg.value, names))
+        return found
     slots = _printf_slots(format.value, dialect)
     stride = max((slot + 1 for slot, _ in slots), default=0)
     if not stride:
@@ -659,35 +766,44 @@ def _env_split(text: str) -> list[_Token] | None:
 
 
 def _env_writers(arguments: list[_Token], names: frozenset[str]) -> set[str]:
-    # Each literal split consumes a written -S occurrence. No expansion may
-    # introduce another option, so nested -S needs neither recursion nor a
-    # fallback which mistakes arbitrary argument data for arithmetic/code.
-    while True:
-        parsed = _options(arguments, "iv0", "uCSa", long=_ENV_LONG_OPTIONS, stop_after="S")
-        if parsed is None:
-            return set()
-        options, operands = parsed
-        split = options.get("S")
-        if split is None:
-            break
-        values = _env_split(split.value)
-        if values is None:
-            return set()
-        arguments = values + operands
+    # Each split consumes a written operand in a known/possible -S role.
+    # Only the finite literal argv grammar is inspected; expansion never
+    # manufactures more source, and command arguments are not shell code.
     found: set[str] = set()
-    for token in operands:
-        if token.value == "-" and not found:
-            continue  # Historical env - (empty environment).
-        name, separator, _ = token.value.partition("=")
-        if not separator and token.literal:
-            break
-        if separator and name in names:
-            found.add(name)
+    pending = [arguments]
+    seen = set()
+    while pending:
+        arguments = pending.pop()
+        key = tuple(arguments)
+        if key in seen:
+            continue
+        seen.add(key)
+        for options, operands in _option_cases(
+            arguments, "iv0", "uCSa", long=_ENV_LONG_OPTIONS, stop_after="S", state_values="S",
+        ):
+            split = options.get("S")
+            if split is not None:
+                values = _env_split(split.value)
+                if values is not None:
+                    pending.append(values + operands)
+                continue
+            for token in operands:
+                if token.value == "-" and not found:
+                    continue  # Historical env - (empty environment).
+                name, separator, _ = token.value.partition("=")
+                if not separator:
+                    break  # Even a dynamic command name anchors command data.
+                if name in names:
+                    found.add(name)
+            if found >= names:
+                return found
     return found
 
 
 def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, dialect: str) -> set[str]:
     found = set().union(*(_embedded_writers(token, names, depth, dialect) for token in tokens))
+    if found >= names:
+        return found
     words: list[_Token] = []
     redirect = False
     for token in tokens:
@@ -711,15 +827,31 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, di
             break
         found.update(_assignment_writers(words[0].value, names))
         words = words[1:]
-    while words and words[0].value in {"command", "builtin"}:
-        parsed = _options(words[1:], "pvV" if words[0].value == "command" else "")
-        if parsed is None:
-            return found
-        options, words = parsed
-        if options.keys() & {"v", "V"}:
-            return found
-    if not words:
-        return found
+    # Wrappers select argv, not fresh shell source. In particular an assignment
+    # word after `command` is a command name, not a prefix assignment.
+    pending = [words] if words else []
+    seen = set()
+    while pending:
+        words = pending.pop()
+        key = tuple(words)
+        if key in seen:
+            continue
+        seen.add(key)
+        if words[0].value in {"command", "builtin"}:
+            for options, operands in _option_cases(
+                words[1:], "pvV" if words[0].value == "command" else "", state_flags="vV",
+            ):
+                if not options.keys() & {"v", "V"} and operands:
+                    pending.append(operands)
+        else:
+            found.update(_builtin_writers(words, names, depth, dialect))
+        if found >= names:
+            break
+    return found
+
+
+def _builtin_writers(words: list[_Token], names: frozenset[str], depth: int, dialect: str) -> set[str]:
+    found: set[str] = set()
     command = words[0].value
     arguments = words[1:]
     if command in _DECLARATIONS:
@@ -731,13 +863,17 @@ def _command_writers(tokens: list[_Token], names: frozenset[str], depth: int, di
     elif command in {"mapfile", "readarray"}:
         found.update(_array_reader_writers(arguments, names, depth, dialect))
     elif command == "unset":
-        parsed = _options(arguments, "fmv" if dialect == "zsh" else "fnv")
-        if parsed is not None and "f" not in parsed[0]:
-            found.update(set().union(*(_destination(arg.value, names) for arg in parsed[1])))
+        for options, operands in _option_cases(arguments, "fmv" if dialect == "zsh" else "fnv", state_flags="f"):
+            if "f" not in options:
+                found.update(set().union(*(_destination(arg.value, names) for arg in operands)))
+            if found >= names:
+                break
     elif command == "getopts":
-        parsed = _options(arguments)
-        if parsed is not None and len(parsed[1]) >= 2:
-            found.update({"OPTARG", "OPTIND", parsed[1][1].value} & names)
+        for _, operands in _option_cases(arguments):
+            if len(operands) >= 2:
+                found.update({"OPTARG", "OPTIND", operands[1].value} & names)
+            if found >= names:
+                break
     elif command == "printf":
         found.update(_printf_writers(arguments, names, dialect))
     elif command == "let":
