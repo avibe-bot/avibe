@@ -126,6 +126,71 @@ Read back every PR-body/comment change. Hand back PR/head, source parent SHAs, s
   or circuit-breaker trigger at this point. The exact-head review and required
   GitHub CI remain post-push gates.
 
+### Post-push mainline synchronization note
+
+- 2026-09-20: After pushing `007f631613be43b3d00918c9e1e3cde58235099d`, the
+  latest remote `master` was independently verified with `git ls-remote` as
+  `162fda5942461941942536355130477372739c36`. It includes the native
+  credential takeover integration from PR #2060, which intersects the shared
+  Model Hub/auth/backend lifecycle boundaries in this merge.
+- The repository's `remote.origin.fetch` contains only unrelated branch-specific
+  refspecs. A plain `git fetch origin master desktop` updates `FETCH_HEAD` but
+  does not refresh `origin/master` or `origin/desktop`. Subsequent source refresh
+  must use explicit refspecs such as
+  `refs/heads/master:refs/remotes/origin/master` and
+  `refs/heads/desktop:refs/remotes/origin/desktop`, or pin the SHA returned by
+  `git ls-remote`. The shared fetch configuration must remain unchanged.
+- A non-checkout merge-tree probe of `162fda5942` with the current candidate
+  returned a clean tree, but textual cleanliness does not establish semantic
+  compatibility. After the current-head review is terminal, merge this exact
+  master SHA normally, inspect native credential takeover against desktop IPC,
+  API, auth, and backend rolling-refresh ownership, and rerun focused consumers,
+  frontend build, and changed-Python Ruff before the one subsequent push.
+
+### Circuit-breaker ruling and bounded follow-up
+
+- 2026-09-20: The Codex review inventory contains two findings-bearing heads:
+  `92c600aa78` (review `5259095413`) and `007f631613` (review `5259460941`).
+  The predecessor-identity finding was fixed on the first candidate. The
+  launch-provenance class repeated on the second candidate as
+  `4056057500`/`PRRT_kwDOPbFPYs6kG0NV`, so the review-loop circuit breaker
+  paused edits until the orchestrator diagnosed the complete class.
+- The diagnosis is that retry deduplication, scoped stop authority, and
+  evidence that a Runtime may still be alive have different lifetimes. The
+  bounded fix keeps one `LaunchState` owner and adds only minimal in-memory
+  liveness evidence. A helper timeout, successful reused outcome, missing
+  receipt, helper failure, receipt refusal, or recovery reset is not proof that
+  a previously launched or reused Runtime is absent. Receipt refusal revokes
+  stop authority; it does not turn uncertain liveness into `Inactive` removal.
+  Unknown liveness must continue to reach `RuntimeRemovalState::Unknown`, where
+  the bundled launcher refuses destructive deletion. A definitive safe stop or
+  completed removal may clear the evidence.
+- The lifecycle contract to preserve is:
+
+  | Launch/watch outcome | Readiness/retry state | Stop authority | Removal decision |
+  | --- | --- | --- | --- |
+  | pending | retain attempt; no overlapping helper | none | `Unknown` if no external readiness proves otherwise |
+  | started receipt | timeout releases only completed retry slot; late readiness may be adopted | scoped stop remains valid until refusal or confirmed loss | `Managed` while the owned Runtime is active; unknown liveness remains fail-closed |
+  | reused receipt | retry may proceed after a completed helper; no ownership | none | `Unknown` until liveness is disproved or removal completes |
+  | successful without receipt | retry may proceed after a completed helper; no ownership | none | `Unknown` rather than `Inactive` |
+  | failed helper | release failed attempt; do not infer prior Runtime absence | none | `Unknown` when prior liveness evidence remains; fresh never-launched state may be `Inactive` |
+
+  Readiness timeout alone releases retry eligibility, not liveness evidence.
+  Receipt refusal removes scoped stop authority but preserves uncertainty until
+  confirmed Runtime loss. `reset_after_confirmed_runtime_loss` is allowed to
+  clear the evidence only when its caller has established that the Runtime is
+  no longer serving. Tests cover timeout -> retry eligibility -> uninstall,
+  late-ready scoped stop, refusal, no-overlap, valid handover, fresh inactive
+  removal, and safe successful cleanup.
+- The Windows notification review finding `4056057501` is a verified false
+  positive and remains a deliberate non-change. `std::fs::rename` replaces an
+  existing destination on Windows according to the Rust standard-library
+  documentation; desktop-shell job `106015889235` in run `35487284891` passed
+  `preference_defaults_on_and_persists_the_tray_choice_across_restarts` and the
+  failure-preservation test on the reviewed head. No notification code or
+  dependency change is warranted. This evidence will be linked in the thread
+  reply before the thread is resolved.
+
 ### Original-head review inventory and scope decision
 
 Review 5259095413 reviewed `92c600aa78f51e3b9ec48f185e5150a4f2ef3163`.
