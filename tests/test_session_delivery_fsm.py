@@ -8156,33 +8156,36 @@ def test_stale_send_now_does_not_mutate_the_deferred_queue(managers) -> None:
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
 
 
-def test_send_now_keeps_attachment_head_for_the_next_turn(
+@pytest.mark.parametrize("text", ["", "看看这张图片"])
+def test_send_now_steers_attachment_head_into_the_active_turn(
     managers,
     tmp_path: Path,
+    text: str,
 ) -> None:
     from storage import media_service
 
     manager, _other, engine, _engine_b, _starts = managers
-    asyncio.run(_activate(manager, text="active turn"))
-    attachment = tmp_path / "queued-input.txt"
-    attachment.write_text("queued attachment", encoding="utf-8")
+    turn_id, _ = asyncio.run(_activate(manager, text="active turn"))
+    attachment = tmp_path / "队列图片.png"
+    attachment.write_bytes(b"queued image bytes")
     with engine.begin() as conn:
         token = media_service.register(
             conn,
             scope_id=None,
             session_id="ses_fsm",
-            kind="file",
+            kind="image",
             source="user_upload",
             local_path=str(attachment),
             file_name=attachment.name,
-            content_type="text/plain",
+            content_type="image/png",
         )
     queued = asyncio.run(
         manager.deliver(
             DeliveryRequest(
                 session_id="ses_fsm",
                 priority="p3",
-                content="review this file",
+                content=text,
+                has_content=True,
                 content_json={"attachments": [{"token": token}]},
             ),
             context=_context(),
@@ -8202,20 +8205,25 @@ def test_send_now_keeps_attachment_head_for_the_next_turn(
         )
     )
 
-    assert promoted.state == "queued"
-    assert promoted.reason == "attachments_wait_for_new_turn"
-    manager._steer.assert_not_awaited()
-    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    assert promoted.state == "accepted"
+    assert promoted.turn_id == turn_id
+    request = manager._steer.await_args.args[1]
+    assert request.text == text
+    assert request.files[0].local_path == str(attachment)
+    assert request.files[0].mimetype == "image/png"
+    assert request.files[0].name == "队列图片.png"
+    assert _row(engine, str(queued.delivery_id))["state"] == "accepted"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
 
 
-def test_content_p1_with_attachment_queues_behind_an_active_turn(
+def test_content_p1_with_attachment_steers_the_active_turn(
     managers,
     tmp_path: Path,
 ) -> None:
     from storage import media_service
 
     manager, _other, engine, _engine_b, _starts = managers
-    asyncio.run(_activate(manager, text="active turn"))
+    turn_id, _ = asyncio.run(_activate(manager, text="active turn"))
     attachment = tmp_path / "priority-input.txt"
     attachment.write_text("priority attachment", encoding="utf-8")
     with engine.begin() as conn:
@@ -8243,11 +8251,58 @@ def test_content_p1_with_attachment_queues_behind_an_active_turn(
         )
     )
 
-    assert admitted.state == "queued"
-    manager._steer.assert_not_awaited()
+    assert admitted.state == "accepted"
+    assert admitted.turn_id == turn_id
+    request = manager._steer.await_args.args[1]
+    assert request.text == "review this first"
+    assert request.files[0].local_path == str(attachment)
     row = _row(engine, str(admitted.delivery_id))
-    assert row["priority"] == "p3"
-    assert row["state"] == "queued"
+    assert row["priority"] == "p1"
+    assert row["state"] == "accepted"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("invalid", ["foreign_session", "revoked", "missing_file", "missing_token"])
+def test_send_now_does_not_partially_steer_unavailable_attachments(managers, tmp_path, invalid):
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    attachment = tmp_path / "图片.png"
+    attachment.write_bytes(b"image bytes")
+    with engine.begin() as conn:
+        if invalid == "foreign_session":
+            _seed_session(engine, "ses_foreign")
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_foreign" if invalid == "foreign_session" else "ses_fsm",
+            kind="image",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="image/png",
+        )
+        if invalid == "revoked":
+            conn.execute(update(media_objects).where(media_objects.c.token == token).values(revoked_at="now"))
+    if invalid == "missing_file":
+        attachment.unlink()
+    queued = asyncio.run(manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content="must keep my image",
+            content_json={"attachments": [{"token": "missing" if invalid == "missing_token" else token}]},
+        ),
+        context=_context(),
+    ))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    result = asyncio.run(manager.send_now("ses_fsm", expected_delivery_id=queued.delivery_id))
+
+    assert result["status"] == "queued"
+    assert result["reason"] == "attachments_unavailable"
+    manager._steer.assert_not_awaited()
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
 
 
 def test_archive_keeps_unknown_and_materializes_late_positive_evidence(managers) -> None:

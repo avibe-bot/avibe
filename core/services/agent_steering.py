@@ -11,6 +11,7 @@ from core.agent_input import AgentInputMetadata
 
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
+    from modules.im.base import FileAttachment
 
 AGENT_TURN_TOKEN = "turn_token"
 AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
@@ -27,7 +28,7 @@ class SteerOutcome(str, Enum):
 
 @dataclass(frozen=True)
 class SteerRequest:
-    """One guarded insertion request carrying the original user text."""
+    """One guarded insertion with original text and session-resolved attachments."""
 
     target_session_id: str
     expected_logical_turn_id: str
@@ -35,6 +36,7 @@ class SteerRequest:
     text: str
     attempt_id: str = ""
     input_metadata: AgentInputMetadata | None = None
+    files: tuple[FileAttachment, ...] = ()
 
 
 @dataclass(frozen=True)

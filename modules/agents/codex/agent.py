@@ -10,7 +10,7 @@ import shlex
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Sequence
 
 from config import paths
 from config.v2_config import (
@@ -18,6 +18,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.backend_failure import emit_backend_failure
+from core.agent_input import AgentInputMetadata
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
 from core.memory_cli_access import configure_memory_cli_access
@@ -55,6 +56,7 @@ from core.runtime_ownership import (
     wake_runtime_ownership,
 )
 from modules.agents.base import AgentRequest, BaseAgent
+from modules.im.base import FileAttachment
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
 from modules.agents.codex.session import CodexSessionManager
@@ -626,7 +628,7 @@ class CodexAgent(BaseAgent):
                 {
                     "threadId": thread_id,
                     "expectedTurnId": request.expected_native_turn_id,
-                    "input": [{"type": "text", "text": self.render_input(request.text, request.input_metadata)}],
+                    "input": self._build_native_input(request.text, request.files, request.input_metadata),
                 },
             )
         except RuntimeError as exc:
@@ -3623,14 +3625,22 @@ class CodexAgent(BaseAgent):
 
     def _build_input(self, request: AgentRequest) -> list[Dict[str, Any]]:
         """Convert AgentRequest into Codex UserInput items."""
+        return self._build_native_input(request.message, request.files, getattr(request, "input_metadata", None))
+
+    def _build_native_input(
+        self,
+        message: str,
+        files: Sequence[FileAttachment] | None,
+        input_metadata: AgentInputMetadata | None,
+    ) -> list[Dict[str, Any]]:
+        """Build both turn/start and turn/steer input without dropping images."""
         items: list[Dict[str, Any]] = []
 
         # Text input
-        message = request.message
-        if request.files:
+        if files:
             # Append file info like Claude agent does
             file_lines = ["", "[User Attachments]"]
-            for attachment in request.files:
+            for attachment in files:
                 if not attachment.local_path:
                     continue
                 is_image = (attachment.mimetype or "").startswith("image/")
@@ -3648,7 +3658,7 @@ class CodexAgent(BaseAgent):
             if len(file_lines) > 2:
                 message = f"{message}\n" + "\n".join(file_lines)
 
-        message = self.render_input(message, getattr(request, "input_metadata", None))
+        message = self.render_input(message, input_metadata)
         if message:
             items.insert(0, {"type": "text", "text": message})
 

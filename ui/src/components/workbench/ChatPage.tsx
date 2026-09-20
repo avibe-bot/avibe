@@ -2325,17 +2325,18 @@ export const ChatPage: React.FC = () => {
   );
 
   const sendQueueNow = useCallback(async () => {
-    // "立即发送": interrupt the running turn + flush the queue now. The queue
-    // flushes as one merged turn, so this runs the whole queue.
+    // Promote the exact FIFO head: steer the current turn without interrupting
+    // it, or start a new turn if idle. Only a compatible prefix may be claimed.
     const sid = sessionId;
-    if (!sid || queue.length === 0 || sendingQueueNow) return;
+    if (!sid || queue.length === 0 || sendingQueueNow || isQueueDeliveryFenced(queue[0])) return;
     const requestGeneration = ++queueSendGenerationRef.current;
     const isCurrentRequest = () =>
       requestGeneration === queueSendGenerationRef.current && sid === sessionIdRef.current;
-    // Give the click an immediate visual response while the request interrupts
-    // the current turn. The queue stays visible until admission succeeds so a
+    // Give the click an immediate visual response during admission.
+    // The queue stays visible until admission succeeds so a
     // failed or ambiguous request never hides work the user may need to retry.
     setSendingQueueNow(true);
+    setError(null);
     // A turn is about to run (the flushed queue) — reflect it immediately so
     // Stop stays available even if the controller's turn.start is missed/delayed
     // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
@@ -2351,13 +2352,16 @@ export const ChatPage: React.FC = () => {
         // (Codex P2). Other failures mean no turn is running → clear working.
         if (res.code !== 'stop_failed') setWorking(false);
         setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
-      } else if (res && (res as { status?: string }).status === 'empty') {
+      } else if (res?.status === 'queued') {
+        setError(t(res.reason === 'attachments_unavailable'
+          ? 'chat.queue.attachmentsUnavailable'
+          : 'chat.queue.sendDeferred'));
+      } else if (res?.status === 'empty') {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
         setWorking(false);
       } else {
-        // A successful admission may only claim the compatible prefix (for
-        // example, attachment rows can remain queued behind an active turn).
+        // A successful admission may only claim the compatible prefix.
         // Re-read the authoritative queue instead of assuming the whole visible
         // batch was flushed.
       }
@@ -3026,11 +3030,15 @@ export const ChatPage: React.FC = () => {
 };
 
 // Pending send-while-busy messages, shown between the transcript and the
-// composer. Queued work is visually grouped, but each Delivery stays
-// independently removable and compatible rows merge only at claim time.
+// composer. Queued work is visually grouped; editable Deliveries stay
+// independently removable. Unconfirmed steers remain visible but read-only,
+// and compatible rows merge only at claim time.
 // One queued message. Its text is a single truncated line by default; clicking
 // it expands to the full wrapped text (and clicking again collapses it) so a
 // long queued prompt can be read without sending it.
+const isQueueDeliveryFenced = (item: WorkbenchMessage) =>
+  item.state === 'pending_steer' || item.state === 'steering' || item.state === 'reconciling_steer';
+
 export const QueueRow: React.FC<{
   item: WorkbenchMessage;
   onRemove: (id: string) => void;
@@ -3057,10 +3065,12 @@ export const QueueRow: React.FC<{
   //  - harness/scheduled rows (source !== 'user') carry provenance flush_queue
   //    needs (suppress-delivery, native-id dedupe) that a plain recall would drop;
   //  - recall can't carry uploaded files (content.attachments), so an attachment
-  //    row would silently lose them. Both can still be deleted or left to send.
+  //    row would silently lose them. Editable queued rows can still be deleted;
+  //    unconfirmed steers cannot be recalled or removed.
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
   const hasAttachments = Array.isArray(att) && att.length > 0;
-  const canRecall = item.source === 'user' && !hasAttachments;
+  const fenced = isQueueDeliveryFenced(item);
+  const canRecall = item.source === 'user' && !hasAttachments && !fenced;
   // Rule 08: a queued annotation belongs to the strip and nowhere else, so the
   // strip is where it has to be identifiable. Same title as the card it will
   // become, so the row the user is looking at and the bubble that replaces it
@@ -3107,6 +3117,7 @@ export const QueueRow: React.FC<{
   return (
     <div
       data-queue-row="true"
+      aria-busy={fenced}
       className={clsx(
         'relative flex gap-2 px-2.5 py-1.5 transition-[background-color,box-shadow,border-radius] hover:z-10 hover:rounded-lg hover:bg-surface-1 hover:ring-1 hover:ring-border focus-within:z-10 focus-within:rounded-lg focus-within:bg-surface-1 focus-within:ring-1 focus-within:ring-border motion-reduce:transition-none',
         hasExpandedContent ? 'items-start' : 'items-center',
@@ -3192,6 +3203,7 @@ export const QueueRow: React.FC<{
         variant="ghost"
         size="icon"
         onClick={() => onRemove(item.id)}
+        disabled={fenced}
         aria-label={t('chat.queue.remove')}
         title={t('chat.queue.remove')}
         className="size-6 shrink-0 text-muted hover:text-destructive-ink"
@@ -3416,6 +3428,8 @@ export const QueueStrip: React.FC<{
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
+  const headFenced = isQueueDeliveryFenced(queue[0]);
+  const busy = sendingNow || headFenced;
   return (
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
@@ -3429,20 +3443,23 @@ export const QueueStrip: React.FC<{
             variant="ghost"
             size="sm"
             onClick={onSendNow}
-            disabled={sendingNow}
-            aria-busy={sendingNow}
+            disabled={busy}
+            aria-busy={busy}
             className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
           >
-            {sendingNow ? (
+            {busy ? (
               <>
                 <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                {t('chat.queue.sendingNow')}
+                {t(queue[0].state === 'reconciling_steer' ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow')}
               </>
             ) : (
               t('chat.queue.sendNow')
             )}
           </Button>
         </div>
+        {headFenced && (
+          <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
+        )}
         {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
         <div
           data-queue-batch="true"

@@ -786,7 +786,7 @@ export type ApiContextType = {
   // Send-while-busy queue (messages sent while a turn runs) + per-session draft.
   listSessionQueue: (sessionId: string, options?: { cache?: boolean }) => Promise<{ queued: WorkbenchMessage[] }>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
-  sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
+  sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; reason?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getCachedSessionDraft: (sessionId: string) => string | null;
   cacheSessionDraft: (sessionId: string, text: string) => void;
@@ -1316,6 +1316,9 @@ export type WorkbenchMessage = {
   parent_native_message_id: string | null;
   // Server-owned read projection. Durable Message rows never carry this field.
   projection?: 'claimed_delivery' | null;
+  // Queue/bootstrap include unaccepted steers as well as editable queued rows.
+  // Durable transcript Messages do not carry Delivery state.
+  state?: string;
   // Server-owned queued Delivery recovery projection, not Message metadata.
   requires_explicit_retry?: boolean;
   retry_reason?: string | null;
