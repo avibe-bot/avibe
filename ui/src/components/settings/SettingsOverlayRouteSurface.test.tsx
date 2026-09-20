@@ -545,7 +545,6 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     expect(document.body.style.pointerEvents).not.toBe('none');
-    expect(document.querySelector('[data-dialog-surface-backdrop="true"]')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
 
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
@@ -597,6 +596,11 @@ describe('SettingsOverlayRouteSurface', () => {
     const open = async () => {
       await user.click(screen.getByRole('link', { name: 'shell-settings' }));
       expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+      // Inline's whole premise is that the shell behind stays reachable, so
+      // this dialog must never go modal: Radix's modal path inerts the page
+      // behind it. Whether a layer *covers* the sidebar is a hit test, which
+      // only a browser can run — `geometry.spec.ts` settles that half.
+      expect(document.body.style.pointerEvents).not.toBe('none');
     };
     const stillOpen = () => expect(
       document.querySelector('[data-settings-overlay="true"]'),

@@ -644,11 +644,28 @@ test.describe('general settings geometry', () => {
     expect(await overlay.boundingBox()).toMatchObject({ x: standaloneRail, width: ULTRA.width - standaloneRail });
     // A secondary nav beside the real one does not deserve a second full column.
     expect(await widthOf(page, SETTINGS_RAIL)).toBe(196);
-    // Live, not a picture of a sidebar: its own controls still answer.
-    await expect(page.locator(`${SIDEBAR} [data-settings-toggle="true"]`)).toBeEnabled();
+
+    // Live, not a picture of a sidebar. `toBeEnabled` only reads the element;
+    // whether anything is stacked over it is a hit test, and a hit test is the
+    // one thing a class name, a bounding box and jsdom all cannot settle. So
+    // ask the browser what is actually under the pointer there — a transparent
+    // full-viewport layer would answer here and nowhere else.
+    const toggle = page.locator(`${SIDEBAR} [data-settings-toggle="true"]`);
+    await expect(toggle).toBeEnabled();
+    const toggleBox = (await toggle.boundingBox())!;
+    expect(await page.evaluate(([x, y]) => {
+      const hit = document.elementFromPoint(x, y);
+      return {
+        sidebar: Boolean(hit?.closest('[data-settings-toggle="true"]')),
+        covered: Boolean(hit?.closest('[data-settings-overlay="true"]')),
+      };
+    }, [toggleBox.x + toggleBox.width / 2, toggleBox.y + toggleBox.height / 2])).toEqual({
+      sidebar: true,
+      covered: false,
+    });
 
     // The preference outlives the surface that set it.
-    await page.locator(`${SIDEBAR} [data-settings-toggle="true"]`).click();
+    await toggle.click();
     await expect(overlay).toHaveCount(0);
     await open(page, '/settings/general');
     await expect(page.locator(SETTINGS_RAIL)).toBeVisible();

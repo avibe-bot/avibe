@@ -104,6 +104,17 @@ the publisher, feeds the rule directly.
 > name one more surface, inline stopped dismissing on outside interaction at all,
 > which is what the reachable-surface inventory above says it should never have
 > done. Standalone's shipped behaviour is untouched.
+>
+> A fifth head put that class on three heads, now claiming a transparent
+> `z-20` backdrop swallows every sidebar interaction. That one is not true:
+> Radix returns `null` from `DialogOverlay` unless the dialog is modal, and the
+> surface's only caller is non-modal, so the backdrop never reached the DOM. The
+> class's real root cause is what makes three reviewers keep finding new
+> mechanisms for one violation: *"inline leaves the shell live"* was stated only
+> as prose and class names, and the primitive carried dead markup that reads
+> exactly like the violation. So the contract is now stated where covering is a
+> real concept — a browser hit test — and the dead backdrop is deleted rather
+> than explained.
 
 ### What each consumer does with it
 
@@ -150,12 +161,23 @@ the publisher, feeds the rule directly.
   tracks even a dragged sidebar) and stays 196px inline, where spending a second
   full-width column on a secondary nav would cost 496px of left chrome.
 
-### Incidental fix
+### Incidental fixes
 
-`DialogSurfaceContent`'s default offset was a literal `md:left-[240px]` — both
-dead (its only caller overrode it) and wrong (the sidebar has been 248/variable
-for a while). It is now `md:left-[var(--app-sidebar-w)]`, which is what lets the
-inline caller need no override at all.
+Both are in `DialogSurfaceContent`, and both are the same shape: markup that
+looked authoritative and was in fact dead.
+
+- The default offset was a literal `md:left-[240px]` — dead (its only caller
+  overrode it) and wrong (the sidebar has been 248/variable for a while). It is
+  now `md:left-[var(--app-sidebar-w)]`, which is what lets the inline caller
+  need no override at all.
+- It also declared a transparent full-viewport backdrop at `z-20`, above the
+  app sidebar's `z-10`, with a comment crediting it for focus and accessibility
+  isolation. None of that was happening: Radix's `DialogOverlay` returns `null`
+  unless the dialog is modal, and this surface's one caller is deliberately
+  non-modal precisely so the shell behind stays live. The element never
+  existed at runtime — but on the page it reads as a layer over a live sidebar,
+  which is how it produced a P2. Deleted; a caller that wants a real backdrop
+  wants `DialogContent`.
 
 ### The card
 
@@ -196,4 +218,9 @@ edited into `design.pen`.
   the shipped behaviour. The portal case is the one an ancestry test cannot pass.
 - `e2e/workbench-general/geometry.spec.ts` — measured in a browser: the 248 rail,
   the card's background matching a neighbouring page's card, and inline actually
-  putting a live sidebar beside Settings at the sidebar's own width.
+  putting a live sidebar beside Settings at the sidebar's own width. It also
+  asks the browser what is under the pointer over that sidebar's Settings
+  toggle, which is the only place "nothing covers the live shell" can be
+  settled — a class name, a bounding box and jsdom all miss a transparent
+  layer. Verified non-vacuous: injecting a real `fixed inset-0 z-20` div into
+  the surface fails it.
