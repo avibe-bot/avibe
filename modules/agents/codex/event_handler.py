@@ -27,6 +27,7 @@ from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from modules.agents.codex.search_history import (
     SAFE_THREAD_ID_RE,
+    HistoryFingerprint,
     ThreadSearchState,
     harvest_search_results,
     is_web_search_item,
@@ -422,10 +423,20 @@ class CodexEventHandler:
         return state
 
     @staticmethod
-    def _remember_absent(state: ThreadSearchState, refs: Collection[str]) -> None:
-        """Record refs a complete read of the current history does not define."""
+    def _remember_absent(
+        state: ThreadSearchState,
+        refs: Collection[str],
+        proved_at: HistoryFingerprint | None,
+    ) -> None:
+        """Record refs a complete read of *proved_at* does not define.
+
+        The fingerprint travels with the ref, so the absence can only ever
+        suppress a re-read of the very history that proved it.
+        """
+        if proved_at is None:
+            return
         for ref in refs:
-            state.absent[ref] = None
+            state.absent[ref] = proved_at
             state.absent.move_to_end(ref)
         while len(state.absent) > _MAX_CITATION_ABSENT_REFS_PER_THREAD:
             state.absent.popitem(last=False)
@@ -444,9 +455,11 @@ class CodexEventHandler:
         whether the thread has an entry.
 
         The read is skipped only when every missing ref was already looked for in
-        exactly the history that is on disk now. Its results are returned
-        alongside the cache even if the bounded cache immediately evicted one of
-        them, so an eviction costs a re-read and never the attribution.
+        exactly one history, and that history is the one on disk now - a ref whose
+        absence was never proved, or was proved against an older file, is reason
+        enough to walk it again. Its results are returned alongside the cache even
+        if the bounded cache immediately evicted one of them, so an eviction costs
+        a re-read and never the attribution.
         """
         if not thread_id or not wanted:
             return {}
@@ -454,20 +467,19 @@ class CodexEventHandler:
         missing = {ref for ref in wanted if ref not in state.sources}
         if not missing:
             return state.sources
-        unchanged = state.at if missing <= state.absent.keys() else None
+        proofs = {state.absent.get(ref) for ref in missing}
+        unchanged = proofs.pop() if len(proofs) == 1 else None
         read = await asyncio.to_thread(
             read_thread_search_sources, thread_id, wanted=missing, unchanged=unchanged
         )
         if not read.scanned:
             return state.sources
         self._merge_search_sources(thread_id, list(read.sources.values()))
+        # Only a complete read leaves an absence behind it: an unreadable,
+        # unindexed, or still-growing history proved nothing, so its refs stay
+        # re-readable rather than settling into negative truth.
         if read.complete:
-            state.at = read.fingerprint
-            self._remember_absent(state, missing - read.sources.keys())
-        else:
-            # An unreadable, unindexed, or still-growing history proved nothing,
-            # so it stays re-readable rather than settling into negative truth.
-            state.at = None
+            self._remember_absent(state, missing - read.sources.keys(), read.fingerprint)
         return {**state.sources, **read.sources}
 
     async def _prepare_citations(

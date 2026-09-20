@@ -24,6 +24,7 @@ from modules.im.formatters.discord_formatter import DiscordFormatter
 from modules.im.formatters.feishu_formatter import FeishuFormatter
 from modules.im.formatters.telegram_formatter import TelegramFormatter
 from modules.im.formatters.wechat_formatter import WeChatFormatter
+from modules.im.wechat import WeChatBot, WeChatConfig
 from tests.test_message_dispatcher_platform_limits import _StubController
 
 URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
@@ -130,6 +131,69 @@ class CitationRenderingPerPlatformTests(unittest.TestCase):
 
         self.assertIn("developers.openai.com", rendered)
         self.assertIn(URL, rendered)
+
+
+class WeChatAdapterRenderingTests(unittest.TestCase):
+    """The real send path, not just the formatter it is supposed to agree with.
+
+    ``WeChatBot.send_message`` puts the text through ``format_markdown`` before
+    it reaches the API, so that method - and not ``WeChatFormatter`` on its own -
+    decides what a WeChat user can read. A formatter test that never crosses this
+    boundary cannot see the adapter drop the very address it renders.
+    """
+
+    def setUp(self):
+        self.bot = WeChatBot(WeChatConfig(bot_token="test-token"))
+
+    def test_the_adapter_keeps_the_destination_it_flattens(self):
+        flattened = self.bot.format_markdown(CITED)
+
+        self.assertIn(URL, flattened)
+        self.assertEqual(flattened, f"Native web search is documented. developers.openai.com ({URL})")
+
+    def test_the_adapter_writes_a_link_the_way_its_own_formatter_does(self):
+        """One platform, one answer about how a link looks in plain text."""
+        self.assertEqual(
+            self.bot.format_markdown(LINK),
+            WeChatFormatter().format_link("developers.openai.com", URL),
+        )
+
+    def test_flattening_a_link_never_lengthens_the_message(self):
+        """``text (url)`` is one character shorter than ``[text](url)``.
+
+        Chunking runs on the text the dispatcher holds, before this conversion,
+        so keeping the address can only ever be safe if it cannot grow a chunk.
+        """
+        for text in (CITED, f"{LINK} {LINK}", f"**Bold** {LINK}", f"# Head\n{LINK}"):
+            with self.subTest(text=text):
+                self.assertLessEqual(len(self.bot.format_markdown(text)), len(text))
+
+    def test_the_emphasis_passes_cannot_rewrite_a_destination(self):
+        """A URL is full of characters the markdown strippers would eat."""
+        url = "https://example.com/a_b_c/d*e*f/g`h"
+
+        flattened = self.bot.format_markdown(f"See [example.com]({url}) now")
+
+        self.assertEqual(flattened, f"See example.com ({url}) now")
+
+    def test_a_self_titled_link_is_not_written_twice(self):
+        url = "https://example.com/x"
+
+        self.assertEqual(self.bot.format_markdown(f"[{url}]({url})"), url)
+
+    def test_ordinary_markdown_is_still_reduced_to_plain_text(self):
+        text = "# Title\n**bold** *italic* ~~gone~~ `code` and [a](https://example.com/a)"
+
+        self.assertEqual(
+            self.bot.format_markdown(text),
+            "Title\nbold italic gone code and a (https://example.com/a)",
+        )
+
+    def test_an_image_is_still_reduced_to_its_alt_text(self):
+        self.assertEqual(
+            self.bot.format_markdown("![a screenshot](https://example.com/s.png)"),
+            "a screenshot",
+        )
 
 
 class SlackCitationRenderingTests(unittest.TestCase):

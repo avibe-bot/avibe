@@ -39,10 +39,16 @@ blob with no way to reach the page the answer is based on.
   A read only licenses "this ref is absent" when it reached the end of a file
   that did not change underneath it: an unreadable, unindexed, or still-growing
   history is re-read later rather than settling into permanent negative truth.
+  Each absence carries the fingerprint that proved it and may suppress a re-read
+  of that history only — a read directed at other refs walks the same file
+  without learning anything about this one, so one shared "already read" mark
+  would let it vouch for an absence it never tested.
 - **One shared rewrite, two readings.** `core/citations.py` rewrites each
   marker into an ordinary Markdown link (`[domain](url)`) and returns a
   structured sidecar persisted at `message.content.citations`. Every IM
-  platform delivers the Markdown unchanged; the Web transcript matches a link
+  platform delivers that Markdown through the renderer it already had — plain
+  `domain (url)` where the platform has no hyperlinks, which is what WeChat's own
+  formatter says a link looks like — and the Web transcript matches a link
   against the sidecar and upgrades it to a compact numbered badge with a
   title/domain preview. Neither surface re-parses markers, and the sidecar adds
   no attribution the text does not already carry.
@@ -87,8 +93,12 @@ blob with no way to reach the page the answer is based on.
   resolved: WHATWG reads `\` as a host separator where `urlsplit` reads
   userinfo, so it is preserved as `%5C`, and a canonical URL whose host the two
   parsers could still read differently is rejected outright rather than
-  repaired. The label attributes the host a browser would actually reach,
-  IDNA-encoded (`例え.jp` → `xn--r8jz45g.jp`), so neither an unsafe URL nor an
+  repaired. The label attributes the host a browser would actually reach:
+  non-transitional UTS #46 per label (`例え.jp` → `xn--r8jz45g.jp`,
+  `faß.de` → `xn--fa-hia.de`, where the standard library's IDNA 2003 codec would
+  have said `fass.de` — a different domain than the link opens), with ASCII
+  labels passed through as a browser passes them and a host that cannot be
+  canonicalized rejected rather than guessed at. So neither an unsafe URL nor an
   ordinary unrelated link can become a fabricated citation. One fixture,
   `tests/fixtures/citation_url_identity.json`, is asserted by both the Python
   canonicalizer and the real renderer.
@@ -107,8 +117,11 @@ blob with no way to reach the page the answer is based on.
   real consumption path (fresh handler, cross-turn, fork inheritance, same-name
   ref isolation, both recorded item shapes in one thread, a partially populated
   thread, a bound that must not discard the ref being resolved, an empty or
-  absent or unreadable history that later becomes readable, and a ref proven
-  absent not being rescanned), message readiness at
+  absent or unreadable history that later becomes readable, a ref proven
+  absent not being rescanned, and an absence not outliving the history that
+  proved it), the URL identity table including the IDN mapping cases, the real
+  `WeChatBot.format_markdown` boundary rather than its formatter alone, message
+  readiness at
   every terminal boundary, hidden blocks, event ordering and repeated
   completions, IM delivery, persistence and reload.
 - `tests/e2e/test_codex_citation_contract.py` — the installed `codex` binary

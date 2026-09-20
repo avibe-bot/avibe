@@ -146,7 +146,7 @@ _MD_ITALIC_UNDER = re.compile(r"_(.+?)_")
 _MD_STRIKETHROUGH = re.compile(r"~~(.+?)~~")
 _MD_INLINE_CODE = re.compile(r"`([^`]+)`")
 _MD_CODE_FENCE = re.compile(r"```[\w]*\n?(.*?)```", re.DOTALL)
-_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MD_HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
 _MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
 _MD_HR = re.compile(r"^---+$", re.MULTILINE)
@@ -493,14 +493,49 @@ class WeChatBot(BaseIMClient):
         """WeChat DMs have no thread concept."""
         return False
 
+    def _plain_link(self, label: str, destination: str) -> str:
+        """One markdown link as the plain text this platform can show.
+
+        The wording comes from ``WeChatFormatter`` rather than a second opinion
+        here, so the adapter and the formatter cannot disagree about what a link
+        looks like on a platform that has none.
+        """
+        label = label.strip()
+        destination = destination.strip()
+        if destination.startswith("<") and destination.endswith(">"):
+            destination = destination[1:-1].strip()
+        elif destination:
+            # A markdown destination cannot hold unescaped whitespace, so
+            # anything past it is the optional title, which is not an address.
+            destination = destination.split(maxsplit=1)[0]
+        if not destination or destination == label:
+            return label or destination
+        return self.formatter.format_link(label, destination)
+
     def format_markdown(self, text: str) -> str:
-        """Strip markdown formatting for WeChat plain text rendering."""
+        """Strip markdown formatting for WeChat plain text rendering.
+
+        WeChat personal chat has no hyperlinks, so a link survives only as
+        readable text - and an answer whose source the reader cannot open has
+        lost its attribution, which is exactly what a cited answer is for. The
+        address is therefore kept, and held behind a placeholder for the rest of
+        the pass the way ``TelegramFormatter.render`` holds its code: a URL is
+        full of characters the emphasis strippers match - ``_``, ``*``, a
+        backtick - and rewriting a destination is worse than not showing one.
+        """
         if not text:
             return text
         # Order matters: code fences before inline code, bold before italic
         result = _MD_CODE_FENCE.sub(r"\1", text)
         result = _MD_IMAGE.sub(r"\1", result)
-        result = _MD_LINK.sub(r"\1", result)
+        held: Dict[str, str] = {}
+
+        def hold_link(match: "re.Match[str]") -> str:
+            token = f"\ue000WX{uuid.uuid4().hex}\ue001"
+            held[token] = self._plain_link(match.group(1), match.group(2))
+            return token
+
+        result = _MD_LINK.sub(hold_link, result)
         result = _MD_BOLD.sub(r"\1", result)
         result = _MD_STRIKETHROUGH.sub(r"\1", result)
         result = _MD_ITALIC_STAR.sub(r"\1", result)
@@ -508,7 +543,10 @@ class WeChatBot(BaseIMClient):
         result = _MD_INLINE_CODE.sub(r"\1", result)
         result = _MD_HEADING.sub("", result)
         result = _MD_HR.sub("---", result)
-        return result.strip()
+        result = result.strip()
+        for token, replacement in held.items():
+            result = result.replace(token, replacement)
+        return result
 
     # ------------------------------------------------------------------
     # Callback registration

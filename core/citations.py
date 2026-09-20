@@ -29,6 +29,8 @@ from html.entities import html5 as HTML5_ENTITIES
 from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import unquote, urlsplit
 
+import idna
+
 from core.reply_enhancer import mask_hidden_and_code
 
 # The private-use delimiters the marker is wrapped in.
@@ -182,6 +184,12 @@ def _browser_host(url: str) -> str:
     carries a character a URL may not hold literally - a backslash is the host
     separator to one and userinfo to the other - so the host is read from the
     canonical form and rejected outright when the two could still disagree.
+
+    An internationalized label is canonicalized the way a browser does it:
+    non-transitional UTS #46, with the STD3 and hyphen rules off. Python's own
+    ``"idna"`` codec is IDNA 2003 *transitional* instead, which folds ``ß`` into
+    ``ss`` - so ``https://faß.de/`` would be attributed to ``fass.de`` while the
+    link opens ``xn--fa-hia.de``, naming a domain the reader never visits.
     """
     try:
         host = urlsplit(url).hostname or ""
@@ -195,14 +203,32 @@ def _browser_host(url: str) -> str:
         return ""
     if any(char in _FORBIDDEN_DOMAIN for char in decoded):
         return ""
-    if decoded.isascii():
-        return decoded
-    try:
-        # A browser labels an internationalized host by its punycode form, so a
-        # citation has to attribute that and not the bytes the URL spells.
-        return decoded.encode("idna").decode("ascii")
-    except (UnicodeError, ValueError):
-        return ""
+    labels: list[str] = []
+    for label in decoded.split("."):
+        if label.isascii():
+            # A browser passes an ASCII label through untouched apart from case,
+            # even one UTS #46 refuses: ``my_site.example.com`` holds an
+            # underscore and ``ab--cd.example`` trips the hyphen rule, and both
+            # resolve. Running them through IDNA would lose the citation.
+            labels.append(label.lower())
+            continue
+        try:
+            # A browser labels an internationalized host by the punycode it
+            # actually visits, so a citation has to attribute that and not the
+            # bytes the URL spells.
+            labels.append(
+                idna.encode(
+                    label, uts46=True, transitional=False, std3_rules=False
+                ).decode("ascii")
+            )
+        except (UnicodeError, ValueError):
+            # Stricter than a browser on the margins: IDNA 2008 disallows symbol
+            # labels UTS #46 alone would map (``❤.example`` resolves for a
+            # browser, and is dropped here). Rejection degrades the citation to
+            # its unresolved label, which is the only safe direction - a label
+            # that names a different domain than the link opens is the defect.
+            return ""
+    return ".".join(labels)
 
 
 def safe_url(value: Any) -> str:

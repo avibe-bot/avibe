@@ -153,19 +153,21 @@ class ThreadSearchRead:
 class ThreadSearchState:
     """What one process knows about a single thread's citable sources.
 
-    One record rather than three parallel maps, because the three facts are one
-    lifecycle: the sources seen so far, the refs a *complete* read of the
-    recorded history proved it does not define, and the fingerprint of the
-    history that proved it. A history that grows invalidates the absences it
-    justified, so an absence outliving its evidence would turn "not written down
-    yet" into permanent negative truth. Both maps are insertion-ordered so the
-    holder can bound them least-recently-used; forgetting an entry costs a
-    re-read, never a citation.
+    One record rather than parallel maps, because the facts are one lifecycle:
+    the sources seen so far, and the refs a *complete* read proved the recorded
+    history does not define - each one carrying the fingerprint of the history
+    that proved it. A history that grows invalidates the absences it justified,
+    so an absence outliving its evidence would turn "not written down yet" into
+    permanent negative truth. The proof is per ref and never shared, because a
+    read is directed at the refs one message cites: a later scan looking for
+    other refs walks the grown file without learning anything about this one, and
+    a single "history I have already read" mark would let it vouch for an absence
+    it never tested. Both maps are insertion-ordered so the holder can bound them
+    least-recently-used; forgetting an entry costs a re-read, never a citation.
     """
 
     sources: "OrderedDict[str, CitationSource]" = field(default_factory=OrderedDict)
-    absent: "OrderedDict[str, None]" = field(default_factory=OrderedDict)
-    at: HistoryFingerprint | None = None
+    absent: "OrderedDict[str, HistoryFingerprint]" = field(default_factory=OrderedDict)
 
 
 def _fingerprint(path: Path) -> HistoryFingerprint:

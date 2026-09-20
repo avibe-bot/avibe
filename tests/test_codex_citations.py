@@ -1091,6 +1091,33 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         self.assertEqual(scans, [True, False])
         self.assertEqual(call.args[1], f"Second. {UNRESOLVED}")
 
+    async def test_an_absence_does_not_outlive_the_history_that_proved_it(self):
+        """A scan directed at one ref may not vindicate another ref's absence.
+
+        The second answer asks only about ``turn9view9``, so its scan of the
+        grown file learns nothing about ``turn0view0`` - it never looked. If both
+        absences lean on one "history I have already read" mark, that scan moves
+        the mark forward and the third answer takes the grown file for the one
+        that proved ``turn0view0`` missing, leaving the search now sitting in it
+        unread. Only the history an absence was actually proved against may
+        suppress a re-read.
+        """
+        path = self.record_history(self.home, "thread-a", [])
+
+        first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
+        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+
+        with path.open("a", encoding="utf-8") as handle:
+            row = self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")
+            handle.write(f"{json.dumps(row)}\n")
+
+        second = await self.next_answer("thread-a", f"Second.{marker('turn9view9')}")
+        self.assertEqual(second.args[1], f"Second. {UNRESOLVED}")
+
+        call = await self.next_answer("thread-a", f"Third.{marker('turn0view0')}")
+
+        self.assertEqual(call.args[1], f"Third. [developers.openai.com]({GUIDE_URL})")
+
     async def test_the_latest_recorded_definition_of_a_ref_wins(self):
         """A rollout file may redefine a ref; the newest row is the trustworthy one."""
         self.record_history(
