@@ -1,5 +1,43 @@
 # Shared Workbench and General Settings — issue #2012
 
+## Owner resolution: PR #2058 over #2061 (2026-09-20)
+
+At 10:30 Asia/Shanghai the owner explicitly selected the complete PR #2058
+presentation when resolving its conflict with merged PR #2061. This decision
+supersedes the sidebar presentation and persistence contract in the retained
+historical `2026-09-20-sidebar-31-alignment.md` plan.
+
+Merge actual master `4de519cce2f7254325a88f652b31f510a7a8ff70` into PR #2058
+head `5b0dab0cbb13fac318e5bfc4bb1778a90d02aca6`, preserving the latter's
+`WorkbenchSidebar.tsx` and `WorkbenchSidebar.inbox.test.tsx` in full. Search
+remains a full-width row below the brand; the logo, Inbox, and capability rows
+follow #2058. Capabilities start expanded and retain their collapsed state while
+the sidebar owner remains mounted, including across Settings, without storing
+that preference in localStorage. Keep #2058's Composer spacing and queue send
+feedback, current authorization filters, and Settings activity boundaries.
+
+All production and test content must remain byte-identical to the original
+#2058 head. Re-run the affected consumers, hermetic browser geometry/capability
+cases, typechecks, lint, and UI build, then obtain fresh exact-head Codex review
+and CI. Historical green results do not qualify for the refreshed head. This
+authorizes updating the existing PR, not merging or deploying it.
+
+PM review inventory before this refresh: nine reviews, eleven inline comments,
+two issue comments, and seven resolved whole-PR threads, including exhausted
+nested pages. The seven original findings span five heads: `366793a02f` (1),
+`24357fb9ee` (2), `8d743f3d42` (1), `e47847a109` (1), and `ad60570259` (2).
+Root causes are documentation drift, server-authoritative queue retention,
+destructive voice-control placement, stale invocation effects, and disconnected
+sidebar state/translation consumers. The stale-invocation class repeated on two
+heads and requires PM diagnosis under the circuit breaker. Independent inspection
+confirms the current invocation predicate gates the settled response, error,
+queue-refresh result, and spinner cleanup; the sidebar toggle and eyebrow have
+live consumers. The current focused consumers pass. This round preserves those
+repairs byte-for-byte and resolves only the owner-selected presentation conflict;
+it is not another queue architecture rewrite. Any new finding requires complete
+inventory and a fresh PM causal/scope ruling before further edits or pushes.
+
+
 Owner authorized parallel implementation on 2026-09-18 02:36 Asia/Shanghai. PM session: sestqz5wvu5ty. Branch feat/workbench-general-settings starts at GitHub-verified master 4019b704c99afe16223d475fccd9e1cb94a109d7 in its own worktree. #2011 is a separate active lane; #2013 remains deferred. Historical #2010-only or sequential-dispatch language is superseded by this explicit instruction.
 
 ## Outcome
