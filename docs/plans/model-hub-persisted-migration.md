@@ -48,8 +48,10 @@ is authorized by this implementation task.
   as dynamic, never as guessed numeric credentials. Ordinary attribute-only
   export/readonly declarations remain non-candidates. Written tied-declaration
   destinations are local evidence, not authority to follow a tie across
-  commands. A literal `emulate -c` shell name selects the embedded code's
-  grammar locally; it does not change the startup file's persistent dialect.
+  commands. Written `emulate -c` bodies retain Zsh's core role inventory:
+  emulation changes options, not the interpreter or builtin table. Do not
+  reinterpret `emulate sh` as Bash/POSIX commands or simulate compatibility
+  option state; it does not change the startup file's persistent dialect.
   Bash/POSIX startup paths and Zsh startup paths use their respective option
   semantics. `.profile` conservatively recognizes explicit Bash extensions
   as ambiguous without claiming that every POSIX shell executes them.
