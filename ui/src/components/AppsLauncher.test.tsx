@@ -53,15 +53,15 @@ afterEach(() => {
 });
 
 describe('AppsLauncher foreground affordance', () => {
-  it('keeps pin, hover Dock and context-menu launch behavior on the scoped mint treatment', () => {
+  it('keeps pin, hover Dock and context-menu launch behavior on the blue treatment', () => {
     renderLauncher();
     const button = screen.getByRole('button', { name: 'Apps' });
     const trigger = button.parentElement;
     expect(trigger).toBeTruthy();
-    expect(button.className).toContain('bg-mint/[0.16]');
+    expect(button.className).toContain('bg-cyan-soft');
     expect(button.className).toContain('text-foreground');
-    expect(button.className).not.toContain('shadow-glow');
-    expect(button.querySelector('svg')?.className.baseVal).toContain('text-mint-ink');
+    expect(button.className).toContain('shadow-glow-sm-cyan');
+    expect(button.querySelector('svg')?.className.baseVal).toContain('text-cyan-ink');
 
     fireEvent.mouseEnter(trigger!);
     expect(screen.getByTestId('dock-content')).toBeTruthy();

@@ -86,6 +86,50 @@ const receivesPointer = (locator: Locator) => locator.evaluate((element) => {
   ));
 });
 
+for (const theme of ['light', 'dark'] as const) {
+  test(`sidebar keeps the compact historical edge spacing and blue Apps treatment (${theme})`, async ({ page }, info) => {
+    await serveProduct(page, 'zh');
+    await page.setViewportSize(VIEWPORT);
+    await open(page, '/', { lang: 'zh', theme });
+    const sidebar = page.locator('aside.fixed');
+    const brand = sidebar.locator('a[href="/"]').first();
+    const apps = page.locator(LAUNCHER);
+    const settings = page.locator(SETTINGS);
+    for (const height of [1329, 767]) {
+      await page.setViewportSize({ ...VIEWPORT, height });
+      await expect.poll(async () => ({
+        brandTop: (await brand.boundingBox())!.y,
+        footerBottomInset: await sidebar.evaluate((element) => {
+          const footer = element.children[1].getBoundingClientRect();
+          return innerHeight - footer.bottom;
+        }),
+        appsHeight: (await apps.boundingBox())!.height,
+        settingsHeight: (await settings.boundingBox())!.height,
+      })).toEqual({ brandTop: 10, footerBottomInset: 16, appsHeight: 39, settingsHeight: 39 });
+    }
+    const treatment = await apps.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        fill: style.backgroundColor,
+        icon: getComputedStyle(element.querySelector('svg')!).color,
+      };
+    });
+    expect(treatment).toEqual(theme === 'light'
+      ? { fill: 'rgba(8, 145, 178, 0.14)', icon: 'rgb(8, 145, 178)' }
+      : { fill: 'rgba(63, 224, 229, 0.16)', icon: 'rgb(63, 224, 229)' });
+    await page.setViewportSize(VIEWPORT);
+    await page.screenshot({ path: info.outputPath(`sidebar-${theme}.png`), scale: 'css' });
+    await sidebar.getByRole('separator').focus();
+    await page.keyboard.press('End');
+    await expect.poll(async () => ({
+      width: (await sidebar.boundingBox())!.width,
+      brandTop: (await brand.boundingBox())!.y,
+      footerBottomInset: await sidebar.evaluate((element) =>
+        innerHeight - element.children[1].getBoundingClientRect().bottom),
+    })).toEqual({ width: 496, brandTop: 10, footerBottomInset: 16 });
+  });
+}
+
 for (const lang of ['en', 'zh'] as const) {
   test(`Settings stays icon-only while Apps takes the available width (${lang})`, async ({ page }) => {
     const denied = await serveProduct(page, lang);
