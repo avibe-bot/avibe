@@ -81,11 +81,14 @@ async function frame(page: Page) {
   const window = await page.evaluate(() => {
     const shell = document.querySelector('.onboarding-shell') as HTMLElement;
     const content = document.querySelector('.onboarding-shell-content') as HTMLElement;
+    // The column the composition is capped to, read from the step itself: the
+    // content box's own rect includes its gutters, which are not the column.
+    const step = document.querySelector('.onboarding-welcome, .onboarding-setup') as HTMLElement | null;
     return {
       vw: globalThis.innerWidth,
       vh: globalThis.innerHeight,
       gutter: parseFloat(getComputedStyle(shell).paddingLeft),
-      available: content.getBoundingClientRect().width,
+      available: step ? step.getBoundingClientRect().width : content.getBoundingClientRect().width,
     };
   });
   const clamp = Math.min(Math.max(976, 0.625 * window.vw), 1200);

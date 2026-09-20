@@ -78,17 +78,17 @@
   --ob-card-ph: 21px;
   --ob-card-gap: 14px;
   --ob-id-h: 43px;
-  --ob-id-pad: 15px;
+  --ob-id-pad: 14px;
   --ob-id-gap: 9px;
-  --ob-card-logo: 30px;
-  --ob-card-name: 18px;
-  --ob-spacer-1: 8px;
+  --ob-card-logo: 28px;
+  --ob-card-name: 16px;
   --ob-spacer-2: 12px;
   --ob-note-fs: 12px;
+  --ob-note-lh: 20px;
   --ob-method-h: 38px;
   --ob-method-fs: 13px;
   --ob-method-gap: 8px;
-  --ob-life-h: 32px;
+  --ob-life-h: 30px;
   --ob-h1: 34px;
   --ob-h1-lh: 46px;
   --ob-sub: 15px;
@@ -240,12 +240,12 @@
     --ob-card-ph: 19px;
     --ob-card-gap: 10px;
     --ob-id-h: 39px;
-    --ob-id-pad: 11px;
+    --ob-id-pad: 10px;
     --ob-card-logo: 28px;
     --ob-card-name: 16px;
-    --ob-spacer-1: 6px;
     --ob-spacer-2: 10px;
     --ob-method-h: 34px;
+    --ob-method-gap: 7px;
     --ob-life-h: 28px;
     --ob-h1: 32px;
     --ob-h1-lh: 44px;
@@ -278,11 +278,12 @@
     --ob-card-ph: 29px;
     --ob-card-gap: 18px;
     --ob-id-h: 56px;
-    --ob-id-pad: 19px;
+    --ob-id-pad: 18px;
     --ob-id-gap: 12px;
     --ob-card-logo: 35px;
     --ob-card-name: 20px;
     --ob-note-fs: 14px;
+    --ob-note-lh: 23px;
     --ob-method-h: 42px;
     --ob-method-fs: 14px;
     --ob-h1: 50px;
@@ -458,7 +459,7 @@
    phones the reserve is in `em`, because the size there is a tier variable and a
    wrapped title in either language has to leave the cards on the same line. */
 .onboarding-heading h1, .onboarding-heading h2 {
-  min-height: var(--ob-h1-lh);
+  min-height: var(--ob-h1-min, var(--ob-h1-lh));
   font-size: var(--ob-h1);
   line-height: var(--ob-h1-lh);
   font-weight: 600;
@@ -466,7 +467,7 @@
 }
 .onboarding-heading p {
   margin-top: var(--ob-heading-gap);
-  min-height: var(--ob-sub-lh);
+  min-height: var(--ob-p-min, var(--ob-sub-lh));
   font-size: var(--ob-sub);
   line-height: var(--ob-sub-lh);
   color: var(--muted);
@@ -945,7 +946,6 @@
   gap: 8px;
   flex-shrink: 0;
   min-height: var(--ob-life-h);
-  margin-bottom: var(--ob-spacer-1);
 }
 .onboarding-assistant-lifecycle {
   display: flex;
@@ -1015,7 +1015,7 @@
    out of the actions' room, and the card's height is the welcome's, not its own. */
 .onboarding-assistant-note {
   font-size: var(--ob-note-fs);
-  line-height: 1.6;
+  line-height: var(--ob-note-lh);
   color: var(--muted);
   margin-bottom: var(--ob-spacer-2);
   display: -webkit-box;
@@ -1156,17 +1156,27 @@
     --ob-card-ph: 25px;
     --ob-card-gap: 15px;
     --ob-id-h: 46px;
-    --ob-id-pad: 16px;
+    --ob-id-pad: 15px;
     --ob-id-gap: 12px;
     --ob-card-logo: 30px;
     --ob-card-name: 18px;
     --ob-note-fs: 13px;
+    --ob-note-lh: 22px;
     --ob-h1: 30px;
     --ob-h1-lh: 41px;
     --ob-sub: 14px;
     --ob-sub-lh: 22px;
     --ob-heading-gap: 12px;
+    /* A phone reserves two title lines and one subtitle line: the English title
+       wraps here while the Chinese does not, and the two steps must not disagree
+       about where the cards start. */
+    --ob-heading-h: 138px;
+    --ob-h1-min: calc(2 * var(--ob-h1-lh));
+    --ob-p-min: var(--ob-sub-lh);
     --ob-heading-mb: 27px;
+    /* The stacked floor, plus the three wrapped guide lines a 320px card can
+       carry: the floor has to hold the taller of the two steps' natural stacks. */
+    --ob-stage-h: calc(var(--ob-card-h) * 3 + 145px);
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;
@@ -1174,11 +1184,6 @@
     --ob-action-h: 54px;
     --ob-action-fs: 16px;
     --ob-action-icon: 18px;
-    /* The same reservation, re-derived for the stack: three cards, the two 16 gaps
-       between them, and the connection step's 20 + 90 import band under them. The
-       introduction spends the identical total on three taller cards, so the action
-       stays put between the steps and when the offer is dismissed. */
-    --ob-stage-h: calc(var(--ob-card-h) * 3 + 142px);
   }
   .onboarding-brand-mark { width: 38px; height: 38px; }
   .onboarding-brand-wordmark strong { font-size: 20px; line-height: 25px; }
@@ -1187,9 +1192,7 @@
      and not in the other still leaves the cards on the same line. In `em`, because the
      size here is a tier variable rather than a number. The block's own reserve gives
      way to these, which are the ones that can wrap. */
-  .onboarding-heading { min-height: 0; }
-  .onboarding-heading h1, .onboarding-heading h2 { min-height: 2.7em; }
-  .onboarding-heading p { min-height: 3.1em; }
+
   /* The story becomes the stack the connection already is. The wires go with the
      columns — there is no handoff to draw between cards that are above one another —
      and the caption, which rode the return wire, returns to normal flow under them.

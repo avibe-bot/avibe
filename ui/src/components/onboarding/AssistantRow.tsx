@@ -85,8 +85,18 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         )}
       </div>
       <div className="onboarding-assistant-body">
-        <p className="onboarding-assistant-note" title={t(`onboarding.setup.${backend}Description`)}>
-          {t(connection ? `onboarding.setup.${connection}` : `onboarding.setup.${backend}Description`)}
+        {/* The note is the guidance for the state the card is in, the way the frames
+            draw it — what to do next when nothing is installed, how to connect when
+            the binary is ready, and what a settled connection means — rather than a
+            static description of the assistant. The frames keep it to one line at
+            every tier, which a per-state sentence is short enough to honour in both
+            languages. */}
+        <p className="onboarding-assistant-note">
+          {status === 'missing'
+            ? t('onboarding.setup.installFirstNamed', { name: label })
+            : connection
+              ? t(`onboarding.setup.${connection}ConnectedHint`)
+              : t(`onboarding.setup.${backend}Guide`)}
         </p>
         {/* One full-width row per connection method, subscription above API Key, and
             the connected state wearing the same row with a mint check. */}
