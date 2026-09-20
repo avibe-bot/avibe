@@ -258,6 +258,13 @@ def plan_native_cleanup(
     # any credential. It cannot authorize cleanup of another native store.
     backends = {item.backend for item in items if not item.native_store_placeholder}
     selected_secrets = {item.secret for item in items if item.secret}
+
+    def selected_api_key(value: object) -> bool:
+        # Producers normalize static keys for proof/custody. Exact raw bytes
+        # remain in the checked snapshots and journal before-images; this
+        # comparison does not replace their consent or concurrency checks.
+        return isinstance(value, str) and value.strip() in selected_secrets
+
     if "claude" in backends:
         def clear_settings(payload: dict) -> None:
             env = payload.get("env")
@@ -265,8 +272,15 @@ def plan_native_cleanup(
                 raise TakeoverStateError("native configuration cannot be parsed")
             if isinstance(env, dict):
                 for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"):
-                    if key != "ANTHROPIC_BASE_URL" and env.get(key) and env[key] not in selected_secrets:
-                        raise TakeoverStateError("another native credential requires migration")
+                    value = env.get(key)
+                    if key != "ANTHROPIC_BASE_URL" and value:
+                        selected = (
+                            selected_api_key(value)
+                            if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+                            else isinstance(value, str) and value in selected_secrets
+                        )
+                        if not selected:
+                            raise TakeoverStateError("another native credential requires migration")
                     env.pop(key, None)
             if payload.get("apiKeyHelper"):
                 raise TakeoverStateError("native credential helper requires configuration")
@@ -285,7 +299,7 @@ def plan_native_cleanup(
         config_path, auth_path = get_codex_config_paths(home)
 
         def clear_auth(payload: dict) -> None:
-            if payload.get("OPENAI_API_KEY") and payload["OPENAI_API_KEY"] not in selected_secrets:
+            if payload.get("OPENAI_API_KEY") and not selected_api_key(payload["OPENAI_API_KEY"]):
                 raise TakeoverStateError("another native credential requires migration")
             if payload.get("tokens") and not any(
                 item.backend == "codex" and item.kind == "oauth_native"
@@ -317,7 +331,7 @@ def plan_native_cleanup(
                     provider = providers.get(provider_id)
                     if not isinstance(provider, dict):
                         continue
-                    if provider.get("experimental_bearer_token") and provider["experimental_bearer_token"] not in selected_secrets:
+                    if provider.get("experimental_bearer_token") and not selected_api_key(provider["experimental_bearer_token"]):
                         raise TakeoverStateError("another native credential requires migration")
                     # Retain user labels, capabilities, and timeout preferences.
                     for key in ("base_url", "env_key", "experimental_bearer_token", "requires_openai_auth"):
@@ -362,7 +376,7 @@ def plan_native_cleanup(
                 options = provider.get("options")
                 if isinstance(options, dict):
                     value = options.get("apiKey")
-                    if value and value not in selected_secrets:
+                    if value and not selected_api_key(value):
                         # The inventory bound the saved assignment, or proved
                         # its absence before selecting the auth.json fallback.
                         reference = (

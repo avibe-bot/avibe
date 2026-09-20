@@ -65,6 +65,7 @@ def _assert_cpa_bearer_consumption(app, upstream, key: str) -> None:
 @pytest.mark.parametrize("shape", [
     "claude-shell", "claude-bearer", "codex-shell", "opencode-file",
     "claude-shell-padded", "codex-shell-padded",
+    "claude-bearer-padded", "codex-file-padded", "opencode-file-padded",
 ])
 def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
     model_hub_app_factory, mock_llm_upstream, shape,
@@ -83,26 +84,33 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
 
     def seed(app):
         _seed_hub(app)
+        saved_key = f" \t{KEY} \t" if shape.endswith("-padded") else KEY
         if shell_fixture:
             prefix = "ANTHROPIC" if backend == "claude" else "OPENAI"
             credential_name = "ANTHROPIC_AUTH_TOKEN" if backend == "claude" else "OPENAI_API_KEY"
             path = app.home / ".bashrc"
-            saved_key = f" \t{KEY} \t" if shape.endswith("-padded") else KEY
             _write(path, retained + (
                 f"export {credential_name}='{saved_key}'\n"
                 f"export {prefix}_BASE_URL='{mock_llm_upstream.url}'\n"
             ))
             path.chmod(0o640)
-        elif shape == "claude-bearer":
+        elif shape.startswith("claude-bearer"):
             path = app.home / ".claude/settings.json"
             _write(path, json.dumps({
-                "env": {"ANTHROPIC_AUTH_TOKEN": KEY, "ANTHROPIC_BASE_URL": mock_llm_upstream.url},
+                "env": {"ANTHROPIC_AUTH_TOKEN": saved_key, "ANTHROPIC_BASE_URL": mock_llm_upstream.url},
                 "permissions": {"allow": ["Read"]},
             }))
+        elif shape == "codex-file-padded":
+            path = app.home / ".codex/config.toml"
+            _write(path, (
+                '[model_providers.fixture]\nname="Preserved fixture"\n'
+                f"experimental_bearer_token={json.dumps(saved_key)}\n"
+                f"base_url={json.dumps(mock_llm_upstream.url)}\n"
+            ))
         else:
             path = app.home / ".config/opencode/opencode.json"
             _write(path, json.dumps({
-                "provider": {"openai": {"options": {"apiKey": KEY, "baseURL": mock_llm_upstream.url}}},
+                "provider": {"openai": {"options": {"apiKey": saved_key, "baseURL": mock_llm_upstream.url}}},
                 "theme": "system",
             }))
         source_paths.append(path)
@@ -127,8 +135,11 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
         if shell_fixture:
             assert source_paths[0].read_bytes() == retained.encode()
             assert source_paths[0].stat().st_mode & 0o777 == 0o640
-        elif shape == "claude-bearer":
+        elif shape.startswith("claude-bearer"):
             assert json.loads(source_paths[0].read_text()) == {"env": {}, "permissions": {"allow": ["Read"]}}
+        elif shape == "codex-file-padded":
+            assert KEY not in source_paths[0].read_text()
+            assert "Preserved fixture" in source_paths[0].read_text()
         else:
             assert json.loads(source_paths[0].read_text())["theme"] == "system"
         assert app.client.post("/api/models/migration/scan", {}).json()["scan"]["items"] == []
