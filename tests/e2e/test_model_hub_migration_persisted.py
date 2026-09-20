@@ -232,6 +232,14 @@ def test_f4_custom_api_key_transport_is_refused_without_cleanup(
     (".zshrc", "emulate ksh -c 'print -v OPENAI_API_KEY fixture'"),
     (".zshrc", "logout 'OPENAI_API_KEY=1'"),
     (".zshrc", "fc -e 'read OPENAI_API_KEY'"),
+    (".bashrc", "compgen -W '# $((OPENAI_API_KEY=1))'"),
+    (".bashrc", "coproc 'OPENAI_API_KEY' { :; }"),
+    (".bashrc", ": {OPENAI_API_KEY}\\\n>/fixture/data"),
+    (".bashrc", ": {OPENAI_\\\nAPI_KEY}>/fixture/data"),
+    (".bashrc", 'complete -F "$FUNCTION" -C \'read OPENAI_API_KEY\' fixture'),
+    (".zshrc", 'trap "$BOUNDARY" \'read OPENAI_API_KEY\' DEBUG'),
+    (".zshrc", 'return "$BOUNDARY" \'OPENAI_API_KEY=1\''),
+    (".zshrc", "eval '-Q; read OPENAI_API_KEY'"),
 ])
 def test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof(
     model_hub_app_factory, mock_llm_upstream, profile, writer,
@@ -273,6 +281,8 @@ def test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof(
     (".zshrc", "print -R -v OPENAI_API_KEY"),
     (".zshrc", "emulate sh -c 'wait -p OPENAI_API_KEY'"),
     (".zshrc", "emulate sh -c 'mapfile OPENAI_API_KEY'"),
+    (".zshrc", "print -rf '%n' unrelated OPENAI_API_KEY"),
+    (".zshrc", "print -r -f '%d' 1 'OPENAI_API_KEY=2'"),
 ])
 def test_f4_shell_data_roles_allow_http_migration_without_changing_data(
     model_hub_app_factory, mock_llm_upstream, profile, data,
