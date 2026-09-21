@@ -616,19 +616,30 @@ class EngineStateStore:
                 if any(not isinstance(model, str) or not model or model != model.strip() for model in route_model_ids):
                     raise EngineStateError("invalid route model id")
                 reasoning_by_model: dict[str, tuple[str, ...]] = {}
+                # Which spelling each entry arrived under. A caller naming one
+                # model twice is still refused, but two names that meet only
+                # because the address came off collapse onto the first — the
+                # same collision ``model_ids`` above absorbs, and the same one a
+                # stored record absorbs on load. A Source may legitimately hold
+                # both spellings until its rows are repaired, and refusing the
+                # pair here would leave the engine unsynchronized instead.
+                spellings: dict[str, str] = {}
                 for model_id, efforts in binding.model_reasoning_efforts:
-                    normalized_model_id = model_id_without_credential_address(
-                        str(model_id).strip(), prefix
-                    )
+                    answered = str(model_id).strip()
+                    normalized_model_id = model_id_without_credential_address(answered, prefix)
                     if not normalized_model_id or normalized_model_id not in model_ids:
                         raise EngineStateError("reasoning model id is not registered")
-                    if normalized_model_id in reasoning_by_model:
-                        raise EngineStateError("duplicate reasoning model id")
                     normalized_efforts = tuple(
                         dict.fromkeys(str(effort).strip() for effort in efforts)
                     )
                     if any(not effort for effort in normalized_efforts):
                         raise EngineStateError("reasoning effort cannot be empty")
+                    held = spellings.get(normalized_model_id)
+                    if held is not None:
+                        if held == answered:
+                            raise EngineStateError("duplicate reasoning model id")
+                        continue
+                    spellings[normalized_model_id] = answered
                     reasoning_by_model[normalized_model_id] = normalized_efforts
                 records.append(
                     SourceRecord(

@@ -30,8 +30,9 @@ from core.handlers.model_hub.identifiers import (
 )
 from core.services.settings import default_config
 from vibe import api
+from core.handlers.model_hub.adapter import SourceBinding
 from vibe.model_hub_runtime.adapter import _discovered_models
-from vibe.model_hub_runtime.state import EngineStateError, SourceRecord
+from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, SourceRecord
 
 ADDRESS = "avibe-dc0395516c77a0ee4e62e01e"
 # Minted the same way, for some other credential. Nothing here may treat the two
@@ -274,6 +275,80 @@ def test_engine_record_still_refuses_an_unreadable_reasoning_map() -> None:
     with pytest.raises(EngineStateError, match="invalid engine source reasoning state"):
         SourceRecord.from_payload(
             _record_payload(model_reasoning_efforts=[["unregistered-model", ["high"]]])
+        )
+
+
+def _bound_store(tmp_path) -> tuple[EngineStateStore, str]:
+    store = EngineStateStore(tmp_path / "state")
+    store.prepare_instance("install-1")
+    (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+    credential_ref = store.bind_oauth_credential(
+        "src_fixture123",
+        "anthropic",
+        "claude-account.json",
+    )
+    return store, credential_ref
+
+
+def _sync_binding(credential_ref: str, **overrides: object) -> SourceBinding:
+    payload = {
+        "source_id": "src_fixture123",
+        "vendor": "anthropic",
+        "protocol": "anthropic",
+        "base_url": None,
+        "credential_ref": credential_ref,
+        "allowed_origins": ("claude",),
+        "model_ids": ("gpt-5.5",),
+    }
+    payload.update(overrides)
+    return SourceBinding(**payload)  # type: ignore[arg-type]
+
+
+def test_a_source_holding_both_spellings_still_reaches_the_engine(tmp_path) -> None:
+    """Config keeps both spellings, so the engine projection must survive them.
+
+    A Source whose file still carries an addressed row next to the bare name
+    projects one reasoning entry per row, and both name one model once the
+    address is gone. Refusing that pair would abort the whole sync and leave the
+    engine holding nothing — so it collapses onto the first, exactly as the
+    model ids beside it and a stored record on load already do.
+    """
+
+    store, credential_ref = _bound_store(tmp_path)
+    # The address this credential is actually reached by, which is the only one
+    # the projection removes.
+    address = store.credential_metadata(credential_ref)["prefix"]
+
+    records = store.sync_sources(
+        [
+            _sync_binding(
+                credential_ref,
+                model_ids=(f"{address}/gpt-5.5", "gpt-5.5"),
+                model_reasoning_efforts=(
+                    (f"{address}/gpt-5.5", ("high",)),
+                    ("gpt-5.5", ()),
+                ),
+            )
+        ]
+    )
+
+    assert records[0].model_ids == ("gpt-5.5",)
+    assert records[0].model_reasoning_efforts == (("gpt-5.5", ("high",)),)
+
+
+def test_one_model_named_twice_by_one_spelling_is_still_refused(tmp_path) -> None:
+    """Collapsing absorbs the merge this layer makes, not a caller's own repeat."""
+
+    store, credential_ref = _bound_store(tmp_path)
+
+    with pytest.raises(EngineStateError, match="duplicate reasoning model id"):
+        store.sync_sources(
+            [
+                _sync_binding(
+                    credential_ref,
+                    model_reasoning_efforts=(("gpt-5.5", ("high",)), ("gpt-5.5", ("low",))),
+                )
+            ]
         )
 
 
