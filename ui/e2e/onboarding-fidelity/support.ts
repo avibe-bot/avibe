@@ -34,6 +34,8 @@ export const VIEWPORTS = [
 export const size = ({ width, height }: { width: number; height: number }) => `${width}x${height}`;
 
 const CONFIG = {
+  capabilities: { model_hub: { enabled: true } },
+  model_hub: { enabled: true },
   platforms: { enabled: [] },
   agents: {
     claude: { enabled: true, cli_path: 'claude' },
@@ -63,6 +65,17 @@ export async function serveProduct(page: Page) {
     denied.push(`${method} ${request.url()}`);
     return route.abort();
   });
+  await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
+  await page.route('**/api/models/migration/scan', (route) => route.fulfill({ json: { scan: { items: [] } } }));
+  // A Hub-enabled config makes the settings surfaces read the Hub projection. The
+  // answers stay Direct-mode so every case authored before the gate keeps its path.
+  await page.route('**/api/models/agents', (route) => route.fulfill({ json: { ok: true, agents: [] } }));
+  await page.route('**/api/models/sources', (route) => route.fulfill({ json: { ok: true, sources: [] } }));
+  await page.route('**/api/models/agents/*/sources', (route) => {
+    const backend = new URL(route.request().url()).pathname.split('/')[4];
+    return route.fulfill({ json: { ok: true, agent: { backend, mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' } } });
+  });
+  await page.route('**/api/models/runtime/status', (route) => route.fulfill({ json: { ok: true, runtime: { contract_version: 10, enabled: true, host_platform: 'linux', manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] }, status: { installed_version: 'fixture', verified: true, health: 'ok' } } } }));
   await page.route('**/status', (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: { ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false } }));
   await page.route('**/api/config', (route) => route.fulfill({ json: CONFIG }));
@@ -211,15 +224,11 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
 }
 
 export async function openSetup(page: Page, lang: string) {
-  await page.getByRole('button', { name: lang === 'zh' ? '开始使用' : 'Get started' }).click();
+  await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
+  // The handoff timer uses the same browser clock as the story in deterministic runs.
+  await page.clock.runFor(950);
+  await page.locator('[data-setup-screen="assistants"]').waitFor();
   await page.locator('.onboarding-assistants').waitFor();
-  // The step switch plays a 450ms entrance that translates and blurs the incoming
-  // composition. It runs on the document timeline, so a frozen clock does not hold
-  // it; geometry read mid-entrance would be geometry of a composition still
-  // arriving. CSS animations, unlike timers, settle on their own.
-  await page.locator('.onboarding-step').evaluate((node) => Promise.all(
-    node.getAnimations({ subtree: false }).map((animation) => animation.finished.catch(() => null)),
-  ));
 }
 
 /**

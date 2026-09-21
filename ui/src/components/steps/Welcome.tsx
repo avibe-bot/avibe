@@ -1,27 +1,33 @@
-import { useRef, useState } from 'react';
-import { ArrowRight, RefreshCw } from 'lucide-react';
+import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../context/ApiContext';
-import { Button } from '../ui/button';
 import { CollaborationStory } from '../onboarding/CollaborationStory';
-import { AccessTiles } from '../onboarding/AccessTiles';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
 import { DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import type { SetupAction, SetupScreenHandle } from '../onboarding/setupFlow';
 import '../onboarding/onboarding.css';
 
 interface WelcomeProps {
+  active: boolean;
+  ref?: Ref<SetupScreenHandle>;
+  onActionChange: (action: SetupAction) => void;
   data?: { agents?: Record<string, { cli_path?: string }> };
   onNext: (data: unknown) => void | Promise<void>;
 }
 
-export function Welcome({ data, onNext }: WelcomeProps) {
+export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomeProps) {
   const { t } = useTranslation();
   const api = useApi();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = useRef(false);
+  // Same commit as the state it describes; see AgentDetection's publication note.
+  useLayoutEffect(() => {
+    if (active) onActionChange({ labelKey: pending ? 'onboarding.welcome.detecting' : error ? 'common.retry' : 'onboarding.welcome.getStarted', disabled: pending, busy: pending, icon: pending ? 'spinner' : 'arrow-right' });
+  }, [active, error, onActionChange, pending]);
+  useImperativeHandle(ref, () => ({ activate: () => { void start(); } }));
   const start = async () => {
-    if (busy.current) return;
+    if (!active || busy.current) return;
     busy.current = true;
     setPending(true);
     setError(null);
@@ -42,27 +48,18 @@ export function Welcome({ data, onNext }: WelcomeProps) {
   return (
     <div className="onboarding-welcome">
       <header className="onboarding-heading">
-        <h1>{t('onboarding.welcome.title')}</h1>
+        <h1 tabIndex={-1}>{t('onboarding.welcome.title')}</h1>
         <p>{t('onboarding.welcome.subtitle')}</p>
       </header>
       {/* The stage both steps share, so this button and the setup step's land on the
           same coordinates — see `.onboarding-stage` in onboarding.css. */}
       <div className="onboarding-stage">
-        <CollaborationStory />
+        <CollaborationStory active={active} />
       </div>
-      <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void start()} disabled={pending}>
-        {t(pending ? 'onboarding.welcome.detecting' : error ? 'common.retry' : 'onboarding.welcome.getStarted')}
-        {pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />}
-      </Button>
       {error && <div role="alert" className="text-center text-sm text-destructive-ink">
         <p>{t('onboarding.welcome.detectionFailed')}</p>
         <details className="mt-2 max-w-xl break-words"><summary>{t('onboarding.details')}</summary>{error}</details>
       </div>}
-      {/* Below the action, not inside the stage: where a person can reach Avibe from is
-          an epilogue to the introduction, and the reference draws it under the button
-          for that reason. Keeping it out of the stage is also what lets the stage be a
-          shared reservation — the connection step has no counterpart to this block. */}
-      <AccessTiles />
     </div>
   );
 }

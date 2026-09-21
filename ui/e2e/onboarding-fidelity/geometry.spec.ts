@@ -44,14 +44,14 @@ const WIRE_RATIO = 350 / 300;
 const STAGE_EXTRA = 64;
 
 const box = async (page: Page, selector: string, index = 0) => {
-  const rect = await page.locator(selector).nth(index).boundingBox();
+  const rect = await page.locator(selector).filter({ visible: true }).nth(index).boundingBox();
   if (!rect) throw new Error(`${selector} is not rendered`);
   return rect;
 };
 
 /** Every match's real rect in one round trip — what "aligned" has to be measured from. */
 const boxes = (page: Page, selector: string) =>
-  page.locator(selector).evaluateAll((nodes) => nodes.map((node) => {
+  page.locator(selector).filter({ visible: true }).evaluateAll((nodes) => nodes.map((node) => {
     const rect = node.getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   }));
@@ -212,19 +212,19 @@ test.describe('desktop reference geometry', () => {
     const heading = await box(page, '.onboarding-heading');
     const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
-    const access = await box(page, '.onboarding-access');
     // The heading block carries its tier's own distance to the stage — 15 under an
     // 800px window — while the stage's distance to the action is 20 in every row.
     const headingGap = await page.evaluate(() =>
-      parseFloat(getComputedStyle(document.querySelector('.onboarding-heading')!).marginBottom));
+      parseFloat(getComputedStyle(document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-heading')!).marginBottom));
     expect(round(headingGap)).toBe(15);
     expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
     expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
     expect(stage.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
 
-    // The access row is an epilogue under the action, not a block inside the stage: the
-    // connection step has no counterpart to it, and the stage is what the two steps share.
-    expect(access.y).toBeGreaterThan(action.y + action.height);
+    // The entry block is collapsed throughout setup (owner handoff, design boards and
+    // prototype agree), so the rhythm under the action ends at the reserved back row.
+    const back = await page.locator('.onboarding-back-action').evaluate((node) => node.getBoundingClientRect().top);
+    expect(back).toBeGreaterThan(action.y + action.height);
     expect(denied).toEqual([]);
   });
 
@@ -321,7 +321,7 @@ test.describe('desktop reference geometry', () => {
     const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
     const headingGap = await page.evaluate(() =>
-      parseFloat(getComputedStyle(document.querySelector('.onboarding-heading')!).marginBottom));
+      parseFloat(getComputedStyle(document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-heading')!).marginBottom));
     expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
     expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
     // The card, and the whole composition with it, follows the window's tier: the
@@ -335,7 +335,6 @@ test.describe('desktop reference geometry', () => {
     const overflows = () => page.evaluate(() =>
       (document.querySelector('.onboarding-shell') as HTMLElement).scrollHeight > globalThis.innerHeight);
     expect(await overflows()).toBe(false);
-    await expect(page.locator('.onboarding-access')).toBeInViewport();
 
     // Shorter than the frame it was drawn at, the card keeps paying and the leftover
     // scrolls — the spacing and the type are never the budget, at any height.
@@ -350,8 +349,6 @@ test.describe('desktop reference geometry', () => {
     // scrolls the rest.
     expect(round((await box(page, '.onboarding-collaboration-card')).height)).toBe(232);
     expect(await overflows()).toBe(true);
-    await page.locator('.onboarding-access').scrollIntoViewIfNeeded();
-    await expect(page.locator('.onboarding-access')).toBeInViewport();
   });
 
   /**
@@ -372,7 +369,7 @@ test.describe('desktop reference geometry', () => {
       await serveProduct(page);
       await openOnboarding(page);
       const type = () => page.evaluate(() => {
-        const node = document.querySelector('.onboarding-heading :is(h1, h2)')!;
+        const node = document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-heading :is(h1, h2)')!;
         const style = getComputedStyle(node);
         return {
           size: parseFloat(style.fontSize),
@@ -452,57 +449,6 @@ test.describe('capped fluid width', () => {
     });
   }
 
-  /**
-   * "Six access points … using circular logo containers, compact spacing and names
-   * underneath", drawn as a centred 560 row inside a block the reference grows in two
-   * steps — 740 on a standard desktop, 830 on a large one. Stretching the six circles
-   * themselves to the block turns a row of logos into a rule across the bottom of the
-   * page, so the grid keeps its 560 span and centres inside the block at every width.
-   */
-  for (const width of [1920, 1366, 1024, 768]) {
-    test(`the access row is a centred 560 of six circles at ${width}`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
-      await serveProduct(page);
-      await openOnboarding(page);
-
-      const access = await box(page, '.onboarding-access');
-      const welcome = await box(page, '.onboarding-welcome');
-      expect(access.width).toBeCloseTo(Math.min(740, welcome.width), 1);
-      expect(access.x + access.width / 2).toBeCloseTo(welcome.x + welcome.width / 2, 0);
-
-      const tiles = await boxes(page, '.onboarding-access-tile');
-      expect(tiles).toHaveLength(6);
-      // One row, on the 560/6 pitch the tracks produce rather than a gap someone typed.
-      expect(spread(tiles.map((tile) => tile.y))).toBeLessThanOrEqual(1);
-      const grid = Math.min(560, welcome.width);
-      for (let index = 1; index < tiles.length; index += 1) {
-        expect(tiles[index].x - tiles[index - 1].x).toBeCloseTo(grid / 6, 1);
-      }
-      const icons = await page.locator('.onboarding-access-icon').evaluateAll((nodes) => nodes.map((node) => {
-        const rect = node.getBoundingClientRect();
-        return { width: rect.width, height: rect.height, radius: getComputedStyle(node).borderRadius };
-      }));
-      for (const icon of icons) expect(icon).toEqual({ width: 52, height: 52, radius: '50%' });
-    });
-  }
-
-  test('phones fold the access row into two rows of three and keep full labels', async ({ page }) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await serveProduct(page);
-    await openOnboarding(page);
-    const access = await box(page, '.onboarding-access');
-    const welcome = await box(page, '.onboarding-welcome');
-    // Six 52px circles cannot sit on one 350px row, so the fixed span is given up here.
-    expect(round(access.width)).toBe(round(welcome.width));
-
-    const tiles = page.locator('.onboarding-access-tile');
-    await expect(tiles).toHaveCount(6);
-    const rows = await tiles.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)));
-    expect(new Set(rows).size).toBe(2);
-    const labels = await page.locator('.onboarding-access-label')
-      .evaluateAll((nodes) => nodes.map((node) => node.scrollWidth <= node.clientWidth + 1));
-    expect(labels).toEqual([true, true, true, true, true, true]);
-  });
 });
 
 /**
@@ -512,13 +458,56 @@ test.describe('capped fluid width', () => {
  * the copy, the step and the locale all change under them. A screen-sized tolerance would
  * make it vacuous, so this is exact box equality.
  */
+/**
+ * The six entry tiles belong to the reached worksurface, not to the setup journey: the
+ * owner handoff, the design boards and the prototype collapse the block for every setup
+ * screen. What stays true here is the property — the block remains mounted (its motion
+ * lifecycle is a mounted component's), hidden and inert, leaking nothing focusable, and
+ * the reserved action anchor does not depend on it at all.
+ */
+test('setup keeps the entry block mounted, hidden and inert, and the anchor independent of it', async ({ page }) => {
+  for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    const denied = await serveProduct(page);
+    await openOnboarding(page);
+    const block = page.locator('.onboarding-access');
+    await expect(block).toHaveCount(1);
+    await expect(block).toBeHidden();
+    expect(await block.evaluate((node) => node.hasAttribute('inert') && getComputedStyle(node).display === 'none')).toBe(true);
+    expect(await block.locator('.onboarding-access-tile').count()).toBe(6);
+    // Mounted but inert: nothing inside the block can take focus.
+    expect(await block.evaluate((node) => {
+      (node.querySelector('.onboarding-access-tile') as HTMLElement).focus();
+      return node.contains(document.activeElement);
+    })).toBe(false);
+    // Revealing the block changes what is below the anchor, never the anchor itself.
+    // The back row reserves its box through visibility on the first screen, so it is
+    // measured rather than filtered for visibility.
+    const rects = () => page.evaluate(() => {
+      const read = (selector: string) => {
+        const rect = document.querySelector(selector)!.getBoundingClientRect();
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+      };
+      return { primary: read('.onboarding-primary-action'), back: read('.onboarding-back-action') };
+    });
+    const before = await rects();
+    await block.evaluate((node) => { (node as HTMLElement).hidden = false; });
+    const after = await rects();
+    for (const key of ['x', 'y', 'width', 'height'] as const) {
+      expect(round(after.primary[key])).toBeCloseTo(round(before.primary[key]), 1);
+      expect(round(after.back[key])).toBeCloseTo(round(before.back[key]), 1);
+    }
+    expect(denied).toEqual([]);
+  }
+});
+
 test.describe('shared action anchor', () => {
   for (const viewport of [
     { width: 1920, height: 1080 }, { width: 1366, height: 768 }, { width: 1200, height: 800 },
     { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 },
   ]) {
     for (const lang of ['en', 'zh'] as const) {
-      test(`${size(viewport)} ${lang} keeps one action anchor across both steps`, async ({ page }) => {
+      test(`${size(viewport)} ${lang} keeps one action pair across every registered screen`, async ({ page }) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
         await openOnboarding(page, { lang });
@@ -530,22 +519,29 @@ test.describe('shared action anchor', () => {
         const action = await box(page, '.onboarding-primary-action');
         await expect(page.getByText('Avibe', { exact: true })).toBeVisible();
 
-        await openSetup(page, lang);
-        await toTop(page);
-        const nextHeading = await box(page, '.onboarding-heading');
-        const nextTitle = await box(page, '.onboarding-heading h2');
-        const nextSubtitle = await box(page, '.onboarding-heading p');
-        const nextStage = await box(page, '.onboarding-stage');
-        const nextAction = await box(page, '.onboarding-primary-action');
-
-        // The heading block is reserved, so a title that wraps in one step or one language
-        // and not in the other cannot move the stage below it.
-        expect(round(nextHeading.height)).toBeCloseTo(round(heading.height), 1);
-        expect(nextTitle.y).toBeCloseTo(title.y, 0);
-        expect(nextSubtitle.y).toBeCloseTo(subtitle.y, 0);
-        expect(round(nextStage.height)).toBeCloseTo(round(stage.height), 1);
-        for (const key of ['x', 'y', 'width', 'height'] as const) {
-          expect(round(nextAction[key])).toBeCloseTo(round(action[key]), 1);
+        const backBox = await page.locator('.onboarding-back-action').evaluate((node) => {
+          const rect = node.getBoundingClientRect(); return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        });
+        const sequence = (await page.locator('[data-setup-sequence]').getAttribute('data-setup-sequence'))!.split(' ');
+        for (const id of sequence.slice(1)) {
+          await page.locator('.onboarding-primary-action').click();
+          await page.clock.runFor(950);
+          await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', id);
+          await toTop(page);
+          const nextHeading = await box(page, '.onboarding-heading');
+          const nextTitle = await box(page, '.onboarding-heading h1');
+          const nextSubtitle = await box(page, '.onboarding-heading p');
+          const nextStage = await box(page, '.onboarding-stage');
+          expect(round(nextHeading.height)).toBeCloseTo(round(heading.height), 1);
+          expect(nextTitle.y).toBeCloseTo(title.y, 0);
+          expect(nextSubtitle.y).toBeCloseTo(subtitle.y, 0);
+          expect(round(nextStage.height)).toBeCloseTo(round(stage.height), 1);
+          for (const [selector, original] of [['.onboarding-primary-action', action], ['.onboarding-back-action', backBox]] as const) {
+            const next = await box(page, selector);
+            for (const key of ['x', 'y', 'width', 'height'] as const) expect(round(next[key])).toBeCloseTo(round(original[key]), 1);
+          }
+          await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
+          await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
         }
         await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
         await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
@@ -726,7 +722,7 @@ test.describe('narrow identity alignment', () => {
             // adjacent row/card. Check the actual visible label boxes.
             const clipped = await page.locator(
               '.onboarding-card-name, .onboarding-card-role, .onboarding-status-text',
-            ).evaluateAll((nodes) => nodes
+            ).filter({ visible: true }).evaluateAll((nodes) => nodes
               .filter((node) => {
                 const style = getComputedStyle(node);
                 const label = node.getBoundingClientRect();
@@ -742,7 +738,7 @@ test.describe('narrow identity alignment', () => {
           });
         }
         // …and the labels are still the product's own words at a readable size.
-        const names = await page.locator('.onboarding-card-name').allInnerTexts();
+        const names = await page.locator('.onboarding-card-name').filter({ visible: true }).allInnerTexts();
         expect(names.map((name) => name.replace(/\s+/g, ' ').trim())).toEqual(['Claude Code', 'Codex', 'OpenCode']);
         const smallest = await page.locator('.onboarding-card-role')
           .evaluateAll((nodes) => Math.min(...nodes.map((node) => parseFloat(getComputedStyle(node).fontSize))));
@@ -820,61 +816,6 @@ test.describe('motion lifecycle', () => {
     // And it is genuinely running again, rather than merely unpaused.
     await freezeAt(page, PHASES['pm-summary'] - PHASES['codex-working']);
     expect(await renderedPhase(page)).not.toEqual(before);
-  });
-
-  /**
-   * The other half of the same lifecycle. A hidden tab is not the only way a story goes
-   * unwatched: at 390x300 the diagram and the button below it cannot share the screen, so
-   * reading the button puts the whole composition above the viewport while the document
-   * stays perfectly visible. Element visibility is what closes that, and `threshold: 0`
-   * is what keeps a partly scrolled composition alive instead of stuttering at the seam.
-   */
-  test('a story scrolled out of sight suspends, and partial visibility does not', async ({ page }, info) => {
-    const denied = await serveProduct(page);
-    await page.setViewportSize({ width: 390, height: 300 });
-    await openOnboarding(page);
-    await freezeAt(page, PHASES['codex-working']);
-    const diagram = page.locator('.onboarding-collaboration');
-    const rect = () => diagram.evaluate((node) => {
-      const found = node.getBoundingClientRect();
-      return { top: Math.round(found.top), bottom: Math.round(found.bottom) };
-    });
-    // Whichever element actually scrolls here, the page or the shell inside it.
-    const scrollBy = (delta: number) => page.evaluate((amount) => {
-      const shell = document.querySelector('.onboarding-shell') as HTMLElement | null;
-      const scroller = shell && shell.scrollHeight > shell.clientHeight ? shell : document.scrollingElement!;
-      scroller.scrollTop += amount;
-    }, delta);
-
-    await page.locator('.onboarding-access').scrollIntoViewIfNeeded();
-    expect((await rect()).bottom).toBeLessThanOrEqual(0);
-    expect(await page.evaluate(() => document.hidden)).toBe(false);
-    await expect(diagram).toHaveAttribute('data-motion', 'paused');
-
-    const before = await renderedPhase(page);
-    const stopped = await cssEffects(page);
-    expect(stopped.every((effect) => effect.state === 'paused')).toBe(true);
-    await page.clock.runFor(3000);
-    await page.waitForTimeout(250);
-    expect(await renderedPhase(page)).toEqual(before);
-    expect(await cssEffects(page)).toEqual(stopped);
-    // The companion still for the design-frame crop: the CTA, reached by scrolling.
-    await page.screenshot({ path: info.outputPath('scrolled-cta-390x300.png') });
-
-    // Partly back: any intersecting pixel counts, so the story is live again at the seam.
-    await scrollBy(-100);
-    await page.waitForTimeout(150);
-    const seam = await rect();
-    expect(seam.top).toBeLessThan(0);
-    expect(seam.bottom).toBeGreaterThan(0);
-    await expect(diagram).toHaveAttribute('data-motion', 'running');
-
-    // And it resumed rather than restarted or skipped: the phase is the one it was
-    // holding, and it moves on from there once the clock runs again.
-    expect(await renderedPhase(page)).toEqual(before);
-    await freezeAt(page, PHASES['pm-summary'] - PHASES['codex-working']);
-    expect(await renderedPhase(page)).not.toEqual(before);
-    expect(denied).toEqual([]);
   });
 
   test('a reduced-motion preference draws the settled story and no pulse', async ({ page }, info) => {
@@ -996,7 +937,6 @@ test.describe('capture', () => {
     await openOnboarding(page);
     await freezeAt(page, PHASES[CAPTURE_PHASE]);
     expect((await renderedPhase(page)).states).toEqual(CAPTURE_STATES);
-    await expect(page.locator('.onboarding-access')).toBeInViewport({ ratio: 1 });
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath(`welcome-design-frame-1200x756-${CAPTURE_PHASE}.png`) });
     await openSetup(page, 'en');

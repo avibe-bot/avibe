@@ -1283,3 +1283,47 @@
 .onboarding-model-recovery { width: 100%; padding: 20px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; gap: 16px; background: var(--surface); min-width: 0; }
 .onboarding-model-recovery h3 { font-size: 16px; font-weight: 600; }
 .onboarding-model-recovery p { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+
+/* C2/C3: persistent screens share one reservation and one shell-owned action pair. */
+.onboarding-step { max-width: var(--ob-content-w); }
+.onboarding-screens { position: relative; width: 100%; }
+.onboarding-screens [hidden], .onboarding-access[hidden] { display: none !important; }
+.onboarding-handoff-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.onboarding-handoff-layer * { animation-play-state: paused !important; }
+.onboarding-handoff-card { position: absolute; pointer-events: none; }
+.onboarding-handoff-surface { position: absolute; inset: 0; border: 1px solid; transform-origin: top left;
+  /* The halo a working card wears is a token, so the flight borrows it through the same
+     name and fades it out on the token's own terms rather than carrying a computed
+     shadow string through the animation. */
+  transition: box-shadow 360ms ease 480ms; }
+.onboarding-handoff-surface[data-glow="true"] { box-shadow: var(--ob-active-shadow); }
+.onboarding-step[data-handoff] .onboarding-primary-action:disabled { opacity: 1; }
+.onboarding-heading h1:focus { outline: none; }
+.onboarding-flow-error { width: 100%; margin-top: 16px; text-align: center; color: var(--destructive-ink); overflow-wrap: anywhere; }
+/* The retained assistant hints are ancillary to the common stage. Their content can grow
+   without pushing the anchor. They follow the buttons in the flow via the shared grid. */
+.onboarding-setup-hint { width: 100%; text-align: center; margin-top: 16px; }
+.onboarding-step:has(.onboarding-setup-hint) .onboarding-setup-hint { position: absolute; top: 100%; padding-top: calc(var(--ob-action-h) * 2 + 10px); }
+
+/* Provider tiers are consumed by L2; their bands are the same C3 bands as the shell. */
+.onboarding-shell {
+  --ob-gateway-h: 72px;
+  --ob-provider-card-h: 76px;
+  --ob-provider-card-pad: 14px;
+  --ob-provider-card-logo: 32px;
+  --ob-provider-card-name: 18px;
+  --ob-provider-card-key: 11px;
+  --ob-wire-h: 48px;
+  --ob-destination-h: 84px;
+  --ob-gap: 10px;
+}
+@media (max-height: 800px) and (min-width: 760px) {
+  .onboarding-shell { --ob-provider-card-h: 62px; --ob-provider-card-pad: 12px; --ob-provider-card-logo: 24px; --ob-wire-h: 32px; --ob-access-circle: 48px; }
+}
+@media (min-width: 1600px) and (min-height: 950px) {
+  .onboarding-shell { --ob-gateway-h: 80px; --ob-provider-card-h: 88px; --ob-provider-card-logo: 35px; --ob-provider-card-name: 20px; --ob-provider-card-key: 12px; }
+}
+@media (max-width: 759px) {
+  .onboarding-shell { --ob-provider-card-h: 116px; --ob-provider-card-pad: 10px; --ob-provider-card-logo: 25px; --ob-provider-card-name: 13px; --ob-provider-card-key: 10px; --ob-wire-h: 42px; --ob-gap: 7px; --ob-destination-h: 120px; --ob-content-w: 460px; }
+  .onboarding-story-caption { display: none; }
+}

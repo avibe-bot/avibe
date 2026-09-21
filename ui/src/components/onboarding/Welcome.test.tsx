@@ -4,6 +4,9 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Welcome } from '../steps/Welcome';
+import { useRef, useState, type ComponentProps } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { SetupAction, SetupScreenHandle } from './setupFlow';
 import { CollaborationStory } from './CollaborationStory';
 import { AccessTiles } from './AccessTiles';
 import en from '../../i18n/en.json';
@@ -15,6 +18,16 @@ vi.mock('../../context/ApiContext', () => ({ useApi: () => mocks.api }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false } });
 const wrap = (element: React.ReactNode) => <I18nextProvider i18n={i18n}>{element}</I18nextProvider>;
+
+function Intro(props: Omit<ComponentProps<typeof Welcome>, 'active' | 'onActionChange'> & { active?: boolean }) {
+  const { t } = useTranslation();
+  const ref = useRef<SetupScreenHandle>(null);
+  const [action, setAction] = useState<SetupAction | null>(null);
+  return <><Welcome {...props} active={props.active ?? true} ref={ref} onActionChange={setAction} />
+    {action && <button disabled={action.disabled} onClick={() => ref.current?.activate()}>{t(action.labelKey)}</button>}
+    {/* The setup shell collapses the entry block on every screen; the wrapper mirrors it. */}
+    <AccessTiles active={false} /></>;
+}
 
 /** The tab going to the background, which jsdom exposes no other way. */
 const setHidden = (hidden: boolean) => act(() => {
@@ -58,7 +71,7 @@ describe('Welcome', () => {
   it('checks saved paths before advancing without persisting configuration', async () => {
     mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: `/test/${binary}` }));
     const next = vi.fn();
-    render(wrap(<Welcome data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
+    render(wrap(<Intro data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
     expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary)).toEqual(['/custom/claude', 'codex', 'opencode']);
@@ -67,7 +80,7 @@ describe('Welcome', () => {
   it('retains a failed detection on Welcome and permits retry', async () => {
     mocks.api.detectCli.mockRejectedValueOnce(new Error('Probe unavailable')).mockResolvedValue({ found: false });
     const next = vi.fn();
-    render(wrap(<Welcome onNext={next} />));
+    render(wrap(<Intro onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await screen.findByRole('alert');
     expect(next).not.toHaveBeenCalled();
@@ -75,11 +88,14 @@ describe('Welcome', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
   });
-  it('renders the approved Chinese copy', async () => {
+  it('renders the approved Chinese copy and keeps the entry block mounted, hidden and inert', async () => {
     await i18n.changeLanguage('zh');
-    render(wrap(<Welcome onNext={vi.fn()} />));
+    const { container } = render(wrap(<Intro onNext={vi.fn()} />));
     expect(screen.getByRole('heading', { name: '各有所长，接力完成' })).toBeTruthy();
-    expect(screen.getAllByRole('listitem')).toHaveLength(6);
+    const block = container.querySelector('.onboarding-access') as HTMLElement;
+    expect(block.querySelectorAll('.onboarding-access-tile')).toHaveLength(6);
+    expect(block.hasAttribute('hidden')).toBe(true);
+    expect(block.hasAttribute('inert')).toBe(true);
   });
 });
 
@@ -153,7 +169,7 @@ describe('collaboration lifecycle and access interaction', () => {
   });
   it('shows completed work and stops all timers for reduced motion', () => {
     vi.useFakeTimers(); mocks.reduced = true;
-    const { container } = render(wrap(<Welcome onNext={vi.fn()} />));
+    const { container } = render(wrap(<Intro onNext={vi.fn()} />));
     expect(container.querySelectorAll('[data-state="complete"]')).toHaveLength(3);
     expect(screen.queryByTestId('handoff-pulse')).toBeNull();
     // Get started is the only button on the screen.
@@ -163,6 +179,8 @@ describe('collaboration lifecycle and access interaction', () => {
   it('pauses idle emphasis throughout pointer and keyboard interaction', () => {
     vi.useFakeTimers();
     const { container } = render(wrap(<AccessTiles />));
+    // An active consumer still draws the block: hiding it in setup is shell policy.
+    expect((container.querySelector('.onboarding-access') as HTMLElement).hasAttribute('hidden')).toBe(false);
     act(() => vi.advanceTimersByTime(2000));
     expect(container.querySelectorAll('[data-emphasis="true"]')).toHaveLength(1);
     fireEvent.pointerEnter(screen.getByRole('list'));

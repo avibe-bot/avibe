@@ -30,7 +30,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
   mock.api.readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
-  mock.api.getConfig.mockResolvedValue({ setup_completed: false, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, platforms: { enabled: [] } });
+  mock.api.getConfig.mockResolvedValue({ setup_completed: false, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, platforms: { enabled: [] } });
   mock.api.detectCli.mockResolvedValue({ found: true, path: '/测试/bin/assistant' });
   mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: false });
   mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, enabled: true, installed: true, auth: backend === 'claude' ? 'api_key' : 'none', application: running ? 'applied' : 'stopped', ready: backend === 'claude' && running, entry_eligible: backend === 'claude', permission_required: backend === 'opencode' }));
@@ -38,6 +38,9 @@ beforeEach(() => {
   mock.api.setDefaultVibeAgent.mockResolvedValue({ ok: true });
   mock.api.mutateConfig.mockResolvedValue({ setup_completed: true });
   mock.control.mockImplementation(async () => { running = true; return { ok: true }; });
+  // Hub-enabled config routes the OpenCode completion read through the supply
+  // projection; Direct mode keeps every case authored before the gate on its path.
+  mock.supply.mockResolvedValue({ backend: 'opencode', mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' });
 });
 afterEach(cleanup);
 async function setup() {
@@ -79,6 +82,9 @@ describe('explicit any-one-ready completion', () => {
     if (failure === 'start') expect(mock.api.mutateConfig).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     mock.control.mockImplementation(async () => { running = true; return { ok: true }; });
+  // Hub-enabled config routes the OpenCode completion read through the supply
+  // projection; Direct mode keeps every case authored before the gate on its path.
+  mock.supply.mockResolvedValue({ backend: 'opencode', mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' });
     mock.api.mutateConfig.mockResolvedValue({ setup_completed: true });
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' })));
     await screen.findByTestId('destination');
@@ -209,7 +215,7 @@ it('keeps incomplete setup when catalog retrieval fails and allows cancellation'
 // AUTH-SETUP-120: the actual Wizard consumes legacy-IM recovery and narrow mutations.
 describe('saved messaging recovery', () => {
   function incompleteSlack() {
-    const config = { setup_completed: false, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, platforms: { enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token', 'app_token'] }], slack: { bot_token: '', app_token: '', has_bot_token: false, has_app_token: true, proxy_url: '' }, agent: { default_cwd: '/original' } };
+    const config = { setup_completed: false, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, platforms: { enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token', 'app_token'] }], slack: { bot_token: '', app_token: '', has_bot_token: false, has_app_token: true, proxy_url: '' }, agent: { default_cwd: '/original' } };
     mock.api.getConfig.mockResolvedValue(config);
     mock.api.slackManifest.mockResolvedValue({ ok: true, manifest: '{}' });
     return config;
@@ -256,7 +262,7 @@ describe('saved messaging recovery', () => {
 // AUTH-SETUP-120: Discord's existing form emits credential and auxiliary settings.
 describe('saved Discord recovery', () => {
   async function repairDiscord() {
-    const config = { setup_completed: false, agents: { claude: { enabled: true } }, platforms: { enabled: ['discord'] }, platform_catalog: [{ id: 'discord', config_key: 'discord', credential_fields: ['bot_token'] }], discord: { bot_token: '', has_bot_token: false } };
+    const config = { setup_completed: false, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, agents: { claude: { enabled: true } }, platforms: { enabled: ['discord'] }, platform_catalog: [{ id: 'discord', config_key: 'discord', credential_fields: ['bot_token'] }], discord: { bot_token: '', has_bot_token: false } };
     mock.api.getConfig.mockResolvedValue(config);
     mock.api.discordAuthTest.mockResolvedValue({ ok: true });
     mock.api.discordGuilds.mockResolvedValue({ ok: true, guilds: [{ id: 'g-one', name: 'Guild One' }, { id: 'g-two', name: 'Guild Two' }] });

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -27,7 +27,8 @@ import type { BackendConnectionState } from '@/context/ApiContext';
 import { setConfigField } from '@/lib/configMutations';
 import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSetup';
 import { ImportKeysNotice } from '../onboarding/ImportKeysNotice';
-import { useModelHubCapability } from '../settings/models/useModelHubCapability';
+import { modelHubEnabledFromConfig } from '../settings/models/featureFlags';
+import type { SetupAction, SetupScreenHandle } from '../onboarding/setupFlow';
 import type { BackendId as RuntimeBackendId } from '../settings/shared/useBackendRuntime';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
@@ -36,6 +37,9 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 
 interface AgentDetectionProps {
+  active?: boolean;
+  ref?: React.Ref<SetupScreenHandle>;
+  onActionChange?: (action: SetupAction) => void;
   data: any;
   onNext: (data: any) => void | Promise<void>;
   onBack?: (data?: { agents: Record<string, AgentState> }) => void;
@@ -79,15 +83,20 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
 // the user enables what they have and installs anything missing.
-export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
+export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery, active = true, ref, onActionChange }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const navigate = useNavigate();
   const routeSurfaceActive = useRouteSurfaceActive();
-  const modelHubEnabled = useModelHubCapability();
+  const modelHubEnabled = modelHubEnabledFromConfig(data);
+  const [visited, setVisited] = useState(active);
+  const activation = useRef(0);
+  const activeRef = useRef(active);
+  useLayoutEffect(() => { activeRef.current = active; activation.current += 1; }, [active]);
+  useEffect(() => { if (active) setVisited(true); }, [active]);
   const [agents, setAgents] = useState<Record<string, AgentState>>(normalizeAgents(data));
-  const permission = useOpencodePermission({ autoFetchStatus: true });
+  const permission = useOpencodePermission({ autoFetchStatus: active });
   const [installingAgents, setInstallingAgents] = useState<Record<string, boolean>>({});
   const [installResults, setInstallResults] = useState<
     Record<string, { ok: boolean; message: string; output?: string | null }>
@@ -127,7 +136,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
   const refreshConnection = useCallback(async (name: RuntimeBackendId, receiptError = '') => {
-    if (pendingEnable.current[name] !== undefined) return;
+    if (!activeRef.current || pendingEnable.current[name] !== undefined) return;
+    const epoch = activation.current;
     const intent = enableIntent.current[name];
     const token = (connectionTokens.current[name] || 0) + 1;
     connectionTokens.current[name] = token;
@@ -135,12 +145,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setConnectionErrors((current) => ({ ...current, [name]: receiptError }));
     try {
       const result = await api.getBackendConnection(name);
-      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (epoch !== activation.current || connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
       setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
     } catch (error) {
-      if (connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (epoch !== activation.current || connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
       setConnections((current) => ({ ...current, [name]: undefined }));
       setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
     } finally {
@@ -148,35 +158,41 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
   }, [api, t]);
   useEffect(() => {
-    if (!isPage) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
+    if (!isPage && active) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
     return () => { for (const name of ASSISTANT_ORDER) {
       connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
       enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
     } };
-  }, [refreshConnection, isPage]);
+  }, [refreshConnection, isPage, active]);
   useEffect(() => {
     const returnedToSurface = routeSurfaceActive && !previousRouteSurfaceActive.current;
     previousRouteSurfaceActive.current = routeSurfaceActive;
-    if (!isPage && returnedToSurface) {
+    if (!isPage && active && returnedToSurface) {
       for (const name of ASSISTANT_ORDER) void refreshConnection(name);
     }
-  }, [isPage, refreshConnection, routeSurfaceActive]);
+  }, [isPage, active, refreshConnection, routeSurfaceActive]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
   useEffect(() => {
-    if (isPage || !data.__onboardingDetected) void detectAll();
+    if (!active || (!onActionChange && !isPage && data.__onboardingDetected)) return;
+    // Welcome may have completed detection after this retained screen mounted.
+    const source = normalizeAgents(data);
+    setAgents((previous) => Object.fromEntries(Object.entries(previous).map(([name, agent]) => [name, { ...agent, cli_path: source[name].cli_path }])));
+    void Promise.all(Object.entries(source).map(([name, agent]) => detect(name, agent.cli_path)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
   const detect = async (name: string, binary?: string) => {
+    if (!activeRef.current) return;
+    const epoch = activation.current;
     const token = (detectionTokens.current[name] || 0) + 1;
     detectionTokens.current[name] = token;
     setDetectingAgents((prev) => ({ ...prev, [name]: true }));
     setDetectionErrors((prev) => ({ ...prev, [name]: '' }));
     try {
       const result = await api.detectCli(binary || name);
-      if (detectionTokens.current[name] !== token) return;
+      if (epoch !== activation.current || detectionTokens.current[name] !== token) return;
       if (result.found) {
         setInstallResults((prev) => {
           if (!prev[name] || prev[name].ok) return prev;
@@ -195,7 +211,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         },
       }));
     } catch (error) {
-      if (detectionTokens.current[name] !== token) return;
+      if (epoch !== activation.current || detectionTokens.current[name] !== token) return;
       setDetectionErrors((prev) => ({ ...prev, [name]: String(error) }));
       setAgents((prev) => ({ ...prev, [name]: { ...prev[name], status: 'unknown' } }));
     } finally {
@@ -374,17 +390,33 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
     && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
+  const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
-    if (entering) return;
-    if (isPage && onSave) { await onSave({ agents }); return; }
+    if (!active || entering || primaryPending.current) return;
+    primaryPending.current = true;
+    if (isPage && onSave) { try { await onSave({ agents }); } finally { primaryPending.current = false; } return; }
     setEntering(true); setEntryError('');
     try {
       await enableQueue.current;
       await onNext({ agents, readyBackends });
     } catch (error) { setEntryError(String(error)); }
-    finally { setEntering(false); }
+    finally { primaryPending.current = false; setEntering(false); }
   };
 
+
+  const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
+  // The recovery node is fresh JSX on every shell render, so the publication depends on
+  // whether one exists, never on its identity — an identity dependency would republish
+  // against itself forever.
+  const recoveryOpen = Boolean(completionRecovery);
+  useImperativeHandle(ref, () => ({ activate: () => { if (canContinue && !actionBusy && !recoveryOpen) void handlePrimaryAction(); } }));
+  // A layout effect, so the shell's action label lands in the same commit as the state
+  // it describes: a passive publish would leave one render where the screen already
+  // shows a settled state while the shared button still carries the previous label.
+  useLayoutEffect(() => {
+    if (active) onActionChange?.({ labelKey: entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter',
+      disabled: !canContinue || actionBusy || recoveryOpen, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
+  }, [active, onActionChange, entering, canContinue, actionBusy, recoveryOpen]);
 
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = isPage ? (
@@ -432,7 +464,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                   <BackendLifecycleChip
                     name={name}
                     enabled={agent.enabled}
-                    cliStatus={agent.status || 'unknown'}
+                    cliStatus={active ? agent.status || 'unknown' : 'unknown'}
                     onChanged={async (info) => {
                       // After a successful (re)install the chip hands back the
                       // path the installer landed at — adopt it before
@@ -574,7 +606,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   return (
     <div className="onboarding-setup">
       <header className="onboarding-heading">
-        <h2>{t('onboarding.setup.title')}</h2>
+        <h1 tabIndex={-1}>{t('onboarding.setup.title')}</h1>
         <p>{t('onboarding.setup.subtitle')}</p>
       </header>
       {/* The stage both steps share, so the action below lands on the same
@@ -622,7 +654,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
               label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               onClick={() => toggle(name, !agent.enabled)} />}
-            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
+            lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={active ? agent.status || 'unknown' : 'unknown'}
               readyLabel={t('onboarding.setup.installed')}
               refreshKey={chipRefresh[name]}
               externallyBusy={!!refreshingAgents[name]}
@@ -659,16 +691,16 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           Settings → Backends reaches the same migration through
           BackendSupplyModeCard, with its broader scope intact. Self-hides when
           there is nothing importable or the gateway isn't reachable. */}
-      {modelHubEnabled === true && <ImportKeysNotice />}
+      {visited && modelHubEnabled === true && <ImportKeysNotice />}
       </div>
       {providerDialog}
       {completionRecovery}
-      <div className="onboarding-setup-footer">
-        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
+      <div className={onActionChange ? 'onboarding-setup-hint' : 'onboarding-setup-footer'}>
+        {!onActionChange && <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
           disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
           {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
           <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
-        </Button>
+        </Button>}
         <p className="text-center text-xs text-muted">
           {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
           {/* The whole-screen rescan, kept as part of the sentence that explains why a
@@ -680,7 +712,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           </Button>
         </p>
         {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
-        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+        {!onActionChange && onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
       </div>
     </div>
   );

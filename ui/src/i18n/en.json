@@ -5244,8 +5244,8 @@
   "onboarding": {
     "welcome": {
       "getStarted": "Get started",
-      "title": "Great on their own. Better together",
-      "subtitle": "Claude Code, Codex, and OpenCode — from planning to delivery",
+      "title": "Different strengths. One team.",
+      "subtitle": "Bring Claude Code, Codex, and OpenCode together",
       "detecting": "Checking…",
       "detectionFailed": "Could not check your assistants. Try again."
     },
@@ -5277,7 +5277,7 @@
     },
     "access": {
       "label": "Work from anywhere",
-      "description": "Work on the go with the Avibe app or your favorite chat apps",
+      "description": "6 ways to work. Wherever you are.",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5398,6 +5398,11 @@
     "brand": {
       "name": "Avibe",
       "tagline": "Agent OS"
+    },
+    "flow": {
+      "backToIntro": "Back to introduction",
+      "backToProviders": "Back to models",
+      "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry."
     }
   }
 }

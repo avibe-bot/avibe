@@ -5243,7 +5243,7 @@
   },
   "onboarding": {
     "welcome": {
-      "getStarted": "开始使用",
+      "getStarted": "立即开始",
       "title": "各有所长，接力完成",
       "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
       "detecting": "检测中…",
@@ -5277,7 +5277,7 @@
     },
     "access": {
       "label": "随时随地安排工作",
-      "description": "手机 APP 和常用聊天应用，随时随地安排工作",
+      "description": "6个工作入口，随时随地安排工作",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5398,6 +5398,11 @@
     "brand": {
       "name": "Avibe",
       "tagline": "Agent OS"
+    },
+    "flow": {
+      "backToIntro": "返回介绍",
+      "backToProviders": "返回模型",
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
     }
   }
 }

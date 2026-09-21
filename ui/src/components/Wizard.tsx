@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
+import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { Button } from './ui/button';
+import { AccessTiles } from './onboarding/AccessTiles';
+import { RouteSurfaceActiveContext, useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
+import { loadingRegion, beginRegionRead, failRegionRead } from './settings/models/regionRead';
+import { INITIAL_SETUP_FLOW_STATE, setupBackTarget, setupCapability, setupNavigationReady, type SetupAction, type SetupCapability, type SetupScreenId, type SetupScreenHandle, type SetupScreenProps } from './onboarding/setupFlow';
+import { mediaQuery, playSetupHandoff, setupHandoffAllowed } from './onboarding/setupHandoff';
+import { SETUP_REGISTERED_SCREENS } from './onboarding/setupScreenRegistry';
+import './onboarding/onboarding.css';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Welcome } from './steps/Welcome';
@@ -37,26 +47,150 @@ function SetupHeader() {
   );
 }
 
+type FlowShellProps = {
+  sequence: readonly SetupScreenId[];
+  capability: SetupCapability;
+  gatewayEnabled: boolean | null;
+  onRetrySetup: () => void;
+  loading?: boolean;
+  error?: string;
+  paused?: boolean;
+  runtimeRead: SetupScreenProps['runtimeRead'];
+  renderScreen: (id: SetupScreenId, props: SetupScreenProps, ref: Ref<SetupScreenHandle>) => ReactElement<{ ref?: Ref<SetupScreenHandle> }>;
+};
+
+function SetupScreenContent({ id, screenProps, renderScreen, ref }: {
+  id: SetupScreenId; screenProps: SetupScreenProps; renderScreen: FlowShellProps['renderScreen']; ref: Ref<SetupScreenHandle>;
+}) {
+  return renderScreen(id, screenProps, ref);
+}
+
+/** One mounted screen collection and one action pair. Activation epochs reject late work. */
+export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySetup, loading = false, error = '', paused = false, runtimeRead, renderScreen }: FlowShellProps) {
+  const { t } = useTranslation();
+  const routeActive = useRouteSurfaceActive();
+  const [activation, setActivation] = useState({ id: sequence[0], epoch: 0 });
+  const [handoff, setHandoff] = useState<SetupScreenProps['handoff']>(false);
+  const [action, setAction] = useState<SetupAction | null>(null);
+  const [flowState, setFlowState] = useState(INITIAL_SETUP_FLOW_STATE);
+  const host = useRef<HTMLDivElement>(null);
+  const roots = useRef<Partial<Record<SetupScreenId, HTMLDivElement | null>>>({});
+  const handles = useRef<Partial<Record<SetupScreenId, SetupScreenHandle | null>>>({});
+  const current = useRef(activation);
+  const transition = useRef<(() => void) | null>(null);
+  const transitioning = useRef(false);
+  const ready = setupNavigationReady(capability, gatewayEnabled);
+  const policy = useRef({ ready, sequence });
+  useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence }; });
+  useLayoutEffect(() => {
+    roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
+  }, [activation]);
+  useEffect(() => () => transition.current?.(), []);
+
+  const navigate = useCallback((target: SetupScreenId) => {
+    if (transitioning.current || !policy.current.sequence.includes(target) || target === current.current.id) return;
+    const previous = current.current;
+    const backwards = policy.current.sequence.indexOf(target) < policy.current.sequence.indexOf(previous.id);
+    if (!backwards && !policy.current.ready) return;
+    const next = { id: target, epoch: previous.epoch + 1 };
+    const finish = () => {
+      transition.current = null;
+      transitioning.current = false;
+      current.current = next;
+      setAction(null);
+      setHandoff(false);
+      setActivation(next);
+    };
+    if (mediaQuery('(max-width: 759px)')) {
+      host.current?.closest('.onboarding-shell')?.scrollTo({ top: 0, behavior: 'instant' });
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    }
+    if (backwards || !setupHandoffAllowed(paused) || !host.current || !roots.current[previous.id] || !roots.current[target]) {
+      finish(); return;
+    }
+    transitioning.current = true;
+    setHandoff(target === 'intro' ? false : target);
+    transition.current = playSetupHandoff(host.current, roots.current[previous.id]!, roots.current[target]!, previous.id, target, finish);
+  }, [paused]);
+  // A callback belongs to this activation, even if an asynchronous consumer saves it.
+  const feeds = useMemo(() => Object.fromEntries(sequence.map((id) => [id, {
+    onActionChange: (next: SetupAction) => {
+      if (current.current.id === id && current.current.epoch === activation.epoch && !transitioning.current) setAction(next);
+    },
+    onNavigate: (target: SetupScreenId) => {
+      if (current.current.id === id && current.current.epoch === activation.epoch) navigate(target);
+    },
+  }])) as Record<SetupScreenId, Pick<SetupScreenProps, 'onActionChange' | 'onNavigate'>>, [activation.epoch, navigate, sequence]);
+  const back = setupBackTarget(sequence, activation.id);
+  const authoritativeBlock = capability === 'disabled' || gatewayEnabled === false;
+  const retry = !loading && (authoritativeBlock || !!error);
+  return <div className="onboarding-step" data-setup-sequence={sequence.join(' ')} data-setup-screen={activation.id} data-handoff={handoff || undefined}>
+    <div className="onboarding-screens" ref={host}>
+      {sequence.map((id) => {
+        const active = routeActive && id === activation.id;
+        return <div key={id} ref={(node) => { roots.current[id] = node; }} data-setup-screen-root={id}
+          hidden={id !== activation.id} inert={!active || !!handoff}>
+          <RouteSurfaceActiveContext.Provider value={active && !handoff}>
+            <SetupScreenContent id={id} screenProps={{ active, handoff, capability, gatewayEnabled, runtimeRead,
+              onRetrySetup, flowState, setFlowState, ...feeds[id] }} renderScreen={renderScreen}
+              ref={(handle) => { handles.current[id] = handle; }} />
+          </RouteSurfaceActiveContext.Provider>
+        </div>;
+      })}
+    </div>
+    <div className="onboarding-setup-footer">
+      <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action"
+        disabled={loading || !!handoff || (!retry && (!action || action.disabled || action.busy || !ready))}
+        onClick={() => { if (transitioning.current) return; if (retry) onRetrySetup(); else if (ready && action && !action.disabled && !action.busy) handles.current[current.current.id]?.activate(); }}>
+        {t(loading ? 'common.loading' : retry ? 'common.retry' : action?.labelKey ?? 'common.loading', action?.labelArgs)}
+        {(loading || action?.busy || action?.icon === 'spinner') ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : action?.icon === 'arrow-right' && <ArrowRight size={16} />}
+      </Button>
+      <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" style={{ visibility: back ? 'visible' : 'hidden' }}
+        disabled={!back || !!handoff || !!action?.busy} onClick={() => { if (back) navigate(back); }}>
+        <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
+      </Button>
+    </div>
+    {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
+      <p>{capability === 'disabled' || gatewayEnabled === false ? t('onboarding.flow.gatewayRequired') : error || t('onboarding.connection.readFailed')}</p>
+    </div>}
+    {/* The owner handoff, the design boards and the prototype all collapse the six entry
+        tiles for the whole setup journey; the block stays mounted hidden and inert so its
+        motion lifecycle survives, and the reserved stage keeps the anchor where it was. */}
+    <AccessTiles active={false} />
+  </div>;
+}
+
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
   const { capabilities } = useInstanceAuthorization();
   const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [recovery, setRecovery] = useState<VibeAgentBrief | null>(null);
-  const [step, setStep] = useState<'welcome' | 'agents'>('welcome');
-  // The first screen arrives without an entrance of its own — the reference opens
-  // on it, settled. Only a switch between the two screens plays the transition, so
-  // the flag flips in the two places that move between them, never on mount.
-  const [entered, setEntered] = useState(false);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [capability, setCapability] = useState<SetupCapability>('pending');
+  const [gatewayEnabled, setGatewayEnabled] = useState<boolean | null>(null);
+  const configGeneration = useRef(0);
+  // The shell owns the region and its request generation. L2 integrates a stateless
+  // D11 loader here on active provider entry; it returns a validated RuntimeDependency.
+  // Until that screen is registered, config reads authorize no runtime read/bootstrap.
+  const [runtimeRead, setRuntimeRead] = useState<SetupScreenProps['runtimeRead']>(() => loadingRegion());
   const completing = useRef(false);
   const load = useCallback(async () => {
-    setError('');
-    try { setData(await api.getConfig()); }
-    catch (cause) { setError(String(cause)); }
+    const generation = ++configGeneration.current;
+    setRuntimeRead((previous) => beginRegionRead(previous));
+    setLoading(true); setError(''); setCapability('pending'); setGatewayEnabled(null);
+    try {
+      const config = await api.getConfig();
+      if (generation !== configGeneration.current) return;
+      setData(config);
+      setCapability(setupCapability(typeof config?.capabilities?.model_hub?.enabled === 'boolean' ? modelHubEnabledFromConfig(config) : null));
+      setGatewayEnabled(typeof config?.model_hub?.enabled === 'boolean' ? config.model_hub.enabled : null);
+    } catch (cause) { if (generation === configGeneration.current) { setError(String(cause)); setRuntimeRead((previous) => failRegionRead(previous)); } }
+    finally { if (generation === configGeneration.current) setLoading(false); }
   }, [api]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { configGeneration.current += 1; }; }, [load]);
   const complete = async () => {
     if (completing.current) return;
     completing.current = true;
@@ -116,20 +250,17 @@ export function Wizard() {
       navigate('/', { state: { onboardingCompleted: true } });
     } finally { completing.current = false; }
   };
-  if (!data) return <div className="min-h-screen flex flex-col items-center justify-center bg-background text-muted">
-    {error ? <><p role="alert">{error}</p><button onClick={() => void load()}>{t('common.retry')}</button></> : t('common.loading')}
-  </div>;
   return <div className="onboarding-shell">
     <SetupHeader />
     <main className="onboarding-shell-content">
-      {/* One keyed wrapper per step: switching steps swaps the composition and
-          the incoming one fades, slides and unblurs in, the way the reference's
-          connection layer arrives over the introduction. Reduced motion takes the
-          whole shell's animation away, so the swap stays instant for it. */}
-      <div key={step} className={entered ? 'onboarding-step onboarding-step-enter' : 'onboarding-step'}>
-        {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
-          : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}
-      </div>
+      <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
+        runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={() => void load()} renderScreen={(id, props, ref) => id === 'intro'
+          ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
+              onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
+          : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
+              completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined}
+              onNext={complete} />}
+      />
     </main>
   </div>;
 }
