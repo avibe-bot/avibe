@@ -234,7 +234,8 @@
           "noteInstalledNotEnabled": "启用后即可使用已添加的模型",
           "enter": "进入工作台",
           "disabledNotice": "已停用，已有配置会保留",
-          "configureRoute": "配置模型路由"
+          "configureRoute": "配置模型路由",
+          "directFallbackNotice": "此设备无法安装模型网关。你仍可配置并使用已有的直连助手。"
         },
         "route": {
           "title": "默认模型路由",
@@ -354,7 +355,8 @@
           "noteInstalledNotEnabled": "Enable to use the models you added",
           "enter": "Open workspace",
           "disabledNotice": "Disabled. Your saved configuration stays.",
-          "configureRoute": "Configure model route"
+          "configureRoute": "Configure model route",
+          "directFallbackNotice": "Model Hub cannot be installed on this device. You can still configure and use assistants with existing Direct connections."
         },
         "route": {
           "title": "Default model route",

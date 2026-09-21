@@ -29,15 +29,16 @@ Sources and provenance:
 - Design source: `../avibe-docs/design_desktop.pen`, board index in the handoff §12.
 - Product baseline: `origin/master` at `31c4e831b`, which is `a07acee02` plus the merged
   #2065. This is the initial planning baseline, not a claim about today's primary checkout.
-  This repair re-read shipped owners from the assigned head `f177ead2c2`; primary dirty
+  This repair re-read shipped owners from the assigned head `616a0b539d`; primary dirty
   files were not edited.
 
 ## 1. Goal
 
 Replace today's two-step `/setup` (welcome → assistant connection) with the handoff's
 three-screen flow — collaboration highlights → model providers → assistant enablement —
-inside one sidebar-free shell whose primary action never moves, and whose readiness gate
-is expressed in Model Hub terms rather than per-assistant connection terms.
+inside one sidebar-free shell whose primary action never moves. Readiness follows the
+shell's authoritative policy and each assistant's persisted supply mode: Hub routes normally,
+existing Direct connections when capability is off or Hub installation is unsupported.
 
 The design is not a new surface bolted onto the old one: screen 1 already ships, screen 3
 is a restructure of what ships, and screen 2 is a new composition of Model Hub APIs that
@@ -78,7 +79,7 @@ policy; D10 must resolve that product choice before implementing setup migration
 | Screen 1 story, cards, wires, loop caption | `steps/Welcome.tsx`, `onboarding/CollaborationStory.tsx`, `onboarding/collaborationTimeline.ts`, `onboarding/motion.ts` | shipped (#2048/#2052/#2065); adapts to the new shell |
 | Six access entries | `onboarding/AccessTiles.tsx` | shipped; needs `hidden`/`inert` instead of unmount |
 | Assistant cards, install/detect/enable | `steps/AgentDetection.tsx` (606 lines), `onboarding/AssistantRow.tsx`, `settings/BackendLifecycleChip.tsx` | shipped; restructured by screen 3 |
-| Per-assistant connection dialog | `onboarding/BackendConnectionDialog.tsx` | leaves the Hub-enabled setup path; remains for explicit Hub-disabled degradation and existing recovery |
+| Per-assistant connection dialog | `onboarding/BackendConnectionDialog.tsx` | leaves the ordinary Hub-configuration path; remains for capability-off/unsupported-host Direct fallback and existing recovery |
 | Discovery capsule + dismissal memory | `onboarding/ImportKeysNotice.tsx`, `lib/modelHubMigrationDismiss.ts` | shipped; C6 identifies copy and scan-ownership gaps before moving it to screen 2 |
 | Import batch dialog | `settings/models/MigrationDialog.tsx`, `migrationScan.ts` (`importableKeys`, `isImportableKey`, `scanMigrationWhenEnabled`) | shipped takeover/grouping owner; needs controlled state adaptation, and D10 withholds setup takeover adoption |
 | Add API key: vendor picker, observe → create | `settings/models/AddApiKeyDialog.tsx` (41 KB impl, 40 KB tests), `apiKeyVendors.ts`, `vendorMarks.ts`, `vendorGlyph.tsx` | shipped; needs its form extracted so a tabbed stable frame can host it (D2) |
@@ -104,7 +105,9 @@ leaving a screen destroys its state — the class of bug the handoff §5 already
 ("09-20 修复过回退丢状态"). The new shell:
 
 - keeps all three screens mounted and gates them with `hidden` + `inert` (handoff §10),
-  which retains local drafts. Hidden/inert does not suspend effects: C2 gates screen activity,
+  which retains local drafts. C2 derives a shared `SetupPolicy` from capability plus runtime
+  admission/health and reconciles a removed current screen in the same update; it passes
+  policy and the existing runtime-read retry callback to all screens. Hidden/inert does not suspend effects: C2 gates screen activity,
   polling and authorization; only the active screen may publish actions or navigate;
 - renders **one** primary action and **one** Back button itself, so the "coordinates and
   size never change" invariant is a property of the tree instead of an agreement between
@@ -184,7 +187,12 @@ outbound wires → three assistant destinations → summary line → reserved ca
   GET and updates shell server-config state. Empty general mutations are rejected and stay
   rejected; direct fetch neither clears ApiContext cache nor emits convergence. Unknown writes
   need the fresh GET plus successful connection evidence of persisted config before startup.
-  A confirmed stopped controller then permits `control('start')` and readiness readback. Next D3 preflights install support and ensures the engine for every backend mode.
+  A confirmed stopped controller then permits `control('start')` and readiness readback.
+  Next D3 reads support/health into shell policy and ensures the engine for every
+  backend mode only with admitted install support. Fresh unsupported + non-running switches
+  providers to assistants atomically and reuses Direct readiness without changing modes;
+  an already-running Hub remains usable. Unread/error holds Continue and offers retry.
+  Back, repeat navigation and Add source all follow the effective C2 sequence.
   Reuse existing automatic runtime setup; no new install-confirmation dialog. Neither phase
   automatically migrates native credentials.
 - **First-entry sequence** (~1.1s): cards → inbound wires → gateway → outbound wires →
@@ -199,15 +207,17 @@ only when installed) → divider → status pill → description → action row.
   one loading indicator per card while an operation runs.
 - Description follows the state: not installed / enabled / installed-not-enabled.
 - Actions: `立即安装` (outline + Download, spinner `正在安装…`) → `api.installAgent` then
-  re-detect; routed candidate chip (`默认模型` + model name + ChevronRight) → route dialog;
-  installed/enabled but unrouted (including Direct) → configure-route action, equally reachable;
+  re-detect; routed Hub candidate chip (`默认模型` + model name + ChevronRight) → route dialog;
+  installed/enabled but unrouted → equally reachable configuration selected by C2 policy
+  (Direct connection in fallback, Hub configuration/recovery otherwise);
   `已安装，未启用` static row (enabling belongs to the identity Switch); `立即升级`
   (outline + ArrowUpToLine) through `BackendLifecycleChip`'s `onVisual`, coexisting with
   the enabled state.
 - Enabled card wears the same mint treatment as screen 2's added cards.
-- **Default model route dialog**: shared ordered list, `提供商 logo + 模型名 + 服务名 ·
+- **Hub default model route dialog**: shared ordered list, `提供商 logo + 模型名 + 服务名 ·
   首选/备用 N`, up/down with first/last disabled, single-route note, footer
-  `添加模型来源` (→ screen 2) + `完成`, focus back to the chip.
+  `添加模型来源` (→ providers, offered only when C2 policy permits source configuration)
+  + `完成`, focus back to the chip.
   The rows remain model-ranked as the handoff requests. C2 retains `(source_id, model_id)`
   draft rows; no source-order write can claim to save that list. C6/D4/D9 specifies builtin
   setup Agent targets, exact menu-model identities, per-target membership projection and
@@ -216,10 +226,13 @@ only when installed) → divider → status pill → description → action row.
   Divergent routes are displayed without an opening write; a dirty shared draft and its
   target baselines survive navigation. Done without an edit is a no-op; an explicit reorder
   freezes changed automatic chains and requires the existing follows/frozen explanation.
-- **Per-assistant connection dialogs leave Hub-enabled onboarding.** Keep them for explicit
-  capability-off degradation and recovery (C4); routing access never depends on route existence.
+- **Connection actions follow persisted mode and shell policy.** Keep Direct dialogs for
+  capability-off or authoritative unsupported-host fallback (C4); Hub candidates retain Hub
+  configuration/recovery, including a running Hub on an install-unsupported host. Never
+  change custody/mode to make a gate pass. Routing access has no route-existence prerequisite.
 - All-uninstalled case: three `立即安装` cards, primary action disabled, and the user can
-  go back to screen 2 to add sources first.
+  go back to providers when the effective sequence includes it; unsupported fallback keeps
+  Direct configuration/recovery and never sends the user into a removed providers step.
 
 ### 4.5 Readiness gate and completion
 
@@ -228,14 +241,18 @@ service only from a confirmed stopped state, filters OpenCode agents by
 `readOpencodeSetupRoutes`, preserves a usable default Agent, and writes `setup_completed`
 last. D11 moves controller bootstrap before Hub-dependent reads; completion reuses it
 if the controller later stops. Startup does not require installed assistants or sources.
-The new gate preserves default/completion ordering and backend permission checks and replaces the route
-input with C4's correlated named-Agent predicate: the same enabled/non-archived Agent has an
+The new gate preserves default/completion ordering and backend permission checks. For Hub
+candidates it replaces the route input with C4's correlated named-Agent predicate: the same enabled/non-archived Agent has an
 installed/enabled backend, running Hub runtime, a runnable own model/route and confirmed
 application state. Source health, another backend's order and a local draft cannot satisfy
 separate parts of the gate. Preserve a usable global default, otherwise select and read back
 an available named Agent; write/read back `setup_completed` last. Re-pin the affected
 `WizardCompletion.test.tsx` invariants deliberately. The all-backend correlation is new L3
-orchestration, not behavior today's OpenCode helper already provides.
+orchestration, not behavior today's OpenCode helper already provides. C4's Direct branch
+reuses shipped native connection/permission readiness, stopped/start/re-read guards and
+Direct OpenCode model recovery; it requires no Hub runtime or Hub-mode write. If unsupported
+installation leaves neither a usable Direct nor a usable running Hub candidate, entry stays
+disabled; preserved Hub custody cannot masquerade as native auth.
 
 ### 4.6 Dialogs and the stable frame
 
@@ -309,7 +326,7 @@ in §10 are settled; no lane may reinterpret them independently:
   screens, and the tier rule (consume `--ob-*`, restate inside the existing bands, never
   invent a new one).
 - **C4 Entry gate** → `contracts.md` §C4: the correlated candidate predicate and its producers, what stays
-  unchanged in `complete()`, what is removed, the hub-disabled degradation, and which
+  unchanged in `complete()`, what is removed, the capability-off/unsupported Direct fallback, and which
   `WizardCompletion.test.tsx` invariants are deliberately re-pinned.
 - **C5 Stable frame** → `contracts.md` §C5.
 - **C6 Data mapping** → `contracts.md` §C6, field by field with a producer and a consumer
@@ -403,7 +420,9 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
   another lane; C3 makes those names a contract and `geometry.spec.ts` fails when they move.
 - **Engine not installed on first run.** D3 reuses the approved automatic active-entry
   behavior. C6 requires authoritative support preflight before potentially installing paths,
-  an ensure-runtime phase for every mode, and separate native consent/mode adoption. Helper
+  an admitted ensure-runtime phase for every mode, and separate native consent/mode adoption.
+  Fresh unsupported hosts use C2/C4 Direct fallback; running Hub health stays independent
+  of installation admission. A missing/failed read cannot trigger fallback or installation. Helper
   `ok` alone cannot prove readiness.
 - **Import custody and copy.** The handoff's preservation promise contradicts shipped takeover.
   D10 is a product decision/backend dependency; changing just the verb to “import” cannot fix it.
@@ -418,32 +437,37 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
 
 ### 9.1 Review-loop record and current repair contract
 
-The orchestrator independently inventoried 18 threads: 14 resolved, four open at dispatch.
-Five findings-bearing heads: `d9c62aa2eb` (2), `cf3b47e8cd` (4), `5ea80ceeec` (4),
-`de9c324872` (4), `f177ead2c2` (4). Counts are dispatch evidence, not a new GitHub read by
-this executor. The repeated classes were route identity/eligibility/readiness (all rounds),
-lifecycle helper semantics (2/3/5), producer-consumer/state contracts (2–5), and contradictory
-duplicate instructions/copy (1/3). Migration grouping belongs to the same UI/API mismatch.
+The orchestrator independently fetched all 19 threads: 18 resolved, one open at dispatch.
+Six findings-bearing heads: `d9c62aa2eb` (2), `cf3b47e8cd` (4), `5ea80ceeec` (4),
+`de9c324872` (4), `f177ead2c2` (4), `616a0b539d` (1). Counts are orchestrator evidence,
+not a new executor GitHub read. Repeated classes are route identity/eligibility/readiness,
+lifecycle/capability ownership, producer-consumer/state contracts and duplicate copy/instructions.
 
-Orchestrator diagnosis (2026-09-21): prescriptive docs promised behavior the named helpers do
-not implement, and sentence-level repairs left contradictory consumers. The current bounded
-repair audits C1–C6, this plan and the type boundary together. Earlier records claiming that
-reducing prose justified a source-ranked D9 are superseded: that deviation was never approved.
+Diagnosis and bounded scope decision: earlier helper promises were repaired across C1–C6,
+but installation refusal still had no edge into navigation and existing Direct readiness.
+This is a missing policy boundary, not a runtime/custody redesign. One shell-derived policy
+now combines independent capability, authoritative install admission and running health;
+C2 consumers reconcile navigation and select the persisted-mode readiness owner together.
+The repair preserves Direct connections, healthy Hub routes, default selection, drafts and
+D10's pending custody proposal. No shipped runtime/Settings/API/bundle or handoff edit.
 
-Intended behavior and affected boundaries: reachable route configuration; full-scan consent
-groups; shell state through React-compatible functional updates; support preflight plus an
-independent ensure-runtime phase; truthful migration copy/status; model-ranked intent with
-concrete fixture-backed mapping. No runtime helpers, Settings, backend APIs, bundles or handoff
-contents change. No feature shell is introduced merely to host a test.
-
-| Current thread | Local repair / evidence boundary |
+| Open thread | Local repair / evidence boundary |
 | --- | --- |
-| `PRRT_kwDOPbFPYs6kOVg4` | C6 route control and plan §4.4 expose configure-route for enabled/unrouted Direct assistants; C4 alone gates workspace entry |
-| `PRRT_kwDOPbFPYs6kOVg6` | C2 full scan + selected backend groups; C6 computes transitive closure over every row and blocks linked non-importable or setup-excluded OAuth rows. Existing `MigrationDialog` grouping/tests are the owner; controlled-state adaptation is explicitly future L2 work |
-| `PRRT_kwDOPbFPYs6kOVg9` | `SetupScreenProps.flowState/setFlowState`; React consuming test crosses navigation and resolves an earlier update after a new route/source edit, preserving unrelated fields |
-| `PRRT_kwDOPbFPYs6kOVg-` | C6 preflight precedes all potentially installing paths; ensure-runtime runs for already-Hub too. Adoption is preparation only; full scan/consent/mode/readback remain separate |
+| `PRRT_kwDOPbFPYs6kO76r` / `4059240601` | C2 `setupPolicy`, `setupCurrentScreen`, sequence and candidate-path helpers, shared props and React consuming tests cover late unsupported fallback, Back/re-entry, pending/error reads and unchanged Hub mode. C4 reuses Direct connection/start/default/completion guards; C6 retains install preflight and healthy Hub use. These policy tests do not assert backend credential readiness |
 
-Local validation for this repair: 73 focused Vitest tests passed (`setupFlow`,
+Previously repeated classes remain audited as a whole: exact Agent/menu-model/pair identity
+and readback (D4/D9), real bootstrap transport → support/lifecycle → consent (D3/D11), full
+scan/group state and functional updates (C2/C6), and plan/type/copy consistency (C1–C6).
+Round-6 validation: 13 `setupFlow.test.ts` tests passed, including React consumers of the
+actual props/policy for late unsupported resolution, supported completion, unread/error
+holds, Back/re-entry, drafts and persisted Hub non-mutation. Separately, 25 focused existing
+`test_backend_connection.py` cases passed for application/start eligibility, permissions and
+Hub custody. Changed-file ESLint, the dedicated TypeScript consuming-test check, UI build,
+C1 locale/plural/placeholder validation (107 keys per locale) and `git diff --check` passed.
+The consumers use synthetic connection readiness and prove policy/navigation, not feature
+E2E or backend authentication. Unaffected prior validation is retained below.
+
+Prior bounded-repair validation: 73 focused Vitest tests passed (`setupFlow`,
 `MigrationDialog`, `gatewayAdoption`, `RuntimeNotStartedAction`); three hermetic backend
 takeover tests passed (global/project cleanup, shadowed-key protection, post-exposure
 recovery). UI build, changed-file ESLint, a dedicated TypeScript check of the consuming test,
@@ -457,9 +481,9 @@ this proves backend orchestration feasibility, not the frontend call chain, a sh
 live inference or visual design. The bootstrap correction passed 10 separate temporary frontend tests with a
 consumer of real ApiProvider/serializer/apiFetch to verify JSON/CSRF, uncached readback,
 error handling and absent cache/convergence side effects. The two layers do not claim E2E.
-L2/L3 must add consuming coverage with the actual feature owners. The original React consuming
-test and UI build remain the validation for unchanged executable C2 behavior. Orchestrator
-spot-checks the repaired diff and a consuming test before delivery continues.
+L2/L3 must add consuming coverage with the actual feature owners. Round-6 policy coverage
+extends the original React state consumer. Orchestrator spot-checks the repaired diff and
+a consuming test before delivery continues.
 
 ## 10. Decisions, provenance and remaining binding conditions
 
@@ -471,9 +495,9 @@ before feature implementation and explicit authority before #2082 merge remain o
 | --- | --- |
 | D1 — #2065 | Owner-authorized merge, squash `31c4e831b`; no implied #2082 merge/feature authority |
 | D2 — shared key form | Orchestrator decision: extract existing `AddApiKeyDialog` form into setup's stable frame; preserve Settings behavior/tests |
-| D3 — runtime setup | Existing approved `model-hub-native-takeover.md` flow, adopted by orchestrator: automatically prepare runtime on active entry; C6 support preflight, ensure/install/start/readback for all modes. No enable/install-confirmation dialog and no automatic credential takeover |
+| D3 — runtime setup | Existing approved `model-hub-native-takeover.md` flow, adopted by orchestrator: automatically prepare runtime on active entry; C6 support preflight, admitted ensure/install/start/readback for all modes; C2/C4 preserve unsupported-host Direct fallback and already-running Hub health. No enable/install-confirmation dialog and no automatic credential takeover |
 | D4 — shared model route | Orchestrator-ratified bounded technical interpretation (not owner feature approval): one designated builtin setup Agent per installed/enabled backend, explicit named target if no builtin, exact saved menu model, shared order projected through each target's reviewed exact-hop membership. Preserve other menu-model routes, default and Agent models. C6 specifies hydration, repair and partial-write retry |
-| D5 — entry gate/degradation | Orchestrator decision: C4 correlated named-Agent route/runtime/application/permission readiness, preserve runnable default, explicit Hub-off fallback; D11 starts before Hub reads |
+| D5 — entry gate/degradation | Orchestrator decision: C4 correlated named-Agent route/runtime/application/permission readiness, preserve runnable default, capability-off or authoritative unsupported-host Direct fallback with persisted custody. One C2 policy owns sequence and candidate paths; errors never become unsupported. D11 precedes support reads |
 | D6 — handoff §13 | Concise recommendations: destinations logo/name, reference English wording, capsule restoration, dashed Add-more. No native Pencil inspection or design-source synchronization claimed |
 | D7 — vendor list | Orchestrator decision: shipped catalog/order, no prototype Cohere; no backend catalog change |
 | D8 — copy scope | Orchestrator decision: setup copy scope separate from Settings; migration portion remains provisional on owner D10. Controlled state/copy adaptation is future L2 work |

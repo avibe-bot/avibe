@@ -14,7 +14,9 @@
  */
 import type { Dispatch, SetStateAction } from 'react';
 import type { TranslationKey } from '@/i18n/types';
-import type { AgentBackend, MigrationScan, RouteHop } from '../settings/models/types';
+import type { AgentBackend, MigrationScan, RouteHop, RuntimeDependency } from '../settings/models/types';
+import { foldRegionRead, type RegionRead } from '../settings/models/regionRead';
+import { runtimeCanAttemptInstall, runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 
 /** The flow's order. A screen id, not an index: `Wizard.tsx` used to hold `'welcome' |
  *  'agents'`, and an index-based step cannot survive a screen being added or skipped. */
@@ -64,6 +66,11 @@ export type SetupScreenProps = {
    *  mutations, poll, claim actions, navigate or run authorization effects (C2). */
   active: boolean;
   handoff: SetupHandoffTarget | false;
+  /** One shell-derived policy for navigation, admission and candidate paths. */
+  policy: SetupPolicy;
+  /** Ask the shell's existing bootstrap/read owner to retry in the current screen.
+   *  This never navigates to a removed providers step or starts an install by itself. */
+  onRetryRuntime: () => void;
   flowState: SetupFlowState;
   /** Pass the shell's React setter. Screens use functional updates to preserve changes
    *  made by other screens while an asynchronous operation was pending. */
@@ -141,30 +148,78 @@ export type SetupCapability = 'pending' | 'enabled' | 'disabled';
 export const setupCapability = (modelHubEnabled: boolean | null): SetupCapability =>
   modelHubEnabled === null ? 'pending' : modelHubEnabled ? 'enabled' : 'disabled';
 
-/**
- * The screens this instance runs, in order.
- *
- * Model Hub is default-on (`is_model_hub_enabled()` defaults to `"1"` since #1917), so the
- * three-screen flow is the ordinary path. A deployment that explicitly turns the capability
- * off has no gateway to add providers to, and the flow drops that screen rather than
- * rendering an empty one or growing a third shape: screen 3 then keeps the per-assistant
- * connection actions it has today.
- *
- * While the capability is `pending` this returns the full sequence, and that is NOT the
- * wait: a returned sequence says which screens exist, not that the shell may enter them.
- * `setupNavigationReady` is the wait, and the shell must honor it — holding the user on the
- * introduction with the primary action disabled — because entering the providers screen on a
- * guess and then removing it when the read resolves to `disabled` recreates exactly the jump
- * the shorter sequence exists to prevent.
- */
-export const setupScreenSequence = (capability: SetupCapability): readonly SetupScreenId[] =>
-  capability === 'disabled'
+/** Deployment capability and host install admission are independent facts. Only ready
+ *  RegionRead values authorize work. A stale snapshot retains layout during retry, never
+ *  readiness; `unresolved` manifests are admitted by runtimeCanAttemptInstall. */
+export type SetupPolicy = {
+  capability: SetupCapability;
+  runtimeRead: 'pending' | 'retry' | 'ready';
+  installSupport: 'unknown' | 'admitted' | 'unsupported';
+  hubRunning: boolean;
+};
+
+export const setupPolicy = (
+  capability: SetupCapability,
+  runtimeRead: RegionRead<RuntimeDependency>,
+): SetupPolicy => {
+  const project = (runtime: RuntimeDependency, read: SetupPolicy['runtimeRead']): SetupPolicy => ({
+    capability,
+    runtimeRead: read,
+    installSupport: runtimeCanAttemptInstall(runtime) ? 'admitted' : 'unsupported',
+    hubRunning: runtimeIsRunning(runtime),
+  });
+  return foldRegionRead<RuntimeDependency, SetupPolicy>(runtimeRead, {
+    loading: () => ({ capability, runtimeRead: 'pending', installSupport: 'unknown', hubRunning: false }),
+    unread: () => ({ capability, runtimeRead: 'retry', installSupport: 'unknown', hubRunning: false }),
+    ready: (runtime) => project(runtime, 'ready'),
+    degraded: (runtime, cause) => project(runtime, cause === 'refreshing' ? 'pending' : 'retry'),
+  });
+};
+
+/** Admission for any setup path that might install; running health is a separate fact. */
+export const setupCanAttemptInstall = (policy: SetupPolicy): boolean =>
+  policy.capability === 'enabled' && policy.runtimeRead === 'ready' && policy.installSupport === 'admitted';
+
+/** Unsupported installation does not disable an already-running Hub. Retained stale
+ *  facts may hold the current layout while retrying, but setupNavigationReady and
+ *  setupCandidatePath require fresh facts before progression/readiness. */
+export const setupScreenSequence = (policy: SetupPolicy): readonly SetupScreenId[] =>
+  policy.capability === 'disabled' || (policy.installSupport === 'unsupported' && !policy.hubRunning)
     ? SETUP_SCREENS.filter((screen) => screen !== 'providers')
     : SETUP_SCREENS;
 
-/** Whether the shell may leave the introduction. False until the capability read settles. */
-export const setupNavigationReady = (capability: SetupCapability): boolean =>
-  capability !== 'pending';
+/** Derive the rendered screen together with its sequence, never in a later effect.
+ *  Late support resolution cannot render a removed screen for one frame. The shell
+ *  uses this on every navigation request and commits the reconciled id on resolution. */
+export const setupCurrentScreen = (policy: SetupPolicy, requested: SetupScreenId): SetupScreenId => {
+  if (policy.capability === 'pending') return 'intro';
+  return requested === 'providers' && !setupScreenSequence(policy).includes('providers')
+    ? 'assistants'
+    : requested;
+};
+
+/** Intro must be able to reach providers to bootstrap and read support. Downstream
+ *  continuation is held on unread/error; Back and the shell's Retry remain available.
+ *  Running/source/connection requirements for the active action still apply (C4/C6). */
+export const setupNavigationReady = (policy: SetupPolicy, current: SetupScreenId): boolean =>
+  policy.capability !== 'pending'
+  && (current === 'intro' || policy.capability === 'disabled' || policy.runtimeRead === 'ready');
+
+/** Select the existing configuration/readiness owner from persisted supply_mode.
+ *  This is a policy path, not a readiness verdict, and performs no mode/credential writes. */
+export const setupCandidatePath = (
+  policy: SetupPolicy,
+  mode: 'direct' | 'hub' | undefined,
+): 'pending' | 'direct' | 'configure-hub' | 'hub' | 'hub-recovery' => {
+  if (policy.capability === 'pending' || mode === undefined) return 'pending';
+  if (mode === 'hub') {
+    return policy.capability === 'enabled' && policy.runtimeRead === 'ready' && policy.hubRunning
+      ? 'hub' : 'hub-recovery';
+  }
+  if (policy.capability === 'disabled') return 'direct';
+  if (policy.runtimeRead !== 'ready') return 'pending';
+  return policy.installSupport === 'unsupported' ? 'direct' : 'configure-hub';
+};
 
 /** The screen a Back action leaves to, or `null` on the first one. */
 export const setupBackTarget = (
