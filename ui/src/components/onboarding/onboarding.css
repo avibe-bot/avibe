@@ -1300,10 +1300,14 @@
 .onboarding-step[data-handoff] .onboarding-primary-action:disabled { opacity: 1; }
 .onboarding-heading h1:focus { outline: none; }
 .onboarding-flow-error { width: 100%; margin-top: 16px; text-align: center; color: var(--destructive-ink); overflow-wrap: anywhere; }
-/* The retained assistant hints are ancillary to the common stage. Their content can grow
-   without pushing the anchor. They follow the buttons in the flow via the shared grid. */
-.onboarding-setup-hint { width: 100%; text-align: center; margin-top: 16px; }
-.onboarding-step:has(.onboarding-setup-hint) .onboarding-setup-hint { position: absolute; top: 100%; padding-top: calc(var(--ob-action-h) * 2 + 10px); }
+/* The retained assistant caption is ancillary to the common stage: the active screen
+   portals it into the shell's slot BELOW the action pair. In normal flow under a
+   top-anchored step it can say as much as it needs to without moving the anchor, and it
+   cannot intercept a tap meant for the buttons — which is what it did while it was
+   lifted out of flow and offset back over the footer. The slot itself costs nothing
+   when no screen is contributing one; the caption brings its own gap. */
+.onboarding-action-aside { width: 100%; }
+.onboarding-setup-hint { width: 100%; margin-top: 16px; text-align: center; }
 
 /* Provider tiers are consumed by L2; their bands are the same C3 bands as the shell. */
 .onboarding-shell {

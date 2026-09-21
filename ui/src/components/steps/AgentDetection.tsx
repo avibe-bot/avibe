@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   ArrowRight,
@@ -115,6 +116,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const enableQueue = useRef(Promise.resolve());
   const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
+  // What a settled write still owes a screen the person had already left, paid on return.
+  const enableReceipt = useRef<Partial<Record<RuntimeBackendId, string>>>({});
   // One provider modal/reconciliation at a time; Configure and navigation stay
   // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
@@ -157,28 +160,41 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
+  // Being read again is one event with one owner, however it arrives: the shell
+  // activates this screen, or the route surface it sits on comes back. In the shell both
+  // happen in the same commit, so two effects would mean two refreshes — and the second,
+  // knowing nothing of the first, would wipe the write receipt it had just reported.
   useEffect(() => {
-    if (!isPage && active) for (const name of ASSISTANT_ORDER) void refreshConnection(name);
+    const leftSurface = previousRouteSurfaceActive.current && !routeSurfaceActive;
+    previousRouteSurfaceActive.current = routeSurfaceActive;
+    // Returning also collects what a write settled while there was nobody to tell.
+    if (!isPage && active && !leftSurface) for (const name of ASSISTANT_ORDER) {
+      const receipt = enableReceipt.current[name];
+      delete enableReceipt.current[name];
+      void refreshConnection(name, receipt);
+    }
+    // Leaving drops in-flight READS only. A queued enable intent is a write the person
+    // already asked for; invalidating it here would strand `pendingEnable` behind a
+    // completion whose intent check can never pass again.
     return () => { for (const name of ASSISTANT_ORDER) {
       connectionTokens.current[name] = (connectionTokens.current[name] || 0) + 1;
-      enableIntent.current[name] = (enableIntent.current[name] || 0) + 1;
     } };
-  }, [refreshConnection, isPage, active]);
-  useEffect(() => {
-    const returnedToSurface = routeSurfaceActive && !previousRouteSurfaceActive.current;
-    previousRouteSurfaceActive.current = routeSurfaceActive;
-    if (!isPage && active && returnedToSurface) {
-      for (const name of ASSISTANT_ORDER) void refreshConnection(name);
-    }
-  }, [isPage, active, refreshConnection, routeSurfaceActive]);
+  }, [refreshConnection, isPage, active, routeSurfaceActive]);
 
   const isAnyInstalling = Object.values(installingAgents).some(Boolean);
 
   useEffect(() => {
     if (!active || (!onActionChange && !isPage && data.__onboardingDetected)) return;
-    // Welcome may have completed detection after this retained screen mounted.
-    const source = normalizeAgents(data);
-    setAgents((previous) => Object.fromEntries(Object.entries(previous).map(([name, agent]) => [name, { ...agent, cli_path: source[name].cli_path }])));
+    // The first showing adopts the parent snapshot, because Welcome may have finished
+    // detection after this retained screen mounted. After that the screen owns its own
+    // paths: the snapshot predates every install, provider write and probe made here, so
+    // copying it back on re-entry would probe a binary nobody chose and report a backend
+    // missing while the right path is the one persisted. `visited` is still false in the
+    // render that activates the screen, which is exactly that first showing.
+    const source = visited ? agents : normalizeAgents(data);
+    if (!visited) {
+      setAgents((previous) => Object.fromEntries(Object.entries(previous).map(([name, agent]) => [name, { ...agent, cli_path: source[name].cli_path }])));
+    }
     void Promise.all(Object.entries(source).map(([name, agent]) => detect(name, agent.cli_path)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
@@ -285,6 +301,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       } catch (error) { receiptError = String(error); }
       if (enableIntent.current[backend] !== intent) return;
       delete pendingEnable.current[backend];
+      // The write is finished either way, but a screen the person has left may neither
+      // read nor publish. Hold its receipt rather than spend it on nobody: the return
+      // refresh reports what this write actually did instead of losing it.
+      if (!activeRef.current) { enableReceipt.current[backend] = receiptError; return; }
       // This uncached projection reads persisted enabled even after a rejected
       // write. Apply failure cannot roll back config that was already committed.
       await refreshConnection(backend, receiptError);
@@ -418,6 +438,46 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       disabled: !canContinue || actionBusy || recoveryOpen, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
   }, [active, onActionChange, entering, canContinue, actionBusy, recoveryOpen]);
 
+  // The readiness caption belongs under the action it explains, and in the shell that
+  // action is the shared pair the screen no longer draws. Kept inside the screen it
+  // either pushes the anchor as it grows or has to be lifted out of flow over the
+  // footer, where it covers the very button it describes; so the shell reserves a slot
+  // after the pair and the active screen portals its caption into that slot instead.
+  const setupRoot = useRef<HTMLDivElement>(null);
+  const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setActionAside(onActionChange
+      ? setupRoot.current?.closest('.onboarding-step')?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null
+      : null);
+  }, [onActionChange]);
+  const hintInner = (<>
+        <p className="text-center text-xs text-muted">
+          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
+          {/* The whole-screen rescan, kept as part of the sentence that explains why a
+              card might not say what was expected rather than a control competing with
+              the action above it. */}
+          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
+            <RefreshCw size={12} />{t('agentDetection.rescan')}
+          </Button>
+        </p>
+        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
+  </>);
+  // A portal leaves the screen root, and with it the `inert` the shell puts on a screen
+  // nobody is reading, so the caption has to answer to the same activity itself.
+  const hintNode = onActionChange
+    ? (active && routeSurfaceActive && actionAside ? createPortal(<div className="onboarding-setup-hint">{hintInner}</div>, actionAside) : null)
+    : (
+      <div className="onboarding-setup-footer">
+        <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
+          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
+          {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
+          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
+        </Button>
+        {hintInner}
+        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+      </div>
+    );
   // Page mode keeps the existing settings shell — render the inner content only
   const Inner = isPage ? (
     <>
@@ -604,7 +664,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }
 
   return (
-    <div className="onboarding-setup">
+    <div className="onboarding-setup" ref={setupRoot}>
       <header className="onboarding-heading">
         <h1 tabIndex={-1}>{t('onboarding.setup.title')}</h1>
         <p>{t('onboarding.setup.subtitle')}</p>
@@ -695,25 +755,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       </div>
       {providerDialog}
       {completionRecovery}
-      <div className={onActionChange ? 'onboarding-setup-hint' : 'onboarding-setup-footer'}>
-        {!onActionChange && <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
-          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
-          {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
-          <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
-        </Button>}
-        <p className="text-center text-xs text-muted">
-          {t(readyBackends.some((name) => connections[name]?.ready) ? 'onboarding.connection.entryReady' : canContinue ? 'onboarding.connection.entryStopped' : 'onboarding.connection.entryHint')}{' '}
-          {/* The whole-screen rescan, kept as part of the sentence that explains why a
-              card might not say what was expected rather than as a control competing
-              with the action above it. */}
-          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
-            onClick={() => void detectAll()} disabled={isAnyInstalling || Object.values(detectingAgents).some(Boolean)}>
-            <RefreshCw size={12} />{t('agentDetection.rescan')}
-          </Button>
-        </p>
-        {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
-        {!onActionChange && onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
-      </div>
+      {hintNode}
     </div>
   );
 };

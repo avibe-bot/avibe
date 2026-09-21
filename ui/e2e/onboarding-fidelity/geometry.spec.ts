@@ -56,6 +56,26 @@ const boxes = (page: Page, selector: string) =>
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   }));
 
+/**
+ * Nothing may sit between a person and the action pair: the centre of each button has to
+ * hit the button itself, or its own label. An ancillary caption, capsule or overlay that
+ * drifts over the footer intercepts the click long before any box assertion notices, so
+ * the anchor fence checks pointer ownership on every screen it walks. An ancestor under
+ * the point is not ownership — a covering element's parent is exactly that.
+ */
+const hitSelf = async (page: Page, selector: string) => {
+  const locator = page.locator(selector);
+  // On the narrow tiers the pair sits well below the fold, and a point outside the
+  // viewport belongs to no element at all; bring it into view first so what comes back
+  // is an answer about the layout rather than about the scroll position.
+  await locator.scrollIntoViewIfNeeded();
+  return locator.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    return !!hit && (node === hit || node.contains(hit));
+  });
+};
+
 const round = (value: number) => Math.round(value * 100) / 100;
 const spread = (values: number[]) => Math.max(...values) - Math.min(...values);
 
@@ -540,11 +560,26 @@ test.describe('shared action anchor', () => {
             const next = await box(page, selector);
             for (const key of ['x', 'y', 'width', 'height'] as const) expect(round(next[key])).toBeCloseTo(round(original[key]), 1);
           }
+          // The pair is not only where it was, it is what a tap actually reaches.
+          expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+          expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
           await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
           await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
         }
+        // The last screen contributes a caption, and a caption is ancillary: it is drawn
+        // below the pair it explains. That placement is what lets it grow without moving
+        // the anchor, and what keeps it off the button it is describing.
+        const caption = await box(page, '.onboarding-setup-hint');
+        const backRect = await box(page, '.onboarding-back-action');
+        expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
         await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
         await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
+        // And the last word on reachability is a real click, which Playwright refuses to
+        // deliver when something else would receive it. The caption's own controls have
+        // to stay live too: it is an aside, not a decoration.
+        await page.locator('.onboarding-setup-hint').getByRole('button').first().click();
+        await page.locator('.onboarding-back-action').click();
+        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence[0]);
         expect(denied).toEqual([]);
       });
     }

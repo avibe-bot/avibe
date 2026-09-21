@@ -150,6 +150,9 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
         <ArrowLeft size={14} />{t(back === 'providers' ? 'onboarding.flow.backToProviders' : 'onboarding.flow.backToIntro')}
       </Button>
     </div>
+    {/* Where a screen puts what is ancillary to the pair above: below it, in normal flow,
+        so a caption that grows can neither move the anchor nor cover it. */}
+    <div className="onboarding-action-aside" data-setup-action-aside="" />
     {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
       <p>{capability === 'disabled' || gatewayEnabled === false ? t('onboarding.flow.gatewayRequired') : error || t('onboarding.connection.readFailed')}</p>
     </div>}

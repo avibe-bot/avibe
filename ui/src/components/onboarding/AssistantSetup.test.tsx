@@ -9,6 +9,7 @@ import { AssistantRow } from './AssistantRow';
 import en from '../../i18n/en.json';
 import type { BackendConnectionState } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
+import type { SetupAction } from './setupFlow';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(),
@@ -232,6 +233,99 @@ describe('assistant installation presentation', () => {
     await act(async () => finishConfig(data()));
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
     expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+  });
+  // The shell's own adapter: every screen stays mounted, Back is a deactivation rather
+  // than an unmount, and the screen publishes its action instead of drawing one. These
+  // three go through that adapter because the retained-screen bugs only exist there.
+  const next = vi.fn();
+  const shown = (saved: ReturnType<typeof data>, active: boolean, onActionChange: (action: SetupAction) => void) =>
+    wrap(<AgentDetection data={saved} active={active} onActionChange={onActionChange} onNext={next} />, active);
+  const configureAction = () => row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ });
+
+  it('settles an enable write that lands while the screen is away, and reads nothing from hiding', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    // The persisted value the uncached projection would report, moved by the write.
+    let persisted = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend: string) => ({
+      ok: true, backend, installed: true, auth: 'api_key', application: 'applied',
+      enabled: backend === 'claude' ? persisted : true,
+      ready: backend === 'claude' && persisted,
+      entry_eligible: backend === 'claude' && persisted,
+    }));
+    let finishWrite!: (value: unknown) => void;
+    const actions: SetupAction[] = [];
+    const publish = (action: SetupAction) => { actions.push(action); };
+    const view = render(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    const enable = () => row('Claude Code').getByRole('switch');
+    await waitFor(() => expect(enable().getAttribute('aria-checked')).toBe('false'));
+    await waitFor(() => expect(actions.at(-1)?.disabled).toBe(true));
+
+    mock.api.mutateConfig.mockImplementation(() => new Promise((resolve) => { finishWrite = resolve; }));
+    fireEvent.click(enable());
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+
+    // Back, while the write the person asked for is still in flight.
+    view.rerender(shown(saved, false, publish));
+    const readsWhileHidden = mock.api.getBackendConnection.mock.calls.length;
+    const publishedWhileHidden = actions.length;
+    persisted = true;
+    await act(async () => { finishWrite({ ok: true }); });
+    // A screen nobody is reading owns no side effects: settling is bookkeeping only.
+    expect(mock.api.getBackendConnection.mock.calls.length).toBe(readsWhileHidden);
+    expect(actions.length).toBe(publishedWhileHidden);
+
+    // Returning pays what that write owed, instead of latching the row pending behind
+    // an intent check that can never pass again.
+    view.rerender(shown(saved, true, publish));
+    await waitFor(() => expect(actions.at(-1)?.disabled).toBe(false));
+    expect(enable().getAttribute('aria-checked')).toBe('true');
+    expect(configureAction().hasAttribute('disabled')).toBe(false);
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+  });
+
+  it('reports an enable write that failed while the screen was away instead of losing it', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    let failWrite!: (reason: Error) => void;
+    const publish = vi.fn();
+    const view = render(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    await waitFor(() => expect(configureAction().hasAttribute('disabled')).toBe(false));
+    mock.api.mutateConfig.mockImplementation(() => new Promise((_resolve, reject) => { failWrite = reject; }));
+    fireEvent.click(row('Claude Code').getByRole('switch'));
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+    view.rerender(shown(saved, false, publish));
+    await act(async () => { failWrite(new Error('fixture persist failure')); });
+    view.rerender(shown(saved, true, publish));
+    // The receipt is what the write actually did, and returning is when there is finally
+    // someone to tell. Dropping it would leave a silent failure behind a clean read.
+    expect((await row('Claude Code').findByRole('alert')).textContent).toContain('fixture persist failure');
+  });
+
+  it('probes the path this screen learned, not the parent snapshot, when it is shown again', async () => {
+    const saved = data();
+    saved.agents.claude.cli_path = '/stale/claude';
+    // Only the retained path resolves, so a probe that fell back to the snapshot is
+    // visible twice over: in the call log, and as a backend reported missing again.
+    mock.api.detectCli.mockImplementation((binary: string) => Promise.resolve(
+      binary === '/retained/claude' ? { found: true, path: '/retained/claude' } : { found: false }));
+    mock.api.installAgent.mockResolvedValue({ ok: true, path: '/retained/claude', message: '' });
+    const probes = (binary: string) => mock.api.detectCli.mock.calls.filter(([called]) => called === binary).length;
+    const publish = vi.fn();
+    const view = render(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    // The first showing does adopt the snapshot: Welcome may have detected after this
+    // retained screen mounted. That is the one probe the stale path ever gets.
+    await waitFor(() => expect(probes('/stale/claude')).toBe(1));
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    const retainedProbes = probes('/retained/claude');
+
+    view.rerender(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    await waitFor(() => expect(probes('/retained/claude')).toBe(retainedProbes + 1));
+    expect(probes('/stale/claude')).toBe(1);
+    expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy();
   });
   it('does not enable entry from installed, draining, failed or unknown states', async () => {
     for (const application of ['draining', 'failed', 'unknown']) {
