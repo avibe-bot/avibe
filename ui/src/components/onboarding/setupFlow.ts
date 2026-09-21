@@ -103,20 +103,39 @@ export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
 };
 
 /**
+ * The capability read as a three-state, because two states cannot express "not read yet".
+ * `useModelHubCapability()` returns `boolean | null`; map it at the boundary with
+ * `setupCapability` and never branch on the raw value.
+ */
+export type SetupCapability = 'pending' | 'enabled' | 'disabled';
+
+export const setupCapability = (modelHubEnabled: boolean | null): SetupCapability =>
+  modelHubEnabled === null ? 'pending' : modelHubEnabled ? 'enabled' : 'disabled';
+
+/**
  * The screens this instance runs, in order.
  *
  * Model Hub is default-on (`is_model_hub_enabled()` defaults to `"1"` since #1917), so the
  * three-screen flow is the ordinary path. A deployment that explicitly turns the capability
  * off has no gateway to add providers to, and the flow drops that screen rather than
  * rendering an empty one or growing a third shape: screen 3 then keeps the per-assistant
- * connection actions it has today. `null` means the capability has not been read yet, and
- * an unread capability is not an absent one — the flow waits instead of committing to the
- * shorter sequence and jumping the screen the user is about to see.
+ * connection actions it has today.
+ *
+ * While the capability is `pending` this returns the full sequence, and that is NOT the
+ * wait: a returned sequence says which screens exist, not that the shell may enter them.
+ * `setupNavigationReady` is the wait, and the shell must honor it — holding the user on the
+ * introduction with the primary action disabled — because entering the providers screen on a
+ * guess and then removing it when the read resolves to `disabled` recreates exactly the jump
+ * the shorter sequence exists to prevent.
  */
-export const setupScreenSequence = (modelHubEnabled: boolean | null): readonly SetupScreenId[] => {
-  if (modelHubEnabled === null) return SETUP_SCREENS;
-  return modelHubEnabled ? SETUP_SCREENS : SETUP_SCREENS.filter((screen) => screen !== 'providers');
-};
+export const setupScreenSequence = (capability: SetupCapability): readonly SetupScreenId[] =>
+  capability === 'disabled'
+    ? SETUP_SCREENS.filter((screen) => screen !== 'providers')
+    : SETUP_SCREENS;
+
+/** Whether the shell may leave the introduction. False until the capability read settles. */
+export const setupNavigationReady = (capability: SetupCapability): boolean =>
+  capability !== 'pending';
 
 /** The screen a Back action leaves to, or `null` on the first one. */
 export const setupBackTarget = (

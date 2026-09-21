@@ -74,7 +74,7 @@ inventory in §3 is the first thing a lane reads.
 | Added providers, masked keys, vendor identity | `modelsApi.listSources()`, `Source{vendor, display_name, masked_credential, account_label, state, models}` | shipped; screen 2's connected cards |
 | Detected candidates with vendor, mask and source label | `modelsApi.scanMigration()`, `MigrationItem{vendor, display_name, masked_credential, backend, notes_key, proposed_action}` | shipped; screen 2's detected slots and import rows |
 | Per-backend route read/write | `modelsApi.getAgentSources/putAgentSources/reorderAgentChains/getAgentChains/previewAgentChain`, `settings/models/RouteChainDialog.tsx`, `routeChainDraft.ts` | shipped; **there is no global route object** — see C6 and D4 |
-| Gateway engine lifecycle | `modelsApi.getRuntimeStatus/installRuntime/startRuntime`, `settings/models/runtimeLifecycle.ts` (`installRuntimeUntilSettled`, `installAndStartStep`), `RuntimeNotStartedAction`, `InstallGatewayDialog`, `EnableGatewayDialog` | shipped, Settings-only today; onboarding never installs the engine — see D3 |
+| Gateway engine lifecycle | `settings/models/gatewayAdoption.ts` (`resumeGatewayAdoption`) over `runtimeLifecycle.ts` (`resumeInstallAndStartRuntime`, `installRuntimeUntilSettled`, `installAndStartStep`, `runtimeCanAttemptInstall`), plus `RuntimeNotStartedAction`, `InstallGatewayDialog`, `EnableGatewayDialog` | shipped, Settings-only today; onboarding never installs the engine — see D3 and C6 |
 | Capability gate | `settings/models/featureFlags.ts`, `useModelHubCapability.ts`, `ModelHubCapabilityGate.tsx` | shipped |
 | Wire drawing pattern | `settings/models/SupplyGraph.tsx` (measures `[data-source-id]` → `[data-agent-backend]`, `xl:block` only) | shipped; screen 2 needs vertical fan-in/fan-out at every width, so a new component reusing the same wire tokens rather than a bent `SupplyGraph` |
 | Geometry and behavior harness | `ui/e2e/onboarding-fidelity/{fixture.tsx, support.ts, geometry.spec.ts, connections.spec.ts, loop.spec.ts, hub-ownership.spec.ts}` | shipped; `serveModelHub` already mocks scan/apply and must grow sources/runtime/agents routes |
@@ -147,9 +147,11 @@ outbound wires → three assistant destinations → summary line → reserved ca
   Subscription (OpenAI/ChatGPT and Anthropic/Claude through the hub OAuth flow, driven by
   real capability rather than a fixture list), API Key (the extracted vendor form:
   eight primaries in catalog order, `更多服务商` collapsed holding the catalog's
-  remainder, `sk-demo-example` placeholder, empty input disables the action). Two-phase
-  progress copy in production wording; failure keeps input and selection and turns the
-  action into Retry.
+  remainder, empty input disables the action). The key field keeps the extracted shared
+  form's own treatment; the prototype's `sk-demo-example` placeholder and its
+  "do not enter real credentials" line are preview-only and ship nowhere (C1's rules,
+  handoff §15). Two-phase progress copy in production wording; failure keeps input and
+  selection and turns the action into Retry.
 - **Primary action states.** `导入 N 项并继续` / `重试导入 N 项并继续` / `继续，选择 AI 助手`
   / `添加订阅或 API Key` (opens the add dialog) / `正在连接…` `正在检查连接…` disabled.
 - **First-entry sequence** (~1.1s): cards → inbound wires → gateway → outbound wires →
@@ -377,6 +379,25 @@ shipped behavior cites its owner module and says "reuse unchanged" instead of pa
 it, and that any new behavioral claim is read out of the implementation before it is written
 into a contract.
 
+Round 3 (head `5ea80cee`) proved the diagnosis rather than contradicting it: four more
+findings, three of them members of the same class that the round-2 sweep had missed — this
+document's own D3 and reuse table still named the install-only helper, §4.3 still told a lane
+to ship the prototype's `sk-demo-example` placeholder against C1's explicit rule, and C4's
+routed condition read the backend-level `selected_model_id`, which is null whenever the
+default Agent belongs to another backend and so rejects a runnable candidate on a different
+one. The fourth was C2 contradicting itself: returning the full sequence for an unread
+capability is not waiting, so a fast click could enter a screen the resolved read then
+removes.
+
+The scope decision therefore tightened as pre-committed. Contracts now carry three things
+only: interfaces and names, ownership boundaries, and the deltas no shipped module owns.
+Everything else became an owner pointer with "reuse unchanged", stated as a rule at the head
+of C6, because a paraphrase of shipped mechanics is a second place to be wrong and this PR
+kept finding new ones. The two changes that are not deletions: C4's routed condition now
+correlates `listVibeAgents()` candidates with their `named_agents` entry, and C2 gained
+`SetupCapability` with `setupNavigationReady` as the explicit wait, so the shell cannot read
+a returned sequence as permission to navigate. Both briefs were swept for the same members.
+
 ## 10. Decisions
 
 D1 was settled by the owner on 2026-09-21 09:30 and executed at 09:31. D2–D8 are adopted
@@ -390,12 +411,15 @@ contract-preserving, and any of them can still be overruled before its lane merg
   tab, with the existing 40 KB suite as the regression fence. Rejected: a setup-only key form
   (duplicates a heavily specified flow) and opening the Settings dialog from setup (breaks
   the tabbed stable frame).
-- **D3 — gateway engine lifecycle in onboarding. Adopted: automatic.** Entering screen 2
-  reads `getRuntimeStatus()` and, when the engine is `not_installed`/`not_started`, runs the
-  existing `installRuntimeUntilSettled` path with visible progress inside the gateway card.
-  It downloads and installs the managed runtime during first run, which is why it was put to
-  the owner rather than assumed. Rejected: an explicit user action (a dead end on first run)
-  and an error pointing at Settings.
+- **D3 — gateway engine lifecycle in onboarding. Adopted: automatic, through the shipped
+  combined path.** Entering screen 2 goes through `resumeGatewayAdoption`, which ensures the
+  engine with `resumeInstallAndStartRuntime` — install AND start — and then scans that
+  backend's candidates, reporting progress and its classified failure inside the gateway
+  card. The install-only helper is not the path: a fresh runtime that classifies as installed
+  but is `not_started` would leave screen 2 talking to a stopped gateway. It downloads and
+  installs the managed runtime during first run, which is why it was put to the owner rather
+  than assumed. Rejected: an explicit user action (a dead end on first run) and an error
+  pointing at Settings.
 - **D4 — the shared default route. Adopted: one shared preference, projected per backend.**
   The contract has no global route object; ordering is per-backend (`AgentSupply.sources.order`,
   `putAgentSources`) and is that backend's ELIGIBLE subset, so the dialog edits one preference

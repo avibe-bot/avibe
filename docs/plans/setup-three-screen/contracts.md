@@ -61,10 +61,14 @@ and the shell-owned `SetupFlowState`. Two rules are the point of the file:
   (installed CLIs, enabled backends, persisted sources) is read, not mirrored;
   `SetupFlowState` holds only what no server does.
 
-`setupScreenSequence(modelHubEnabled)` encodes the capability degradation: three screens
-normally, `intro → assistants` when a deployment explicitly disables Model Hub, and the
-full sequence while the capability is still unread (`null`), because an unread capability
-is not an absent one.
+`setupCapability(boolean | null)` maps `useModelHubCapability()`'s read onto
+`'pending' | 'enabled' | 'disabled'`, and `setupScreenSequence(capability)` encodes the
+degradation: three screens normally, `intro → assistants` when a deployment explicitly
+disables Model Hub. A `pending` capability returns the full sequence, and that return is not
+the wait — `setupNavigationReady(capability)` is. The shell must hold the user on the
+introduction with the primary action disabled until it is true, because entering the
+providers screen on a guess and then removing it when the read resolves to `disabled`
+recreates the very jump the shorter sequence exists to prevent.
 
 ## C3 — geometry and DOM hooks
 
@@ -128,17 +132,17 @@ OpenCode is simultaneously:
 | --- | --- |
 | installed | `api.detectCli(cli_path)`, corroborated by `AgentSupply.cli_present` |
 | enabled | the identity Switch's existing write path, read back through `getBackendConnection(backend).enabled` |
-| routed | `getAgentSources(backend)`: `mode === 'hub'`, a non-empty `sources.order`, and `model_supply` reporting `has_runnable_hop` for that backend's `selected_model_id` — the runnable-hop read `readOpencodeSetupRoutes` already uses for OpenCode, generalized to all three |
+| routed | the candidate's own supply, read per named Agent: `listVibeAgents()` candidates correlated with their entry in that backend's `AgentSupply.named_agents` (`effective_model_id`, `supply_status`) | the correlation `Wizard.complete()` already performs between candidate Agents and the backend supply projection, generalized from OpenCode-only to the three backends. It must NOT read the backend-level `selected_model_id`: that field describes only the route named by `selected_by_agent`, so it is null whenever the global default Agent belongs to another backend, and a predicate built on it rejects a runnable candidate on a different backend before the re-pointing rule below can select it |
 
 and that assistant is selectable as the default Vibe Agent, which keeps today's rule that a
 usable selected Agent is preserved and re-pointed only when the current default is not in the
 available set.
 
-Source health is not a separate condition: `has_runnable_hop` is the server's own answer
-about whether the route can run, and a healthy source that no route uses does not make an
-assistant usable. `SetupFlowState.routeOrder` is the route dialog's working preference and
-never gates entry — a gate resting on client draft state would block a stateful installation
-that already has valid persisted routes (see C6's hydration row).
+Source health is not a separate condition: the per-Agent supply status is the server's own
+answer about whether that Agent's next turn can run, and a healthy source that no route uses
+does not make an assistant usable. `SetupFlowState.routeOrder` is the route dialog's working
+preference and never gates entry — a gate resting on client draft state would block a
+stateful installation that already has valid persisted routes (see C6's hydration row).
 
 Unchanged from today's `complete()`: a start is issued only from a confirmed `stopped`
 application state; a usable selected Agent is preserved and only re-pointed when the
@@ -187,6 +191,12 @@ Applies to all three screen-2 dialogs and to screen 3's route dialog.
 Field names are exact. Every row names its producer and its consumer, because a shape-only
 contract passes both sides' unit tests while the behavior silently disagrees.
 
+A row that describes shipped behavior names the module that owns it and says reuse
+unchanged; the mechanics live in that owner's code and tests, not here, and a second copy of
+them is a second place to be wrong. Where a row states a trap, it states only the trap.
+Anything setup does that no shipped module owns is written out in full, and a lane that finds
+a claim here contradicting the implementation reports it instead of following it.
+
 ### Screen 2 — providers
 
 | Element | Source of truth | Rule |
@@ -215,7 +225,7 @@ contract passes both sides' unit tests while the behavior silently disagrees.
 | install | `api.installAgent(name)` then re-detect with the returned path | one loading indicator per card; a failure keeps its message and output |
 | enabled | the identity Switch's existing write path | disabling preserves configuration and says so (`onboarding.setup.disabledNotice`) |
 | update available / update | `BackendLifecycleChip` with `onVisual` | the chip still owns the probe and the write; the card only draws the reported visual, and an update coexists with the enabled state |
-| default-model chip | `getAgentSources(backend)` → `selected_model_id`, `model_supply` | rendered only when the assistant is enabled and a route resolves |
+| default-model chip | the candidate Agent's own `named_agents` entry (`effective_model_id`, `supply_status`) | rendered only when the assistant is enabled and that Agent's route resolves; it shows the model this Agent would actually ask for, not the backend-level projection, which is null whenever the default Agent belongs to another backend |
 | route preference hydration | `getAgentSources(backend)` for each enabled backend | the dialog's list is derived from persisted state and never left at an empty client default: prefer the order of the backend that will run (the default Vibe Agent's), else the longest persisted order, else the ordering the server reports for that backend's eligible sources. Every re-entry re-derives it, so persisted state stays authoritative — a stateful installation opens on its real rows and can satisfy C4 without any write |
 | backend mode | `resumeGatewayAdoption` → `setAgentMode(backend, 'hub')` | the shipped sequence in `BackendSupplyModeCard.setMode` and `SettingsModelsPage`: adoption ensures the engine first and hands back that backend's migration candidates, and only a backend with none is switched straight to hub. Eligibility is read AFTER the switch, from the echoed `AgentSupply`, because in Direct mode `sources` is `null` and `eligibilityOf` marks every source ineligible — projecting first would skip every Direct backend, so setup could never establish a route on a fresh or Direct installation |
 | route dialog list | the hydrated preference, projected to rows | row = provider mark + model name + `服务名 · 首选/备用 N`; up/down disabled at the ends; a single route shows the "already preferred" note |
