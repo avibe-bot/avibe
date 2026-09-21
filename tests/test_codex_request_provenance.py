@@ -3,7 +3,6 @@ from __future__ import annotations
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.provenance import (
-    _MAX_CONTINUATION_MODELS_PER_TURN,
     BoundedProvenanceStore,
     PreparedGatewayRoute,
     TurnCorrelationRegistry,
@@ -274,14 +273,16 @@ def test_late_request_on_same_route_never_claims_newer_turn(tmp_path):
         assert late.turn_id is None
         late.mark_downstream_canceled()
 
-    # Off its own route, a handle whose turn has settled has nothing left to
-    # vouch for the model, so it fails closed rather than routing unattributed.
+    # Off its own route it routes by the model the request names, and claims a
+    # turn no more and no less than on it: what a settled turn cannot do is own
+    # a request, which has nothing to do with the model the request names.
     with registry.gateway_terminalizer(
         backend="codex",
         token=token,
         request_metadata=metadata_old,
     ) as stale_switch:
-        assert stale_switch.resolution_model("other-alias") is None
+        assert stale_switch.resolution_model("other-alias") == "other-alias"
+        assert stale_switch.turn_id is None
         stale_switch.mark_downstream_canceled()
 
     with registry.gateway_terminalizer(
@@ -397,16 +398,19 @@ def test_live_handle_routes_another_model_and_keeps_its_turn(tmp_path):
 
     trace = registry._traces["turn-new"]
     assert not trace.ambiguous
-    assert trace.continuation_model_ids == {"alias-old"}
     assert "turn-new" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
 
 
-def test_continuation_models_are_bounded_and_refused_in_lockstep(tmp_path):
-    """Past the ceiling the hop is refused, never routed without a turn.
+def test_handle_routes_every_model_its_process_names_in_any_order(tmp_path):
+    """A handle authorizes no model, so no order of them can starve one.
 
-    Routing and attribution have to answer alike: admitting a request the turn
-    could not then be credited with is the split this change exists to remove,
-    so the bound that keeps one turn's set finite closes both at once.
+    Bounding what a live turn may name brings back the bug the bound was meant
+    to contain. Counted, the first other model a process names spends the
+    allowance and the outgoing model's re-serialisation is refused behind it;
+    ordered, a turn that names its own model first refuses the hop that had to
+    precede it. Both stranded the thread again from the other side. Whether a
+    named model is configured at all is resolution's question, and it answers
+    it from this agent's menu.
     """
 
     registry = _registry(tmp_path)
@@ -417,7 +421,7 @@ def test_continuation_models_are_bounded_and_refused_in_lockstep(tmp_path):
         gateway_request_model_id="alias",
     )
 
-    def route(gateway_model_id: str) -> str | None:
+    def route(gateway_model_id: str) -> tuple[str | None, str | None]:
         with registry.gateway_terminalizer(
             backend="codex",
             token=token,
@@ -425,21 +429,20 @@ def test_continuation_models_are_bounded_and_refused_in_lockstep(tmp_path):
         ) as terminalizer:
             model = terminalizer.resolution_model(gateway_model_id)
             terminalizer.mark_downstream_canceled()
-            return model
+            return model, terminalizer.turn_id
 
-    for number in range(_MAX_CONTINUATION_MODELS_PER_TURN):
-        assert route(f"alias-{number}") == f"alias-{number}"
+    # Some other configured model first, then the outgoing one the thread is
+    # re-serialised under, then the turn's own route by both of its spellings.
+    assert route("alias-other") == ("alias-other", "turn-many")
+    assert route("alias-old") == ("alias-old", "turn-many")
+    assert route("alias") == ("alias", "turn-many")
+    assert route("shared-upstream") == ("alias", "turn-many")
+    # A turn's own request closes the handle to nothing: a retry of the
+    # migration hop behind it is the same request on the same handle.
+    assert route("alias-old") == ("alias-old", "turn-many")
     trace = registry._traces["turn-many"]
-    assert len(trace.continuation_model_ids) == _MAX_CONTINUATION_MODELS_PER_TURN
-
-    assert route("alias-overflow") is None
-    assert "alias-overflow" not in trace.continuation_model_ids
-    # One already admitted still routes, and the route's own models never count
-    # against the ceiling at all.
-    assert route("alias-0") == "alias-0"
-    assert route("alias") == "alias"
-    assert route("shared-upstream") == "alias"
     assert not trace.ambiguous
+    assert "turn-many" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
 
 
 def test_retirement_revokes_explicit_auth_and_preserves_exact_closed_fact(tmp_path):
