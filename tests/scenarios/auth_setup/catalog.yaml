@@ -348,4 +348,20 @@ scenarios:
     layer: scenario
     backend: opencode
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_explicit_opencode_model_recovery_preserves_agent_and_completes
+  - id: AUTH-SETUP-122
+    name: Authorized config envelope carries every setup prerequisite field, and completion persists and reads back
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_authorized_config_envelope_and_completion_persistence_closed_loop
+    # Two complementary halves. The scenario test owns the producer side at the real
+    # boundary: remote authentication refusal that persists nothing, every field the
+    # setup parser requires, CSRF-gated persistence and per-call readback. The supporting
+    # test owns the browser side against controlled responses: unread or disabled
+    # evidence producing zero mutation and no completion, and recovery only through an
+    # explicit successful read. Neither runs a real browser against the real boundary, so
+    # the assembled journey is not covered by this entry.
+    supporting_tests:
+      - ui/src/components/onboarding/WizardCompletion.test.tsx
 next_priority: []

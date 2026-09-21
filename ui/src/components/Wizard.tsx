@@ -206,7 +206,9 @@ export function Wizard() {
   const applyRead = useCallback((result: SetupConfigRead): SetupConfigSnapshot | null => {
     if (result.state === 'unread') {
       setCapability('pending'); setGatewayEnabled(null);
-      setError(result.detail || (result.status !== undefined ? `HTTP ${result.status}` : '') || t('onboarding.connection.readFailed'));
+      // The status is a diagnostic the user can quote, so it stays — but the sentence
+      // carrying it is copy, and copy is the bundles' to own in both languages.
+      setError(result.detail || (result.status !== undefined ? t('onboarding.connection.readFailedStatus', { status: result.status }) : t('onboarding.connection.readFailed')));
       setRuntimeRead((previous) => failRegionRead(previous));
       return null;
     }

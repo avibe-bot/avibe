@@ -353,6 +353,12 @@ function expectNoForwardWrite() {
 
 // XpVZ/XpVc: the prerequisite is persisted state somebody else can change while this
 // flow is open, so every case here starts from a config the initial load accepted.
+//
+// AUTH-SETUP-122, browser half: these cases own the admission rule — what the shell does
+// with an answer it could not validate — against controlled responses. The producer half
+// (real authentication refusal, the full envelope shape, CSRF-gated persistence, readback)
+// is the scenario test the catalog entry names. The two do not compose into the assembled
+// browser-to-API journey; that stays with integrated acceptance.
 describe('fresh prerequisite boundary', () => {
   it.each([
     ['the saved intent', { model_hub: { enabled: false } }],
@@ -372,7 +378,7 @@ describe('fresh prerequisite boundary', () => {
     ['a body that never says what it had to', async () => jsonResponse({ ...baseConfig(), runtime: undefined }), en.onboarding.connection.readFailed],
     ['a body that is not JSON at all', async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } }) as unknown as Response, en.onboarding.connection.readFailed],
     ['an HTTP failure that explains itself', async () => jsonResponse({ error: 'config unavailable' }, { ok: false, status: 503 }), 'config unavailable'],
-    ['an HTTP failure that does not', async () => jsonResponse({}, { ok: false, status: 500 }), 'HTTP 500'],
+    ['an HTTP failure that does not', async () => jsonResponse({}, { ok: false, status: 500 }), en.onboarding.connection.readFailedStatus.replace('{{status}}', '500')],
     ['a transport that never answered', async () => { throw new Error('network down'); }, 'Error: network down'],
   ])('leaves the prerequisite unknown and offers Retry for %s', async (_label, respond, explanation) => {
     const enter = await setup();

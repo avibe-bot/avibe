@@ -5337,6 +5337,7 @@
       "savedSubscription": "Subscription credentials detected",
       "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
+      "readFailedStatus": "Unable to read connection state (HTTP {{status}}). Try again.",
       "saveFailed": "Unable to save the connection. Try again.",
       "applyFailed": "Credentials saved, but runtime application failed. Retry the save.",
       "applyPending": "Runtime application is not confirmed yet. Refresh the connection state.",
