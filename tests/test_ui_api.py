@@ -1694,6 +1694,100 @@ def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_ba
     assert result["claude_reasoning_effort"] == "max"
 
 
+@pytest.mark.parametrize("surface", ["channel", "user", "thread"])
+@pytest.mark.parametrize("inherit_model", [False, True])
+@pytest.mark.parametrize(
+    ("efforts", "supports_reasoning", "requested", "expected"),
+    [
+        (["low", "medium", "none", "自定义"], True, "none", "none"),
+        (["low", "medium", "none", "自定义"], True, "medium", "medium"),
+        (["low", "medium", "none", "自定义"], True, "自定义", "自定义"),
+        (["low", "medium", "none"], True, None, None),
+        (["low", "medium"], True, "none", None),
+        ([], True, "none", None),
+        (["none"], False, "none", None),
+    ],
+)
+def test_routing_save_roundtrips_exact_hub_model_effort(
+    monkeypatch, surface, inherit_model, efforts, supports_reasoning, requested, expected,
+):
+    config = V2Config.default()
+    config.model_hub.agents["claude"].mode = "hub"
+    config.model_hub.agents["claude"].models = [
+        ModelHubBackendModelConfig(
+            id="中文模型", reasoning_efforts=efforts, supports_reasoning=supports_reasoning,
+        ),
+        ModelHubBackendModelConfig(id="other-model", reasoning_efforts=["none"]),
+    ]
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
+    monkeypatch.setattr(backend_model_catalog, "catalog_reasoning_efforts_for_model", lambda *_args: ["low", "medium"])
+    SettingsStore.reset_instance()
+    agent_store = VibeAgentStore()
+    try:
+        agent_store.create(name="routing-claude", backend="claude", model="中文模型")
+        route = {
+            "agent_name": "routing-claude",
+            "model": None if inherit_model else "中文模型",
+            "reasoning_effort": requested,
+        }
+        if surface == "channel":
+            api.save_settings({"platform": "telegram", "channels": {"-1001": {"routing": route}}})
+        elif surface == "user":
+            api.save_users({"platform": "telegram", "users": {"U123": {"routing": route}}})
+        else:
+            api.save_thread_settings({
+                "platform": "telegram", "channel_id": "-1001", "thread_id": "42",
+                "settings": {"routing": route},
+            })
+        # Read through a new store: successful API responses alone are not
+        # evidence that the requested value survived persistence.
+        SettingsStore.reset_instance()
+        if surface == "user":
+            saved = api.get_users("telegram")["users"]["U123"]["routing"]
+        else:
+            settings = api.get_settings("telegram")
+            saved = (
+                settings["channels"]["-1001"]["routing"]
+                if surface == "channel"
+                else settings["threads"]["-1001"]["42"]["routing"]
+            )
+        assert saved["reasoning_effort"] == expected
+        assert saved["model"] == route["model"]
+        assert saved["agent_name"] == "routing-claude"
+    finally:
+        SettingsStore.reset_instance()
+        agent_store.close()
+
+
+@pytest.mark.parametrize("mode", ["direct", "disabled", "hub-missing-model", "hub-empty-catalog"])
+@pytest.mark.parametrize("efforts", [None, ["low", "medium"], ["low", "medium", "none", "自定义"]])
+@pytest.mark.parametrize("requested", [None, "none", "medium", "自定义"])
+def test_routing_normalization_retains_native_fallback_without_cross_model_leaks(
+    monkeypatch, mode, efforts, requested,
+):
+    config = V2Config.default()
+    agent_catalog = config.model_hub.agents["claude"]
+    agent_catalog.mode = "direct" if mode == "direct" else "hub"
+    agent_catalog.models = (
+        [] if mode == "hub-empty-catalog" else [
+            ModelHubBackendModelConfig(id="other-model", reasoning_efforts=["none", "自定义"]),
+        ]
+    )
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0" if mode == "disabled" else "1")
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
+    monkeypatch.setattr(backend_model_catalog, "catalog_reasoning_efforts_for_model", lambda *_args: efforts)
+    result = api._normalize_backend_routing_payload({
+        "agent_name": "claude", "model": "native-model", "reasoning_effort": requested,
+    })
+    allowed = (
+        efforts if mode in {"direct", "disabled"} and efforts is not None
+        else ["low", "medium", "high"]
+    )
+    expected = requested if requested in allowed else None
+    assert result["reasoning_effort"] == expected
+    assert result["model"] == "native-model"
+
+
 def test_sync_start_oauth_web_keeps_background_tasks_on_persistent_loop(monkeypatch):
     from core.agent_auth_service import WebAuthFlow
 

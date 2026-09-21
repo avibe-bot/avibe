@@ -31,6 +31,15 @@ Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
 - Existing Agent creation/model-switch default selection remains intact:
   prefer an available `medium`, otherwise use the declared list's first option.
   Adding the vocabulary entry never reorders that declared list.
+- Claude cache reuse compares the effective normalized reasoning choice as a
+  process-creation setting, for main sessions, subagents, and in-flight creates.
+  A changed choice waits for idle and rebuilds through the existing generation
+  lifecycle with the native resume ID; unchanged choices reuse the process.
+  Model-only control requests remain unchanged when effective reasoning matches.
+- Web channel, user, and thread route saves normalize against the same exact
+  backend model row as the picker, including an inherited Agent model. Native
+  mode keeps its native catalog. Empty declarations stay empty; another model's
+  `none` never grants support. Inherited model fields are not materialized.
 
 ## Validation invariants
 
@@ -50,6 +59,15 @@ Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
 - Resolver tests include direct/nested `none` and disabled thinking, plus
   provider fallback with mismatched/empty source capability metadata. Each
   attempt preserves the caller's original payload, protocol, and headers.
+
+## Compatibility review scope decision
+
+The independent review of `5ec19f1ac` found two boundary omissions: cache
+identity did not include the selected process-level reasoning setting, and
+Web routing writes used only the generic Claude vocabulary. Both were
+reproduced with failing consumer tests before repair. Fix these two owners
+using the existing lifecycle and model catalog; do not change shared gateway
+fingerprints, provider policy, route selection, retry, or persisted schemas.
 
 ## Known by design
 

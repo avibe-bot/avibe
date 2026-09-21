@@ -306,6 +306,166 @@ def test_session_handler_turns_thinking_off_only_when_the_model_declares_none(
     assert getattr(captured["options"], "effort", None) is None
 
 
+@pytest.mark.parametrize("channel", ["direct", "hub", "native_cli"])
+@pytest.mark.parametrize("subagent", [False, True])
+@pytest.mark.parametrize("waiting", [False, True])
+@pytest.mark.parametrize(
+    ("before", "after", "next_model", "expected"),
+    [
+        ("none", "medium", "思考模型", "medium"),
+        ("medium", "none", "思考模型", "none"),
+        ("none", None, "思考模型", None),
+        (None, "none", "思考模型", "none"),
+        ("none", "none", "ordinary-model", None),
+        ("medium", "custom-effort", "思考模型", "custom-effort"),
+        ("none", "none", "思考模型", "none"),
+        ("medium", "medium", "思考模型", "medium"),
+        (None, "unsupported", "思考模型", None),
+    ],
+)
+def test_cached_claude_rechecks_effective_reasoning_and_preserves_resume(
+    monkeypatch, tmp_path, channel, subagent, waiting, before, after, next_model, expected,
+) -> None:
+    from modules.agents.model_hub import ModelHubLaunch
+
+    clients = []
+    catalogs = {
+        "思考模型": ["low", "medium", "none", "custom-effort"],
+        "ordinary-model": ["low", "medium"],
+    }
+
+    class Client:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            self.model_calls = []
+            clients.append(self)
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            self.disconnects += 1
+
+        async def set_model(self, model):
+            self.model_calls.append(model)
+
+    class Runtime:
+        async def resolve(self, backend, requested_model, **_kwargs):
+            return ModelHubLaunch(
+                backend=backend, channel=channel, requested_model=requested_model,
+                target_model=requested_model, runtime_model=requested_model,
+                source_id="src_test01", gateway_base_url="http://127.0.0.1:9/fixture",
+                gateway_token="fixture-token",
+                reasoning_efforts=tuple(catalogs[requested_model]),
+            )
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        lambda _backend, model: catalogs.get(model),
+    )
+    controller = _Controller(tmp_path)
+    controller.model_hub_runtime = Runtime()
+    routing = RoutingSettings(model="思考模型", reasoning_effort=before)
+    controller.settings_manager.get_channel_routing = lambda _key: routing
+    native_id = "native-resume-unchanged"
+    controller.settings_manager.sessions.get_claude_session_id = lambda *_args: native_id
+    controller.settings_manager.sessions.get_agent_session_id = lambda *_args, **_kw: native_id
+    handler = SessionHandler(controller)
+    monkeypatch.setattr(handler, "_load_agent_file", lambda *_args: {"prompt": "Review 中文", "model": "思考模型"})
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    async def run():
+        kwargs = {"subagent_name": "reviewer"} if subagent else {}
+        first = await handler.get_or_create_claude_session(context, **kwargs)
+        assert await handler.get_or_create_claude_session(context, **kwargs) is first
+        routing.model = next_model
+        routing.reasoning_effort = after
+        if waiting:
+            # An in-flight creator can publish an older configuration after the
+            # initial cache check. Its result must pass the same reuse policy.
+            key = first._vibe_runtime_session_key
+            controller.claude_sessions.pop(key)
+
+            async def publish_waiting_client(composite_key):
+                assert composite_key == key
+                controller.claude_sessions[key] = first
+                return first
+
+            monkeypatch.setattr(handler, "_wait_for_claude_session_create", publish_waiting_client)
+        second = await handler.get_or_create_claude_session(context, **kwargs)
+        changed = before != expected
+        assert (second is not first) is changed
+        assert first.disconnects == int(changed)
+        assert len(clients) == 1 + int(changed)
+        assert second.options.resume == native_id
+        assert second.options.fork_session is False
+        assert getattr(second.options, "thinking", None) == (
+            {"type": "disabled"} if expected == "none" else None
+        )
+        assert getattr(second.options, "effort", None) == (None if expected == "none" else expected)
+        assert await handler.get_or_create_claude_session(context, **kwargs) is second
+        assert len(clients) == 1 + int(changed)
+
+    asyncio.run(run())
+
+
+def test_claude_reasoning_change_waits_for_idle_before_recreation(monkeypatch, tmp_path) -> None:
+    clients = []
+
+    class Client:
+        def __init__(self, options):
+            self.options = options
+            self.disconnected = False
+            clients.append(self)
+
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            assert self._vibe_runtime_session_key not in handler.active_sessions
+            self.disconnected = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        lambda *_args: ["none", "medium"],
+    )
+    controller = _Controller(tmp_path)
+    routing = RoutingSettings(model="claude-opus-4-6", reasoning_effort="none")
+    controller.settings_manager.get_channel_routing = lambda _key: routing
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    async def run():
+        first = await handler.get_or_create_claude_session(context)
+        key = first._vibe_runtime_session_key
+        handler.active_sessions.add(key)
+        routing.reasoning_effort = "medium"
+        entered_wait = asyncio.Event()
+        wait_for_idle = handler._wait_for_claude_session_idle
+
+        async def observe_wait(composite_key):
+            entered_wait.set()
+            await wait_for_idle(composite_key)
+
+        monkeypatch.setattr(handler, "_wait_for_claude_session_idle", observe_wait)
+        pending = asyncio.create_task(handler.get_or_create_claude_session(context))
+        await asyncio.wait_for(entered_wait.wait(), timeout=1)
+        assert not pending.done()
+        assert not first.disconnected
+        handler.active_sessions.remove(key)
+        second = await asyncio.wait_for(pending, timeout=1)
+        assert first.disconnected
+        assert second.options.effort == "medium"
+        assert len(clients) == 2
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("channel", ["hub", "native_cli"])
 @pytest.mark.parametrize("explicit", [None, "", "333333"])
 @pytest.mark.parametrize("has_metadata", [False, True])
