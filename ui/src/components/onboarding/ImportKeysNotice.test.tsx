@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import type { MigrationItem } from '@/components/settings/models/types';
+import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 
 const showToast = vi.hoisted(() => vi.fn());
@@ -128,7 +129,7 @@ const renderNotice = (onApplied?: (applied: number) => void) =>
   );
 
 const openDialog = async (user: ReturnType<typeof userEvent.setup>) => {
-  await user.click(await screen.findByRole('button', { name: 'Review and migrate' }));
+  await user.click(await screen.findByRole('button', { name: 'Review migration' }));
   return screen.findByRole('dialog');
 };
 
@@ -162,7 +163,7 @@ describe('ImportKeysNotice', () => {
     expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
     view.rerender(notice(true));
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review and migrate' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull());
     expect(modelsApi.applyMigration).not.toHaveBeenCalled();
   });
 
@@ -223,7 +224,7 @@ describe('ImportKeysNotice', () => {
     // The remainder is the server's answer after the rescan, not a subtraction.
     expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
     // A partial selection can still be finished from here.
-    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review migration' })).toBeTruthy();
   });
 
   it('keeps a blocked CLI group available after importing independent keys', async () => {
@@ -235,7 +236,7 @@ describe('ImportKeysNotice', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Review and migrate' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review migration' })).toBeTruthy();
     // The blocked Claude group remains on this machine, including its import
     // row, and the unrelated reauth row is untouched.
     expect(stored.map((i) => i.id)).toEqual([
@@ -300,5 +301,98 @@ describe('ImportKeysNotice', () => {
     await Promise.resolve();
     expect(modelsApi.scanMigration).not.toHaveBeenCalled();
     expect(screen.queryByText(/Model Gateway/)).toBeNull();
+  });
+});
+
+// The providers screen holds one scan for the stage, the footer action and this
+// sentence at once. Hosting hands the capsule the rows rather than letting it take
+// a second scan, because two reads of the same machine are how three surfaces end
+// up advertising different numbers of the same keys. What the capsule keeps is what
+// it always owned: the sentence, the help, and the dismissal signature.
+describe('ImportKeysNotice — hosted by a screen that already scanned', () => {
+  const renderHosted = (props: { candidates: MigrationItem[]; imported?: number; onReview?: () => void }) => {
+    const element = ({ candidates, imported = 0, onReview }: typeof props) => (
+      <I18nextProvider i18n={i18n}>
+        <ImportKeysNotice candidates={candidates} imported={imported} onReview={onReview} />
+      </I18nextProvider>
+    );
+    const view = render(element(props));
+    return { ...view, show: (next: typeof props) => view.rerender(element(next)) };
+  };
+
+  it('takes no scan of its own and says what the host gave it', async () => {
+    serve(FULL_SCAN);
+    const onReview = vi.fn();
+    renderHosted({ candidates: [CLAUDE_KEY, OPENCODE_ZHIPU], onReview });
+    const user = userEvent.setup();
+
+    expect(screen.getByText('Found 2 API keys to import into Model Hub')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Review migration' }));
+
+    // The host's dialog, over the host's rows.
+    expect(onReview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(modelsApi.scanMigration).not.toHaveBeenCalled();
+  });
+
+  it('does not let its own capability probe overrule a host that has real evidence', async () => {
+    // The probe resolves its own failures to `false`. A host holding rows has
+    // better evidence than that, and hiding a real offer on a blip is the worse
+    // failure of the two.
+    capability.value = false;
+    serve(FULL_SCAN);
+    renderHosted({ candidates: [CLAUDE_KEY] });
+
+    expect(screen.getByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+  });
+
+  it('honours a dismissal the first batch is recognised by', async () => {
+    writeMigrationDismissed([CLAUDE_KEY, OPENCODE_ZHIPU]);
+    serve(FULL_SCAN);
+    // The host is still scanning: an empty batch is not the first batch.
+    const { show } = renderHosted({ candidates: [] });
+
+    show({ candidates: [CLAUDE_KEY, OPENCODE_ZHIPU] });
+
+    expect(screen.queryByText(/API keys to import/)).toBeNull();
+  });
+
+  it('reports what the host just imported even against a remembered dismissal', async () => {
+    // These two were dismissed on some earlier visit.
+    writeMigrationDismissed([CLAUDE_KEY, OPENCODE_ZHIPU]);
+    serve(FULL_SCAN);
+    const { show } = renderHosted({ candidates: [OPENCODE_LEGACY] });
+    expect(screen.getByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+
+    // The host's rescan after an import someone just asked for. Its remainder is
+    // a subset of that old dismissal, and consulting it again here would hide the
+    // person's own result.
+    show({ candidates: [OPENCODE_ZHIPU], imported: 1 });
+
+    expect(screen.getByText('Migrated 1 · 1 API key still available')).toBeTruthy();
+  });
+
+  it('closes the receipt without remembering an empty set', async () => {
+    serve(FULL_SCAN);
+    renderHosted({ candidates: [], imported: 2 });
+    const user = userEvent.setup();
+
+    expect(screen.getByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
+    // Nothing left to review, so nothing to review.
+    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss import notice' }));
+
+    expect(screen.queryByText(/Migrated/)).toBeNull();
+    // Remembering nothing would overwrite the signature an earlier batch was
+    // dismissed by, and those keys would start asking again.
+    expect(isMigrationDismissed([CLAUDE_KEY])).toBe(false);
+  });
+
+  it('says nothing when the host has neither an offer nor an outcome', async () => {
+    serve(FULL_SCAN);
+    renderHosted({ candidates: [] });
+
+    expect(screen.queryByText(/Model Hub/)).toBeNull();
   });
 });

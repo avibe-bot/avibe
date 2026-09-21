@@ -10,14 +10,25 @@
 // `google` and Qwen `alibaba-cn`; a source calls them what it was created with.
 // Resolving both through `providerIdentity` is what stops the same provider
 // occupying two slots.
+import type { ParseKeys } from 'i18next';
+
 import {
+  appliableItems,
+  BACKEND_ORDER,
   groupMigrationCandidates,
   groupSelectable,
+  requiredBackends,
+  type MigrationSelection,
 } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
+import { foldRegionRead, type RegionRead } from '@/components/settings/models/regionRead';
+import { installAndStartStep } from '@/components/settings/models/runtimeLifecycle';
 import type {
   AgentBackend,
+  AgentSupply,
+  MigrationItem,
   MigrationScan,
+  RuntimeDependency,
   Source,
 } from '@/components/settings/models/types';
 import {
@@ -27,10 +38,43 @@ import {
   setupPrimaryRank,
 } from '@/components/settings/providers/providerIdentity';
 import type { TranslationKey } from '@/i18n/types';
-import type { SetupAction } from '../setupFlow';
+import {
+  setupCanAttemptInstall,
+  setupHubRunning,
+  setupNavigationReady,
+  type SetupAction,
+  type SetupCapability,
+} from '../setupFlow';
 
 /** The stage draws three cards; the third is always the way to add more. */
 export const PROVIDER_SLOT_COUNT = 2;
+
+/**
+ * Whether a source counts as connected.
+ *
+ * `active` and `standby` are the two healthy statuses; the shipped resolver already
+ * routes through standby, so treating it as anything less would under-report a source
+ * the gateway is in fact willing to use. A source still awaiting its first successful
+ * model call is kept and disclosed as unverified rather than hidden — the credential
+ * exists and the person did add it.
+ */
+export const usableSource = (source: Source): boolean =>
+  source.state.status === 'active' || source.state.status === 'standby';
+
+/**
+ * How many of the sources added through Add more are still there.
+ *
+ * Filtered against the live source list rather than trusted from the flow state: the
+ * badge describes what exists now, and a source removed in another tab must not keep
+ * inflating it.
+ */
+export function addedThroughMoreCount(
+  addedThroughMore: readonly string[],
+  sources: readonly Source[],
+): number {
+  const usable = new Set(sources.filter(usableSource).map((source) => source.id));
+  return new Set(addedThroughMore.filter((id) => usable.has(id))).size;
+}
 
 export type ProviderSlotKind =
   /** A source already exists. A fact, not a choice. */
@@ -115,7 +159,7 @@ export function providerSlots(input: {
   const seen = new Set<string>();
   const slots: ProviderSlot[] = [];
 
-  for (const source of input.sources) {
+  for (const source of input.sources.filter(usableSource)) {
     const vendor = providerVendorId(source.vendor);
     if (seen.has(vendor)) continue;
     seen.add(vendor);
@@ -144,6 +188,23 @@ export function providerSlots(input: {
   return slots.slice(0, PROVIDER_SLOT_COUNT);
 }
 
+/**
+ * Detected providers the stage is not already drawing.
+ *
+ * This is what the add dialog's 已检测到 tab lists, and whether it has anything to
+ * list is what decides the tab exists at all: a tab repeating the two cards
+ * immediately behind it offers nothing, and an empty tab is worse than an absent
+ * one. Sources occupy too, so a brand already connected never comes back as
+ * something to review.
+ */
+export function unlistedDetected(input: {
+  sources: readonly Source[];
+  scan: MigrationScan | null;
+}): ProviderSlot[] {
+  const shown = new Set(providerSlots(input).map((slot) => slot.vendor));
+  return detectedProviders(input.scan).filter((slot) => !shown.has(slot.vendor));
+}
+
 /** Whether a detected card is currently consented to. A connected card is never
  *  "selected": its fill states a fact, so a selection toggle cannot change it. */
 export const slotSelected = (
@@ -152,6 +213,66 @@ export const slotSelected = (
 ): boolean => slot.kind === 'detected'
   && slot.backends.length > 0
   && slot.backends.every((backend) => selected.includes(backend));
+
+/**
+ * The rows the current consent would submit, counted the way the dialog counts them.
+ *
+ * Deliberately the takeover's own computation rather than anything of this screen's:
+ * the number the CTA promises and the number the batch sends have to be one number,
+ * and the only way to guarantee that is to run the same grouping the dialog runs —
+ * scope the scan, drop groups this entry point cannot consent to, then take every
+ * importable row of the consented backends.
+ */
+export function pendingImportRows(selection: MigrationSelection): MigrationItem[] {
+  const items = selection.scan?.items ?? [];
+  const consented = new Set(
+    groupMigrationCandidates(items, isImportableKey)
+      .filter((group) => groupSelectable(group) && selection.selectedBackends.includes(group.backend))
+      .map((group) => group.backend),
+  );
+  return appliableItems(items, consented);
+}
+
+/**
+ * Consent after a card was toggled.
+ *
+ * A card names an entry point, not a consent group: toggling it writes its whole
+ * linked closure, because migrating one backend's copy of a shared credential file
+ * migrates every backend that reads it. Consent to half of that does not exist, so
+ * it is never representable here.
+ */
+export function toggleSlotSelection(
+  selection: MigrationSelection,
+  slot: ProviderSlot,
+): AgentBackend[] {
+  const items = selection.scan?.items ?? [];
+  if (slot.kind !== 'detected' || slot.backends.length === 0) return [...selection.selectedBackends];
+  const next = new Set(selection.selectedBackends);
+  const on = slotSelected(slot, selection.selectedBackends);
+  for (const backend of requiredBackends(items, slot.backends)) {
+    if (on) next.delete(backend);
+    else next.add(backend);
+  }
+  return [...next];
+}
+
+/**
+ * Consent a fresh scan still supports.
+ *
+ * Run whenever the scan is replaced. A backend that was consented to and has since
+ * been imported, blocked, or lost its importable rows is no longer something this
+ * entry point can submit — and a stale name left in the selection would keep the
+ * CTA offering a batch the dialog would refuse to build.
+ */
+export function reconcileSelection(selection: MigrationSelection): AgentBackend[] {
+  const items = selection.scan?.items ?? [];
+  const selectable = new Set(
+    groupMigrationCandidates(items, isImportableKey)
+      .filter(groupSelectable)
+      .map((group) => group.backend),
+  );
+  return selection.selectedBackends.filter((backend) => selectable.has(backend));
+}
 
 export type ProviderSummary =
   | { kind: 'none' }
@@ -174,7 +295,7 @@ export function providerSummary(input: {
 }): ProviderSummary {
   if (input.failed) return { kind: 'error' };
   const added = new Map<string, string>();
-  for (const source of input.sources) {
+  for (const source of input.sources.filter(usableSource)) {
     const vendor = providerVendorId(source.vendor);
     if (!added.has(vendor)) added.set(vendor, providerBrandLabel(source.vendor, source.display_name));
   }
@@ -184,6 +305,77 @@ export function providerSummary(input: {
     .map((slot) => slot.label);
   if (selected.length > 0) return { kind: 'selected', count: selected.length, names: selected };
   return { kind: 'none' };
+}
+
+/**
+ * The backend whose adoption the screen resumes, or `null` when there is none.
+ *
+ * `resumeGatewayAdoption` is named for one backend and returns early — without
+ * touching the runtime at all — when that backend is already in hub mode. So the
+ * choice is not cosmetic: naming an already-adopted backend would skip the install
+ * and start this screen exists to perform. Hence the first present backend that is
+ * NOT already adopted, in the shared backend order, falling back to the first
+ * present one when every row is already in hub mode and there is nothing to resume.
+ *
+ * Presence is the server's `cli_present`, read from a refreshed collection rather
+ * than a cached list: a CLI installed while setup was open is exactly the case a
+ * cached read would get wrong.
+ */
+export function adoptionBackend(agents: readonly AgentSupply[]): AgentBackend | null {
+  const present = BACKEND_ORDER.filter((backend) =>
+    agents.some((agent) => agent.backend === backend && agent.cli_present));
+  const unadopted = present.find((backend) =>
+    agents.find((agent) => agent.backend === backend)?.mode !== 'hub');
+  return unadopted ?? present[0] ?? null;
+}
+
+export type GatewayIntent =
+  /** Already serving. Nothing to do, and nothing to say beyond that. */
+  | { kind: 'running' }
+  /** No authoritative answer yet, or one that authorizes nothing. The shell owns
+   *  the read and its recovery; the card waits rather than inventing a verdict. */
+  | { kind: 'waiting' }
+  /** The engine is missing or stopped and this screen may resume it. */
+  | { kind: 'resume'; step: 'install' | 'start' }
+  /** Installing here is not something this deployment can do. */
+  | { kind: 'unsupported' };
+
+/**
+ * What the screen should do about the engine, from the read the shell handed down.
+ *
+ * Two rules the ordering encodes. Installing and starting are admitted separately:
+ * `setupCanAttemptInstall` gates fresh installation only, so a Hub that is installed
+ * but stopped still starts on a host where new installation is unsupported —
+ * refusing to start it would strand a working engine on a technicality. And nothing
+ * outside `ready` authorizes anything: a loading, unread or degraded read is not
+ * evidence the engine is absent, and acting on it would install over a Hub that is
+ * merely unreachable this second.
+ *
+ * Controller startup already ran the first recovery, which is why this resumes only
+ * what that recovery demonstrably left undone rather than installing unconditionally.
+ */
+export function gatewayIntent(input: {
+  capability: SetupCapability;
+  gatewayEnabled: boolean | null;
+  runtimeRead: RegionRead<RuntimeDependency>;
+}): GatewayIntent {
+  if (setupHubRunning(input.runtimeRead)) return { kind: 'running' };
+  if (!setupNavigationReady(input.capability, input.gatewayEnabled)) return { kind: 'waiting' };
+  const runtime = foldRegionRead(input.runtimeRead, {
+    loading: () => null,
+    unread: () => null,
+    degraded: () => null,
+    ready: (value: RuntimeDependency) => value,
+  });
+  // A runtime whose own persisted intent is off is a configuration boundary, and
+  // the flow's one rule about those is that setup never silently re-enables them.
+  if (!runtime || runtime.enabled === false) return { kind: 'waiting' };
+  const step = installAndStartStep(runtime);
+  if (step === 'complete') return { kind: 'running' };
+  if (step === 'start') return { kind: 'resume', step: 'start' };
+  return setupCanAttemptInstall(input.capability, input.gatewayEnabled, input.runtimeRead)
+    ? { kind: 'resume', step: 'install' }
+    : { kind: 'unsupported' };
 }
 
 export type ProviderActionKind =
@@ -224,14 +416,32 @@ export function providerAction(input: {
   return { kind: 'add', count: 0 };
 }
 
-const ACTION_LABEL = {
+/** A plural family, named by the base `t` resolves it under. */
+type PluralBase<Key> = Key extends `${infer Base}_other` ? Base : never;
+
+/**
+ * The label per action state — and the one place C1 and C2 do not meet.
+ *
+ * `TranslationKey` is text leaves that resolve *without* count (its own note says
+ * so); a family shipped only as `_one`/`_other` is not one, even though
+ * `t(base, { count })` resolves it. C1 ships both counted action labels as exactly
+ * such families and C2 types `SetupAction.labelKey` as `TranslationKey` — so the
+ * contract's copy cannot be named by the contract's type. Widening `labelKey` to
+ * accept a plural base is the edit that removes the assertion below; it is
+ * `setupFlow.ts`, so it is reported rather than made here.
+ *
+ * What the assertion gives up is checked back in `actionLabelResolves`: every key
+ * in this table has to resolve in both shipped bundles, which is the guarantee
+ * `TranslationKey` was providing and the only one that was ever at stake.
+ */
+export const ACTION_LABEL = {
   import: 'onboarding.providers.actionImport',
   retryImport: 'onboarding.providers.actionRetryImport',
   continue: 'onboarding.providers.actionContinue',
   add: 'onboarding.providers.actionAdd',
   connecting: 'onboarding.providers.actionConnecting',
   checking: 'onboarding.providers.actionChecking',
-} as const satisfies Record<ProviderActionKind, TranslationKey>;
+} as const satisfies Record<ProviderActionKind, TranslationKey | PluralBase<ParseKeys>>;
 
 const BUSY_ACTIONS = new Set<ProviderActionKind>(['connecting', 'checking']);
 
@@ -239,7 +449,7 @@ const BUSY_ACTIONS = new Set<ProviderActionKind>(['connecting', 'checking']);
 export function providerSetupAction(state: ProviderActionState): SetupAction {
   const busy = BUSY_ACTIONS.has(state.kind);
   return {
-    labelKey: ACTION_LABEL[state.kind],
+    labelKey: ACTION_LABEL[state.kind] as TranslationKey,
     ...(state.count > 0 ? { labelArgs: { count: state.count } } : {}),
     disabled: busy,
     busy,

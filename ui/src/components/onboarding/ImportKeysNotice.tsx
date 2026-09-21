@@ -25,13 +25,29 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 export const ImportKeysNotice: React.FC<{
   /** Bubble the applied count so the host step can refresh assistants/sources. */
   onApplied?: (applied: number) => void;
-}> = ({ onApplied }) => {
+  /**
+   * The rows to offer, when the host already holds them.
+   *
+   * Passing this hands over the whole data side: the capsule stops scanning, stops
+   * counting what it imported, and stops owning a dialog. The providers screen does
+   * that because it holds one scan for the stage, the CTA and this sentence at once,
+   * and a second scan taken by the capsule would make those three disagree about the
+   * same machine. What stays the capsule's is what it always was — the sentence, the
+   * help, and the dismissal signature.
+   */
+  candidates?: MigrationItem[];
+  /** Cumulative imported count, when the host owns it. */
+  imported?: number;
+  /** Replaces the capsule's own dialog. Required alongside `candidates`. */
+  onReview?: () => void;
+}> = ({ onApplied, candidates: hostedCandidates, imported: hostedImported, onReview }) => {
   const { t } = useTranslation();
   const modelHubEnabled = useModelHubCapability();
   const routeSurfaceActive = useRouteSurfaceActive();
+  const hosted = hostedCandidates !== undefined;
 
-  const [candidates, setCandidates] = React.useState<MigrationItem[]>([]);
-  const [imported, setImported] = React.useState(0);
+  const [ownCandidates, setCandidates] = React.useState<MigrationItem[]>([]);
+  const [ownImported, setImported] = React.useState(0);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [dismissed, setDismissed] = React.useState(false);
   const [scanToken, setScanToken] = React.useState(0);
@@ -44,6 +60,7 @@ export const ImportKeysNotice: React.FC<{
   }, []);
 
   React.useEffect(() => {
+    if (hosted) return;
     if (modelHubEnabled !== true) {
       setCandidates([]);
       return;
@@ -70,10 +87,28 @@ export const ImportKeysNotice: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [modelHubEnabled, routeSurfaceActive, scanToken]);
+  }, [hosted, modelHubEnabled, routeSurfaceActive, scanToken]);
+
+  const candidates = hostedCandidates ?? ownCandidates;
+  const imported = hostedImported ?? ownImported;
+
+  // A hosted capsule has no first scan to hang the dismissal check on, so the first
+  // batch the host delivers plays that part. Later batches are the host's own rescan
+  // after an import, and hiding someone's result because an older batch was once
+  // dismissed would lose the outcome report — the same reason the scan path only
+  // consults it at token 0.
+  const consultedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!hosted || consultedRef.current || (hostedCandidates?.length ?? 0) === 0) return;
+    consultedRef.current = true;
+    setDismissed(isMigrationDismissed(hostedCandidates ?? []));
+  }, [hosted, hostedCandidates]);
 
   const remaining = candidates.length;
-  if (modelHubEnabled !== true || dismissed) return null;
+  // The capability gate belongs to the path that would otherwise call the scan
+  // itself. A host that already scanned has better evidence than this hook, which
+  // resolves its own failures to `false` and would hide a real offer on a blip.
+  if ((!hosted && modelHubEnabled !== true) || dismissed) return null;
   // Nothing found and nothing done — there is no offer and no outcome to report.
   if (remaining === 0 && imported === 0) return null;
 
@@ -101,8 +136,8 @@ export const ImportKeysNotice: React.FC<{
             // A light button, not a text link: this is the capsule's own action and
             // it has to read as one next to the primary CTA below it.
             <Button type="button" variant="secondary" size="sm" className="onboarding-import-notice-action"
-              onClick={() => setDialogOpen(true)}>
-              {t('settings.models.importNotice.review')}
+              onClick={() => (onReview ? onReview() : setDialogOpen(true))}>
+              {t('onboarding.import.review')}
             </Button>
           )}
           <InfoHint
@@ -111,7 +146,7 @@ export const ImportKeysNotice: React.FC<{
             className="onboarding-import-notice-help"
             label={t('settings.models.importNotice.help') as string}
             trigger={t('settings.models.importNotice.help')}
-            content={t('settings.models.importNotice.helpBody')}
+            content={t('onboarding.import.helpBody')}
             contentClassName="w-72"
           />
         </div>
@@ -125,7 +160,7 @@ export const ImportKeysNotice: React.FC<{
         </button>
       </div>
 
-      {dialogOpen && (
+      {dialogOpen && !hosted && (
         <MigrationDialog
           open
           eligible={isImportableKey}
