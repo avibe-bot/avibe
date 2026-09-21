@@ -550,8 +550,8 @@
 .model-hub-route-preview[data-origin="unconfigured"] { background: var(--model-hub-wash-08); color: var(--muted); }
 .model-hub-route-ordinal[data-origin="automatic"] { color: var(--mint-ink); background: var(--model-hub-mint-1a); }
 .model-hub-route-ordinal[data-origin="passthrough"] { color: var(--gold-ink); background: var(--model-hub-gold-1a); }
-.model-hub-route-custom { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: 8px; align-items: center; padding: 12px; font-size: 12px; }
-.model-hub-route-custom select { min-width: 0; height: 32px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 0 8px; }
+.model-hub-route-custom { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: var(--model-hub-route-custom-gap, 8px); align-items: center; padding: 0 12px var(--model-hub-route-custom-pad-block-end, 12px); font-size: 12px; }
+.model-hub-route-custom select { min-width: 0; height: var(--model-hub-route-custom-source-height, 32px); border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 0 8px; }
 .model-hub-default-counts { margin-top: auto; padding: 20px; font-size: 12px; color: var(--muted); }
 .model-hub-recorded-turn { display: flex; flex-direction: column; gap: 6px; margin: 0 20px 16px; padding: 12px; border-left: 2px solid var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
 .model-hub-recorded-turn strong { color: var(--destructive-ink); }
@@ -1000,27 +1000,17 @@
 
 .model-hub-route-dialog {
   --model-hub-route-width: 520px;
-  --model-hub-route-top: 300px;
   --model-hub-route-viewport-inset: 16px;
   --model-hub-route-radius: 14px;
-  /* The design's 302px body is what a two-hop chain measures, not a fixed box:
-     pinning it left short chains padded with dead space and long ones scrolling
-     inside a dialog that never grew. It survives only as the anchor the top
-     offset is computed from, so the resting placement still matches the design. */
-  --model-hub-route-body-anchor: 302px;
-  --model-hub-route-offset: min(
-    var(--model-hub-route-top),
-    max(
-      var(--model-hub-route-viewport-inset),
-      calc(
-        100dvh - var(--model-hub-route-head-height) -
-          var(--model-hub-route-body-anchor) -
-          var(--model-hub-dialog-foot-height) -
-          var(--model-hub-route-viewport-inset)
-      )
-    )
-  );
-  top: var(--model-hub-route-offset);
+  /* Centred, like every other modal in the design file: each one whose frame
+     carries an explicit height sits at exactly (viewport - dialog) / 2. The
+     route dialog is the one hug-height frame there, so its 300px `y` is a round
+     stand-in for the 332.5px its own head/body/foot measure to — and read as a
+     literal `top` it only held at the 1100px-tall artboard, leaving the dialog
+     near the bottom of every shorter viewport. Placement is `top: 50%` plus the
+     element's own translate; what belongs here is the room a centred box may
+     take. A centred box of at most this height clears both insets by
+     construction, so the footer cannot be pushed off the bottom. */
   width: min(
     var(--model-hub-route-width),
     calc(
@@ -1029,11 +1019,8 @@
     )
   );
   max-width: var(--model-hub-route-width);
-  /* Anchored at `top` rather than centred, so the room left over is what is
-     below the offset — subtracting only the two insets would let a long chain
-     push the footer off the bottom of the screen. */
   max-height: calc(
-    100dvh - var(--model-hub-route-offset) -
+    100dvh - var(--model-hub-route-viewport-inset) -
       var(--model-hub-route-viewport-inset)
   );
   border-radius: var(--model-hub-route-radius);
@@ -1117,12 +1104,69 @@
    chain is what lets a flex item shrink below its content and hand the overflow
    to the one element that owns `overflow-y: auto`. */
 .model-hub-route-selector {
+  /* Every band that cannot shrink, named once so the floor below is arithmetic
+     rather than a number someone re-eyeballs. A band added to the panel without
+     a term here is what `modelHubStylePolicy.test.ts` fails on: the manual
+     source/model pair was added straight into the flex column, nothing
+     recomputed, and the list — the only child that can give — went to a sliver. */
+  --model-hub-route-selector-search-height: 34px;
+  --model-hub-route-selector-head-height: 26px;
+  --model-hub-route-selector-manual-height: 30px;
+  --model-hub-route-selector-foot-height: 49px;
+  /* What the disclosure adds when it is opened: the source select, the shared
+     input at the height its primitive draws (h-9), the gap between their rows
+     and the band's own bottom padding. Terms rather than an override of the
+     primitive: if that height changes, the rendered geometry test fails on the
+     under-counted band instead of this panel silently shrinking it. */
+  --model-hub-route-custom-source-height: 32px;
+  --model-hub-route-custom-model-height: 36px;
+  --model-hub-route-custom-gap: 8px;
+  --model-hub-route-custom-pad-block-end: 12px;
+  /* Folded, so zero — which is what lets the room below the trigger bound the
+     panel in the state it opens in, and still leaves its border around the
+     confirm row once the pair is on screen. */
+  --model-hub-route-selector-manual-fields-height: 0px;
+  --model-hub-route-selector-bands: calc(
+    var(--model-hub-route-selector-search-height) +
+      var(--model-hub-route-selector-head-height) +
+      var(--model-hub-route-selector-manual-height) +
+      var(--model-hub-route-selector-manual-fields-height) +
+      var(--model-hub-route-selector-foot-height)
+  );
+  /* Three candidate rows: the least that still reads as a list to scroll. */
+  --model-hub-route-selector-list-min: 84px;
   --model-hub-route-selector-max: 300px;
-  max-height: min(
-    var(--model-hub-route-selector-max),
-    var(--radix-popover-content-available-height, var(--model-hub-route-selector-max))
+  --model-hub-route-selector-room: var(
+    --radix-popover-content-available-height,
+    var(--model-hub-route-selector-max)
+  );
+  /* The reported room bounds the panel — it is what is on screen below the
+     trigger, and this popover neither flips nor scrolls the page, so anything
+     past it is unreachable rather than merely clipped. The one thing the room
+     may not do is take the panel below its own fixed bands: there the panel
+     would stop drawing its border around the confirm row instead of shrinking. */
+  max-height: max(
+    var(--model-hub-route-selector-bands),
+    min(
+      var(--model-hub-route-selector-max),
+      var(--model-hub-route-selector-room)
+    )
   );
 }
+.model-hub-route-selector--manual {
+  --model-hub-route-selector-manual-fields-height: calc(
+    var(--model-hub-route-custom-source-height) +
+      var(--model-hub-route-custom-model-height) + var(--model-hub-route-custom-gap) +
+      var(--model-hub-route-custom-pad-block-end)
+  );
+}
+.model-hub-route-selector-manual-toggle {
+  height: var(--model-hub-route-selector-manual-height);
+  padding-inline: 12px;
+  color: var(--model-hub-ink-73);
+  font-size: 11.5px;
+}
+.model-hub-route-selector-manual-toggle:hover { color: var(--foreground); }
 .model-hub-route-selector-command { min-height: 0; flex: 1 1 auto; }
 .model-hub-route-selector [cmdk-input-wrapper] {
   flex-shrink: 0;
@@ -1149,7 +1193,25 @@
   font-weight: 700;
   line-height: 14px;
 }
-.model-hub-route-selector-list { min-height: 0; max-height: none; flex: 1 1 auto; overflow-y: auto; }
+/* The list is the only child that can give, so without a floor it is what every
+   fixed band is paid for out of — which is how the manual source/model pair,
+   added straight into the column, left a sliver of green where the candidates
+   were. The floor is three rows wherever the room reaches, and the room minus
+   the bands where it does not: a floor held past that point would not produce a
+   list, only a confirm button below the fold. */
+.model-hub-route-selector-list {
+  min-height: clamp(
+    0px,
+    calc(
+      min(var(--model-hub-route-selector-max), var(--model-hub-route-selector-room)) -
+        var(--model-hub-route-selector-bands)
+    ),
+    var(--model-hub-route-selector-list-min)
+  );
+  max-height: none;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
 .model-hub-route-selector-group { padding: 0 6px 6px; }
 .model-hub-route-candidate { min-height: 28px; font-size: 11.5px; line-height: 16px; }
 .model-hub-route-candidate-model { color: var(--model-hub-ink-73); }

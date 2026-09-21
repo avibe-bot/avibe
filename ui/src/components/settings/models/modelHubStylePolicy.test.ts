@@ -204,18 +204,28 @@ describe('Model Hub visual token policy', () => {
     expect(literals).toEqual([]);
   });
 
-  it('pins the route dialog placement, shadow, and bounded body scroll to named roles', () => {
-    const dialog = surfaceCss.match(/\.model-hub-route-dialog\s*\{([^}]*)\}/)?.[1] ?? '';
-    const body = surfaceCss.match(/\.model-hub-route-body\s*\{([^}]*)\}/)?.[1] ?? '';
+  // Every modal in `design.pen` whose frame carries an explicit height sits at
+  // exactly (viewport - dialog) / 2. This one is the file's single hug-height
+  // frame, so its 300px `y` is a round stand-in for the 332.5px its own
+  // head/body/foot measure to — and read as a literal `top` it held at the
+  // 1100px artboard and nowhere else, which is how the dialog came to sit near
+  // the bottom of an ordinary laptop viewport.
+  it('centres the route dialog and leaves it the room a centred box has', () => {
+    const dialog = surfaceCssBody.match(/\.model-hub-route-dialog\s*\{([^}]*)\}/)?.[1] ?? '';
+    const body = surfaceCssBody.match(/\.model-hub-route-body\s*\{([^}]*)\}/)?.[1] ?? '';
+    const root = readFileSync(join(__dirname, 'RouteChainDialog.tsx'), 'utf8');
 
-    expect(dialog).toContain('--model-hub-route-offset: min(');
-    expect(dialog).toContain('--model-hub-route-top: 300px');
-    expect(dialog).toContain('var(--model-hub-route-top)');
-    expect(dialog).toContain('top: var(--model-hub-route-offset)');
+    // Placement through the shared modal idiom, so nothing here has to track
+    // the dialog's measured height.
+    expect(root).toContain('model-hub-route-dialog fixed left-1/2 top-1/2');
+    expect(root).toContain('-translate-x-1/2 -translate-y-1/2');
+    expect(dialog).not.toMatch(/(?:^|;)\s*top\s*:/);
+    expect(dialog).not.toContain('--model-hub-route-top');
+    expect(dialog).not.toContain('--model-hub-route-offset');
     expect(dialog).toContain('box-shadow: var(--model-hub-dialog-shadow)');
-    // The dialog grows with its chain, so what bounds it is the room below the
-    // offset it is anchored at — not the viewport minus two insets.
-    expect(dialog).toMatch(/max-height:\s*calc\([\s\S]*100dvh - var\(--model-hub-route-offset\) -[\s\S]*var\(--model-hub-route-viewport-inset\)/);
+    // A centred box of at most this height clears both insets by construction,
+    // so a long chain can no longer push the footer off the bottom.
+    expect(dialog).toMatch(/max-height:\s*calc\(\s*100dvh - var\(--model-hub-route-viewport-inset\) -\s*var\(--model-hub-route-viewport-inset\)\s*\)/);
     expect(body).not.toMatch(/^\s*height:/m);
     expect(body).toContain('overflow-y: auto');
   });
@@ -229,13 +239,69 @@ describe('Model Hub visual token policy', () => {
   // `ui/src/components/ui/anchored-selection-scroll.test.tsx` and by the add-hop
   // case in `RouteChainDialog.test.tsx`.
   it('bounds the add-hop picker against the space the popover reports', () => {
-    const selector = surfaceCss.match(/\.model-hub-route-selector\s*\{([^}]*)\}/)?.[1] ?? '';
-    const list = surfaceCss.match(/\.model-hub-route-selector-list\s*\{([^}]*)\}/)?.[1] ?? '';
+    const selector = surfaceCssBody.match(/\.model-hub-route-selector\s*\{([^}]*)\}/)?.[1] ?? '';
+    const list = surfaceCssBody.match(/\.model-hub-route-selector-list\s*\{([^}]*)\}/)?.[1] ?? '';
 
     expect(selector).toContain('--radix-popover-content-available-height');
-    expect(selector).toContain('max-height: min(');
+    expect(selector).toMatch(/max-height:\s*max\(\s*var\(--model-hub-route-selector-bands\),\s*min\(\s*var\(--model-hub-route-selector-max\),\s*var\(--model-hub-route-selector-room\)/);
     expect(list).toContain('overflow-y: auto');
-    expect(list).toContain('min-height: 0');
+  });
+
+  // The panel is one flexible list plus bands that cannot shrink, so the list is
+  // the only child a new band can be paid for out of — which is what happened:
+  // the manual source/model pair went straight into the column, nothing
+  // recomputed, and the list was left a few pixels of green. The floor makes
+  // that arithmetic, and this is where the arithmetic has to hold. That the
+  // panel drawn in a browser contains nothing the arithmetic missed is the other
+  // half, and belongs to the rendered census in `RouteChainDialog.test.tsx`.
+  it('keeps a three-row list floor no fixed band can take back', () => {
+    const selector = surfaceCssBody.match(/\.model-hub-route-selector\s*\{([^}]*)\}/)?.[1] ?? '';
+    const list = surfaceCssBody.match(/\.model-hub-route-selector-list\s*\{([^}]*)\}/)?.[1] ?? '';
+    const candidate = surfaceCssBody.match(/\.model-hub-route-candidate\s*\{([^}]*)\}/)?.[1] ?? '';
+    const px = (source: string, property: string) => {
+      const value = source.match(new RegExp(`${property}:\\s*(\\d+(?:\\.\\d+)?)px`))?.[1];
+      expect(value, `${property} is not declared in px`).toBeDefined();
+      return Number(value);
+    };
+
+    // Three rows wherever the room reaches, and the room minus the bands where
+    // it does not — a floor held past that point would not produce a list, only
+    // a confirm button below the fold, which is unreachable under a popover
+    // that neither flips nor scrolls the page.
+    expect(list).toMatch(/min-height:\s*clamp\(\s*0px,\s*calc\(\s*min\(var\(--model-hub-route-selector-max\), var\(--model-hub-route-selector-room\)\) -\s*var\(--model-hub-route-selector-bands\)\s*\),\s*var\(--model-hub-route-selector-list-min\)\s*\)/);
+    expect(px(selector, '--model-hub-route-selector-list-min'))
+      .toBeGreaterThanOrEqual(px(candidate, 'min-height') * 3);
+
+    // Every band that cannot shrink has a term, so the room the floor is
+    // measured against is the room the list can actually be given.
+    const bands = [
+      '--model-hub-route-selector-search-height',
+      '--model-hub-route-selector-head-height',
+      '--model-hub-route-selector-manual-height',
+      '--model-hub-route-selector-manual-fields-height',
+      '--model-hub-route-selector-foot-height',
+    ];
+    const summed = [...(selector.match(/--model-hub-route-selector-bands:([^;]*);/)?.[1] ?? '')
+      .matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1]);
+    expect(summed).toEqual(bands);
+    // And the bands plus the full floor fit under the cap, so a panel with room
+    // to spare reaches three rows rather than stopping short of its own floor.
+    expect(bands.reduce((total, band) => total + px(selector, band), 0)
+      + px(selector, '--model-hub-route-selector-list-min'))
+      .toBeLessThanOrEqual(px(selector, '--model-hub-route-selector-max'));
+
+    // The manual pair is a band only while it is on screen: zero folded, and
+    // opened, every part of what it draws — both fields, the row gap, the
+    // padding under them — rather than a number measured once off a screenshot.
+    expect(px(selector, '--model-hub-route-selector-manual-fields-height')).toBe(0);
+    const opened = surfaceCssBody.match(/\.model-hub-route-selector--manual\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect([...opened.matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1])).toEqual([
+      '--model-hub-route-custom-source-height',
+      '--model-hub-route-custom-model-height',
+      '--model-hub-route-custom-gap',
+      '--model-hub-route-custom-pad-block-end',
+    ]);
+    expect(opened).toMatch(/--model-hub-route-selector-manual-fields-height:\s*calc\(/);
   });
 
   // The surface draws the same 10.5px status pill in six places (upstream count,

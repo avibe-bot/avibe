@@ -1379,7 +1379,8 @@
           "search": "Search sources or models",
           "confirm": "Add",
           "noMatch": "No source or model matches that",
-          "none": "No source/model pair is available to add"
+          "none": "No source/model pair is available to add",
+          "manual": "Enter a model ID manually"
         },
         "edit": {
           "confirm": "Replace",

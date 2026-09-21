@@ -41,6 +41,7 @@ for (const backend of ['claude', 'codex', 'opencode']) {
 
         await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
         const selector = page.locator('.model-hub-route-selector');
+        await selector.getByRole('button', { name: copy('routeDialog.add.manual'), exact: true }).click();
         await selector.getByLabel(copy('routing.exactModel'), { exact: true }).fill('exact/model-中文');
         await selector.getByRole('button', { name: copy('routeDialog.edit.confirm'), exact: true }).click();
         await expect(dialog).toBeVisible();
@@ -104,4 +105,57 @@ for (const lang of ['en', 'zh'] as const) {
       await expect.poll(async () => (await state()).writes).toEqual([{ method: 'PUT', hops: inheritedHops }]);
     });
   }
+}
+
+// The add-hop picker is bounded by the room the popover reports below its
+// trigger, and it neither flips nor scrolls the page, so that room is the whole
+// budget. The dialog's literal `top: 300px` spent most of it before the picker
+// opened — at 1280x720 it left 103px against 139px of fixed bands, which is a
+// candidate list of nothing and a confirm button painting 72px below the fold.
+// Centring the dialog returns the room; folding the manual pair stops a rare
+// path from holding a third of it; the floor spends what is returned on the
+// list. Measured here rather than reasoned about, because every term in that
+// sentence is a rendered height.
+for (const lang of ['en', 'zh'] as const) {
+  test(`MH-ROUTING-007: the add-hop picker opens onto a readable list (${lang})`, async ({ page }) => {
+    const copy = (key: string) => hub(key, {}, lang);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(`/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=${lang}&stocked=1`);
+    await page.getByRole('button', { name: 'Open route', exact: true }).click();
+    const dialog = page.locator('.model-hub-route-dialog');
+    await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(2);
+
+    // Centred, so the room below the dialog is the room above it.
+    const viewport = page.viewportSize()!;
+    const dialogBox = (await dialog.boundingBox())!;
+    expect(Math.abs(dialogBox.y + dialogBox.height / 2 - viewport.height / 2)).toBeLessThanOrEqual(1);
+
+    await dialog.getByRole('button', { name: copy('routeDialog.addHop'), exact: true }).click();
+    const selector = page.locator('.model-hub-route-selector');
+    await expect(selector).toBeVisible();
+    // The manual pair is folded away: the panel opens on what it is for.
+    await expect(selector.locator('.model-hub-route-custom')).toHaveCount(0);
+
+    const measure = async () => {
+      const panel = (await selector.boundingBox())!;
+      const list = (await selector.locator('.model-hub-route-selector-list').boundingBox())!;
+      const row = (await selector.locator('.model-hub-route-candidate').first().boundingBox())!;
+      const confirm = (await selector.locator('.model-hub-route-selector-confirm').boundingBox())!;
+      return { rows: list.height / row.height, confirm, panelBottom: panel.y + panel.height };
+    };
+
+    const folded = await measure();
+    expect(folded.rows).toBeGreaterThanOrEqual(3);
+    // The panel keeps its own border around the confirm row, and the row stays
+    // on screen: under a popover that cannot flip, below the fold is unreachable.
+    expect(folded.confirm.y + folded.confirm.height).toBeLessThanOrEqual(folded.panelBottom + 1);
+    expect(folded.confirm.y + folded.confirm.height).toBeLessThanOrEqual(viewport.height);
+
+    // Opening the rare path costs list room, never the confirm button.
+    await selector.getByRole('button', { name: copy('routeDialog.add.manual'), exact: true }).click();
+    await expect(selector.getByLabel(copy('routing.exactModel'), { exact: true })).toBeVisible();
+    const opened = await measure();
+    expect(opened.confirm.y + opened.confirm.height).toBeLessThanOrEqual(opened.panelBottom + 1);
+    expect(opened.confirm.y + opened.confirm.height).toBeLessThanOrEqual(viewport.height);
+  });
 }
