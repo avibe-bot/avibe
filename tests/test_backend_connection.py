@@ -150,8 +150,11 @@ def test_install_job_applies_persisted_path_before_admitting_connection(monkeypa
         config.model_hub.agents[name].mode = "direct"
     getattr(config.agents, backend).cli_path = "/old/missing-cli"
     config.save()
+    # Resolve lazy config imports before substituting the process constructor.
+    assert not V2Config.load().load_warnings
     installed_path = str(tmp_path / "安装 后端/bin" / backend)
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: installed_path)
+    monkeypatch.setattr(api, "_probe_cli_version", lambda _: "1.0.0")
     monkeypatch.setattr(api.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(
         communicate=lambda **_: ("fixture installed", ""), returncode=0,
     ))
