@@ -46,6 +46,8 @@ from core.handlers.model_hub.stream_wire import (
 )
 from core.handlers.model_hub.usage import (
     USAGE_COUNTER_CEILING,
+    USAGE_MAX_ROWS,
+    USAGE_PUBLISHED_COUNT_BOUND,
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
     SourceIdentity,
@@ -613,6 +615,92 @@ def test_the_row_cap_keeps_the_newest_rows(tmp_path: Path) -> None:
 
     persisted = json.loads(ledger.path.read_text(encoding="utf-8"))
     assert [row["model_id"] for row in persisted] == ["model-3", "model-4", "model-5"]
+
+
+def test_the_row_cap_holds_when_reading_a_file_that_overflows_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review 5266689271: a file may hold more rows than the writer would emit.
+
+    `max_rows` used to be applied in `_write` only, which bounds every file this
+    ledger produces and no other one. A store that was corrupted, hand-edited, or
+    written by a different version was read back whole, so the window it published
+    was not bounded by anything the contract could name.
+
+    Reading it has to evict, not just the next write, because the read is what
+    `summary` publishes from.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    overflow = [
+        {
+            "day": local_usage_day(NOW).isoformat(),
+            "source_id": "src_a",
+            "model_id": f"model-{index:03d}",
+            "requests": 1,
+            "input_tokens": 1,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": (NOW + timedelta(seconds=index)).isoformat(),
+        }
+        for index in range(5)
+    ]
+    path.write_text(json.dumps(overflow), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+    with caplog.at_level(logging.WARNING):
+        held = ledger.window(days=30, now=NOW)
+
+    # The survivors are the ones `_write` would have kept, in the same order.
+    assert [row["model_id"] for row in held] == ["model-002", "model-003", "model-004"]
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 3
+    assert "over its capacity of 3" in caplog.text
+
+
+def test_no_file_can_make_a_published_count_exceed_the_declared_maximum(
+    tmp_path: Path,
+) -> None:
+    """The contract's maximum has to bound the reader, not just the writer.
+
+    `USAGE_PUBLISHED_COUNT_BOUND` is the product of the two capacities this file
+    has. It is a real bound on what `summary` publishes only while both of them
+    are enforced on the way *in*; each was once enforced at one door only, and
+    each time the gap let a hand-edited store publish a count its own schema
+    rejects. This drives the worst case directly — every row at the counter
+    ceiling, more rows than the file may hold — so the product stays a promise the
+    producer keeps rather than a description of its happy path.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    rows = USAGE_MAX_ROWS + 25
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": (local_usage_day(NOW) - timedelta(days=index % 30)).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": f"model-{index:04d}",
+                    "requests": USAGE_COUNTER_CEILING,
+                    "input_tokens": USAGE_COUNTER_CEILING,
+                    "cached_input_tokens": USAGE_COUNTER_CEILING,
+                    "output_tokens": USAGE_COUNTER_CEILING,
+                    "last_metered_at": (NOW + timedelta(seconds=index)).isoformat(),
+                }
+                for index in range(rows)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    totals = BoundedUsageLedger(path).summary(days=30, now=NOW)["totals"]
+
+    for key in ("requests", "input_tokens", "cached_input_tokens", "output_tokens"):
+        assert totals[key] == USAGE_PUBLISHED_COUNT_BOUND, key
+    # Tight, not merely safe: the worst admissible file reaches the bound exactly,
+    # so the contract declares no range the producer cannot occupy.
+    assert USAGE_PUBLISHED_COUNT_BOUND == USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
 
 
 def test_the_row_cap_evicts_the_least_recently_metered_row(tmp_path: Path) -> None:

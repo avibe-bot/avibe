@@ -74,15 +74,23 @@ USAGE_DEFAULT_WINDOW_DAYS: Final = 30
 # exists to not produce.
 USAGE_COUNTER_CEILING: Final = 2**53 - 1
 # The largest count `summary` can publish, and the maximum
-# `usage-summary.schema.json` declares. Derived, never enforced: a published count
-# is a sum over the window's rows, the file holds at most `USAGE_MAX_ROWS` of them,
-# and each counter is admitted only up to `USAGE_COUNTER_CEILING`. Saying it out
-# loud is what lets the contract carry a maximum that is both true and satisfiable;
-# the two things tried before were a maximum the producer could violate, and none
-# at all, which left a consumer nothing to size against and said nothing about
-# where exactness ends. Every value in the range is a finite double, only the part
-# above `USAGE_COUNTER_CEILING` rounds, and reaching that at all takes a corrupt
-# file — a window spans at most `USAGE_RETENTION_DAYS` days of real calls.
+# `usage-summary.schema.json` declares. Derived rather than imposed: a published
+# count is a sum over the rows of one window, `_read` returns at most
+# `USAGE_MAX_ROWS` of them, and every counter it admits is at most
+# `USAGE_COUNTER_CEILING`. Both capacities holding at both doors is what makes the
+# product a bound on what this module can publish, rather than a description of
+# the files it happens to write. Deriving it from the write path alone was true of
+# every file this ledger produces and false of every other one — a reader handed a
+# larger file published a total above its own contract.
+#
+# Saying it out loud is what lets the contract carry a maximum that is both true
+# and satisfiable; the two things tried before were a maximum the producer could
+# violate, and none at all, which left a consumer nothing to size against and said
+# nothing about where exactness ends. Never a clamp: it states the range, and
+# nothing compares a sum against it. Every value in the range is a finite double,
+# only the part above `USAGE_COUNTER_CEILING` rounds, and reaching that at all
+# takes a corrupt file — a window spans at most `USAGE_RETENTION_DAYS` days of
+# real calls.
 USAGE_PUBLISHED_COUNT_BOUND: Final = USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
 # Anything older than every instant this ledger can hold, so a row that never
 # recorded one sorts as the least recently metered.
@@ -435,6 +443,25 @@ class BoundedUsageLedger:
         self._now = now
         self._lock = threading.RLock()
 
+    def _within_capacity(self, rows: list[dict]) -> list[dict]:
+        """Return at most `max_rows` rows, evicting the least recently metered.
+
+        Both doors call this, which is the point of it being one method rather
+        than a line in each. The row capacity used to live in `_write` alone, so
+        the set of files `_read` would accept was strictly larger than the set
+        `_write` could produce, and a bound derived from what the writer emits
+        says nothing about a file that arrived some other way. A ledger holding
+        more rows than the file may hold was read back whole, and `summary`
+        published a total above the maximum its own contract declares.
+
+        Eviction here takes nothing a later write would have kept: `_write`
+        evicts in this same `_recency` order and keeps these same survivors.
+        """
+
+        if len(rows) <= self.max_rows:
+            return rows
+        return sorted(rows, key=_recency)[-self.max_rows :]
+
     def _read(self) -> list[dict]:
         if not self.path.exists():
             return []
@@ -476,13 +503,28 @@ class BoundedUsageLedger:
             logger.warning(
                 "Model Hub usage ledger %s dropped %d unusable row(s)", self.path, dropped
             )
-        return sorted(rows.values(), key=_row_key)
+        held = self._within_capacity(list(rows.values()))
+        # Eviction on the write path is this file working as designed, and on a
+        # busy machine it happens constantly. Reaching the same bound here cannot
+        # be that: `_write` never emits more rows than the file holds, so a read
+        # that has to evict is reading a file this ledger did not produce.
+        if len(held) < len(rows):
+            logger.warning(
+                "Model Hub usage ledger %s held %d row(s) over its capacity of %d; "
+                "dropped the least recently metered",
+                self.path,
+                len(rows) - len(held),
+                self.max_rows,
+            )
+        return sorted(held, key=_row_key)
 
     def _write(self, rows: list[dict]) -> None:
         """Persist the rows the file can hold, at both of the capacities it has.
 
-        `max_rows` is one and has always been applied here. The other is what a
-        stored counter may be without putting the published document out of the
+        `max_rows` is one, and `_within_capacity` is where it is applied for this
+        door and the read door together — holding it here alone is what let a
+        larger file be read back whole. The other capacity is what a stored counter
+        may be without putting the published document out of the
         range its reader holds exactly, and it needs the same door for a reason
         the exact merges upstream make unavoidable: folding an increment onto a row
         near the ceiling, or merging two duplicate-keyed rows a corrupt file holds,
@@ -507,7 +549,7 @@ class BoundedUsageLedger:
                 self.path,
                 _row_key(row),
             )
-        retained = sorted(holdable, key=_recency)[-self.max_rows :]
+        retained = self._within_capacity(holdable)
         write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
