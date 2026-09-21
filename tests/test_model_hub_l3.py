@@ -5713,6 +5713,7 @@ def test_opencode_overlay_projects_menu_identity_to_exact_hop_model(tmp_path: Pa
     assert provider["models"]["menu-model"]["variants"] == {
         "high": {"reasoningEffort": "high"},
         "low": {"reasoningEffort": "low"},
+        "none": {"reasoningEffort": "none"},
     }
     assert provider["models"]["menu-model"]["reasoning"] is True
     assert overlay.launches[0].target_model == "upstream-model"
@@ -5760,6 +5761,7 @@ def test_opencode_public_models_follow_persisted_config_without_overlay(
             "variants": {
                 "low": {"reasoningEffort": "low"},
                 "high": {"reasoningEffort": "high"},
+                "none": {"reasoningEffort": "none"},
             },
         }
     }
@@ -5920,6 +5922,7 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     assert anthropic["options"]["baseURL"] == "http://127.0.0.1:19000/opencode/v1"
     assert anthropic["models"]["first-model"]["variants"] == {
         "high": {"effort": "high"},
+        "none": {"thinking": {"type": "disabled"}},
     }
     assert "reasoning" not in anthropic["models"]["first-model"]
     assert set(anthropic["models"]) == {"first-model", "empty-route-model"}
@@ -5927,6 +5930,7 @@ def test_opencode_overlay_partitions_every_row_by_native_protocol(tmp_path: Path
     assert openai["npm"] == "@ai-sdk/openai"
     assert openai["models"]["second-model"]["variants"] == {
         "high": {"reasoningEffort": "high"},
+        "none": {"reasoningEffort": "none"},
     }
     assert {launch.target_model for launch in overlay.launches} == {
         "first-model",

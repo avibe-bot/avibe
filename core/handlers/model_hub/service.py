@@ -240,6 +240,15 @@ def project_opencode_public_model(
         else {}
     )
     if variants:
+        # Offer an explicit "no reasoning" beside the tiers so an Agent can turn
+        # thinking off. Anthropic expresses it as a switch; the OpenAI-shaped
+        # protocols name it as a level. Only added next to a declared ladder, so
+        # a model nobody has enumerated is not read as "can be turned off".
+        variants["none"] = (
+            {"thinking": {"type": "disabled"}}
+            if model.native_protocol == "anthropic"
+            else {"reasoningEffort": "none"}
+        )
         projected["variants"] = variants
     return projected
 logger = logging.getLogger(__name__)

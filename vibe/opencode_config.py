@@ -31,6 +31,10 @@ OPENCODE_REASONING_VARIANTS: Final[tuple[str, ...]] = (
     "max",
     "ultra",
 )
+# OpenCode's own token for the absence of reasoning. It is a switch, not a
+# level, so Anthropic-compatible providers translate it to a disabled thinking
+# block rather than an enabled one naming this value.
+_NO_REASONING_VARIANT: Final[str] = "none"
 _CUSTOM_PROVIDER_META_KEY = "vibe_remote"
 _CUSTOM_PROVIDER_ADAPTERS = {
     "openai-compatible": "@ai-sdk/openai-compatible",
@@ -689,7 +693,14 @@ def _normalize_reasoning_variants(
         if effort not in OPENCODE_REASONING_VARIANTS:
             raise ValueError(f"unsupported reasoning effort: {effort}")
         if uses_anthropic_thinking:
-            variants[effort] = {"thinking": {"type": "enabled", "effort": effort}}
+            # ``none`` is a switch, not a level. Emitting it as
+            # ``{"type": "enabled", "effort": "none"}`` turned thinking ON with a
+            # bogus level; Anthropic disables it with ``{"type": "disabled"}``.
+            variants[effort] = (
+                {"thinking": {"type": "disabled"}}
+                if effort == _NO_REASONING_VARIANT
+                else {"thinking": {"type": "enabled", "effort": effort}}
+            )
         else:
             variants[effort] = {"reasoningEffort": effort}
     return variants

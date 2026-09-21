@@ -43,7 +43,7 @@ import type {
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
 import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
-import { EFFORT_BY_BACKEND, sortEffortsByVocabulary } from '@/lib/effortOptions';
+import { EFFORT_BY_BACKEND, NO_REASONING_EFFORT, sortEffortsByVocabulary } from '@/lib/effortOptions';
 import { HubOwnedAuthNotice } from '../shared/HubOwnedAuthNotice';
 
 type FilterMode = 'all' | 'configured' | 'oauth' | 'local';
@@ -97,7 +97,7 @@ const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', '
 // fallback (`minimal`..`max`). `ultra` is in the unified vocabulary because
 // catalog rows declare it, but offering it here would send a value the
 // save path rejects. Checkboxes and the default-checked list are the same set.
-const OPENCODE_PROVIDER_EFFORTS = EFFORT_BY_BACKEND.opencode;
+const OPENCODE_PROVIDER_EFFORTS = [NO_REASONING_EFFORT, ...EFFORT_BY_BACKEND.opencode];
 const defaultReasoningEfforts = () => [...OPENCODE_PROVIDER_EFFORTS];
 
 const notifyOpenCodeModelOptionsChanged = () => {

@@ -66,6 +66,25 @@ def test_every_vocabulary_tier_projects_to_an_anthropic_variant(tmp_path: Path) 
     assert _written_model(tmp_path, "anthropic", "relay-model")["variants"] == {
         effort: {"thinking": {"type": "enabled", "effort": effort}}
         for effort in OPENCODE_REASONING_VARIANTS
+        if effort != "none"
+    } | {"none": {"thinking": {"type": "disabled"}}}
+
+
+def test_anthropic_none_disables_thinking_instead_of_enabling_a_bogus_level(
+    tmp_path: Path,
+) -> None:
+    """`none` is a switch, not a level: emitting `enabled` with effort `none`
+    turned thinking ON. Anthropic disables it with `{"type": "disabled"}`."""
+
+    upsert_opencode_provider_model(
+        "anthropic",
+        "relay-model",
+        reasoning_efforts=["none"],
+        home=tmp_path,
+    )
+
+    assert _written_model(tmp_path, "anthropic", "relay-model")["variants"] == {
+        "none": {"thinking": {"type": "disabled"}},
     }
 
 
