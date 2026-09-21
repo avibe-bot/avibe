@@ -4338,7 +4338,7 @@
       "sendingNow": "Sending…",
       "confirmingNow": "Send status not confirmed",
       "sendFailed": "Couldn't send this message right now. Please try again.",
-      "sendStatusUnknown": "Avibe couldn't confirm whether this message was sent. Refresh to check the latest status before trying again.",
+      "sendStatusUnknown": "We couldn't confirm whether this message was sent. Check the conversation and queue to avoid sending it twice.",
       "sendDeferred": "Couldn't send into the current turn. Your message is still queued.",
       "attachmentsUnavailable": "An attachment is no longer available. Your message is still queued; upload the attachment again to resend it.",
       "sendReconciling": "We couldn't confirm whether this message was sent. It is kept here, and Avibe won't send it again. Refresh to check the latest status.",
