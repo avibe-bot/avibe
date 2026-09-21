@@ -29,7 +29,7 @@ from .message_facts import (
 from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
-from .formatters import SlackFormatter
+from .formatters import SlackFormatter, hold_markdown_escapes, restore_held
 from .slack_modal import parse_routing_modal_selection
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
@@ -387,9 +387,15 @@ class SlackBot(BaseIMClient):
         - Headers, lists, quotes, and more
         """
         try:
-            # Use the third-party converter for comprehensive markdown to mrkdwn conversion
-            converted_text = self.markdown_converter.convert(text)
-            return converted_text
+            # A CommonMark backslash escape means the character after it is not
+            # syntax, and the converter does not know that: it reads an escaped
+            # ``*`` as emphasis and emits ``_`` for it, changing the characters
+            # the reader sees. Resolving the escapes first and holding what they
+            # protected keeps the converter off exactly the text that was marked
+            # as literal.
+            held_text, escaped = hold_markdown_escapes(text)
+            converted_text = self.markdown_converter.convert(held_text)
+            return restore_held(converted_text, escaped)
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")
             # Fallback to original text if conversion fails

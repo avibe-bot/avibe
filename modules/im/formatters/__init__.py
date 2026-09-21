@@ -1,4 +1,8 @@
-from .base_formatter import BaseMarkdownFormatter
+from .base_formatter import (
+    BaseMarkdownFormatter,
+    hold_markdown_escapes,
+    restore_held,
+)
 from .slack_formatter import SlackFormatter
 from .discord_formatter import DiscordFormatter
 from .telegram_formatter import TelegramFormatter
@@ -8,6 +12,8 @@ from .avibe_formatter import AvibeFormatter
 
 __all__ = [
     "BaseMarkdownFormatter",
+    "hold_markdown_escapes",
+    "restore_held",
     "SlackFormatter",
     "DiscordFormatter",
     "TelegramFormatter",

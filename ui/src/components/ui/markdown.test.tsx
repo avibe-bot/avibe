@@ -105,15 +105,24 @@ describe('Markdown source citations', () => {
 
   const GUIDE = 'https://developers.openai.com/api/docs/guides/tools-web-search';
   const PROBE = 'https://example.com/citation-probe-source';
+  // A row the backend writes today: the one link it wrote, of the one link
+  // pointing at that page. A test that renders a second link to the same page
+  // says so by overriding both numbers, the same way the backend would.
   const guide = (over: Partial<CitationSource> = {}): CitationSource => ({
     index: 1,
     ref_id: 'turn0view0',
     title: 'Web search — OpenAI API',
     url: GUIDE,
     label: 'developers.openai.com',
+    occurrences: [1],
+    occurrence_total: 1,
     ...over,
   });
-  const link = (citation: { label: string; url: string }) => `[${citation.label}](${citation.url})`;
+  // What core/citations.py's _escape_label writes: the characters that would
+  // otherwise let a label swallow the link around it.
+  const escapeLabel = (label: string) => label.replace(/([\\[\]`<])/g, '\\$1');
+  const link = (citation: { label: string; url: string }) =>
+    `[${escapeLabel(citation.label)}](${citation.url})`;
 
   const renderMarkdown = (content: string, citations?: unknown[], interactive = true) => render(
     <I18nextProvider i18n={i18n}>
@@ -134,10 +143,12 @@ describe('Markdown source citations', () => {
   // and this asserts the real renderer hands back exactly that href, so a badge
   // cannot quietly stop matching the link it describes. Read at runtime rather
   // than imported so the fixture stays outside Vite's module graph.
-  const urlIdentity = (JSON.parse(
+  type IdentityCase = { why: string; raw: string; url: string | null; label: string | null };
+  const fixture = JSON.parse(
     readFileSync(resolve(process.cwd(), '../tests/fixtures/citation_url_identity.json'), 'utf8'),
-  ) as { cases: { why: string; raw: string; url: string | null; label: string | null }[] })
-    .cases.filter((entry): entry is { why: string; raw: string; url: string; label: string } =>
+  ) as { cases: IdentityCase[]; authority: IdentityCase[] };
+  const urlIdentity = [...fixture.cases, ...fixture.authority]
+    .filter((entry): entry is { why: string; raw: string; url: string; label: string } =>
       Boolean(entry.url));
 
   it.each(urlIdentity)('keeps a canonical citation URL identical through the renderer ($why)', ({ url, label }) => {
@@ -157,7 +168,9 @@ describe('Markdown source citations', () => {
     // last 63 characters: a label cut from the right would read as a domain the
     // link never opens, and keeping whole labels only left `…co.uk`, a public
     // suffix shared by every site a long label could hide behind.
-    const host = new URL(url).host;
+    // `hostname`, not `host`: a port belongs to the URL and never to the
+    // attribution, so a label beside `:8080` still names the site.
+    const host = new URL(url).hostname;
     const elided = label.startsWith('…');
     const shown = elided ? label.slice(1) : label;
 
@@ -170,42 +183,31 @@ describe('Markdown source citations', () => {
     }
   });
 
-  it('resolves a C1 numeric reference in a destination the way the backend does', () => {
+  it.each([
     // Measured rather than assumed: micromark - the parser behind this renderer
     // - replaces the whole C1 range with U+FFFD, so `&#x80;` is NOT HTML's
-    // Windows-1252 `€`. The backend stores what this renderer produces, and the
-    // badge only appears when the two agree, so this is the assertion.
-    const citation = guide({ url: 'https://example.com/p%EF%BF%BDq' });
-    const { container } = renderMarkdown(
-      `Cited. [${citation.label}](https://example.com/p&#x80;q)`,
-      [citation],
-    );
-    const [badge] = badges(container);
-
-    expect(badge).toBeDefined();
-    expect(badge.getAttribute('href')).toBe(citation.url);
-  });
-
-  it.each([
-    ['&Tab;', '%09'],
-    ['&#x9;', '%09'],
-    ['&#xA;', '%0A'],
-    ['&#xD;', '%0D'],
-  ])('escapes a %s reference in a destination the way the backend does', (reference, encoded) => {
+    // Windows-1252 `€`.
+    ['&#x80;', '%EF%BF%BD'],
     // The character a reference spells is part of the destination, so micromark
     // percent-encodes it. Only a LITERAL tab or newline is removed - and that
     // one never reaches here, because it ends the destination and leaves no
     // link at all. The backend cleans literals off first and resolves
     // references after, which is the only order that keeps these two hrefs.
-    const citation = guide({ url: `https://example.com/p${encoded}q` });
+    ['&Tab;', '%09'],
+    ['&#x9;', '%09'],
+    ['&#xA;', '%0A'],
+    ['&#xD;', '%0D'],
+  ])('resolves a %s reference in a destination the way the backend does', (reference, encoded) => {
+    // The backend never writes a live character reference into a destination -
+    // it percent-encodes the character, or escapes the `&` that would start one
+    // - so this is the boundary being held rather than a shape to recognize:
+    // both sides must agree on what the destination says.
     const { container } = renderMarkdown(
-      `Cited. [${citation.label}](https://example.com/p${reference}q)`,
-      [citation],
+      `Cited. [developers.openai.com](https://example.com/p${reference}q)`,
     );
-    const [badge] = badges(container);
 
-    expect(badge).toBeDefined();
-    expect(badge.getAttribute('href')).toBe(citation.url);
+    expect(container.querySelector('a')?.getAttribute('href'))
+      .toBe(`https://example.com/p${encoded}q`);
   });
 
   it('renders a cited link as a numbered badge that is itself the link', () => {
@@ -238,7 +240,7 @@ describe('Markdown source citations', () => {
   });
 
   it('leaves a link the agent worded itself as an ordinary anchor', () => {
-    const citation = guide();
+    const citation = guide({ occurrences: [2], occurrence_total: 2 });
     const { container } = renderMarkdown(
       `See [the web search guide](${GUIDE}) and ${link(citation)}.`,
       [citation],
@@ -312,6 +314,120 @@ describe('Markdown source citations', () => {
     fireEvent.pointerDown(badge, { pointerType: 'touch' });
 
     expect(fireEvent.click(badge)).toBe(true);
+  });
+
+  // A badge is an attribution claim, so it belongs to a link the backend wrote.
+  // Recognizing one used to mean matching the rendered label back to a sidecar
+  // row, which cannot tell that link apart from one the answer's own prose
+  // wrote to the same page - and got it wrong in the direction that matters,
+  // since the prose link is the one nobody vouched for. So the row carries
+  // where each link it wrote sits among the links sharing that destination, and
+  // the renderer counts the same thing from the same delivered text.
+  describe('provenance', () => {
+    it('leaves a prose link alone even when it is word-for-word the citation', () => {
+      const citation = guide({ occurrences: [2], occurrence_total: 2 });
+      const { container } = renderMarkdown(
+        `See ${link(citation)} first. ${link(citation)}`,
+        [citation],
+      );
+      const anchors = Array.from(container.querySelectorAll('a'));
+
+      expect(anchors).toHaveLength(2);
+      expect(anchors[0].hasAttribute('data-citation-index')).toBe(false);
+      expect(anchors[0].textContent).toBe('developers.openai.com');
+      expect(anchors[1].getAttribute('data-citation-index')).toBe('1');
+    });
+
+    it('draws a badge on each link one source wrote', () => {
+      const citation = guide({ occurrences: [1, 2], occurrence_total: 2 });
+      const { container } = renderMarkdown(
+        `One. ${link(citation)} Two. ${link(citation)}`,
+        [citation],
+      );
+
+      expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '1']);
+    });
+
+    it('counts ordinals per destination, so another citation between shifts neither', () => {
+      const citations = [
+        guide({ occurrences: [1, 2], occurrence_total: 2 }),
+        guide({ index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com' }),
+      ];
+      const { container } = renderMarkdown(
+        `A. ${link(citations[0])} B. ${link(citations[1])} C. ${link(citations[0])}`,
+        citations,
+      );
+
+      expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '2', '1']);
+    });
+
+    it('degrades to the plain link when the two sides counted different text', () => {
+      // A total this render disagrees with means the row describes text that is
+      // not what is on screen. The honest answer is the link the reader already
+      // has, not a badge on whichever link landed in that position.
+      const citation = guide({ occurrences: [1], occurrence_total: 3 });
+      const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+
+      expect(badges(container)).toHaveLength(0);
+      expect(container.querySelector('a')?.getAttribute('href')).toBe(GUIDE);
+    });
+
+    it.each([
+      ['an image', `![alt](${'https://developers.openai.com/api/docs/guides/tools-web-search'})`],
+      ['an autolink', `<${'https://developers.openai.com/api/docs/guides/tools-web-search'}>`],
+      ['a reference link', '[dup][k]'],
+    ])('does not count %s among the links sharing a destination', (_why, decoy) => {
+      // The backend counts only `[label](destination)`, so anything else here
+      // would make the totals disagree and cost the badge.
+      const citation = guide();
+      const { container } = renderMarkdown(
+        `${decoy} Shown. ${link(citation)}\n\n[k]: ${GUIDE}`,
+        [citation],
+      );
+
+      expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
+    });
+
+    it('still recognizes a row persisted before provenance existed', () => {
+      // History is a shipped surface: a message stored by an earlier release
+      // has no occurrences to compare, so it keeps the match it was written
+      // for - the exact destination and link text.
+      const { occurrences, occurrence_total, ...legacy } = guide();
+      void occurrences;
+      void occurrence_total;
+      const { container } = renderMarkdown(`Documented. ${link(legacy)}`, [legacy]);
+
+      expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
+    });
+
+    it('opens an IPv6 source the rendered anchor cannot', () => {
+      // micromark percent-encodes the brackets, and `new URL` refuses what it
+      // writes. The badge is an anchor of its own carrying the stored URL, so
+      // the address stays reachable - which is why matching keys on the parsed
+      // destination and never on the href the renderer resolved.
+      const citation = guide({ url: 'https://[2001:db8::1]/x', label: '[2001:db8::1]' });
+      const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+      const plain = renderMarkdown(`Documented. ${link(citation)}`);
+
+      expect(badges(container)[0].getAttribute('href')).toBe(citation.url);
+      expect(new URL(badges(container)[0].getAttribute('href') as string).hostname)
+        .toBe(citation.label);
+      expect(plain.container.querySelector('a')?.getAttribute('href'))
+        .toBe('https://%5B2001:db8::1%5D/x');
+    });
+
+    it('recognizes a citation whose label had to be escaped, and keeps the code after it', () => {
+      // The escape is what stops the backtick opening a code span that runs
+      // past `](url)` to the next one and takes the link with it.
+      const citation = guide({ label: 'ex`ample.com' });
+      const { container } = renderMarkdown(
+        `Documented. ${link(citation)} and \`code\` prose.`,
+        [citation],
+      );
+
+      expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
+      expect(container.querySelector('code')?.textContent).toBe('code');
+    });
   });
 
   it('attributes a source whose search returned no title by its domain', () => {

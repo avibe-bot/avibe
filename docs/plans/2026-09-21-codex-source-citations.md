@@ -48,10 +48,47 @@ blob with no way to reach the page the answer is based on.
   structured sidecar persisted at `message.content.citations`. Every IM
   platform delivers that Markdown through the renderer it already had — plain
   `domain (url)` where the platform has no hyperlinks, which is what WeChat's own
-  formatter says a link looks like — and the Web transcript matches a link
-  against the sidecar and upgrades it to a compact numbered badge with a
+  formatter says a link looks like — and the Web transcript recognizes the links
+  the rewrite wrote and upgrades those to a compact numbered badge with a
   title/domain preview. Neither surface re-parses markers, and the sidecar adds
   no attribution the text does not already carry.
+- **A badge belongs to a link the backend wrote.** A badge is an attribution
+  claim, so recognizing one is a provenance question rather than a text
+  question: an answer may word its own sentence around the same page, and that
+  link is the one nobody vouched for. Matching a rendered label back to a
+  sidecar row cannot tell the two apart, so the row carries the answer instead
+  — `occurrences` is where each link the rewrite wrote sits among the links
+  sharing its destination, in document order, and `occurrence_total` is how many
+  links that destination has in the whole message. The renderer counts the same
+  thing from the same delivered text. The destination is the counting key rather
+  than the label, because that is what both parsers agree on: a label is what is
+  left after emphasis, character references and escapes have been resolved, and
+  every one of those is a way for the two to disagree. Only a link spelled
+  `[label](destination)` is counted — an image, a reference link and both
+  autolink forms are excluded on both sides without either parser's vocabulary
+  for them — and a total the two sides disagree on degrades to the plain link
+  the reader already has rather than a badge on whichever link landed in that
+  position. A row persisted before provenance existed keeps the exact
+  `(destination, link text)` match it was written for, because history is a
+  shipped surface.
+- **A backslash escape is resolved before a platform reads it.** An escape says
+  one character is not syntax, and no IM dialect knows that. Telegram and Slack
+  re-read the escaped character as markup of their own — Slack's converter
+  turns an escaped `*` into `_`, so the reader is shown a different character
+  than the writer wrote — and WeChat, whose renderer is a sequence of regex
+  passes, both shows the backslash and lets an escaped `]` close a link label
+  early. So a shared helper in the formatter layer resolves the escapes and
+  holds what they protected behind a placeholder until the platform pass is
+  done, and each of those three platforms applies it — honouring upstream's
+  intent in the dialect that is actually about to parse the text. Discord and
+  Feishu are left as they were: their `format_markdown` returns the text
+  unchanged, so nothing here re-reads it. Labels are therefore escaped for exactly the
+  characters that would otherwise destroy the link around them: a backtick or an
+  angle bracket opens a code span, comment, processing instruction, declaration
+  or CDATA section that runs past `](url)` and leaves the reader raw Markdown
+  with nothing to click. Emphasis characters are left alone — they change how a
+  label reads without ever breaking the link, and the citation's identity is no
+  longer read back off its text.
 - **Never invent, never silently drop.** A URL is never derived from a `ref_id`
   or from search order. An unknown, malformed, or non-http(s) source degrades to
   a visible localized label (`message.citationUnresolved`); a marker with
@@ -72,7 +109,11 @@ blob with no way to reach the page the answer is based on.
   superseded turn discards its queue exactly as it discards its result
   candidate.
 - **Untrusted input.** Titles and URLs come from search results: a title has
-  its controls and private-use characters stripped and is collapsed and bounded,
+  its controls, private-use characters and the invisible formatting characters
+  that could render its own text backwards — the bidi marks, embeddings,
+  overrides and isolates — stripped, while the joiners and variation selectors
+  a real title needs to spell a family emoji, a Persian word or a text-style
+  symbol are kept, and it is collapsed and bounded,
   a URL is cleaned the way a browser cleans one (see below), only http(s) with a
   host is accepted, and link labels are escaped. Whether a marker is
   code is a CommonMark question — fence lengths nest, an unclosed fence runs to
@@ -112,10 +153,23 @@ blob with no way to reach the page the answer is based on.
   and the scheme lowercased, since a renderer that only knows the lowercase
   spelling sees no link at all (Telegram delivered
   `[example.com](HTTPS://Example.com/X)` as raw Markdown). Backslash escapes are deliberately *not*
-  resolved: WHATWG reads `\` as a host separator where `urlsplit` reads
-  userinfo, so it is preserved as `%5C`, and a canonical URL whose host the two
-  parsers could still read differently is rejected outright rather than
-  repaired. The label attributes the host a browser would actually reach:
+  resolved: WHATWG reads `\` as a host separator, so it is preserved as `%5C`
+  rather than becoming a second way to spell an authority. Beyond that the URL
+  is left as it arrived: it names the page its source gave, and `:0080`,
+  `Example.COM` and an uncompressed IPv6 address all open the same page, so this
+  is not the place to decide two spellings are one. What is judged is only
+  whether a browser opens it at all — one authority judgment covering userinfo
+  (split at the **last** `@`, never case-folded, it may be a password), a
+  bracketed IPv6 literal (WHATWG's own parser, which rejects the zone id
+  `ipaddress` accepts), and a port (ASCII digits only, since `int()` reads `٣`
+  as 3 where a browser reads no port at all; empty is no port, in range is kept
+  as written). The brackets of an IPv6 host are written literally rather than
+  percent-encoded, because `%5B` is a destination the URL parser refuses
+  outright; the badge carries the stored URL, so the address stays reachable
+  even though the rendered anchor's href does not. An authority is read only
+  where one is written: a browser repairs `https:example.com/x`, but the rule
+  that keeps a hostless URL out keeps this out too, and a search result always
+  writes the slashes. The label attributes the host a browser would actually reach:
   non-transitional UTS #46 per label (`例え.jp` → `xn--r8jz45g.jp`,
   `faß.de` → `xn--fa-hia.de`, where the standard library's IDNA 2003 codec would
   have said `fass.de` — a different domain than the link opens), with ASCII
@@ -160,9 +214,10 @@ blob with no way to reach the page the answer is based on.
   thread, a bound that must not discard the ref being resolved, an empty or
   absent or unreadable history that later becomes readable, a ref proven
   absent not being rescanned, and an absence not outliving the history that
-  proved it), the URL identity table including the IDN mapping cases, the real
-  `WeChatBot.format_markdown` boundary rather than its formatter alone, message
-  readiness at
+  proved it), the URL identity table including the IDN mapping cases and the
+  authority table (IPv6 literals, ports, userinfo), which links each citation
+  wrote and which prose links it did not, the real `WeChatBot.format_markdown`
+  boundary rather than its formatter alone, message readiness at
   every terminal boundary, hidden blocks, event ordering and repeated
   completions, IM delivery, persistence and reload.
 - `tests/e2e/test_codex_citation_contract.py` — the installed `codex` binary
@@ -174,12 +229,20 @@ blob with no way to reach the page the answer is based on.
   search itself once `model_providers.<p>.supports_standalone_web_search` and
   the under-development `features.standalone_web_search` are set, and the
   `webSearch` item the test replays is the captured native notification.
-- `ui/src/components/ui/markdown.test.tsx` — renderer matching, degradation to a
-  plain link, hover/focus/touch behavior, and accessible naming.
+- `tests/test_markdown_escape_delivery.py` — the same escaped text through
+  Telegram, Slack and WeChat: the reader sees the character and no backslash,
+  an escape inside a code span stays a backslash, and an escaped backtick in a
+  label no longer takes the link and the code span after it.
+- `ui/src/components/ui/markdown.test.tsx` — renderer matching, provenance
+  (a word-for-word prose link left alone, ordinals counted per destination, a
+  total mismatch degrading to a plain link, a legacy row still recognized),
+  degradation to a plain link, hover/focus/touch behavior, and accessible
+  naming.
 - `ui/e2e/citations/` — real-browser layout and pointer routing on desktop,
   mobile Chromium, and mobile WebKit, in English and Chinese, including the
   falsifiable form of the no-fetch rule: zero requests to the cited site after
-  render and preview, exactly one after an explicit open.
+  render and preview, exactly one after an explicit open, and a prose link to a
+  cited page that stays an ordinary anchor in a real browser.
 
 ## Known-by-design
 

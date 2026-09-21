@@ -12,7 +12,11 @@ import { ChatImage, LinkedImageContent, LinkedImageProvider } from '@/components
 import { FileCard } from '@/components/ui/file-card';
 import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { CitationBadge } from '@/components/ui/citation-badge';
-import { findCitation, type CitationSource } from '@/lib/citations';
+import {
+  findCitation,
+  remarkCitationOccurrences,
+  type CitationSource,
+} from '@/lib/citations';
 import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
@@ -75,10 +79,9 @@ function linkifySecretRequests(text: string): string {
   return result + rewrite(text.slice(last));
 }
 
-// The visible text of a rendered link, flattened back to a string. A citation is
-// matched on the exact (destination, link text) pair the backend wrote, so a link
-// the agent authored itself in its own prose keeps its own wording instead of
-// collapsing into a numbered badge.
+// The visible text of a rendered link, flattened back to a string. Only a
+// citation row persisted before provenance existed is still matched on it (see
+// lib/citations); a current one is matched on which link the backend wrote.
 function linkText(children: React.ReactNode): string {
   if (typeof children === 'string') return children;
   if (typeof children === 'number') return String(children);
@@ -221,6 +224,11 @@ export const Markdown: React.FC<{
   onOpenLocalFile,
   readOnly = false,
 }) => {
+  // The citation annotation is only ever read back on the surface that renders
+  // badges, so the walk that writes it is attached only there — every other
+  // markdown surface parses exactly what it parsed before.
+  const annotateCitations = interactive && !!citations?.length;
+
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
   // ReactMarkdown keys its rendered tree on the component functions it is handed;
   // the old inline object minted fresh functions every render, so ReactMarkdown
@@ -234,10 +242,13 @@ export const Markdown: React.FC<{
   // the editor-preview caller that lacks that wrapper.)
   const remarkPlugins = React.useMemo(
     // CJK punctuation can touch emphasis markers without spaces between words.
-    () => (softBreaks
-      ? [remarkGfm, remarkCjkFriendly, remarkBreaks]
-      : [remarkGfm, remarkCjkFriendly]),
-    [softBreaks],
+    () => [
+      remarkGfm,
+      remarkCjkFriendly,
+      ...(softBreaks ? [remarkBreaks] : []),
+      ...(annotateCitations ? [remarkCitationOccurrences] : []),
+    ],
+    [softBreaks, annotateCitations],
   );
   const components = React.useMemo<Components>(
     () => ({
@@ -261,7 +272,7 @@ export const Markdown: React.FC<{
       // download card (filename + type + download / preview). Other links keep
       // the normal anchor (interactive) or collapse to plain text inside a
       // clickable row (non-interactive).
-      a: ({ href, children }) => {
+      a: ({ href, children, node }) => {
         const url = href ? String(href) : '';
         // @-agent / #-session mention chips (see lib/mentions). Rendered in both
         // interactive and non-interactive contexts — a chip is a span, safe inside
@@ -292,7 +303,9 @@ export const Markdown: React.FC<{
         // anchor, which would be invalid interactive content inside a clickable
         // row — the ``!interactive`` branch below already renders the plain
         // domain text, which still attributes the source.
-        const citation = interactive ? findCitation(citations, url, linkText(children)) : null;
+        const citation = interactive
+          ? findCitation(citations, node, url, linkText(children))
+          : null;
         if (citation) return <CitationBadge citation={citation} />;
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;

@@ -27,7 +27,7 @@ from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
 from markdown_it.common.normalize_url import validateLink as _validate_markdown_link
-from markdown_it.common.utils import isStrSpace, unescapeAll
+from markdown_it.common.utils import ESCAPE_CHAR, isStrSpace, unescapeAll
 from markdown_it.common.html_re import HTML_TAG_RE
 from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
 from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
@@ -43,6 +43,7 @@ _INLINE_CODE_RANGES_KEY = "avibe_inline_code_ranges"
 _INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
 _INLINE_SILENT_RANGES_KEY = "avibe_inline_silent_ranges"
 _FILE_LINK_CAPTURES_KEY = "avibe_file_link_captures"
+_LINK_CAPTURES_KEY = "avibe_link_captures"
 
 
 def _track_inline_code(state: StateInline, silent: bool) -> bool:
@@ -153,6 +154,39 @@ def _capture_file_link_rule(rule, *, is_image: bool):
     return capture
 
 
+def _capture_inline_link(rule):
+    """Wrap the CommonMark link rule and record the destination it accepted."""
+
+    def capture(state: StateInline, silent: bool) -> bool:
+        start = state.pos
+        matched = rule(state, silent)
+        if not matched or silent:
+            return matched
+        label_end = state.md.helpers.parseLinkLabel(state, start, True)
+        pos = label_end + 1
+        if label_end < 0 or pos >= state.posMax or state.src[pos] != "(":
+            # A reference link (``[label][ref]``) spells no destination of its
+            # own, and the renderer this answers for does not read one either.
+            return matched
+        pos += 1
+        while pos < state.posMax and (
+            isStrSpace(state.src[pos]) or state.src[pos] == "\n"
+        ):
+            pos += 1
+        destination = state.md.helpers.parseLinkDestination(
+            state.src,
+            pos,
+            state.posMax,
+        )
+        if destination.ok:
+            state.env.setdefault(_LINK_CAPTURES_KEY, []).append(
+                (start, destination.str)
+            )
+        return matched
+
+    return capture
+
+
 _INLINE_MARKDOWN.inline.ruler.disable(["autolink", "html_inline"])
 _INLINE_MARKDOWN.inline.ruler.before(
     "backticks",
@@ -176,6 +210,9 @@ _FILE_LINK_MARKDOWN.inline.ruler.at(
     "image",
     _capture_file_link_rule(_commonmark_image, is_image=True),
 )
+
+_LINK_MARKDOWN = MarkdownIt("commonmark")
+_LINK_MARKDOWN.inline.ruler.at("link", _capture_inline_link(_commonmark_link))
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -926,6 +963,85 @@ def _extract_secret_requests(
             seen.add(name)
             out.append(SecretRequest(name=name))
     return out
+
+
+def inline_link_destinations(text: str) -> List[Tuple[int, str]]:
+    """Return ``(source offset, destination)`` for each CommonMark inline link.
+
+    The destination is the one a Markdown reader resolves, so a backslash
+    escape or a character reference spelled inside it reads the same here as
+    it does in the browser. Reference links are left out on purpose: they
+    carry no destination of their own, and a consumer that counts links by
+    destination is told the total so a disagreement degrades instead of
+    pointing at the wrong link.
+    """
+    if not text or "](" not in text:
+        return []
+    _, inline_ranges, _ = _markdown_block_ranges(text)
+    destinations: List[Tuple[int, str]] = []
+    for source_start, source_end, content in inline_ranges:
+        env: dict = {}
+        _LINK_MARKDOWN.inline.parse(content, _LINK_MARKDOWN, env, [])
+        captures = env.get(_LINK_CAPTURES_KEY)
+        if not captures:
+            continue
+        offsets = _inline_source_offsets(
+            text,
+            source_start,
+            source_end,
+            content,
+        )
+        for relative_start, destination in captures:
+            source_offset = offsets.get(relative_start)
+            if source_offset is not None:
+                destinations.append((source_offset, destination))
+    destinations.sort()
+    return destinations
+
+
+def unescape_markdown(text: str, *, replace=None) -> str:
+    """Resolve CommonMark backslash escapes outside code, autolinks and HTML.
+
+    No IM dialect understands a CommonMark escape, so a ``\\_`` that made the
+    Web reader see ``_`` reaches an IM reader with the backslash still showing
+    -- and Telegram and Slack go further and read the escaped character as
+    markup of their own. Resolving the escapes before a platform formatter
+    runs hands each dialect the character the reader was meant to see;
+    ``replace`` lets that formatter hide the character from its own pass.
+    """
+    if not text or "\\" not in text:
+        return text
+    masked = mask_markdown_code(text)
+    terminators = {
+        "-->": _substring_positions(masked, "-->"),
+        "?>": _substring_positions(masked, "?>"),
+        "]]>": _substring_positions(masked, "]]>"),
+        ">": _substring_positions(masked, ">"),
+    }
+    parts: List[str] = []
+    cursor = 0
+    index = 0
+    while index < len(text):
+        char = masked[index]
+        if char == "\\" and ESCAPE_CHAR.match(masked, index):
+            parts.append(text[cursor:index])
+            character = text[index + 1]
+            parts.append(replace(character) if replace else character)
+            index += 2
+            cursor = index
+            continue
+        if char == "<":
+            # An escaped ``<`` never opened one of these, and the branch above
+            # already consumed it -- so reaching here means a real token start.
+            token_end = _autolink_end(masked, index, terminators[">"])
+            if token_end is None:
+                token_end = _raw_html_end(masked, index, terminators)
+            if token_end is not None:
+                index = token_end
+                continue
+        index += 1
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def mask_markdown_code(text: str) -> str:

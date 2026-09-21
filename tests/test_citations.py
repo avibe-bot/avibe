@@ -35,6 +35,11 @@ from core.citations import (
     unresolved_refs,
 )
 from core.reply_enhancer import strip_silent_blocks
+from markdown_it import MarkdownIt
+
+# The reference parser for anything asserted about rendered Markdown, so a
+# claim that a label breaks its own link is a measurement and not a reading.
+MARKDOWN = MarkdownIt("commonmark")
 
 START, SEP, END = "\ue200", "\ue202", "\ue201"
 UNRESOLVED = "(source unavailable)"
@@ -83,6 +88,10 @@ class TestResolution:
                 "title": "Web search - OpenAI API",
                 "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
                 "label": "developers.openai.com",
+                # The one link this citation wrote, of the one link in the
+                # message pointing there. See TestLinkProvenance.
+                "occurrences": [1],
+                "occurrence_total": 1,
             }
         ]
 
@@ -446,6 +455,60 @@ class TestUntrustedMetadata:
 
         assert _escape_label("a]b[c\\d") == "a\\]b\\[c\\\\d"
 
+    def test_a_title_may_still_spell_an_emoji_or_an_indic_word(self):
+        """The sanitizer removes what reorders text, not what joins it.
+
+        A zero-width joiner and a variation selector are how a real title
+        spells a family emoji, a Persian word or a text-style symbol. Deleting
+        them silently rewrites the title; only the bidi controls, which can
+        render a title's own text backwards, have no legitimate use on one
+        line.
+        """
+        assert clean_title("👨\u200d👩\u200d👧 ☎\ufe0f افغانی\u200c ها") == (
+            "👨\u200d👩\u200d👧 ☎\ufe0f افغانی\u200c ها"
+        )
+        assert clean_title("Report\u202egnp.\u202c pdf") == "Report gnp. pdf"
+
+    @pytest.mark.parametrize(
+        "label, closer",
+        [
+            ("ex`ample.com", "`code`"),
+            ("a<!--b", "--> and"),
+            ("a<?x", "?> and"),
+            ("a<!X", "> and"),
+            ("a<![CDATA[b", "]]> and"),
+        ],
+        ids=["code-span", "comment", "instruction", "declaration", "cdata"],
+    )
+    def test_a_label_cannot_swallow_the_link_it_labels(self, label, closer):
+        """Measured against CommonMark: each of these, left raw, takes the link.
+
+        A backtick or an angle bracket in link text does not merely change how
+        the text reads. It opens a code span, an HTML comment, a processing
+        instruction, a declaration or a CDATA section, which then runs past
+        ``](url)`` looking for its closer - and markdown-it renders the whole
+        thing as literal text, so the reader is shown raw Markdown with nothing
+        to click. Escaping is what keeps the link a link.
+        """
+        from core.citations import _escape_label
+
+        document = f"Claim. [{_escape_label(label)}](https://s.example/p) then {closer} prose."
+
+        assert MARKDOWN.render(document).count('<a href="https://s.example/p">') == 1
+
+    def test_emphasis_in_a_label_is_left_alone(self):
+        """What a badge stands for is no longer read back off its text.
+
+        Emphasis, a tilde and an ampersand change how a label *reads* without
+        ever breaking the link around it, and escaping them would put a visible
+        backslash in front of each one on every IM dialect that does not speak
+        CommonMark - Telegram and Slack both re-interpret the escape rather
+        than removing it.
+        """
+        from core.citations import _escape_label
+
+        assert _escape_label("a*b_c~d&e") == "a*b_c~d&e"
+
     @pytest.mark.parametrize(
         "ref_id",
         ["turn0view0 with spaces", "a" * 65, "ref/id", "ref​id", ""],
@@ -727,6 +790,104 @@ class TestUnresolvedRefs:
         assert unresolved_refs([], SOURCES) == []
 
 
+class TestLinkProvenance:
+    """Which links in the delivered text each citation actually wrote.
+
+    A badge is an attribution claim, so it belongs to a link this module wrote
+    and not to any link the answer's own prose happens to point at the same
+    page. Recognizing one used to mean matching a rendered label back to a
+    sidecar entry, which cannot tell those two apart - and got the claim wrong
+    in the direction that matters, since the prose link is the one nobody
+    vouched for.
+
+    So the sidecar carries the answer instead: the 1-based ordinal of each link
+    it wrote among the links sharing that destination, plus how many links that
+    destination has in the whole message. The destination is the key rather
+    than the label, because that is what both parsers agree on - a label is
+    what is left after emphasis, character references and escapes have been
+    resolved, and every one of those is a way for the two to disagree.
+    """
+
+    GUIDE_URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
+
+    def test_a_citation_records_the_link_it_wrote(self):
+        _, citations = resolve(f"Documented.{marker('turn0view0')}")
+
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 1
+
+    def test_prose_pointing_at_the_same_page_is_counted_but_not_claimed(self):
+        """The link the answer wrote itself is not the one the citation vouches for."""
+        _, citations = resolve(
+            f"See [the guide]({self.GUIDE_URL}) first.{marker('turn0view0')}"
+        )
+
+        assert citations[0]["occurrences"] == [2]
+        assert citations[0]["occurrence_total"] == 2
+
+    def test_a_prose_link_after_the_marker_shifts_nothing_before_it(self):
+        _, citations = resolve(
+            f"Documented.{marker('turn0view0')} Also [the guide]({self.GUIDE_URL})."
+        )
+
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 2
+
+    def test_one_source_cited_twice_claims_both_of_its_links(self):
+        _, citations = resolve(f"One.{marker('turn0view0')} Two.{marker('turn1view0')}")
+
+        assert citations[0]["occurrences"] == [1, 2]
+        assert citations[0]["occurrence_total"] == 2
+
+    def test_ordinals_are_counted_per_destination(self):
+        """A citation to another page sits between these two and moves neither."""
+        _, citations = resolve(
+            f"A.{marker('turn0view0')} B.{marker('turn0view1')} C.{marker('turn1view0')}"
+        )
+
+        assert [c["occurrences"] for c in citations] == [[1, 2], [1]]
+        assert [c["occurrence_total"] for c in citations] == [2, 1]
+
+    @pytest.mark.parametrize(
+        "decoy",
+        [
+            "<silent>[dup]({url})</silent>",
+            "`[dup]({url})`",
+            "![alt]({url})",
+            "<{url}>",
+            "[dup][k]",
+        ],
+        ids=["hidden", "code-span", "image", "autolink", "reference-link"],
+    )
+    def test_only_a_link_the_reader_can_click_is_counted(self, decoy):
+        """The total has to mean the same thing on both sides of the boundary.
+
+        Every shape here is one the consumer counts the same way: a hidden
+        block leaves before delivery, a code span is text, and an image, an
+        autolink and a reference link are not spelled ``[label](destination)``
+        at all. Counting one here and not there would make the totals disagree,
+        and a disagreement costs the badge.
+        """
+        text, citations = resolve(
+            f"{decoy.format(url=self.GUIDE_URL)} Shown.{marker('turn0view0')}"
+            f"\n\n[k]: {self.GUIDE_URL}"
+        )
+
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 1
+
+    def test_a_hidden_citation_is_not_counted_against_the_visible_one(self):
+        """Stripping the block must not leave the sidecar describing text that left with it."""
+        text, citations = resolve(
+            f"<silent>Hidden.{marker('turn0view0')}</silent>Shown.{marker('turn1view0')}"
+        )
+        delivered = strip_silent_blocks(text)
+
+        assert delivered.count(f"]({self.GUIDE_URL})") == 1
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 1
+
+
 class TestUrlIdentityAcrossTheBoundary:
     """One URL table, asserted on both sides of the backend/renderer boundary.
 
@@ -736,13 +897,19 @@ class TestUrlIdentityAcrossTheBoundary:
     backend cannot see that happen, so every case here is also rendered by
     ``ui/src/components/ui/markdown.test.tsx`` from this same fixture. A ``url``
     of ``null`` means the raw value must be rejected rather than canonicalized.
+
+    The fixture's ``authority`` half is the same table for the userinfo, host
+    and port, and it is read straight into the same cases: an authority is one
+    thing a browser decides all at once, so a new shape belongs in that table
+    rather than in a branch of its own.
     """
 
-    CASES = json.loads(
+    FIXTURE = json.loads(
         (Path(__file__).resolve().parent / "fixtures/citation_url_identity.json").read_text(
             encoding="utf-8"
         )
-    )["cases"]
+    )
+    CASES = [*FIXTURE["cases"], *FIXTURE["authority"]]
 
     @pytest.mark.parametrize("case", CASES, ids=[c["why"] for c in CASES])
     def test_the_backend_produces_the_url_the_renderer_will_keep(self, case):

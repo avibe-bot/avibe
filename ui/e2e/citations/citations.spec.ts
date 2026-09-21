@@ -58,6 +58,13 @@ for (const locale of ['en', 'zh'] as const) {
       // An unresolved ref keeps its label as plain prose — never as a link.
       await expect(page.getByText('(source unavailable)')).toBeVisible();
       await expect(page.getByRole('link', { name: /source unavailable/ })).toHaveCount(0);
+      // A link the answer worded itself points at source 1's page and is still
+      // not a badge: the attribution belongs to the link the backend wrote, not
+      // to every link that happens to go there.
+      const prose = page.getByRole('link', { name: 'the web search guide', exact: true });
+      await expect(prose).toHaveAttribute('href', GUIDE);
+      await expect(prose).not.toHaveAttribute('data-citation-index', /.*/);
+      await expect(page.locator('a[data-citation-index]')).toHaveCount(5);
 
       await page.screenshot({ path: testInfo.outputPath(`compact-${locale}.png`), scale: 'css' });
     });

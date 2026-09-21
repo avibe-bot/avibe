@@ -24,14 +24,14 @@ ref_id or from search order.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as replace_dataclass
 from html.entities import html5 as HTML5_ENTITIES
 from typing import Any, Callable, Iterable, Mapping, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 
 import idna
 
-from core.reply_enhancer import mask_hidden_and_code
+from core.reply_enhancer import inline_link_destinations, mask_hidden_and_code
 
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
@@ -50,9 +50,19 @@ CITATION_MARKER_RE = re.compile(f"{_START}cite{_SEP}([^{_START}{_END}]*){_END}")
 _REF_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
-# C0/C1 controls, zero-width and line/paragraph separators, and the whole
-# private-use area (which is where the markers themselves live).
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\ue000-\uf8ff]")
+# C0/C1 controls, line/paragraph separators, and the whole private-use area
+# (which is where the markers themselves live), plus the invisible formatting
+# characters a single-line source title has no legitimate use for: the bidi
+# marks, embeddings, overrides and isolates that let a title render its own
+# text backwards, and the zero-width space, word joiner and byte order mark.
+#
+# ZWNJ, ZWJ and the variation selectors are deliberately left in: they carry
+# meaning inside a real title, joining an emoji sequence or spelling an Indic
+# or Persian word, and none of them can reorder what the reader sees.
+_CONTROL_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200b\u200e\u200f\u202a-\u202e"
+    "\u2028\u2029\u2060\u2066-\u2069\ufeff\ue000-\uf8ff]"
+)
 # What WHATWG's URL parser deletes from its input before parsing anything: a tab
 # or newline anywhere, and C0 controls or spaces at either end.
 _URL_REMOVED_RE = re.compile(r"[\t\n\r]")
@@ -86,9 +96,25 @@ _URI_ESCAPE_RE = re.compile(r"%[0-9A-Za-z]{2}")
 # unbalanced one truncates the link, so they are encoded here as well - and
 # ``%28``/``%29`` survive it untouched, which keeps the result a fixed point.
 _MARKDOWN_UNSAFE = frozenset("()")
-# WHATWG forbidden domain code points, checked after percent-decoding: these are
-# where ``urlsplit`` and a browser stop agreeing about which part is the host.
-_FORBIDDEN_DOMAIN = frozenset("\x00\t\n\r #%/:<>?@[\\]^|\x7f")
+# WHATWG forbidden domain code points, checked after percent-decoding. The C0
+# range is there in full: a host is not allowed to hold any of it, and a
+# citation whose host carries one names a page no browser opens.
+_FORBIDDEN_DOMAIN = frozenset(
+    "".join(chr(code) for code in range(0x20)) + " #%/:<>?@[\\]^|\x7f"
+)
+# The ports a browser drops from the URL it shows, because they are the ones it
+# would have used anyway.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_PORT_MAX = 65535
+_PORT_DIGITS = len(str(_PORT_MAX))
+# An IPv6 host is wrapped in brackets, which ``_canonical_uri`` percent-encodes
+# along with every other character Markdown would read as syntax - so the
+# wrapper is recognized in either spelling and always written back literally.
+_IPV6_OPEN_RE = re.compile(r"\[|%5[Bb]")
+_IPV6_CLOSE_RE = re.compile(r"\]|%5[Dd]")
+# Where an authority ends. A backslash ends one too for a special scheme, but
+# ``_canonical_uri`` has already percent-encoded it by this point.
+_AUTHORITY_END_RE = re.compile(r"[/?#]")
 _TITLE_MAX = 200
 _LABEL_MAX = 64
 
@@ -111,6 +137,10 @@ class Citation:
     title: str
     url: str
     label: str
+    # Which links in the delivered text this citation actually wrote. See
+    # ``_link_provenance`` for what the two numbers mean and why they exist.
+    occurrences: tuple[int, ...] = ()
+    occurrence_total: int = 0
 
     def to_payload(self) -> dict[str, Any]:
         """The persisted sidecar shape (``message.content.citations`` entries)."""
@@ -120,6 +150,8 @@ class Citation:
             "title": self.title,
             "url": self.url,
             "label": self.label,
+            "occurrences": list(self.occurrences),
+            "occurrence_total": self.occurrence_total,
         }
 
 
@@ -309,16 +341,142 @@ def _canonical_uri(value: str) -> str:
     return "".join(out)
 
 
-def _browser_host(url: str) -> str:
-    """The host a browser resolves for *url*, or ``""`` if that is not knowable.
+def _parse_ipv6(value: str) -> Optional[list[int]]:
+    """WHATWG's IPv6 parser: eight 16-bit pieces, or ``None`` for no address.
 
-    The result is the browser's own serialization: lowercase, punycode for an
-    internationalized label, dotted-quad for a numeric one.
+    Python's own ``ipaddress`` cannot stand in here. It accepts a zone id
+    (``fe80::1%eth0``) that a browser refuses, and it serializes an
+    IPv4-mapped address back as ``::ffff:127.0.0.1`` where a browser shows
+    ``::ffff:7f00:1`` - so a label drawn from it would name the address bar
+    shows something the reader never sees.
+    """
+    address = [0] * 8
+    piece_index = 0
+    compress: Optional[int] = None
+    pointer = 0
+    length = len(value)
 
-    ``urlsplit`` and the WHATWG parser split an authority differently once it
-    carries a character a URL may not hold literally - a backslash is the host
-    separator to one and userinfo to the other - so the host is read from the
-    canonical form and rejected outright when the two could still disagree.
+    def char(offset: int = 0) -> str:
+        position = pointer + offset
+        return value[position] if position < length else ""
+
+    if char() == ":":
+        if char(1) != ":":
+            return None
+        pointer += 2
+        piece_index += 1
+        compress = piece_index
+    while pointer < length:
+        if piece_index == 8:
+            return None
+        if char() == ":":
+            if compress is not None:
+                return None
+            pointer += 1
+            piece_index += 1
+            compress = piece_index
+            continue
+        piece_value = 0
+        piece_length = 0
+        while piece_length < 4 and char() in _HEX_DIGITS:
+            piece_value = piece_value * 0x10 + int(char(), 16)
+            pointer += 1
+            piece_length += 1
+        if char() == ".":
+            # A dotted tail, as in ``::ffff:127.0.0.1``. It is read as an IPv4
+            # address and stored in the last two pieces, which is why the
+            # browser serializes it back as hexadecimal.
+            if piece_length == 0 or piece_index > 6:
+                return None
+            pointer -= piece_length
+            numbers_seen = 0
+            while pointer < length:
+                ipv4_piece: Optional[int] = None
+                if numbers_seen > 0:
+                    if char() == "." and numbers_seen < 4:
+                        pointer += 1
+                    else:
+                        return None
+                if char() not in _DECIMAL_DIGITS:
+                    return None
+                while char() in _DECIMAL_DIGITS:
+                    number = int(char())
+                    if ipv4_piece is None:
+                        ipv4_piece = number
+                    elif ipv4_piece == 0:
+                        return None
+                    else:
+                        ipv4_piece = ipv4_piece * 10 + number
+                    if ipv4_piece > 255:
+                        return None
+                    pointer += 1
+                address[piece_index] = address[piece_index] * 0x100 + (ipv4_piece or 0)
+                numbers_seen += 1
+                if numbers_seen in (2, 4):
+                    piece_index += 1
+            if numbers_seen != 4:
+                return None
+            break
+        if char() == ":":
+            pointer += 1
+            if pointer >= length:
+                return None
+        elif char():
+            return None
+        address[piece_index] = piece_value
+        piece_index += 1
+    if compress is not None:
+        swaps = piece_index - compress
+        piece_index = 7
+        while piece_index != 0 and swaps > 0:
+            address[piece_index], address[compress + swaps - 1] = (
+                address[compress + swaps - 1],
+                address[piece_index],
+            )
+            piece_index -= 1
+            swaps -= 1
+    elif piece_index != 8:
+        return None
+    return address
+
+
+def _serialize_ipv6(address: list[int]) -> str:
+    """The address as a browser writes it: lowercase, longest zero run elided."""
+    compress: Optional[int] = None
+    best_length = 1
+    run_start: Optional[int] = None
+    run_length = 0
+    for piece_index in range(8):
+        if address[piece_index] != 0:
+            run_start = None
+            run_length = 0
+            continue
+        if run_start is None:
+            run_start = piece_index
+        run_length += 1
+        # Strictly greater keeps the leftmost of two equally long runs.
+        if run_length > best_length:
+            best_length = run_length
+            compress = run_start
+
+    out: list[str] = []
+    ignore_zero = False
+    for piece_index in range(8):
+        if ignore_zero and address[piece_index] == 0:
+            continue
+        ignore_zero = False
+        if compress == piece_index:
+            out.append("::" if piece_index == 0 else ":")
+            ignore_zero = True
+            continue
+        out.append(format(address[piece_index], "x"))
+        if piece_index != 7:
+            out.append(":")
+    return "".join(out)
+
+
+def _canonical_domain(host: str) -> str:
+    """A non-IP host as a browser serializes it, or ``""`` when it names none.
 
     An internationalized label is canonicalized the way a browser does it:
     non-transitional UTS #46, with the STD3 and hyphen rules off. Python's own
@@ -326,10 +484,6 @@ def _browser_host(url: str) -> str:
     ``ss`` - so ``https://faß.de/`` would be attributed to ``fass.de`` while the
     link opens ``xn--fa-hia.de``, naming a domain the reader never visits.
     """
-    try:
-        host = urlsplit(url).hostname or ""
-    except ValueError:
-        return ""
     if not host:
         return ""
     try:
@@ -366,13 +520,111 @@ def _browser_host(url: str) -> str:
     return _canonical_host(".".join(labels))
 
 
+def _port_accepted(value: str) -> bool:
+    """Whether a browser would read *value* as a port at all.
+
+    ``str.isdigit`` is true for ``٣`` and ``int`` reads that as 3, so a port
+    checked with it would let ``:٣`` through as 3 while a browser refuses the
+    URL outright. Membership in the ASCII digits is the only test that agrees.
+
+    An empty port is not a rejection - ``https://example.com:/x`` opens - and a
+    port in range is kept as the provider wrote it, default or not: it is the
+    same page either way, and the label never shows a port.
+    """
+    if not value:
+        return True
+    if not all(char in _DECIMAL_DIGITS for char in value):
+        return False
+    trimmed = value.lstrip("0")
+    # Bound the string before converting it: CPython refuses to convert a
+    # decimal ``int`` past ``sys.set_int_max_str_digits``, and an untrusted
+    # authority is exactly where a host spelled with thousands of digits shows
+    # up. Anything wider than the maximum port is out of range regardless.
+    if len(trimmed) > _PORT_DIGITS:
+        return False
+    return not trimmed or int(trimmed) <= _PORT_MAX
+
+
+def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
+    """``(authority, label host, rest)`` for *url*, or ``None`` to reject it.
+
+    One function answers the whole authority, because the parts are not
+    independent: which ``@`` starts the host depends on the userinfo, whether a
+    ``:`` starts a port depends on whether the host is a bracketed IPv6
+    literal, and whether a port is in range depends on nothing else at all.
+    Asking those questions separately - which is what reading
+    ``urlsplit().hostname`` and nothing else amounted to - answers each one
+    against a different authority, and every shape that fell between two of
+    them became a citation pointing somewhere the reader could not go.
+
+    It answers two things at once because they are one judgment. Whether a
+    browser can open this URL decides if the citation is delivered; what that
+    browser resolves the host to decides what the label may claim. The
+    *authority* it hands back is still the one the provider wrote: a page is
+    named by the URL its source gave, and a host written ``2130706433``,
+    ``ＥＸＡＭＰＬＥ.com`` or ``:0080`` opens the same page the label names.
+
+    The canonical URI is what gets parsed, not the provider's raw string, so
+    this reads the same authority the renderer will hand the browser.
+    """
+    remainder = url[len(scheme) + 1 :]
+    if not remainder.startswith("//"):
+        return None
+    remainder = remainder[2:]
+    end = _AUTHORITY_END_RE.search(remainder)
+    authority = remainder[: end.start()] if end else remainder
+    rest = remainder[end.start() :] if end else ""
+
+    # WHATWG splits userinfo at the LAST ``@``: everything before it is
+    # credentials, which may hold an ``@`` of their own. They are carried
+    # across untouched - case-folding a password would change it.
+    userinfo, separator, host_port = authority.rpartition("@")
+    if not separator:
+        userinfo, host_port = "", authority
+
+    opener = _IPV6_OPEN_RE.match(host_port)
+    if opener is not None:
+        closer = _IPV6_CLOSE_RE.search(host_port, opener.end())
+        if closer is None:
+            return None
+        inner = host_port[opener.end() : closer.start()]
+        address = _parse_ipv6(inner)
+        if address is None:
+            return None
+        # Literal brackets, not the ``%5B`` the URI encoder would leave: a
+        # destination spelled that way is one the URL parser refuses outright,
+        # so the badge could not open the address either.
+        host = f"[{inner}]"
+        label_host = f"[{_serialize_ipv6(address)}]"
+        port = host_port[closer.end() :]
+        if port and not port.startswith(":"):
+            return None
+    else:
+        host, colon, port_text = host_port.partition(":")
+        label_host = _canonical_domain(host)
+        if not label_host:
+            return None
+        port = f":{port_text}" if colon else ""
+
+    if not _port_accepted(port[1:]):
+        return None
+    authority = f"{host}{port}"
+    return (f"{userinfo}@{authority}" if userinfo else authority), label_host, rest
+
+
 def safe_url(value: Any) -> str:
     """Canonical http(s) URL usable as a Markdown destination, or ``""``.
 
     Anything else - ``javascript:``, ``data:``, ``file:``, a hostless URL, an
-    authority whose host a browser would read differently - is rejected rather
-    than repaired, so the citation is reported as unresolved instead of becoming
-    an unsafe or misattributed link.
+    authority no browser would open - is rejected rather than repaired, so the
+    citation is reported as unresolved instead of becoming an unsafe or dead
+    link.
+
+    What survives is left as it arrived, percent-encoding aside: the URL names
+    the page its source gave, and this is not the place to decide that two
+    spellings of one are the same. ``source_label`` is where the host a browser
+    resolves is worked out, because that is the one place the difference is
+    something the reader is shown.
     """
     if not isinstance(value, str):
         return ""
@@ -380,22 +632,32 @@ def safe_url(value: Any) -> str:
     if not raw:
         return ""
     url = _canonical_uri(raw)
-    try:
-        scheme = urlsplit(url).scheme.lower()
-    except ValueError:
-        return ""
-    if scheme not in _ALLOWED_SCHEMES or not _browser_host(url):
-        return ""
+    scheme, separator, _ = url.partition(":")
     # A browser lowercases the scheme, and a renderer that only knows the
     # lowercase spelling does not see a link at all: Telegram delivered
-    # ``[example.com](HTTPS://Example.com/X)`` as raw Markdown. ``urlsplit``
-    # already lowercased it, and case never changes a scheme's length.
-    return scheme + url[len(scheme) :]
+    # ``[example.com](HTTPS://Example.com/X)`` as raw Markdown.
+    scheme = scheme.lower()
+    if not separator or scheme not in _ALLOWED_SCHEMES:
+        return ""
+    parsed = _authority(url, scheme)
+    if parsed is None:
+        return ""
+    return f"{scheme}://{parsed[0]}{parsed[2]}"
 
 
 def source_label(url: str, title: str = "") -> str:
     """Short link text for a citation: its domain, which is what attributes it."""
-    host = _browser_host(url)
+    host = ""
+    if isinstance(url, str):
+        scheme, separator, _ = url.partition(":")
+        if separator:
+            parsed = _authority(url, scheme.lower())
+            if parsed is not None:
+                # The port is left out on purpose. A page is attributed by the
+                # site it is on, a non-default port does not change which site
+                # that is, and showing it would spend six of the label's 64
+                # characters saying so.
+                host = parsed[1]
     if host.startswith("www."):
         host = host[4:]
     if not host:
@@ -425,8 +687,21 @@ def source_label(url: str, title: str = "") -> str:
 
 
 def _escape_label(value: str) -> str:
-    """Escape the characters that would end a Markdown link label early."""
-    return re.sub(r"([\\\[\]])", r"\\\1", value)
+    """Escape the label characters that would destroy the link around them.
+
+    A backtick or an angle bracket in a label does not merely change what the
+    label reads as: a code span, an HTML comment, a processing instruction or an
+    unclosed attribute opened inside the brackets runs past ``](url)`` looking
+    for its closer, and takes the link and the sentence after it along. The
+    reader is then shown raw Markdown with nothing to click.
+
+    Only the characters that can do that are escaped. Emphasis and character
+    references change how a label *reads* without ever breaking the link, and
+    the citation's identity no longer depends on reading it back - so escaping
+    them would buy nothing and cost a visible backslash on every IM dialect
+    that does not speak CommonMark.
+    """
+    return re.sub(r"([\\\[\]`<])", r"\\\1", value)
 
 
 def has_citation_markers(text: Optional[str]) -> bool:
@@ -483,6 +758,10 @@ def resolve_citations(
     ``unresolved_label``; a marker where only some refs resolve keeps the links
     it has and adds the label once. When there is no label to fall back to, the
     raw marker is left in place - the answer text is never quietly de-attributed.
+
+    Each sidecar entry also records which links in the delivered text it wrote,
+    so a consumer can tell a citation apart from an ordinary link the answer
+    happened to point at the same page.
     """
     if not text or _START not in text:
         return text, []
@@ -518,29 +797,105 @@ def resolve_citations(
         by_url[url] = citation
         return citation
 
+    # Where each link this rewrite writes lands in the delivered text, keyed by
+    # the offset of the marker it replaced so the caller can add the offset the
+    # replacement itself was spliced to.
+    written: dict[int, list[tuple[int, Citation]]] = {}
+
     def replace(match: re.Match[str]) -> str:
         refs = [ref for ref in match.group(1).split(_SEP) if ref]
         links: list[str] = []
+        placed: list[tuple[int, Citation]] = []
         unresolved = not refs
+        # Markers usually sit flush against the preceding word or full stop;
+        # a separating space keeps the link from reading as part of the sentence.
+        lead = "" if match.start() == 0 or text[match.start() - 1].isspace() else " "
+        cursor = len(lead)
         for ref in refs:
             citation = resolve_ref(ref)
             if citation is None:
                 unresolved = True
                 continue
-            links.append(f"[{_escape_label(citation.label)}]({citation.url})")
+            link = f"[{_escape_label(citation.label)}]({citation.url})"
+            placed.append((cursor, citation))
+            # One space joins the links below, so the next one starts past it.
+            cursor += len(link) + 1
+            links.append(link)
         if unresolved and fallback:
             links.append(fallback)
         if not links:
             return match.group(0)
-        # Markers usually sit flush against the preceding word or full stop;
-        # a separating space keeps the link from reading as part of the sentence.
-        lead = "" if match.start() == 0 or text[match.start() - 1].isspace() else " "
+        written[match.start()] = placed
         return lead + " ".join(links)
 
-    return _rewrite_outside_code(text, replace), [c.to_payload() for c in citations]
+    rewritten, offsets = _rewrite_outside_code(text, replace)
+    provenance = _link_provenance(
+        rewritten,
+        {
+            offsets[marker_start] + relative: citation
+            for marker_start, placed in written.items()
+            for relative, citation in placed
+        },
+    )
+    return rewritten, [
+        c.to_payload()
+        for c in (
+            replace_dataclass(
+                citation,
+                occurrences=provenance[0].get(citation.url, ()),
+                occurrence_total=provenance[1].get(citation.url, 0),
+            )
+            for citation in citations
+        )
+    ]
 
 
-def _rewrite_outside_code(text: str, replace: Callable[[re.Match[str]], str]) -> str:
+def _link_provenance(
+    text: str,
+    written: Mapping[int, Citation],
+) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
+    """Which links in *text* each citation wrote, and how many share its URL.
+
+    A badge is an attribution claim, so it has to belong to a link this module
+    wrote - not to any link that happens to point at the same page, which is
+    what matching a rendered label against a sidecar entry amounted to. The
+    delivered text is the only thing both sides hold, so provenance travels as
+    a position in it: the 1-based ordinal of the link among the links sharing
+    its destination, counted in document order.
+
+    The destination is the counting key rather than the rendered label, because
+    that is what both parsers agree on - a label is what is left after emphasis,
+    character references and escapes have been resolved, and every one of those
+    is a way for the two to disagree.
+
+    The total is recorded alongside so a disagreement is detectable. A consumer
+    that counts a different number of links is looking at different text, and
+    the honest answer there is an ordinary link rather than a badge on the wrong
+    one. That is also what makes reference links safe to leave uncounted.
+    """
+    mask = mask_hidden_and_code(text)
+    totals: dict[str, int] = {}
+    occurrences: dict[str, list[int]] = {}
+    for offset, destination in inline_link_destinations(text):
+        # A link the reader is never shown is not a link: one inside a hidden
+        # block leaves with the block before any consumer sees the text.
+        if mask[offset : offset + 1] != "[":
+            continue
+        ordinal = totals.get(destination, 0) + 1
+        totals[destination] = ordinal
+        citation = written.get(offset)
+        if citation is not None and citation.url == destination:
+            occurrences.setdefault(citation.url, []).append(ordinal)
+    return (
+        {url: tuple(found) for url, found in occurrences.items()},
+        totals,
+    )
+
+
+def _rewrite_outside_code(
+    text: str,
+    replace: Callable[[re.Match[str]], str],
+) -> tuple[str, dict[int, int]]:
     """Apply ``replace`` to every marker the reader will actually be shown.
 
     A marker shown inside a code example must stay literal - an agent
@@ -556,16 +911,27 @@ def _rewrite_outside_code(text: str, replace: Callable[[re.Match[str]], str]) ->
     markers are matched against the mask and spliced back into the original
     source, which leaves every byte this function does not replace exactly as
     it arrived.
+
+    Also returns where each replacement was written, keyed by the offset of the
+    marker it replaced, so a caller that cares which text it produced can find
+    it without reparsing for its own output.
     """
     mask = mask_hidden_and_code(text)
     out: list[str] = []
+    offsets: dict[int, int] = {}
+    written = 0
     cursor = 0
     # A match in the mask cannot overlap a blanked region, so the marker text
     # under it is the original text - only its surroundings may have been
     # blanked, and those are copied from ``text``, never from the mask.
     for match in CITATION_MARKER_RE.finditer(mask):
-        out.append(text[cursor : match.start()])
-        out.append(replace(match))
+        prefix = text[cursor : match.start()]
+        replacement = replace(match)
+        out.append(prefix)
+        out.append(replacement)
+        written += len(prefix)
+        offsets[match.start()] = written
+        written += len(replacement)
         cursor = match.end()
     out.append(text[cursor:])
-    return "".join(out)
+    return "".join(out), offsets

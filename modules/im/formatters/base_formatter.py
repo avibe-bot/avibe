@@ -1,10 +1,50 @@
 from abc import ABC, abstractmethod
-from typing import Optional, List, Tuple, Any, Dict
+from typing import Callable, Optional, List, Tuple, Any, Dict
 import json
 import logging
 import re
+import uuid
+
+from core.reply_enhancer import unescape_markdown
 
 logger = logging.getLogger(__name__)
+
+
+def hold_markdown_escapes(
+    text: str,
+    *,
+    render: Optional[Callable[[str], str]] = None,
+) -> Tuple[str, Dict[str, str]]:
+    """Resolve CommonMark backslash escapes behind per-platform placeholders.
+
+    One Markdown text is delivered to every platform, and a backslash escape in
+    it means "show this character, do not read it as syntax". No IM dialect
+    knows that: Slack and Telegram read the escaped character as markup of
+    their own and Discord, Feishu and WeChat show the backslash. So the escape
+    is resolved here, before a platform formatter runs, and the character it
+    protected is held behind a placeholder until that formatter is done - which
+    is the same reason it was escaped upstream, honoured in the dialect that is
+    actually about to parse the text.
+
+    ``render`` is how the platform wants the character to come back: Telegram
+    needs it HTML-escaped, the others want it verbatim. Restore with
+    ``restore_held`` once the platform pass is finished.
+    """
+    held: Dict[str, str] = {}
+
+    def hold(character: str) -> str:
+        token = f"\ue000MD{uuid.uuid4().hex}\ue001"
+        held[token] = render(character) if render else character
+        return token
+
+    return unescape_markdown(text, replace=hold), held
+
+
+def restore_held(text: str, held: Dict[str, str]) -> str:
+    """Put back what ``hold_markdown_escapes`` (or a sibling pass) held."""
+    for token, replacement in held.items():
+        text = text.replace(token, replacement)
+    return text
 
 
 def _truncate_status(text: str, max_len: int) -> str:

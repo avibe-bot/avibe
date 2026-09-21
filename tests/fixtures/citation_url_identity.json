@@ -1,5 +1,5 @@
 {
-  "description": "One shared table for the URL a citation is allowed to carry.\n\nA citation is delivered twice: as the destination of an ordinary Markdown link every surface can follow, and as the `url` of a `message.content.citations` row. The Web renderer draws a badge only when the two agree exactly, so the backend has to write the destination the real Markdown pipeline (remark-parse -> remark-rehype's normalizeUri -> defaultUrlTransform) produces from it - a fixed point - and has to label it with the host a browser actually resolves.\n\nBoth sides of that boundary read this file: tests/test_citations.py asserts core.citations produces `url`/`label` from `raw`, and ui/src/components/ui/markdown.test.tsx renders `url` and asserts the DOM href and the WHATWG host come back unchanged. Neither side can drift without the other failing. `url: null` means the raw value must be rejected outright rather than repaired.",
+  "description": "One shared table for the URL a citation is allowed to carry.\n\nA citation is delivered twice: as the destination of an ordinary Markdown link every surface can follow, and as the `url` of a `message.content.citations` row. The Web renderer draws a badge only when the two agree exactly, so the backend has to write the destination the real Markdown pipeline (remark-parse -> remark-rehype's normalizeUri -> defaultUrlTransform) produces from it - a fixed point - and has to label it with the host a browser actually resolves.\n\nBoth sides of that boundary read this file: tests/test_citations.py asserts core.citations produces `url`/`label` from `raw`, and ui/src/components/ui/markdown.test.tsx renders `url` and asserts the DOM href and the WHATWG host come back unchanged. Neither side can drift without the other failing. `url: null` means the raw value must be rejected outright rather than repaired.\n\n`authority` is the same table for the authority - userinfo, host and port - where the browser is the assertion rather than a reference: every accepted row's `url` is one `new URL` opens rather than refuses, and `new URL(url).hostname` is exactly that row's `label`. The authority stays as the provider wrote it - letter case, a leading zero in a port, an uncompressed IPv6 address - because each of those spellings opens the same page, and the label is where the browser's own answer is shown instead. A `url: null` row is one a browser refuses, apart from the single deliberate exception whose `why` says so. A new authority shape is a row here, not a branch.",
   "cases": [
     {
       "why": "an ordinary result needs no rewriting at all",
@@ -307,5 +307,29 @@
       "url": null,
       "label": null
     }
+  ],
+  "authority": [
+    {"why": "an IPv6 literal is a host a browser resolves, so a citation naming one is delivered instead of dropped", "raw": "https://[2001:db8::1]/docs", "url": "https://[2001:db8::1]/docs", "label": "[2001:db8::1]"},
+    {"why": "the URL keeps the address its source wrote, while the label is the serialized form the address bar shows", "raw": "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/x", "url": "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/x", "label": "[2001:db8::1]"},
+    {"why": "hexadecimal pieces are lowercased for the label, not for the URL", "raw": "https://[2001:DB8::1]/x", "url": "https://[2001:DB8::1]/x", "label": "[2001:db8::1]"},
+    {"why": "an all-zero address is labelled with the empty compression", "raw": "https://[0:0:0:0:0:0:0:0]/x", "url": "https://[0:0:0:0:0:0:0:0]/x", "label": "[::]"},
+    {"why": "only the longest zero run compresses, so the shorter one beside it stays written out", "raw": "https://[1:0:0:2:0:0:0:3]/x", "url": "https://[1:0:0:2:0:0:0:3]/x", "label": "[1:0:0:2::3]"},
+    {"why": "a dotted IPv4 tail is labelled as hexadecimal pieces, which is the host the address bar names", "raw": "https://[::127.0.0.1]/x", "url": "https://[::127.0.0.1]/x", "label": "[::7f00:1]"},
+    {"why": "an IPv4-mapped address is no exception - Python's ipaddress writes it back dotted, a browser does not", "raw": "https://[::ffff:127.0.0.1]/x", "url": "https://[::ffff:127.0.0.1]/x", "label": "[::ffff:7f00:1]"},
+    {"why": "a port belongs to the URL but never to the attribution: the label names the host", "raw": "https://[::1]:8080/x", "url": "https://[::1]:8080/x", "label": "[::1]"},
+    {"why": "the scheme's default port is kept - it opens the same page - and no port reaches the label", "raw": "https://[::1]:443/x", "url": "https://[::1]:443/x", "label": "[::1]"},
+    {"why": "a zone id names an interface only the local machine has, and a browser refuses it", "raw": "https://[fe80::1%25eth0]/x", "url": null, "label": null},
+    {"why": "an unclosed bracket is not an address", "raw": "https://[2001:db8::1/x", "url": null, "label": null},
+    {"why": "a port is carried as it was written, leading zeros and all: it is the same port", "raw": "https://example.com:0080/x", "url": "https://example.com:0080/x", "label": "example.com"},
+    {"why": "the scheme's own default port is no different - dropping it would edit a URL that already opens", "raw": "https://example.com:443/x", "url": "https://example.com:443/x", "label": "example.com"},
+    {"why": "another scheme's default is just a port here", "raw": "https://example.com:80/x", "url": "https://example.com:80/x", "label": "example.com"},
+    {"why": "an empty port is no port, and refusing the URL over it would lose a source a browser opens", "raw": "https://example.com:/x", "url": "https://example.com:/x", "label": "example.com"},
+    {"why": "a port past 16 bits opens nothing, so the citation is refused rather than delivered broken", "raw": "https://example.com:99999/x", "url": null, "label": null},
+    {"why": "a port must be ASCII digits: int() reads an Arabic-Indic three as 3, a browser reads no port at all", "raw": "https://example.com:%D9%A3/x", "url": null, "label": null},
+    {"why": "a C0 control the host spells percent-encoded is a forbidden domain code point once decoded", "raw": "https://exa%01mple.com/x", "url": null, "label": null},
+    {"why": "userinfo is case-folded nowhere - it may be a password - and neither is the host beside it; the label is where the browser's answer shows", "raw": "https://user:PW@Example.COM/x", "url": "https://user:PW@Example.COM/x", "label": "example.com"},
+    {"why": "the label names the host and never the userinfo, so a username cannot dress a link up as a domain", "raw": "https://USER@example.com/x", "url": "https://USER@example.com/x", "label": "example.com"},
+    {"why": "userinfo hides an IPv6 host no better", "raw": "https://attacker.example@[::1]/x", "url": "https://attacker.example@[::1]/x", "label": "[::1]"},
+    {"why": "an authority is read only where one is written: a browser repairs the missing slashes, but the rule that keeps a hostless URL out keeps this out too, and a search result always writes them", "raw": "https:example.com/x", "url": null, "label": null}
   ]
 }

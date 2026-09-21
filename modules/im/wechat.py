@@ -38,6 +38,10 @@ from modules.im.message_facts import (
     is_original_human_wechat_text,
     wechat_message_kind,
 )
+from modules.im.formatters.base_formatter import (
+    hold_markdown_escapes,
+    restore_held,
+)
 from modules.im.formatters.wechat_formatter import WeChatFormatter
 
 logger = logging.getLogger(__name__)
@@ -525,8 +529,13 @@ class WeChatBot(BaseIMClient):
         """
         if not text:
             return text
-        # Order matters: code fences before inline code, bold before italic
-        result = _MD_CODE_FENCE.sub(r"\1", text)
+        # Order matters: escapes before everything (a backslash escape says the
+        # character it protects is not syntax, and every pass below is a
+        # syntax pass - an escaped ``]`` would end a link label early and leak
+        # the raw Markdown), then code fences before inline code, bold before
+        # italic.
+        result, escaped = hold_markdown_escapes(text)
+        result = _MD_CODE_FENCE.sub(r"\1", result)
         result = _MD_IMAGE.sub(r"\1", result)
         held: Dict[str, str] = {}
 
@@ -544,9 +553,8 @@ class WeChatBot(BaseIMClient):
         result = _MD_HEADING.sub("", result)
         result = _MD_HR.sub("---", result)
         result = result.strip()
-        for token, replacement in held.items():
-            result = result.replace(token, replacement)
-        return result
+        result = restore_held(result, held)
+        return restore_held(result, escaped)
 
     # ------------------------------------------------------------------
     # Callback registration
