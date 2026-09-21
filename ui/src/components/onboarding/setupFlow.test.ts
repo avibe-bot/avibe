@@ -3,20 +3,18 @@
 import { createElement, useState } from 'react';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { beginRegionRead, failRegionRead, loadingRegion, readyRegion, unreadRegion, type RegionRead } from '../settings/models/regionRead';
+import { beginRegionRead, failRegionRead, loadingRegion, readyRegion, unreadRegion } from '../settings/models/regionRead';
 import { CONTRACT_VERSION, type RuntimeDependency } from '../settings/models/types';
 
 import {
   INITIAL_SETUP_FLOW_STATE,
   SETUP_SCREENS,
   setupBackTarget,
-  setupCandidatePath,
   setupCanAttemptInstall,
-  setupCurrentScreen,
-  setupPolicy,
+  setupCandidateAllowed,
+  setupHubRunning,
   setupCapability,
   setupNavigationReady,
-  setupScreenSequence,
   type SetupCapability,
   type SetupFlowState,
   type SetupScreenId,
@@ -25,69 +23,26 @@ import {
 
 afterEach(cleanup);
 
-const runtime = (
-  resolution: RuntimeDependency['manifest']['resolution'] = 'resolved',
-  health: RuntimeDependency['status']['health'] = 'not_installed',
-): RuntimeDependency => ({
-  contract_version: CONTRACT_VERSION,
-  manifest: resolution === 'unresolved'
-    ? { name: 'cliproxyapi', resolution, assets: [] }
-    : { name: 'cliproxyapi', resolution, version: 'fixture', source_sha: 'fixture', assets: [] },
-  status: { verified: false, health },
-});
-const policyFor = (capability: SetupCapability) => setupPolicy(capability, readyRegion(runtime()));
 const CAPABILITIES: readonly SetupCapability[] = ['pending', 'enabled', 'disabled'];
 
-describe('setup screen sequence', () => {
-  it('keeps the flow a prefix-stable ordering of the declared screens', () => {
-    // A property rather than three copied lists: whatever the capability says, the flow
-    // opens on the introduction, closes on the assistants, and never reorders what is
-    // between them — so a screen added later is covered without editing this test.
+describe('one Hub setup journey', () => {
+  it('keeps every step and requires enabled capability to progress', () => {
+    expect(SETUP_SCREENS).toEqual(['intro', 'providers', 'assistants']);
     for (const capability of CAPABILITIES) {
-      const sequence = setupScreenSequence(policyFor(capability));
-      expect(sequence[0]).toBe('intro');
-      expect(sequence[sequence.length - 1]).toBe('assistants');
-      const declared = SETUP_SCREENS.filter((screen) => sequence.includes(screen));
-      expect([...sequence]).toEqual([...declared]);
+      expect(setupNavigationReady(capability, true)).toBe(capability === 'enabled');
     }
   });
 
-  it('drops only the providers screen when the capability is explicitly off', () => {
-    expect(setupScreenSequence(policyFor('disabled'))).toEqual(['intro', 'assistants']);
-    expect(setupScreenSequence(policyFor('enabled'))).toEqual([...SETUP_SCREENS]);
-  });
-
-  it('maps the capability read without collapsing "unread" into "off"', () => {
+  it('distinguishes unread capability from an authoritative disabled configuration', () => {
     expect(setupCapability(null)).toBe('pending');
     expect(setupCapability(true)).toBe('enabled');
     expect(setupCapability(false)).toBe('disabled');
   });
-});
 
-describe('setup navigation readiness', () => {
-  it('holds the shell on the introduction until the capability read settles', () => {
-    // A returned sequence says which screens exist, not that the shell may enter them:
-    // entering the providers screen on a guess and removing it when the read resolves to
-    // `disabled` recreates the jump the shorter sequence exists to prevent.
-    expect(setupNavigationReady(policyFor('pending'), 'intro')).toBe(false);
-    for (const capability of CAPABILITIES.filter((value) => value !== 'pending')) {
-      expect(setupNavigationReady(policyFor(capability), 'intro')).toBe(true);
-    }
-  });
-});
-
-describe('setup back target', () => {
-  it('leaves to the previous screen of the sequence actually running', () => {
-    expect(setupBackTarget(setupScreenSequence(policyFor('enabled')), 'assistants')).toBe('providers');
-    expect(setupBackTarget(setupScreenSequence(policyFor('enabled')), 'providers')).toBe('intro');
-    // The degraded flow has no providers screen, so Back from the assistants screen is the
-    // introduction rather than a screen this instance never renders.
-    expect(setupBackTarget(setupScreenSequence(policyFor('disabled')), 'assistants')).toBe('intro');
-  });
-
-  it('has nowhere to go from the first screen', () => {
-    expect(setupBackTarget(setupScreenSequence(policyFor('enabled')), 'intro')).toBeNull();
-    expect(setupBackTarget(setupScreenSequence(policyFor('disabled')), 'intro')).toBeNull();
+  it('keeps Back on the same three-screen path', () => {
+    expect(setupBackTarget(SETUP_SCREENS, 'assistants')).toBe('providers');
+    expect(setupBackTarget(SETUP_SCREENS, 'providers')).toBe('intro');
+    expect(setupBackTarget(SETUP_SCREENS, 'intro')).toBeNull();
   });
 });
 
@@ -143,8 +98,8 @@ describe('shell-owned flow state', () => {
       const [current, setCurrent] = useState<SetupScreenId>('providers');
       const [flowState, setFlowState] = useState(INITIAL_SETUP_FLOW_STATE);
       const common: Omit<SetupScreenProps, 'active'> = {
-        flowState, setFlowState, policy: policyFor('enabled'), onRetryRuntime: () => {},
-        handoff: false, onNavigate: setCurrent, onActionChange: () => {},
+        capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion(), onRetrySetup: () => {},
+        flowState, setFlowState, handoff: false, onNavigate: setCurrent, onActionChange: () => {},
       };
       return createElement('main', null,
         createElement(ProviderScreen, { ...common, active: current === 'providers' }),
@@ -168,184 +123,193 @@ describe('shell-owned flow state', () => {
   });
 });
 
-
-describe('authoritative setup policy', () => {
-  it('separates install admission from runtime health and never rewrites persisted mode', () => {
-    const healths: RuntimeDependency['status']['health'][] = ['ok', 'degraded', 'down', 'not_started', 'not_installed', 'installing'];
-    for (const health of healths) {
-      const policy = setupPolicy('enabled', readyRegion(runtime('unsupported', health)));
-      expect(policy.installSupport).toBe('unsupported');
-      expect(setupCanAttemptInstall(policy)).toBe(false);
-      expect(setupCandidatePath(policy, 'direct')).toBe('direct');
-      const running = health === 'ok' || health === 'degraded';
-      expect(setupCandidatePath(policy, 'hub')).toBe(running ? 'hub' : 'hub-recovery');
-      expect(setupScreenSequence(policy).includes('providers')).toBe(running);
-    }
-    for (const resolution of ['resolved', 'unresolved'] as const) {
-      const policy = setupPolicy('enabled', readyRegion(runtime(resolution)));
-      expect(policy.installSupport).toBe('admitted');
-      expect(setupCanAttemptInstall(policy)).toBe(true);
-      expect(setupCandidatePath(policy, 'direct')).toBe('configure-hub');
-      expect(setupScreenSequence(policy)).toEqual(SETUP_SCREENS);
-    }
-  });
-
-  it('holds downstream progression on pending, failed and stale reads without inventing fallback', () => {
-    const stale = readyRegion(runtime('unsupported'));
-    for (const read of [loadingRegion<RuntimeDependency>(), unreadRegion<RuntimeDependency>(), beginRegionRead(stale), failRegionRead(stale)]) {
-      const policy = setupPolicy('enabled', read);
-      expect(setupNavigationReady(policy, 'intro')).toBe(true); // Bootstrap remains reachable.
-      expect(setupNavigationReady(policy, 'providers')).toBe(false);
-      expect(setupCanAttemptInstall(policy)).toBe(false);
-      expect(setupNavigationReady(policy, 'assistants')).toBe(false);
-      expect(setupCandidatePath(policy, 'direct')).toBe('pending');
-      expect(setupCandidatePath(policy, 'hub')).toBe('hub-recovery');
-    }
-    for (const read of [loadingRegion<RuntimeDependency>(), unreadRegion<RuntimeDependency>()]) {
-      const policy = setupPolicy('enabled', read);
-      expect(policy.installSupport).toBe('unknown');
-      expect(setupCurrentScreen(policy, 'providers')).toBe('providers');
-    }
-    expect(setupCandidatePath(policyFor('disabled'), 'hub')).toBe('hub-recovery');
-    expect(setupCandidatePath(policyFor('disabled'), undefined)).toBe('pending');
-  });
+const runtime = (
+  resolution: RuntimeDependency['manifest']['resolution'],
+  health: RuntimeDependency['status']['health'] = 'not_installed',
+): RuntimeDependency => ({
+  contract_version: CONTRACT_VERSION, enabled: true,
+  manifest: resolution === 'unresolved'
+    ? { name: 'cliproxyapi', resolution, assets: [] }
+    : { name: 'cliproxyapi', resolution, version: 'fixture', source_sha: 'fixture', assets: [] },
+  status: { verified: false, health },
 });
 
-// A contract consumer, not the feature shell or a backend-readiness implementation.
-// Connection readiness below is synthetic; assertions test policy choice/CTA/navigation.
-type Observation = { capability: SetupCapability; runtimeRead: RegionRead<RuntimeDependency> };
-type PolicyHarnessControls = {
-  settle: (observation: Observation) => void;
-  go: (screen: SetupScreenId) => void;
-};
-function PolicyHarness({ capture, modes, retry, complete }: {
-  capture: (controls: PolicyHarnessControls) => void;
-  modes: ReadonlyArray<'direct' | 'hub'>;
-  retry: () => void;
+it('keeps Hub readiness independent of install admission and requires the deployment-selected mode', () => {
+  const healths: RuntimeDependency['status']['health'][] = ['ok', 'degraded', 'down', 'not_started', 'not_installed', 'installing'];
+  for (const health of healths) {
+    const read = readyRegion(runtime('unsupported', health));
+    expect(setupCanAttemptInstall('enabled', true, read)).toBe(false);
+    expect(setupCandidateAllowed('enabled', true, read, 'direct')).toBe(false);
+    expect(setupCandidateAllowed('enabled', true, read, 'hub')).toBe(health === 'ok' || health === 'degraded');
+  }
+  for (const resolution of ['resolved', 'unresolved'] as const) {
+    expect(setupCanAttemptInstall('enabled', true, readyRegion(runtime(resolution)))).toBe(true);
+  }
+  for (const capability of ['pending', 'disabled'] as const) {
+    expect(setupCanAttemptInstall(capability, true, readyRegion(runtime('resolved')))).toBe(false);
+    expect(setupCandidateAllowed(capability, true, readyRegion(runtime('resolved', 'ok')), 'hub')).toBe(false);
+  }
+  expect(setupCandidateAllowed('disabled', true, unreadRegion(), 'direct')).toBe(false);
+  expect(setupCandidateAllowed('disabled', true, unreadRegion(), undefined)).toBe(false);
+  const stoppedIntent = readyRegion({ ...runtime('resolved', 'ok'), enabled: false });
+  expect(setupCanAttemptInstall('enabled', true, stoppedIntent)).toBe(false);
+  expect(setupCandidateAllowed('enabled', true, stoppedIntent, 'hub')).toBe(false);
+  expect(setupNavigationReady('enabled', null)).toBe(false);
+  expect(setupNavigationReady('enabled', false)).toBe(false);
+});
+
+// Test-only consumers of C2 and its actual gates; synthetic route/auth/application
+// readiness below does not prove backend readiness or a shipped feature coordinator.
+type Observation = Pick<SetupScreenProps, 'capability' | 'gatewayEnabled' | 'runtimeRead'>;
+function RuntimeConsumer({ active, capability, runtimeRead, flowState, setFlowState, onRetrySetup }: SetupScreenProps) {
+  return createElement('section', { hidden: !active, inert: !active },
+    createElement('output', { 'aria-label': 'draft' }, JSON.stringify(flowState)),
+    createElement('output', { 'aria-label': 'capability' }, capability),
+    createElement('output', { 'aria-label': 'runtime read' }, runtimeRead.kind),
+    createElement('button', { onClick: () => setFlowState((previous) => ({
+      ...previous, routeOrder: [{ source_id: 'src_fixture1', model_id: '模型' }], routeOrderDirty: true,
+    })) }, 'Edit draft'),
+    createElement('button', { onClick: onRetrySetup }, 'Recheck runtime'));
+}
+function RuntimeHarness({ capture, retry, install, complete, mode }: {
+  capture: (settle: (observation: Observation) => void) => void;
+  // Synthetic result of the shell's config-first retry owner; no real HTTP here.
+  retry: () => Promise<Observation>;
+  install: () => void;
   complete: () => void;
+  mode: 'direct' | 'hub';
 }) {
-  const [environment, setEnvironment] = useState<Observation & { current: SetupScreenId }>({
-    capability: 'pending', runtimeRead: loadingRegion(), current: 'intro',
-  });
-  const [flowState, setFlowState] = useState<SetupFlowState>({
-    ...INITIAL_SETUP_FLOW_STATE,
-    routeOrder: [{ source_id: 'src_fixture1', model_id: '模型' }], routeOrderDirty: true,
-  });
-  const policy = setupPolicy(environment.capability, environment.runtimeRead);
-  const sequence = setupScreenSequence(policy);
-  const go = (requested: SetupScreenId) => setEnvironment((previous) => ({
-    ...previous, current: setupCurrentScreen(setupPolicy(previous.capability, previous.runtimeRead), requested),
-  }));
-  capture({
-    go,
-    settle: (observation) => setEnvironment((previous) => ({
-      ...observation, current: setupCurrentScreen(setupPolicy(observation.capability, observation.runtimeRead), previous.current),
-    })),
-  });
-  const current = environment.current;
-  const paths = modes.map((mode) => setupCandidatePath(policy, mode));
-  const policyAllowsSyntheticReadyCandidate = paths.some((path) => path === 'direct' || path === 'hub');
-  const nextDisabled = !setupNavigationReady(policy, current)
-    || (current === 'assistants' && !policyAllowsSyntheticReadyCandidate);
-  const common: Omit<SetupScreenProps, 'active'> = {
-    policy, flowState, setFlowState, onRetryRuntime: retry,
-    handoff: false, onNavigate: go, onActionChange: () => {},
-  };
-  const Consumer = ({ active, policy: consumedPolicy, flowState: consumedState, onRetryRuntime }: SetupScreenProps) =>
-    createElement('section', { hidden: !active, inert: !active },
-      createElement('output', { 'aria-label': 'policy' }, JSON.stringify(consumedPolicy)),
-      createElement('output', { 'aria-label': 'draft' }, JSON.stringify(consumedState)),
-      createElement('output', { 'aria-label': 'candidate paths' }, modes.map((mode) => setupCandidatePath(consumedPolicy, mode)).join(',')),
-      createElement('button', { onClick: onRetryRuntime }, 'Retry runtime read'));
+  const [observation, setObservation] = useState<Observation>({ capability: 'pending', gatewayEnabled: null, runtimeRead: loadingRegion() });
+  const [current, setCurrent] = useState<SetupScreenId>('intro');
+  const [flowState, setFlowState] = useState(INITIAL_SETUP_FLOW_STATE);
+  capture(setObservation);
+  const { capability, gatewayEnabled, runtimeRead } = observation;
+  const sequence = SETUP_SCREENS;
   const back = setupBackTarget(sequence, current);
+  const mayContinue = setupNavigationReady(capability, gatewayEnabled) && (current === 'intro'
+    || (current === 'providers' ? setupHubRunning(runtimeRead) : setupCandidateAllowed(capability, gatewayEnabled, runtimeRead, mode)));
+  const common: Omit<SetupScreenProps, 'active'> = {
+    ...observation, flowState, setFlowState, handoff: false, onActionChange: () => {}, onNavigate: setCurrent,
+    onRetrySetup: () => {
+      setObservation((previous) => ({ ...previous, runtimeRead: beginRegionRead(previous.runtimeRead) }));
+      void retry().then(
+        (result) => setObservation(result),
+        () => setObservation((previous) => ({ ...previous, runtimeRead: failRegionRead(previous.runtimeRead) })),
+      );
+    },
+  };
   return createElement('main', null,
     createElement('output', { 'aria-label': 'current screen' }, current),
-    ...SETUP_SCREENS.map((id) => createElement(Consumer, { ...common, key: id, active: id === current })),
-    createElement('button', { disabled: nextDisabled, onClick: () => {
+    ...SETUP_SCREENS.map((id) => createElement(RuntimeConsumer, { ...common, key: id, active: id === current })),
+    createElement('button', { disabled: !mayContinue, onClick: () => {
       if (current === 'assistants') complete();
-      else go(sequence[sequence.indexOf(current) + 1]);
+      else setCurrent(sequence[sequence.indexOf(current) + 1]);
     } }, 'Primary'),
-    createElement('button', { disabled: !back, onClick: () => { if (back) go(back); } }, 'Back'));
+    createElement('button', { disabled: !back, onClick: () => { if (back) setCurrent(back); } }, 'Back'),
+    createElement('button', { disabled: !setupCanAttemptInstall(capability, gatewayEnabled, runtimeRead), onClick: install }, 'Prepare runtime'));
 }
 const output = (name: string) => screen.getByRole('status', { name }).textContent;
 const primary = () => screen.getByRole('button', { name: 'Primary' }) as HTMLButtonElement;
 
-it('consumes late unsupported resolution atomically, preserves drafts and Direct access, and cannot bounce back into providers', () => {
-  let controls!: PolicyHarnessControls;
-  const modes = Object.freeze(['direct', 'hub'] as const);
-  const retry = vi.fn(); const complete = vi.fn();
-  render(createElement(PolicyHarness, { capture: (value) => { controls = value; }, modes, retry, complete }));
+it('consumes unsupported admission without leaving providers, losing drafts or completing through Direct', async () => {
+  let settle!: (observation: Observation) => void;
+  const install = vi.fn(); const complete = vi.fn();
+  const retry = vi.fn().mockResolvedValue({ capability: 'enabled', gatewayEnabled: true, runtimeRead: readyRegion(runtime('resolved', 'ok')) });
+  const props = { capture: (value: typeof settle) => { settle = value; }, retry, install, complete };
+  const view = render(createElement(RuntimeHarness, { ...props, mode: 'direct' }));
   expect(primary().disabled).toBe(true);
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: loadingRegion() }));
-  fireEvent.click(primary());
-  expect(output('current screen')).toBe('providers'); // No support read before bootstrap required.
+  act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion() }));
+  fireEvent.click(primary()); // Support is first learned after provider bootstrap.
+  expect(output('current screen')).toBe('providers');
+  fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }));
   const draft = output('draft');
+  act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: readyRegion(runtime('unsupported')) }));
+  expect(output('current screen')).toBe('providers');
   expect(primary().disabled).toBe(true);
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: readyRegion(runtime('unsupported')) }));
-  expect(output('current screen')).toBe('assistants');
-  expect(output('candidate paths')).toBe('direct,hub-recovery');
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare runtime' }));
+  expect(install).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  expect(output('current screen')).toBe('intro');
+  fireEvent.click(primary());
+  expect(output('current screen')).toBe('providers');
   expect(output('draft')).toBe(draft);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Recheck runtime' })); });
+  expect(retry).toHaveBeenCalledOnce();
+  expect(output('runtime read')).toBe('ready');
+  expect(output('current screen')).toBe('providers');
+  fireEvent.click(primary());
+  expect(output('current screen')).toBe('assistants');
+  expect(primary().disabled).toBe(true); // A healthy runtime alone never changes Direct custody.
+  fireEvent.click(primary());
+  expect(complete).not.toHaveBeenCalled();
+  view.rerender(createElement(RuntimeHarness, { ...props, mode: 'hub' })); // Fresh persisted-mode evidence.
   expect(primary().disabled).toBe(false);
+  expect(output('draft')).toBe(draft);
   fireEvent.click(primary());
   expect(complete).toHaveBeenCalledOnce();
-  act(() => controls.go('providers')); // Includes Add source / an obsolete requested destination.
-  expect(output('current screen')).toBe('assistants');
-  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
-  expect(output('current screen')).toBe('intro');
-  fireEvent.click(primary());
-  expect(output('current screen')).toBe('assistants');
-  fireEvent.click(screen.getByRole('button', { name: 'Retry runtime read' }));
-  expect(retry).toHaveBeenCalledOnce();
-  expect(output('current screen')).toBe('assistants');
-  expect(modes).toEqual(['direct', 'hub']);
 });
 
-it('consumes supported and failed reads with a usable retry and preserves a running Hub on install-unsupported admission', () => {
-  let controls!: PolicyHarnessControls;
-  const complete = vi.fn(); const retry = vi.fn();
-  render(createElement(PolicyHarness, { capture: (value) => { controls = value; }, modes: ['hub'], retry, complete }));
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: loadingRegion() }));
+it('consumes read failures as held errors, retries in place and preserves a healthy install-unsupported Hub', async () => {
+  let settle!: (observation: Observation) => void;
+  const retry = vi.fn().mockRejectedValueOnce(new Error('fixture 503'))
+    .mockResolvedValue({ capability: 'enabled', gatewayEnabled: true, runtimeRead: readyRegion(runtime('unsupported', 'ok')) });
+  const complete = vi.fn(); const install = vi.fn();
+  render(createElement(RuntimeHarness, { capture: (value) => { settle = value; }, retry, complete, install, mode: 'hub' }));
+  act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion() }));
   fireEvent.click(primary());
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: unreadRegion() }));
-  expect(output('current screen')).toBe('providers');
+  for (const read of [unreadRegion<RuntimeDependency>(), beginRegionRead(readyRegion(runtime('resolved', 'ok'))), failRegionRead(readyRegion(runtime('unsupported', 'ok')))]) {
+    act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: read }));
+    expect(output('current screen')).toBe('providers');
+    expect(output('capability')).toBe('enabled');
+    expect(primary().disabled).toBe(true);
+    expect(setupCanAttemptInstall('enabled', true, read)).toBe(false);
+    expect(setupCandidateAllowed('enabled', true, read, 'direct')).toBe(false);
+    expect(setupCandidateAllowed('enabled', true, read, 'hub')).toBe(false);
+  }
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Recheck runtime' })); });
+  expect(output('capability')).toBe('enabled');
   expect(primary().disabled).toBe(true);
-  expect(output('candidate paths')).toBe('hub-recovery');
-  fireEvent.click(screen.getByRole('button', { name: 'Retry runtime read' }));
-  expect(retry).toHaveBeenCalledOnce();
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: readyRegion(runtime('resolved', 'ok')) }));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Recheck runtime' })); });
+  expect(output('runtime read')).toBe('ready');
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare runtime' }));
+  expect(install).not.toHaveBeenCalled();
   fireEvent.click(primary());
   expect(output('current screen')).toBe('assistants');
   fireEvent.click(primary());
   expect(complete).toHaveBeenCalledOnce();
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: readyRegion(runtime('unsupported', 'ok')) }));
-  expect(output('candidate paths')).toBe('hub');
-  expect(primary().disabled).toBe(false);
   fireEvent.click(screen.getByRole('button', { name: 'Back' }));
   expect(output('current screen')).toBe('providers');
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: readyRegion(runtime('unsupported', 'down')) }));
-  expect(output('current screen')).toBe('assistants');
-  expect(primary().disabled).toBe(true); // No Direct candidate means no readiness shortcut.
-  expect(output('candidate paths')).toBe('hub-recovery');
-  const stale = readyRegion(runtime('unsupported', 'down'));
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: failRegionRead(stale) }));
-  expect(output('current screen')).toBe('assistants'); // Stale evidence holds layout only.
-  expect(primary().disabled).toBe(true);
 });
 
 
-it('consumes explicit opt-out without a runtime read and redirects a late capability change coherently', () => {
-  let controls!: PolicyHarnessControls;
-  const complete = vi.fn();
-  render(createElement(PolicyHarness, { capture: (value) => { controls = value; }, modes: ['direct'], retry: vi.fn(), complete }));
-  act(() => controls.settle({ capability: 'enabled', runtimeRead: loadingRegion() }));
+it.each(['deployment', 'saved-intent'] as const)('holds disabled %s without skipping providers or treating Direct as setup-ready', async (disabled) => {
+  const config = { capability: disabled === 'deployment' ? 'disabled' as const : 'enabled' as const, gatewayEnabled: disabled !== 'saved-intent' };
+  let settle!: (observation: Observation) => void;
+  const complete = vi.fn(); const install = vi.fn();
+  const retry = vi.fn().mockResolvedValue({ ...config, runtimeRead: loadingRegion() });
+  render(createElement(RuntimeHarness, { capture: (value) => { settle = value; }, retry, complete, install, mode: 'direct' }));
+  act(() => settle({ ...config, runtimeRead: readyRegion(runtime('resolved', 'ok')) }));
+  expect(output('current screen')).toBe('intro');
+  expect(primary().disabled).toBe(true);
   fireEvent.click(primary());
+  fireEvent.click(screen.getByRole('button', { name: 'Prepare runtime' }));
+  expect(complete).not.toHaveBeenCalled();
+  expect(install).not.toHaveBeenCalled();
+  expect(output('capability')).toBe(config.capability);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Recheck runtime' })); });
+  expect(retry).toHaveBeenCalledOnce();
+  expect(output('capability')).toBe(config.capability);
+  expect(primary().disabled).toBe(true);
+  // A disabled result arriving later holds the current screen, never redirects to Direct.
+  act(() => settle({ capability: 'enabled', gatewayEnabled: true, runtimeRead: loadingRegion() }));
+  fireEvent.click(primary());
+  fireEvent.click(screen.getByRole('button', { name: 'Edit draft' }));
+  const draft = output('draft');
+  act(() => settle({ ...config, runtimeRead: readyRegion(runtime('resolved', 'ok')) }));
   expect(output('current screen')).toBe('providers');
-  act(() => controls.settle({ capability: 'disabled', runtimeRead: unreadRegion() }));
-  expect(output('current screen')).toBe('assistants');
-  expect(output('candidate paths')).toBe('direct');
-  expect(primary().disabled).toBe(false);
-  fireEvent.click(primary());
-  expect(complete).toHaveBeenCalledOnce();
+  expect(primary().disabled).toBe(true);
+  expect(output('draft')).toBe(draft);
   fireEvent.click(screen.getByRole('button', { name: 'Back' }));
   expect(output('current screen')).toBe('intro');
+  expect(output('capability')).toBe(config.capability);
 });

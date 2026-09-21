@@ -63,14 +63,20 @@ export type SetupScreenHandle = {
 
 export type SetupScreenProps = {
   /** Mounted does not mean active: hidden/inert screens retain drafts but must not start
-   *  mutations, poll, claim actions, navigate or run authorization effects (C2). */
+   *  mutations, poll, claim actions, navigate or run authorization effects (C2).
+   *  D11 bootstrap runs only on active provider entry with capability enabled;
+   *  intro mount alone never seeds config or starts services. */
   active: boolean;
   handoff: SetupHandoffTarget | false;
-  /** One shell-derived policy for navigation, admission and candidate paths. */
-  policy: SetupPolicy;
-  /** Ask the shell's existing bootstrap/read owner to retry in the current screen.
-   *  This never navigates to a removed providers step or starts an install by itself. */
-  onRetryRuntime: () => void;
+  capability: SetupCapability;
+  /** Fresh config.model_hub.enabled: persisted user intent, separate from deployment capability. */
+  gatewayEnabled: boolean | null;
+  /** Shell-owned authoritative runtime read. Host admission never changes capability
+   *  or the screen sequence. Stale/error reads authorize no installation or Hub entry. */
+  runtimeRead: RegionRead<RuntimeDependency>;
+  /** Re-read config, then resume the existing bootstrap/runtime owner only if enabled.
+   *  Preserve drafts and never re-enable a disabled configuration automatically. */
+  onRetrySetup: () => void;
   flowState: SetupFlowState;
   /** Pass the shell's React setter. Screens use functional updates to preserve changes
    *  made by other screens while an asynchronous operation was pending. */
@@ -140,86 +146,50 @@ export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
  * (`modelHubEnabledFromConfig`, after verifying capabilities.model_hub.enabled is a boolean;
  * that helper also returns false for missing fields). This is the same projection
  * `readOpencodeSetupRoutes` uses; a successful config read plus the explicit boolean supplies
- * the authority. Anything less stays `pending`, and `setupNavigationReady` keeps the user on the introduction until it
- * settles.
+ * the authority. Anything less stays `pending`. Setup requires enabled capability;
+ * disabled is a configuration boundary, never a Direct setup branch.
  */
 export type SetupCapability = 'pending' | 'enabled' | 'disabled';
 
 export const setupCapability = (modelHubEnabled: boolean | null): SetupCapability =>
   modelHubEnabled === null ? 'pending' : modelHubEnabled ? 'enabled' : 'disabled';
 
-/** Deployment capability and host install admission are independent facts. Only ready
- *  RegionRead values authorize work. A stale snapshot retains layout during retry, never
- *  readiness; `unresolved` manifests are admitted by runtimeCanAttemptInstall. */
-export type SetupPolicy = {
-  capability: SetupCapability;
-  runtimeRead: 'pending' | 'retry' | 'ready';
-  installSupport: 'unknown' | 'admitted' | 'unsupported';
-  hubRunning: boolean;
-};
+/** Setup has one fixed SETUP_SCREENS journey. Capability/runtime never remove a step.
+ *  Disabled configuration is preserved and requires recovery, not Direct completion. */
+export const setupNavigationReady = (capability: SetupCapability, gatewayEnabled: boolean | null): boolean =>
+  capability === 'enabled' && gatewayEnabled === true;
 
-export const setupPolicy = (
+/** Fresh install admission; unresolved manifests may still be installable. */
+export const setupCanAttemptInstall = (
   capability: SetupCapability,
+  gatewayEnabled: boolean | null,
   runtimeRead: RegionRead<RuntimeDependency>,
-): SetupPolicy => {
-  const project = (runtime: RuntimeDependency, read: SetupPolicy['runtimeRead']): SetupPolicy => ({
-    capability,
-    runtimeRead: read,
-    installSupport: runtimeCanAttemptInstall(runtime) ? 'admitted' : 'unsupported',
-    hubRunning: runtimeIsRunning(runtime),
+): boolean => setupNavigationReady(capability, gatewayEnabled) && foldRegionRead(runtimeRead, {
+  loading: () => false,
+  unread: () => false,
+  degraded: () => false,
+  ready: (runtime) => runtime.enabled !== false && runtimeCanAttemptInstall(runtime),
+});
+
+/** Running health is independent of install admission. Providers may continue with an
+ *  existing running Hub even when new installation is unsupported. */
+export const setupHubRunning = (runtimeRead: RegionRead<RuntimeDependency>): boolean =>
+  foldRegionRead(runtimeRead, {
+    loading: () => false,
+    unread: () => false,
+    degraded: () => false,
+    ready: (runtime) => runtime.enabled !== false && runtimeIsRunning(runtime),
   });
-  return foldRegionRead<RuntimeDependency, SetupPolicy>(runtimeRead, {
-    loading: () => ({ capability, runtimeRead: 'pending', installSupport: 'unknown', hubRunning: false }),
-    unread: () => ({ capability, runtimeRead: 'retry', installSupport: 'unknown', hubRunning: false }),
-    ready: (runtime) => project(runtime, 'ready'),
-    degraded: (runtime, cause) => project(runtime, cause === 'refreshing' ? 'pending' : 'retry'),
-  });
-};
 
-/** Admission for any setup path that might install; running health is a separate fact. */
-export const setupCanAttemptInstall = (policy: SetupPolicy): boolean =>
-  policy.capability === 'enabled' && policy.runtimeRead === 'ready' && policy.installSupport === 'admitted';
-
-/** Unsupported installation does not disable an already-running Hub. Retained stale
- *  facts may hold the current layout while retrying, but setupNavigationReady and
- *  setupCandidatePath require fresh facts before progression/readiness. */
-export const setupScreenSequence = (policy: SetupPolicy): readonly SetupScreenId[] =>
-  policy.capability === 'disabled' || (policy.installSupport === 'unsupported' && !policy.hubRunning)
-    ? SETUP_SCREENS.filter((screen) => screen !== 'providers')
-    : SETUP_SCREENS;
-
-/** Derive the rendered screen together with its sequence, never in a later effect.
- *  Late support resolution cannot render a removed screen for one frame. The shell
- *  uses this on every navigation request and commits the reconciled id on resolution. */
-export const setupCurrentScreen = (policy: SetupPolicy, requested: SetupScreenId): SetupScreenId => {
-  if (policy.capability === 'pending') return 'intro';
-  return requested === 'providers' && !setupScreenSequence(policy).includes('providers')
-    ? 'assistants'
-    : requested;
-};
-
-/** Intro must be able to reach providers to bootstrap and read support. Downstream
- *  continuation is held on unread/error; Back and the shell's Retry remain available.
- *  Running/source/connection requirements for the active action still apply (C4/C6). */
-export const setupNavigationReady = (policy: SetupPolicy, current: SetupScreenId): boolean =>
-  policy.capability !== 'pending'
-  && (current === 'intro' || policy.capability === 'disabled' || policy.runtimeRead === 'ready');
-
-/** Select the existing configuration/readiness owner from persisted supply_mode.
- *  This is a policy path, not a readiness verdict, and performs no mode/credential writes. */
-export const setupCandidatePath = (
-  policy: SetupPolicy,
+/** A necessary mode/runtime gate, NOT a complete readiness verdict. C4 additionally
+ *  requires the same candidate's route, credentials, application and permissions.
+ *  Setup always requires Hub; post-setup Direct choices belong to Settings. */
+export const setupCandidateAllowed = (
+  capability: SetupCapability,
+  gatewayEnabled: boolean | null,
+  runtimeRead: RegionRead<RuntimeDependency>,
   mode: 'direct' | 'hub' | undefined,
-): 'pending' | 'direct' | 'configure-hub' | 'hub' | 'hub-recovery' => {
-  if (policy.capability === 'pending' || mode === undefined) return 'pending';
-  if (mode === 'hub') {
-    return policy.capability === 'enabled' && policy.runtimeRead === 'ready' && policy.hubRunning
-      ? 'hub' : 'hub-recovery';
-  }
-  if (policy.capability === 'disabled') return 'direct';
-  if (policy.runtimeRead !== 'ready') return 'pending';
-  return policy.installSupport === 'unsupported' ? 'direct' : 'configure-hub';
-};
+): boolean => setupNavigationReady(capability, gatewayEnabled) && mode === 'hub' && setupHubRunning(runtimeRead);
 
 /** The screen a Back action leaves to, or `null` on the first one. */
 export const setupBackTarget = (

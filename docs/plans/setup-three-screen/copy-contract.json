@@ -133,7 +133,8 @@
       "onboarding": {
         "flow": {
           "backToIntro": "返回介绍",
-          "backToProviders": "返回模型"
+          "backToProviders": "返回模型",
+          "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
         },
         "providers": {
           "title": "添加模型提供商",
@@ -195,7 +196,9 @@
           "addProgressChecking": "正在检查模型连接…",
           "addProgressWaitingAuth": "等待授权完成…",
           "addErrorPreserved": "连接未完成，输入已保留，请重试。",
-          "addErrorDetectedPreserved": "操作未确认完成，选择已保留。请先检查当前状态，再继续恢复。"
+          "addErrorDetectedPreserved": "操作未确认完成，选择已保留。请先检查当前状态，再继续恢复。",
+          "gatewayUnsupported": "此设备无法安装模型网关。请重新检查可用性，或在受支持的环境中设置 Avibe。",
+          "gatewayEnvironmentHelp": "查看安装指南"
         },
         "import": {
           "title": "迁移到模型网关",
@@ -234,8 +237,7 @@
           "noteInstalledNotEnabled": "启用后即可使用已添加的模型",
           "enter": "进入工作台",
           "disabledNotice": "已停用，已有配置会保留",
-          "configureRoute": "配置模型路由",
-          "directFallbackNotice": "此设备无法安装模型网关。你仍可配置并使用已有的直连助手。"
+          "configureRoute": "配置模型路由"
         },
         "route": {
           "title": "默认模型路由",
@@ -254,7 +256,8 @@
       "onboarding": {
         "flow": {
           "backToIntro": "Back to introduction",
-          "backToProviders": "Back to models"
+          "backToProviders": "Back to models",
+          "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry."
         },
         "providers": {
           "title": "Add model providers",
@@ -316,7 +319,9 @@
           "addProgressChecking": "Checking the model connection…",
           "addProgressWaitingAuth": "Waiting for authorization…",
           "addErrorPreserved": "Connection failed. Your entries are preserved. Please retry.",
-          "addErrorDetectedPreserved": "Completion is unconfirmed. Your selection is preserved. Check the current state before continuing recovery."
+          "addErrorDetectedPreserved": "Completion is unconfirmed. Your selection is preserved. Check the current state before continuing recovery.",
+          "gatewayUnsupported": "Model Hub cannot be installed on this device. Recheck availability or set up Avibe in a supported environment.",
+          "gatewayEnvironmentHelp": "View installation guide"
         },
         "import": {
           "title": "Migrate to Model Hub",
@@ -355,8 +360,7 @@
           "noteInstalledNotEnabled": "Enable to use the models you added",
           "enter": "Open workspace",
           "disabledNotice": "Disabled. Your saved configuration stays.",
-          "configureRoute": "Configure model route",
-          "directFallbackNotice": "Model Hub cannot be installed on this device. You can still configure and use assistants with existing Direct connections."
+          "configureRoute": "Configure model route"
         },
         "route": {
           "title": "Default model route",

@@ -1,11 +1,13 @@
 # Setup three-screen — contracts C1–C6
 
 Status: **PR0 repaired interface proposal**, audited against head
-`616a0b539dd4e25cc3f42976277ef7a2a218098d`. The handoff remains unchanged user source.
+`890014421ff855e0d2476c9179dbf5a10bb1eca3`. The handoff remains unchanged user source.
 The approved `model-hub-native-takeover.md` supplies runtime/custody precedent; the
 orchestrator adopts its automatic runtime preparation and the routine decisions in plan §10.
-There is no owner response adopting D2–D9, and #2065 merge authority does not authorize
-#2082 merge or feature implementation. Current repair authorization covers PR0 only.
+The owner reaffirmed on 2026-09-21 12:56 +08 that setup uses Model Hub; disabling it
+belongs to Settings afterward. There is no Direct setup branch, including explicit opt-out.
+That decision does not adopt D10, authorize feature implementation or extend #2065 merge
+authority to #2082. Current repair authorization covers PR0 only.
 
 C2–C6 specify concrete technical mappings; C1's migration entries and C6's setup apply path
 remain **provisional on D10**, the conflict between the handoff's copy-only promise and
@@ -83,61 +85,80 @@ and the shell-owned `SetupFlowState`.
   reconciliation, route targets and preservation of dirty target baselines. `setupFlow.test.ts` consumes the actual
   props with React state and checks navigation plus a late update, not just initial values.
 
-`setupCapability(boolean | null)` retains the deployment decision as
-`'pending' | 'enabled' | 'disabled'`. Use the shell's validated fresh config boolean, never
-`useModelHubCapability()` (it collapses failures to false) or an unvalidated missing field
-passed to `modelHubEnabledFromConfig`. Host install support is a **separate fact**, learned
-only after D11 controller bootstrap in active providers. Do not block that entry on support.
+`setupCapability(boolean | null)` maps the shell's validated config capability boolean to
+`pending | enabled | disabled`. Validate `capabilities.model_hub.enabled` before using
+`modelHubEnabledFromConfig`; missing data and request errors are pending, never disabled.
+`useModelHubCapability()` collapses failure to false and is not a safe producer here.
+`setupNavigationReady(capability,gatewayEnabled)` requires enabled deployment capability
+and fresh saved `model_hub.enabled === true`. Missing/malformed saved intent stays null,
+not implicitly true; these are separate config fields. Initial config
+loading stays read-only; entering active providers starts D11, never merely mounting intro.
 
-The shell owns a `RegionRead<RuntimeDependency>` and passes its single derived
-`policy = setupPolicy(capability, runtimeRead)` through **`SetupScreenProps.policy`** to L2/L3.
-Use `readyRegion` only for a successful, validated runtime response; null, malformed payloads,
-transport failure and non-2xx/5xx become loading/unread, never unsupported. Retry uses
-`beginRegionRead`/`failRegionRead` so old observations may preserve layout without becoming
-fresh again. Ignore obsolete request/activation completions. `SetupPolicy` holds capability,
-`runtimeRead` (`pending`/`retry`/`ready`), `installSupport` (`unknown`/`admitted`/`unsupported`)
-and `hubRunning`. These are observations, not saved mode or a readiness verdict.
+**Setup has one fixed sequence, `SETUP_SCREENS`: intro → providers → assistants.** Capability,
+installation support and errors never remove providers or create a Direct branch. Back uses
+`setupBackTarget(SETUP_SCREENS,current)` and keeps drafts. Host support is learned after
+D11 bootstrap on active provider entry; do not require it before reaching that entry.
+Unsupported/error holds the current step. Clear obsolete action publications on navigation;
+only the active owner may retry, claim the CTA or navigate.
 
-The executable `setupCanAttemptInstall(policy)` requires enabled capability, a fresh ready
-read and admitted support; L2 uses it before any potentially installing operation.
-The projection reuses **`runtimeCanAttemptInstall`** and **`runtimeIsRunning`**. Only manifest
-`resolution === 'unsupported'` refuses installation; `unresolved` is admitted and must not be
-confused with an unread request. Running means health `ok` or `degraded`, independently of
-install support. Neither browser platform, missing assets guessed by the UI nor a 5xx is an
-unsupported-host producer. The shell owns policy calculation; screens consume it rather than
-inventing independent capability/support gates.
+An authoritative disabled deployment capability **or saved runtime intent** fails setup's Hub prerequisite. Show
+`onboarding.flow.gatewayRequired`, the current configuration/recovery boundary and Retry;
+keep the current step and Back if applicable. Retry re-reads config first; while capability
+or saved runtime intent remains disabled/unknown, do not seed config, start a controller, call Hub RPCs, install, switch mode
+or complete. The user must restore the existing configuration through its existing management
+owner before resuming. There is no new setup toggle or implied Settings route exemption:
+`ModelHubCapabilityGate` redirects when disabled and `App.tsx` restricts incomplete setup
+navigation. Preserve those boundaries rather than linking to a recovery page that cannot
+be entered. Completed instances' post-setup Settings choices remain outside this contract;
+manual setup re-entry cannot silently re-enable or reset them.
 
-| Effective policy | Sequence / candidate configuration and readiness owner |
-| --- | --- |
-| capability pending | Intro primary held; support is not guessed |
-| capability enabled, runtime unread/error | Intro can enter providers for D11/read. Keep current screen on read failure; downstream Continue/entry held, Retry and Back available |
-| capability enabled, install admitted | Three screens; Hub setup and correlated Hub readiness (C4). Admitted does not itself mean running |
-| capability enabled, authoritative unsupported, engine not running | `intro → assistants`; existing Direct candidates use Direct connections/readiness. Persisted Hub candidates keep Hub recovery and cannot pass as Direct |
-| capability enabled, authoritative unsupported, engine running | Keep providers and existing Hub reads/routes; allow existing Direct candidates too. Installation and potentially installing mutations remain blocked; a working Hub is not disabled |
-| capability explicitly disabled | `intro → assistants`; keep shipped connection actions/readiness. Persisted Hub mode still means Hub recovery, never presumed native credentials |
+The shell passes **`capability`, `gatewayEnabled: boolean | null` and
+`runtimeRead: RegionRead<RuntimeDependency>`** through
+`SetupScreenProps`, plus `onRetrySetup` for its existing config/bootstrap/runtime owner.
+The retry first re-reads config; pending/error config reads hold capability pending, and only
+fresh enabled capability and saved intent may resume bootstrap/runtime work. This
+reuses the shipped read shape without a parallel setup policy/state machine. `readyRegion`
+requires a successful validated response; null/malformed/HTTP/transport errors remain
+loading/unread. `beginRegionRead`/`failRegionRead` retain old display data while refreshing or
+failed, not authorization. Ignore stale request/activation completions. No hidden screen
+starts a retry, installation or other mutation.
 
-`setupScreenSequence(policy)` and `setupCurrentScreen(policy, requested)` are consumed together
-in the shell's **same state update/render**, not corrected in a later effect. On a late
-unsupported/not-running result while providers is current, commit assistants as current,
-cancel a pending handoff, clear the obsolete action/ref publication and render exactly one
-active screen with the new sequence. Preserve `SetupFlowState` and mounted dialog drafts.
-If current is already intro/assistants, keep it. Map every navigation request (including an
-old Add-source request) through `setupCurrentScreen`; removed providers cannot be re-entered.
-Back uses `setupBackTarget` on the effective sequence, so assistants goes to intro. Advancing
-again stays on that sequence rather than bouncing into providers. Re-read support in place
-on an explicit retry through **`SetupScreenProps.onRetryRuntime`**, owned by the shell's
-existing bootstrap/read path; no new dialog or parallel state machine. If new evidence
-restores providers, keep the current valid screen; Back or Add source can reach it normally.
+Three small predicates define distinct necessary conditions, not complete readiness:
 
-`setupNavigationReady(policy,current)` permits intro to reach bootstrap after capability
-settles; later Continue is held unless runtime is freshly read or capability is explicitly
-off. This helper does not replace action-specific busy/readiness rules. Back and the active
-owner's Retry remain operable on errors (the shell may publish `common.retry` as its shared
-CTA). A stale unsupported snapshot can hold the reduced layout during retry but cannot
-permit completion until refreshed. A blocked Hub engine does not block an otherwise ready
-Direct candidate once fresh unsupported evidence establishes that path. The consumer calls
-`setupCandidatePath(policy, connection.supply_mode)` to choose the C4 owner; it never changes
-saved modes or credentials. `pending` cannot pass entry; `hub-recovery` keeps recovery access.
+- `setupCanAttemptInstall(capability,gatewayEnabled,runtimeRead)` requires enabled capability, a fresh read
+  and `runtimeCanAttemptInstall`, plus saved enabled intent. Manifest `unsupported` blocks installation; `unresolved`
+  is admitted. Neither browser platform guesses nor a 5xx determines host support.
+- `setupHubRunning(runtimeRead)` requires fresh `ok`/`degraded` health independently of
+  installation admission. Provider Continue requires this plus its action-specific guards;
+  an existing healthy Hub remains usable on an install-unsupported host.
+- `setupCandidateAllowed(capability,gatewayEnabled,runtimeRead,mode)` admits only persisted Hub candidates
+  with a running runtime and enabled capability. Direct never passes setup, even with valid
+  native credentials. C4 still requires the same candidate's actual route/auth/application/
+  permission evidence.
+  No helper changes mode, custody or the selected Agent.
+
+A fresh runtime payload with `enabled === false` also blocks these gates even if an older
+config read said true. Its optional field may be absent on older payloads, so fresh validated
+config remains required. `runtime_start` writes saved `enabled = true`; therefore configuration
+recheck must precede automatic ensure/start, not just installation. Never turn a deliberate
+stop into a start while recovering setup.
+
+Unsupported/non-running holds Continue and completion on the same flow with C1's truthful
+unsupported notice, **Recheck/Retry** (`common.retry`) and **View installation guide**
+(`onboarding.providers.gatewayEnvironmentHelp`). The guide action opens the existing
+[installation guide](https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md)
+(Chinese counterpart `INSTALL_FOR_AI_ZH.md`), explaining how to use a supported environment;
+it does not migrate this instance, promise platform availability or offer a Direct bypass.
+The runtime response remains authoritative about current installation support. Network/read
+errors show the existing runtime-unread copy with retry, not the unsupported notice.
+
+The active owner may publish Retry as the shared CTA while Continue is held; do not apply
+Continue's readiness gate to Retry or Back. Retry re-reads first, holds writes while pending,
+then resumes the same flow on fresh support/running evidence. If support becomes admitted
+but the runtime is stopped/missing, resume C6's automatic ensure path and read back running
+health before continuing. Repeated unsupported responses keep the guidance and require an
+explicit recheck; no automatic impossible-install loop. A later failure on assistants keeps
+that screen's drafts and recovery/Back action. A running Hub needs no install to continue.
 
 ## C3 — geometry and DOM hooks
 
@@ -199,8 +220,8 @@ uninstalled Claude, a healthy source that neither route uses — and setup would
 on a machine whose first workspace turn cannot run. The gate is therefore correlated over a
 single assistant, and it reads the server rather than any client-side draft.
 
-L3 first uses the shell policy and each candidate's fresh persisted `supply_mode` to choose
-`setupCandidatePath`. For the **Hub** path, build the available set from fresh
+With Model Hub capability and saved runtime intent enabled (the setup prerequisite), L3
+builds the available set from fresh
 `listVibeAgents({ cache: false })`: enabled, non-archived named Agents, joined by **backend
 and Agent name** to backend connection/CLI reads and `AgentSupply.named_agents`.
 
@@ -215,7 +236,9 @@ Do not read backend-level `selected_model_id` to reject a different candidate: i
 only `selected_by_agent`. The runnable-hop owner is the server resolver; neither an unrelated
 healthy source nor a client `routeOrder` proves readiness. Revalidate on the completion click.
 
-D11 establishes controller availability **before** Hub-dependent screen-2 work (C6).
+D11 establishes config persistence and controller availability on active provider entry
+**before** Hub-dependent screen-2 work (C6). Enabled capability is a prerequisite; no bootstrap
+expansion is needed for an excluded Direct branch.
 `ModelHubRemoteService` uses the controller socket; `engine_down` on a missing socket is
 neither an unsupported manifest nor proof of a bad model route. If the controller stops
 later, retain a reachable start/retry action using confirmed application `stopped`, bootstrap
@@ -233,38 +256,26 @@ Unknown writes are reconciled by reads, not treated as success or blindly retrie
 existing invalid IM configuration. `SetupModelRecovery` is the shipped **Direct OpenCode**
 recovery; it does not repair Hub models. C6 specifies Hub catalog/chain repair.
 
-The Hub predicate applies only to Hub candidates. It supplements connection custody,
-application and permission evidence with the named Agent's own runnable route. Today's `Wizard.complete()` only
+The new Hub route predicate replaces credential readiness / `entry_eligible` as the *route*
+criterion, not the confirmed application-state or backend permission guard. Today's `Wizard.complete()` only
 filters OpenCode routes; the all-backend named-Agent join is new L3 orchestration, not a
 helper that already exists. Unrouted enabled assistants retain a configuration action (C6).
 
-**Direct fallback (current thread `PRRT_kwDOPbFPYs6kO76r`, comment `4059240601`).** When
-`setupCandidatePath` returns `direct` (explicit capability-off or fresh unsupported install
-admission), reuse `getBackendConnection` and the shipped Direct connection dialogs/model
-recovery. The same installed/enabled backend must have `supply_mode === 'direct'`, no pending
-config write/read error, valid native auth/permission and `entry_eligible`. The selected
-named Agent must be enabled/non-archived on that backend; Direct OpenCode additionally uses
-`readOpencodeSetupRoutes`/`SetupModelRecovery` for its own selected model. A Direct candidate
-requires **no Hub runtime, Hub mode, Hub supply row or source-order proof**. This preserves
-the shipped Direct credential/readiness owner; it does not delegate Agent model selection
-to a backend-native default.
+**Known by design — setup requires Model Hub.** Owner decision, 2026-09-21 12:56 +08:
+“setup的契约是默认使用模型网关”; users who later need to disable it do so in Settings.
+Unsupported installation without a usable running Hub cannot complete setup, even with
+working Direct credentials. Explicitly disabled gateway configuration also does not create
+a Direct setup branch: preserve that saved choice and expose the C2 configuration/recovery
+boundary. No silent enabling, custody rewrite or setup-completion write bypasses it.
+A fresh healthy Hub still uses the correlated gate above regardless of install admission.
 
-`entry_eligible` with confirmed `application === 'stopped'` keeps the shared start-and-enter
-CTA usable. On activation, retain the existing start guard, call `control('start')`, then
-re-read connection and require `ready === true`/`application === 'applied'` before default
-selection and completion. Failed/draining/unknown cannot start or complete by inference.
-Correlate every read with the same candidate, preserve a usable default across Direct and
-Hub candidates, and perform the same last `setup_completed` write/readback above. An
-unsupported host with neither a usable Direct candidate nor a usable running Hub candidate
-remains configurable with entry disabled; unsupported is not readiness.
-
-Never PATCH Hub to Direct or invoke native credential flows for a persisted Hub candidate.
-Its `hub-recovery` path retains Models recovery and runtime retry; a stopped/missing engine
-cannot pass entry. Conversely a fresh `ok`/`degraded` Hub can satisfy the Hub predicate even
-if installation is unsupported. Keep its source/route reads and allowed existing-route
-controls; do not hide or reset a working Hub. Pure setup policy tests prove branch selection
-and navigation, not credential/backend readiness; existing `test_backend_connection.py`
-covers the reused owner, including stopped versus broken IPC, permissions and Hub custody.
+This is the intentional non-change for `PRRT_kwDOPbFPYs6kO76r` / `4059240601` and
+`PRRT_kwDOPbFPYs6kPKSx` / `4059328091`: neither unsupported-host Direct fallback nor a bootstrap
+expansion for disabled-gateway setup belongs to the product journey. D11 still supports the
+normal Hub setup. Existing Settings/backend Direct support and completed-instance preferences
+remain untouched. This specific owner-ratified boundary is **not a Codex gate waiver**:
+unavailable retry/Back, unsafe installation, lost drafts and false readiness in the normal
+Hub flow remain defects. Current-head review, unresolved-thread and CI gates still apply.
 
 ## C5 — stable dialog frame
 
@@ -306,11 +317,11 @@ of silently changing either the handoff or another owner.
 | selected and connected | selected means complete consent group selected; a blocked group is disabled with its reason. Added/connected treatment follows confirmed source IDs from `listSources` and status `active` / `standby`; `verification_pending` is disclosed as unverified, not rejected as unusable (the shipped resolver accepts standby). One vendor's healthy source does not prove every key/card connected or a runnable assistant |
 | counts | CTA count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. Capsule count = distinct key IDs in complete, unblocked, key-only groups, independent of selection. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
 | capsule | retain dismissal signature owner `modelHubMigrationDismiss` and the reserved slot. Existing `ImportKeysNotice` scans/owns a dialog internally: L2 must adapt it to the shared scan/selection owner before claiming consistency; it is not a drop-in consumer of C2 |
-| import / Detected tab | requires admitted install support; use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 blocks wiring apply under copy-only promises |
+| import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 blocks wiring apply under copy-only promises |
 | add — API key | shared `AddApiKeyDialog` form: observe then create with the confirmed observation, preserve its existing unknown-write recovery. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready |
 | add — subscription | reuse `subscriptionOptions.ts` / `OAuthConnectDialog` / `OAuthFlowParts` for the offered product vendors, custody choice and flow ownership. Setup limits the shipped vendor list to OpenAI/Anthropic per handoff; there is no callable vendor-capability-list API in `ModelsApi`, and no such producer should be invented. `getOAuthStatus` / `submitOAuth` return `OAuthResult`; terminal create carries `created.source` and placement tails. Do not create the source a second time or equate terminal OAuth with assistant readiness |
 | picker order | `apiKeyVendors.ts` reads `vibe/data/api_key_vendors.json`; first eight in file order, remainder plus custom. No browser re-sort or prototype Cohere |
-| runtime | active providers bootstraps controller then reads runtime into the shell policy (D3/D11). Ensure only with admitted support. Unsupported follows C2 navigation/C4 Direct fallback; an existing running Hub remains usable. Retry delegates to the same shell owner in the current screen |
+| runtime | with capability enabled, active provider entry performs D11 config/bootstrap then runtime reads (D3). Automatically ensure only with admitted installation support; running health remains independent. Unsupported/error stays on the normal flow with C2 retry/guide/Back. No enable/install confirmation or automatic credential takeover |
 | first entry | cards → inbound wires → gateway → outbound wires → destinations, about 1.1s; C3 bail-outs; no production reset/replay control |
 
 #### Complete consent groups (current thread `PRRT_kwDOPbFPYs6kOVg6`)
@@ -373,8 +384,10 @@ Two alternatives for the owner, prepared as one coherent C1 proposal:
 
 #### Controller bootstrap — D11 (orchestrator-ratified technical sequence)
 
-L1's existing setup shell owns one bootstrap operation on active provider entry, before Hub
-RPCs. A hidden screen cannot start it. **Do not call `api.mutateConfig([])`:**
+L1's existing setup shell owns one bootstrap operation on active provider entry with enabled
+capability and saved runtime intent, before Hub RPCs. A hidden screen cannot start it. If a fresh config read reports
+either capability or saved intent disabled/unknown, stop at C2's prerequisite boundary without changing that preference.
+**Do not call `api.mutateConfig([])`:**
 `configMutationsToPayload` rejects empty mutations before any HTTP request. Keep that general
 validation intact. The smallest setup-only composition uses the existing CSRF-aware
 `apiFetch` directly; no new API service or production helper is introduced by PR0:
@@ -394,7 +407,7 @@ const readback = await apiFetch('/api/config', { cache: 'no-store' });
 it does not validate HTTP success or the body for the caller. POST and GET success return a
 **top-level config object**, not `{ok:true,config:...}`. Validate a JSON object with no error
 or `ok:false`, `version === 'v2'`, boolean `setup_completed` and
-`capabilities.model_hub.enabled`, string `platforms.primary`, string-array
+`capabilities.model_hub.enabled` and saved `model_hub.enabled`, string `platforms.primary`, string-array
 `platforms.enabled`, and object `runtime`/`agents` before consuming these fields. Preserve
 load-recovery warnings for the existing recovery path. An absent/malformed required field
 is unread state, not an explicit capability opt-out.
@@ -450,7 +463,7 @@ preservation and controller startup without sources or completed setup. These ar
 transport/server proofs, **not browser/server E2E**, full Controller construction or a shipped
 setup bootstrap implementation.
 
-#### Ensure runtime, then prepare adoption (support fallback: `PRRT_kwDOPbFPYs6kO76r`)
+#### Ensure runtime, then prepare adoption
 
 0. D11 establishes controller availability before these RPC reads; a stopped application
    is distinct from an installed-but-stopped Hub engine. A missing socket is not an
@@ -458,30 +471,29 @@ setup bootstrap implementation.
 1. An active screen/action owner obtains a fresh `getRuntimeStatus()`; a failed or stale read
    cannot authorize installation. Check `runtimeCanAttemptInstall(runtime)` **before** invoking
    any potentially installing helper or endpoint, including adoption, source observation/create,
-   OAuth, migration apply and mode preparation. If false, make no install attempt or
-   potentially installing mutation; publish fresh unsupported evidence to C2. If not running,
-   reconcile providers → assistants and show `onboarding.setup.directFallbackNotice`; Direct
-   candidates retain C4 entry/configuration. If already running, preserve existing Hub
-   reads/routes and let the provider CTA continue to assistants using existing candidates,
-   even when new-source actions are unavailable. Do not loop an impossible installation.
-   Unknown/read failures offer retry without installs or fallback. Every retry repeats the
-   authoritative read; `unresolved` remains install-admitted. The server
-   remains the final platform authority if conditions change after the read.
-2. With admitted support, automatically on active entry (approved D3), call
-   `resumeInstallAndStartRuntime` with fresh runtime for **all backend modes**, including
-   already-Hub. It installs or
+   OAuth, migration apply and mode preparation. If unsupported and not running, show C2's
+   recoverable environmental failure; keep providers, recheck/guide/Back and drafts, with no
+   installation, mode change or Direct completion. Every retry first repeats the authoritative
+   read; `unresolved` remains install-admitted, while read failures authorize no writes.
+   The server remains the final platform authority if conditions change after the read.
+   If already running (`ok`/`degraded`), preserve read/route access and Continue regardless of
+   install admission. `get_agent_sources`, chain reads/preview and pure exact-hop reorder do
+   not install: `_write_agent_chain` calls `_commit_synced`, whose unchanged bindings save
+   without engine restart. Keep their ordinary route/write guards and readback. Potentially
+   installing source/adoption operations remain blocked; no blanket ban on healthy Hub use.
+2. With admitted install support, automatically on active entry (approved D3), call
+   `resumeInstallAndStartRuntime` with fresh runtime for **all backend modes**, including already-Hub. It installs or
    observes installation and starts when needed. `installAndStartStep` only classifies;
    `installRuntimeUntilSettled` does not start. None enforces `runtimeCanAttemptInstall`.
    Observe progress through `onRuntime`, handle `failedStep`, and re-read runtime; only
    `runtimeIsRunning` (`ok` / `degraded`) proves running. Already-Hub + stopped/missing engine
-   takes this path only with admitted support; unsupported uses recovery/Direct fallback.
+   takes this path too when admitted; unsupported retains recovery without attempting install.
 3. Adoption is a separate step. `resumeGatewayAdoption` reads agents, returns immediately
    for Hub (`runtime: null`, no scan), otherwise re-reads/ensures runtime and returns candidates
    filtered to one backend. It **never** sets mode or applies migration and has no support
    check. Setup should compose step 2 with a full `scanMigration()` for consent instead of
    treating this helper's `ok` as readiness or its filtered candidates as a grouping input.
-4. After runtime readiness **and admitted install support**, prepare the backend needed by
-   a Hub configuration action: native
+4. After runtime readiness and install admission, prepare the backend needed by a configuration action: native
    rows → full group review/apply subject to D10; no native rows →
    `setAgentMode(backend, 'hub')` directly, without another confirmation. The apply owner
    already commits mode; do not issue a second mode PATCH after migration.
@@ -498,16 +510,14 @@ setup bootstrap implementation.
 | install | explicit `api.installAgent(name)` then detect the returned path; retain failure/output; one loading indicator |
 | enabled | existing Switch config write, followed by `getBackendConnection` and Agent reads. Saved config reconciles live backends; no second restart |
 | upgrade | `BackendLifecycleChip.onVisual` still owns probe/write, activity-gated; update coexists with enabled state |
-| route control | **every installed/enabled assistant has an action**. Use `setupCandidatePath`: `direct` keeps shipped connection configuration; `configure-hub` opens Hub setup; `hub` keeps its own route; `hub-recovery` retains Models recovery/retry; `pending` retains retry and prevents unsafe writes. For Hub route controls, show the candidate's own `named_agents` model when routed, otherwise `onboarding.setup.configureRoute`; opening requires no resolved route. Direct fallback uses its connection/model owner without a Hub projection. Read failures retain retry access; busy operations may temporarily disable action |
+| route control | **every installed/enabled assistant has an action**, including Direct, empty route, missing model and read failure. Enabled-capability setup opens Hub configuration/recovery: show its own `named_agents` model when routed, otherwise `onboarding.setup.configureRoute`. Opening requires no resolved route; mutations require C6 preflight/consent. Unsupported offers recheck/guide, not native auth as a setup bypass. A disabled configuration retains C2 configuration recovery, never a Direct setup dialog. Busy operations may temporarily disable action |
 | candidate identity | use the setup target policy below; identify backend + Agent name and exact menu model, independently of the global default. C4 may preserve a runnable custom default outside these edit targets |
-| add model source | offer only when policy permits provider configuration; removed providers requests are reconciled to assistants. `onNavigate('providers')` preserves the dirty route draft and closes the route dialog; reopening restores it. Done returns focus to the invoking chip/configure action |
+| add model source | `onNavigate('providers')` preserves the dirty route draft and closes the route dialog; reopening restores it. Done returns focus to the invoking chip/configure action |
 | all uninstalled | three install actions, workspace entry disabled, Back still available |
 
 ### Model-ranked route mapping — D4/D9 orchestrator-ratified technical interpretation
 
-This mapping applies to admitted Hub configuration and existing Hub route editing. Direct
-fallback retains its own connection/model owner and never writes these chains or changes
-mode merely to satisfy the dialog. C2 keeps `RouteHop[]`: ordered `(source_id, upstream model_id)` pairs. A source with two
+C2 keeps `RouteHop[]`: ordered `(source_id, upstream model_id)` pairs. A source with two
 models yields two distinct rows. `putAgentSources` changes backend source membership and
 priority; it is never the model-ranked Save operation. Existing `getAgentChain`,
 `previewAgentChain`, `putAgentChain`, `putAgentModels` and `RouteChainDialog` supply the
@@ -531,8 +541,7 @@ as affected; do not promise custom Agents with that same key are unaffected. A c
 on a different menu model and a runnable global custom default are preserved. Explicit target
 selection is required before adding such a custom route to the edit set.
 
-**Fresh or unrouted target.** First consult the shell candidate path, then ensure controller/runtime and mode only on
-the admitted Hub path above; opening the
+**Fresh or unrouted target.** First ensure controller/runtime and mode as above; opening the
 control itself has no route prerequisite. The server materializes recommendations for new
 and legacy blank Agent models (`VibeAgentStore` creation/prefill); the UI never chooses the
 first catalog row as an Agent model. Read back the actual selected model. If an anomalous
@@ -621,7 +630,7 @@ L3 must port these cases to its real consuming coordinator.
 | Repeated root class | Whole boundary audited / remaining evidence |
 | --- | --- |
 | route identity / eligibility / readiness | action availability → named Agent+backend → mode → menu model → exact chain → default readback. C4/C6 define reachable configuration, explicit targets, exact-pair projection, partial-write/readback and default preservation; composed fixtures exercise the mapping |
-| lifecycle / capability / readiness | capability + fresh runtime admission/health → atomic effective sequence → persisted-mode candidate owner → admitted ensure-runtime or Direct fallback/Hub recovery → consent/mode readback. `gatewayAdoption.test.ts` proves helper scope only; it is not a screen-2 preflight test. Future L2 tests must cover unsupported with zero writes, already-Hub missing/stopped, controller stopped (D11, bootstrap fixture available), start failure, Direct with native blockers |
+| lifecycle / capability / readiness | enabled setup prerequisite → active-provider config/bootstrap → fresh support/health → admitted ensure-runtime or in-place recovery → full scan → consent → mode readback. Default Hub requirement and independent healthy-Hub use are preserved; no unsupported-to-Direct conversion. `gatewayAdoption.test.ts` proves helper scope only; it is not a screen-2 preflight test. Future L2 tests must cover unsupported with zero writes, already-Hub missing/stopped, controller stopped (D11, bootstrap fixture available), start failure, Direct with native blockers |
 | producer / consumer / state | C2 React consuming test covers cross-screen state plus a late functional update. Full scan → transitive backend groups → complete apply IDs follows `MigrationDialog` and its grouping tests; L2 still needs a consuming integration test after adapting that owner |
 | duplicated instructions / copy | plan §§4/9/10, C1 metadata and C2/C4/C6 reviewed together. Automatic runtime setup reuses approved precedent; D10 alone withholds migration copy/apply binding. Source-ranking substitution and false approval/rollback claims are removed; handoff remains unchanged user source |
 
