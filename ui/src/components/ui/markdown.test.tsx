@@ -47,12 +47,13 @@ describe('Markdown character references in a link label', () => {
 // The address half of the same unit. This renderer resolves a destination the
 // way a Markdown reader does - escapes, character references and all - and
 // then writes it as an href, so it is the independent answer for what address
-// each of these links names. The Slack adapter is measured against the same
-// corpus in tests/test_link_unit_delivery.py, and agrees here on every row but
-// three: it leaves `%b` and `[]` in a path exactly as the author wrote them
-// and leaves a non-ASCII host and path unencoded, because delivering an
-// address is not the same job as canonicalizing one. All three still name the
-// same page.
+// each of these links names. Two things are checked, and they are not the same
+// check: the rows below pin the exact spelling this renderer writes, while the
+// shared matrix further down compares the destination the Slack adapter
+// delivers, decoded out of its wrapper, against the address an actual anchor
+// here navigates to. Destinations that differ on the wire are not thereby the
+// same address - only that measured navigation comparison says where each one
+// arrives, and nothing here speaks for what a target server would accept.
 describe('Markdown link destinations', () => {
   it.each([
     // A character the Slack wrapper is built out of, however Markdown spells it.

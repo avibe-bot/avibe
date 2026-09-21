@@ -1122,14 +1122,16 @@ def percent_encode(char: str) -> str:
 
 
 def spell_uri(value: str) -> str:
-    """Spell a destination the way the Markdown pipeline spells it.
+    """Spell a destination the way the Web Markdown consumer spells it.
 
-    The rule is micromark's ``normalizeUri``, which every renderer in this
-    product reaches a destination through: a character outside the safe set
+    The rule is micromark's ``normalizeUri``: the Web Markdown component's
+    URI-spelling rule for the destination it has already resolved, reused here
+    to write the destinations of Slack's resolved inline links. It does not
+    speak for every renderer in this product. A character outside the safe set
     becomes its percent escape, and a ``%`` that already starts one is left
     alone so ``%3E`` stays ``%3E`` instead of becoming ``%253E``. A ``%`` that
     starts nothing - ``%b``, or a ``%`` at the end - is data, and is written
-    ``%25``. That is not a repair policy chosen here: it is what the consumer
+    ``%25``. That is not a repair policy chosen here: it is what that consumer
     does, and a destination spelled any other way names a different path.
 
     Malformed-looking escapes are not repaired, because that rule does not
