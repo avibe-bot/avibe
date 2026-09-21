@@ -26,6 +26,7 @@ from pathlib import Path
 from unittest import mock
 
 from markdown_it import MarkdownIt
+from markdown_it.common.entities import entities
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -108,6 +109,15 @@ def commonmark_shows(label: str) -> str:
     match = _ANCHOR_TEXT_RE.search(rendered)
     assert match is not None, rendered
     return html.unescape(match.group(1))
+
+
+def one_line(text: str) -> str:
+    """A label's documented policy: a break, and the space around it, is a space.
+
+    The oracle above answers what a Markdown reader sees; a Slack label answers
+    that on one line, because a newline inside ``<url|label>`` is not a link.
+    """
+    return re.sub(r"[ \t]*(?:\r\n|\r|\n)[ \t]*", " ", text)
 
 
 def citation_body(url: str, title: str = "Source") -> str:
@@ -434,8 +444,118 @@ class TestSlackTellsAReferenceFromItsSpelling:
             assert destination == url, url
             assert slack_decodes(label) == shown, url
 
+    def test_every_name_the_parser_knows_reaches_slack_as_that_character(self):
+        """The whole entity table, against the parser that owns it.
+
+        Which names are references at all, and what each one stands for, is one
+        table with two thousand rows; a helper that reconstructs it from a
+        pattern of its own is a second grammar that will disagree somewhere. So
+        the oracle is the real inline parser, asked for every name it knows.
+        """
+        for name in entities:
+            label = f"a&{name};b"
+
+            assert slack_decodes(slack_label(f"[{label}]({PLAIN})")) == one_line(
+                commonmark_shows(label)
+            ), label
+
+    def test_a_numeric_reference_is_read_at_the_width_the_grammar_allows(self):
+        """Seven decimal digits and six hexadecimal ones - the eighth is text.
+
+        A decoding utility of the same package accepts eight of either. It is
+        not the inline rule, and a label is what the inline rule reads: padded
+        past the limit, ``&#00000038;`` is the thirteen characters a reader
+        sees, not ``&``.
+        """
+        widths = [f"a&#{'0' * pad}38;b" for pad in range(0, 7)]
+        widths += [f"a&#x{'0' * pad}26;b" for pad in range(0, 6)]
+
+        for label in widths:
+            assert slack_decodes(slack_label(f"[{label}]({PLAIN})")) == commonmark_shows(
+                label
+            ), label
+
+        assert slack_label(f"[a&#00000038;b]({PLAIN})") == "a&amp;#00000038;b"
+        assert slack_label(f"[a&#x0000026;b]({PLAIN})") == "a&amp;#x0000026;b"
+
+    def test_a_code_point_the_parser_cannot_encode_is_the_character_it_substitutes(self):
+        """Recognized is not the same as valid, and the rule answers both.
+
+        ``&#0;``, a C1 control, a surrogate half and anything past the last
+        code point are all references the grammar recognizes; CommonMark shows
+        U+FFFD for each. Leaving the spelling standing would show the reader a
+        different thing than every other Markdown surface does.
+        """
+        for label in (
+            "a&#0;b",
+            "a&#128;b",
+            "a&#xD800;b",
+            "a&#xDFFF;b",
+            "a&#1114112;b",
+            "a&#x110000;b",
+            "a&#x10FFFF;b",
+            "a&#9999999;b",
+        ):
+            assert slack_decodes(slack_label(f"[{label}]({PLAIN})")) == commonmark_shows(
+                label
+            ), label
+
+        assert slack_label(f"[a&#0;b]({PLAIN})") == "a\ufffdb"
+
+    def test_a_malformed_or_unknown_reference_stays_the_text_it_is(self):
+        for label in ("a&#;b", "a&#x;b", "a&#xZZ;b", "a&nope;b", "a&amp b"):
+            assert slack_decodes(slack_label(f"[{label}]({PLAIN})")) == commonmark_shows(
+                label
+            ), label
+
+    def test_an_escaped_numeric_reference_is_literal_text(self):
+        """The escape still decides, and a numeric spelling is no different."""
+        assert slack_label(rf"[a\&#38;b]({PLAIN})") == "a&amp;#38;b"
+        assert slack_label(rf"[a\&#0;b]({PLAIN})") == "a&amp;#0;b"
+        assert slack_label(rf"[a\&#00000038;b]({PLAIN})") == "a&amp;#00000038;b"
+
+    def test_a_nested_looking_numeric_reference_is_resolved_once(self):
+        assert slack_decodes(slack_label(f"[a&amp;#38;b]({PLAIN})")) == "a&#38;b"
+
+    def test_a_numeric_reference_inside_a_code_literal_stays_written_out(self):
+        assert slack_decodes(slack_label(f"[`&#0;`]({PLAIN})")) == "`&#0;`"
+
     def test_emphasis_and_a_reference_in_one_label_both_survive(self):
         assert slack(f"[**bold** &amp; &copy;]({PLAIN})") == f"<{PLAIN}|*bold* &amp; ©>"
+
+
+class TestALabelIsOneLineHoweverTheBreakIsSpelled:
+    """``<url|label>`` ends at a newline, and Markdown spells one three ways.
+
+    A source line break was already folded to a space before the platform pass,
+    which was the whole of the invariant while a break could only be written as
+    one. A character reference writes one too - ``&#10;``, ``&#xA;``,
+    ``&NewLine;``, ``&#13;`` - and those become characters only after the
+    reference is resolved. So the label is measured for being one line once its
+    characters are decided, not before they are.
+    """
+
+    def test_a_source_line_break_is_still_a_space(self):
+        """The case that already held, restated where the policy now ends."""
+        assert slack(f"[the\nguide]({PLAIN})") == f"<{PLAIN}|the guide>"
+        assert slack(f"[the\r\nguide]({PLAIN})") == f"<{PLAIN}|the guide>"
+
+    def test_a_reference_that_spells_a_break_is_folded_the_same_way(self):
+        for label in ("a&#10;b", "a&#xA;b", "a&NewLine;b", "a&#13;b", "a&#13;&#10;b"):
+            assert slack(f"[{label}]({PLAIN})") == f"<{PLAIN}|a b>", label
+
+    def test_an_escaped_break_reference_is_literal_text_with_no_break_to_fold(self):
+        assert slack(rf"[a\&NewLine;b]({PLAIN})") == f"<{PLAIN}|a&amp;NewLine;b>"
+        assert slack(rf"[a\&#10;b]({PLAIN})") == f"<{PLAIN}|a&amp;#10;b>"
+
+    def test_the_destination_is_not_touched_by_the_fold(self):
+        """A percent-encoded break in the address is address, not label."""
+        url = "https://example.com/a%0Ab"
+
+        assert slack(f"[x]({url})") == f"<{url}|x>"
+
+    def test_text_outside_a_link_keeps_the_lines_it_had(self):
+        assert slack("first\nsecond") == converter_alone("first\nsecond")
 
 
 class _TextOnlyClient:

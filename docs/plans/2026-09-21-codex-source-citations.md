@@ -178,7 +178,19 @@ blob with no way to reach the page the answer is based on.
   inside a code literal stays written out. A citation of
   `https://a%26amp%3B.example/x` is exactly this case: the host contains
   `&amp;` literally, and the reader must not be told the page is on
-  `a&.example`. The destination is delivered exactly as it stands.
+  `a&.example`. Which spellings are references, and what each one stands for,
+  are the parser's own questions — two thousand names, seven decimal digits or
+  six hexadecimal ones, and U+FFFD for a code point it recognizes but cannot
+  encode — so the parser's own inline rule is what answers them, run at each
+  candidate offset outside code. A pattern that merely resembles the grammar,
+  paired with a same-package decoding utility that takes eight digits and keeps
+  an invalid spelling, is a second grammar that disagrees with every other
+  Markdown surface. And because a reference spells a line break too (`&#10;`,
+  `&#xA;`, `&NewLine;`, `&#13;`), the label's existing one-line rule — a
+  newline inside `<url|label>` is not a link — is applied once more after
+  interpretation, where the label's characters are finally known; an escaped
+  `\&NewLine;` is literal text with no break to fold. The destination is
+  delivered exactly as it stands.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -394,6 +406,16 @@ blob with no way to reach the page the answer is based on.
   out and a nested-looking one decoded only once. Two producer-side citations
   of `https://a%26amp%3B.example/x` and `https://a%26lt%3B.example/x` run the
   same assertion end to end, over both the visible label and the destination.
+  The oracle is asked for every name the parser knows — the whole entity table
+  — and for a bounded numeric matrix: decimal and hexadecimal widths on either
+  side of the grammar's limit, code points that are valid, recognized but
+  unencodable, or past the last one, and each of those escaped, nested-looking,
+  or inside a code literal. A label is then required to be one line however its
+  break is spelled: a source LF or CRLF, `&#10;`, `&#xA;`, `&NewLine;`,
+  `&#13;`, and `\&NewLine;` staying literal, with the address left alone.
+  `ui/src/components/ui/markdown.test.tsx` asks the real Web renderer the same
+  eight reference questions, so the two surfaces are measured against one
+  answer rather than against each other's expectations.
   Then the boundary: a fitting link crossing a proposed boundary, a fitting
   link at the head of a chunk, two adjacent links, and a multibyte byte budget,
   each keeping every link whole and every chunk within the platform limit —

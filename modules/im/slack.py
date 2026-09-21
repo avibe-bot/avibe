@@ -413,7 +413,13 @@ class SlackBot(BaseIMClient):
         # then are the escaped characters restored, because what a backslash
         # protected is literal text that merely looks like a reference.
         label = resolve_character_references(label)
-        label = encode_slack_delimiters(restore_held(label, escaped))
+        label = restore_held(label, escaped)
+        # ``&#10;`` and ``&NewLine;`` spell a line break, so the label is only
+        # known to be one line once every spelling of its characters has been
+        # read. The same policy runs again over the finished text - an escaped
+        # ``\&NewLine;`` stayed literal and has no break to fold.
+        label = _SOFT_LINE_BREAK_RE.sub(" ", label)
+        label = encode_slack_delimiters(label)
         return f"<{destination}|{label}>" if label else f"<{destination}>"
 
     def _convert_markdown_to_slack_mrkdwn(self, text: str) -> str:

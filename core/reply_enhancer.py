@@ -31,9 +31,11 @@ from markdown_it.common.utils import ESCAPE_CHAR, isStrSpace, unescapeAll
 from markdown_it.common.html_re import HTML_TAG_RE
 from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
 from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
+from markdown_it.rules_inline.entity import entity as _commonmark_entity
 from markdown_it.rules_inline.image import image as _commonmark_image
 from markdown_it.rules_inline.link import link as _commonmark_link
 from markdown_it.rules_inline.state_inline import StateInline
+from markdown_it.token import Token
 
 logger = logging.getLogger(__name__)
 # Block consumers use source maps/content/levels, never parsed inline children.
@@ -1103,15 +1105,6 @@ def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:
     return ranges
 
 
-# A CommonMark character reference: a name, a decimal code point or a
-# hexadecimal one, between ``&`` and ``;``. Matching the shape here and handing
-# the match to ``unescapeAll`` keeps the entity table - which names resolve and
-# which are literal text - where CommonMark already defines it.
-_CHARACTER_REFERENCE_RE = re.compile(
-    r"&(?:#[0-9]{1,8}|#[xX][0-9a-fA-F]{1,8}|[a-zA-Z][a-zA-Z0-9]{1,31});"
-)
-
-
 def resolve_character_references(text: str) -> str:
     """Resolve CommonMark character references outside code, exactly once.
 
@@ -1122,11 +1115,21 @@ def resolve_character_references(text: str) -> str:
     verbatim - so a label that said ``&copy;`` reached the reader as six
     characters instead of ``©``.
 
+    Which spellings are references, and what each one stands for, are the
+    parser's questions, so the parser's own inline rule answers both: the
+    rule is run at each candidate offset and the token it pushes carries the
+    text a reader is shown. A near-enough pattern paired with a decoding
+    utility is a different grammar wearing the same name - the inline rule
+    reads at most seven decimal or six hexadecimal digits and shows U+FFFD for
+    a code point it recognizes but cannot encode, while ``unescapeAll`` takes
+    eight of either and keeps the spelling, so ``&#0;`` and ``&#00000038;``
+    would each come out as the opposite of what the reader sees.
+
     Resolving is one pass, not a loop: ``&amp;copy;`` is the text ``&copy;`` to
     a Markdown reader, and resolving what that produced would turn it into
     ``©`` - a character the source never wrote. Code is left alone through the
-    shared mask, because a reference inside a code span is a literal the reader
-    is shown as written.
+    shared mask, and so is a reference that would reach out of prose into it,
+    because a reference is only one where the parser reads prose.
 
     Call this only where Markdown has actually been interpreted. Text a
     backslash escape protected is NOT a reference: hold it behind a placeholder
@@ -1136,12 +1139,27 @@ def resolve_character_references(text: str) -> str:
     if not text or "&" not in text:
         return text
     masked = mask_markdown_code(text)
+    # The state carries the source the rule reads and collects the token it
+    # pushes; the rule consults no other part of it, so one state is reused
+    # across candidates with its output cleared between them.
+    tokens: List[Token] = []
+    state = StateInline(text, _INLINE_MARKDOWN, {}, tokens)
     parts: List[str] = []
     cursor = 0
-    for match in _CHARACTER_REFERENCE_RE.finditer(masked):
-        parts.append(text[cursor : match.start()])
-        parts.append(unescapeAll(text[match.start() : match.end()]))
-        cursor = match.end()
+    candidate = masked.find("&")
+    while candidate != -1:
+        tokens.clear()
+        state.tokens_meta.clear()
+        state.pos = candidate
+        state.posMax = len(text)
+        resolved = _commonmark_entity(state, False)
+        if resolved and masked[candidate : state.pos] == text[candidate : state.pos]:
+            parts.append(text[cursor:candidate])
+            parts.append(tokens[-1].content)
+            cursor = state.pos
+            candidate = masked.find("&", cursor)
+        else:
+            candidate = masked.find("&", candidate + 1)
     if not parts:
         return text
     parts.append(text[cursor:])

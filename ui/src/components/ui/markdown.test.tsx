@@ -15,6 +15,35 @@ import { Markdown } from './markdown';
 
 afterEach(cleanup);
 
+// A character reference is the other way Markdown writes a character the
+// reader must see, and every surface has to agree on which spellings are
+// references and what each one stands for. This renderer is the reference
+// answer the IM adapters are measured against, so the cases where a pattern
+// that merely looks like the grammar disagrees with it are asserted here too.
+describe('Markdown character references in a link label', () => {
+  it.each([
+    ['a&#38;b', 'a&b'],
+    ['a&copy;b', 'a\u00A9b'],
+    // Past the grammar's width - seven decimal digits, six hexadecimal ones -
+    // the spelling is the text.
+    ['a&#00000038;b', 'a&#00000038;b'],
+    ['a&#x0000026;b', 'a&#x0000026;b'],
+    // Recognized, but not a code point that can be encoded.
+    ['a&#0;b', 'a\uFFFDb'],
+    ['a&#128;b', 'a\uFFFDb'],
+    ['a&#xD800;b', 'a\uFFFDb'],
+    ['a&#1114112;b', 'a\uFFFDb'],
+  ])('shows %j as the label %j', (label, shown) => {
+    const { container } = render(
+      <Markdown content={`[${label}](https://example.com/x)`} />,
+    );
+    const anchor = container.querySelector('a');
+
+    expect(anchor?.textContent).toBe(shown);
+    expect(anchor?.getAttribute('href')).toBe('https://example.com/x');
+  });
+});
+
 describe('Markdown emphasis', () => {
   it.each([
     ['', 'p'],
