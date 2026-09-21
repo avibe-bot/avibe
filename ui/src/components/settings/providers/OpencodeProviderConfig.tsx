@@ -92,13 +92,10 @@ const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
 
-// This form's save path is `_normalize_reasoning_variants` in
-// `vibe/opencode_config.py`, which accepts `none` plus the OpenCode family
-// fallback (`minimal`..`max`). `ultra` is in the unified vocabulary because
-// catalog rows declare it, but offering it here would send a value the
-// save path rejects. Checkboxes and the default-checked list are the same set.
+// Off is available as an explicit per-model declaration. Keep the existing
+// default-checked tiers unchanged; offering a choice must not enable it.
 const OPENCODE_PROVIDER_EFFORTS = [NO_REASONING_EFFORT, ...EFFORT_BY_BACKEND.opencode];
-const defaultReasoningEfforts = () => [...OPENCODE_PROVIDER_EFFORTS];
+const defaultReasoningEfforts = () => [...EFFORT_BY_BACKEND.opencode];
 
 const notifyOpenCodeModelOptionsChanged = () => {
   window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
@@ -1396,7 +1393,7 @@ export const OpencodeProviderConfig: React.FC<{
                                             checked={edit.reasoningEfforts.includes(effort)}
                                             presentational
                                           />
-                                          {effort}
+                                          {effort === NO_REASONING_EFFORT ? t('chat.picker.effortOptions.none') : effort}
                                         </Button>
                                       ))}
                                     </div>

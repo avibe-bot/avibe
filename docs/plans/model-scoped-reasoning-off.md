@@ -1,0 +1,55 @@
+# Model-scoped reasoning Off
+
+Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
+
+## Contract
+
+- The existing backend model row's `reasoning_efforts` is the source of
+  selectable options. `none` means explicitly disabling extended thinking;
+  an absent effort still means no override. `medium` remains unchanged.
+- `none` belongs to the shared display vocabulary, not to protocol defaults,
+  backend fallbacks, or automatically populated capability lists. Recognizing
+  the value does not declare that a model supports it.
+- Users can opt an individual model into `none` through the existing model
+  editor. Merely opening or saving an existing row does not add the value.
+  Built-in model rows, stored metadata, provenance, and default selection stay
+  unchanged. No schema change or migration is needed.
+- Claude normalization uses the same exact model declaration as other efforts.
+  After selection, the Claude SDK translates `none` to
+  `thinking: {"type": "disabled"}` without an effort override.
+- OpenCode projects only declared variants. For Anthropic, a declared `none`
+  becomes `thinking: {"type": "disabled"}`; other declared values keep their
+  existing payloads. OpenAI-shaped variants keep `reasoningEffort: <value>`.
+- Codex keeps its existing model-catalog and transport behavior: this change
+  neither invents Off for native models nor prevents an explicitly configured
+  compatible model from advertising it.
+- Shared resolver intent forwarding, source discovery/provenance, routing,
+  retry, and proxy-engine policy are not changed. Model metadata controls the
+  selectable UI; it does not introduce a new gateway allowlist.
+- Unknown/custom effort strings still round-trip. Existing `supports_reasoning`
+  semantics and empty-versus-missing catalog behavior remain unchanged.
+
+## Validation invariants
+
+- For all three backends, a model declaring `none` exposes it, while unrelated,
+  missing, empty, default-only, and ordinary tier lists never acquire it.
+- UI model editing persists Off only after an explicit selection, preserves
+  custom values, and does not change existing selections or default behavior.
+  English/Chinese pickers label the value as Off/关闭, not Default.
+- Claude SDK options distinguish absent, ordinary, custom, declared Off, and
+  undeclared Off requests on both native and Model Hub launch paths.
+- OpenCode native/custom-provider and Model Hub projections preserve all
+  existing ordinary-tier payloads, including custom model effort values, and
+  translate only an explicitly declared `none`.
+- Catalog serialization and existing routing/retry tests stay green. Tests use
+  isolated state and native-transport fakes; they do not prove live provider
+  support for an operator's custom model declaration.
+
+## Known by design
+
+- No blanket Off backfill: support depends on the exact provider/model route.
+- No universal Off-to-medium fallback or re-enabling thinking on rejection.
+- No migration, deployment, release, host restart, or live-model invocation is
+  part of this implementation.
+- Automatic Codex review on the original external-fork PR has not been picked
+  up yet. Full exact-head review remains a delivery gate, not a waived check.

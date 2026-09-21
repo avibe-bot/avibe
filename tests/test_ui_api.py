@@ -258,12 +258,10 @@ def test_opencode_options_in_hub_mode_returns_projection_without_server(monkeypa
     assert result["data"]["reasoning_options"] == {
         "deepseek-v3.2": [
             {"value": "__default__", "label": "(Default)"},
-            {"value": "none", "label": "None"},
             {"value": "high", "label": "High"},
         ],
         "claude-opus-5": [
             {"value": "__default__", "label": "(Default)"},
-            {"value": "none", "label": "None"},
             {"value": "max", "label": "Max"},
         ],
     }

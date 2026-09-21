@@ -184,9 +184,13 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
-def test_session_handler_uses_native_cli_launch_reasoning_catalog(
+@pytest.mark.parametrize("channel", ["hub", "native_cli"])
+@pytest.mark.parametrize("requested", [None, "none", "medium", "max", "custom-effort"])
+def test_session_handler_uses_exact_launch_reasoning_catalog(
     monkeypatch,
     tmp_path: Path,
+    channel: str,
+    requested: str | None,
 ) -> None:
     from modules.agents.model_hub import ModelHubLaunch
 
@@ -203,14 +207,16 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
         async def resolve(self, backend, requested_model, **_kwargs):
             return ModelHubLaunch(
                 backend=backend,
-                channel="native_cli",
+                channel=channel,
                 requested_model=requested_model,
                 target_model=requested_model,
                 runtime_model=requested_model,
                 source_id="src_native01",
+                gateway_base_url="http://127.0.0.1:9/fixture",
+                gateway_token="fixture-gateway-token",
                 context_window=128_000,
                 max_output_tokens=32_000,
-                reasoning_efforts=("max",),
+                reasoning_efforts=("none", "medium", "max", "custom-effort"),
             )
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
@@ -224,23 +230,49 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
     controller.model_hub_runtime = _Runtime()
     controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
         model="claude-opus-4-6",
-        reasoning_effort="max",
+        reasoning_effort=requested,
     )
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
 
     _run_session(handler, context)
 
-    assert captured["options"].effort == "max"
+    if requested == "none":
+        assert captured["options"].thinking == {"type": "disabled"}
+        assert getattr(captured["options"], "effort", None) is None
+    else:
+        assert getattr(captured["options"], "thinking", None) is None
+        assert getattr(captured["options"], "effort", None) == requested
     assert captured["options"].env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "128000"
     assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
 
+    # Exercise the installed SDK's real argument serializer without starting a
+    # CLI or contacting a model. Capturing our own kwargs alone is insufficient.
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
 
-def test_session_handler_turns_thinking_off_for_explicit_none(
+    command = SubprocessCLITransport(
+        prompt="isolated parameter probe",
+        options=ClaudeAgentOptions(**vars(captured["options"])),
+    )._build_command()
+    if requested == "none":
+        assert command[command.index("--thinking") + 1] == "disabled"
+        assert "--effort" not in command
+    else:
+        assert "--thinking" not in command
+        if requested is None:
+            assert "--effort" not in command
+        else:
+            assert command[command.index("--effort") + 1] == requested
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_session_handler_turns_thinking_off_only_when_the_model_declares_none(
     monkeypatch,
     tmp_path: Path,
+    declared: bool,
 ) -> None:
-    """An Agent set to the Off sentinel must disable thinking, not pick a tier."""
+    """The legacy launch path follows the exact model catalog too."""
 
     captured: dict[str, Any] = {}
 
@@ -253,6 +285,10 @@ def test_session_handler_turns_thinking_off_for_explicit_none(
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        "vibe.backend_model_catalog.catalog_reasoning_efforts_for_model",
+        lambda *_args: ["low", "none"] if declared else ["low"],
+    )
 
     controller = _Controller(tmp_path)
     controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
@@ -264,9 +300,9 @@ def test_session_handler_turns_thinking_off_for_explicit_none(
 
     _run_session(handler, context)
 
-    assert captured["options"].thinking == {"type": "disabled"}
-    # ``thinking`` and ``effort`` are mutually exclusive: an effort here would
-    # re-enable the reasoning the Agent asked to turn off.
+    assert getattr(captured["options"], "thinking", None) == (
+        {"type": "disabled"} if declared else None
+    )
     assert getattr(captured["options"], "effort", None) is None
 
 

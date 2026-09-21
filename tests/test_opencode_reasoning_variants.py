@@ -38,8 +38,7 @@ def _catalog_declared_tiers() -> dict[str, tuple[str, ...]]:
 
 
 def test_opencode_variants_mirror_the_unified_vocabulary() -> None:
-    # OpenCode adds exactly one token of its own: `none`, the opt-out.
-    assert OPENCODE_REASONING_VARIANTS == ("none", *REASONING_EFFORT_VOCABULARY)
+    assert OPENCODE_REASONING_VARIANTS == REASONING_EFFORT_VOCABULARY
 
 
 def test_every_vocabulary_tier_projects_to_an_openai_variant(tmp_path: Path) -> None:
@@ -127,7 +126,7 @@ def test_family_default_suggestions_never_claim_ultra() -> None:
 
     protocol_defaults = backend_model_catalog.PROTOCOL_REASONING_EFFORT_DEFAULTS
     assert protocol_defaults
-    assert all("ultra" not in efforts for efforts in protocol_defaults.values())
+    assert all(not {"none", "ultra"}.intersection(efforts) for efforts in protocol_defaults.values())
 
     backend_defaults = backend_model_catalog._DEFAULT_REASONING_EFFORTS
     assert backend_defaults

@@ -11,10 +11,8 @@ from typing import Any, Dict, Final, Optional
 
 logger = logging.getLogger(__name__)
 
-# Every reasoning tier OpenCode accepts, in ascending order: the unified Model
-# Hub vocabulary (``vibe.backend_model_catalog.REASONING_EFFORT_VOCABULARY``)
-# plus OpenCode's own ``none``, which names the absence of reasoning rather
-# than a level.
+# Known OpenCode reasoning options, including explicitly declared Off, mirrored
+# from ``vibe.backend_model_catalog.REASONING_EFFORT_VOCABULARY``.
 #
 # Mirrored rather than imported: this module is stdlib-only so the OpenCode
 # read path can stay cheap, while the catalog module pulls in the whole

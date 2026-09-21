@@ -1612,9 +1612,8 @@ class SessionHandler(BaseHandler):
         if cli_path_override:
             option_kwargs["cli_path"] = cli_path_override
         if effective_effort == NO_REASONING_EFFORT:
-            # Claude takes "no reasoning" as an explicit thinking switch, not as
-            # an effort tier. ``thinking`` wins over ``effort``, so the two are
-            # mutually exclusive: passing an effort here would re-enable it.
+            # The exact model declaration admitted Off. Claude expresses that
+            # choice through the thinking switch, not an `effort="none"` tier.
             option_kwargs["thinking"] = {"type": "disabled"}
         elif effective_effort:
             option_kwargs["effort"] = effective_effort

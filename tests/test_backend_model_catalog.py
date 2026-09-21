@@ -50,6 +50,7 @@ def _persisted_remote_record(tmp_path: Path, url: str) -> dict:
 
 def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
     assert backend_model_catalog.REASONING_EFFORT_VOCABULARY == (
+        "none",
         "minimal",
         "low",
         "medium",
@@ -64,7 +65,7 @@ def test_reasoning_effort_authorities_are_ordered_and_complete() -> None:
         "anthropic": ("low", "medium", "high", "xhigh", "max"),
     }
     assert all(
-        "ultra" not in efforts
+        not {"none", "ultra"}.intersection(efforts)
         for efforts in backend_model_catalog.PROTOCOL_REASONING_EFFORT_DEFAULTS.values()
     )
 

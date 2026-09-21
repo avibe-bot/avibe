@@ -2411,7 +2411,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
                   !canEdit && !active && 'opacity-70 hover:text-muted',
                 )}
               >
-                {opt}
+                {opt === 'none' ? t('chat.picker.effortOptions.none') : opt}
               </button>
             );
           })}

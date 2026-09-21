@@ -58,6 +58,7 @@ _DEFAULT_REASONING_EFFORTS = {
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
 }
 REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
+    "none",
     "minimal",
     "low",
     "medium",

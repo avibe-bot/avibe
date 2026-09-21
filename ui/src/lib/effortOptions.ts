@@ -25,19 +25,15 @@
  * declare it. Protocol-family defaults and backend fallbacks still omit it: an
  * unknown relay model must not be over-claimed.
  */
-export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+// `none` is a known explicit Off value, not a backend/family default. Only a
+// model that declares it may offer it; recognizing it does not add capability.
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 /**
- * Explicit "no reasoning" for an Agent, distinct from an unset effort.
- *
- * Unset means "let the backend choose"; on Claude that is thinking on. An Agent
- * that must not think therefore needs a value the backend can tell apart from
- * unset — `none` — which the Claude session maps to
- * `thinking: {"type": "disabled"}`. It is a sentinel, not a tier: it is absent
- * from `REASONING_EFFORTS` so it can never be suggested as a model capability,
- * and only backends that translate it appear in the list below.
+ * Explicit Off in a model's declared options, distinct from an unset effort.
+ * Adapters translate this value; they never add it to a model's capabilities.
  */
 export const NO_REASONING_EFFORT = 'none';
 
@@ -54,10 +50,8 @@ const DEFAULT_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high'];
 
 export const effortOptionsFor = (backend: string): string[] => EFFORT_BY_BACKEND[backend] ?? DEFAULT_EFFORTS;
 
-/** Rank in the unified vocabulary; unknown tokens sort after every named rung.
- *  "No reasoning" is weaker than every tier, so it ranks before them. */
+/** Rank in the unified vocabulary; unknown tokens sort after every named rung. */
 const effortRank = (effort: string): number => {
-  if (effort === NO_REASONING_EFFORT) return -1;
   const index = (REASONING_EFFORTS as readonly string[]).indexOf(effort);
   // A finite sentinel — not Infinity — so two unknowns subtract to 0 instead of NaN.
   return index < 0 ? REASONING_EFFORTS.length : index;
@@ -79,19 +73,6 @@ const SHARED_DEFAULT_EFFORT_BACKENDS = new Set(['claude', 'codex']);
 const selectableEfforts = (entries: { value: string; label: string }[]): string[] =>
   entries.filter((option) => option.value !== '__default__').map((option) => option.value);
 
-/** Backends that honour an explicit "no reasoning" choice. Kept beside the
- *  resolver rather than folded into `EFFORT_BY_BACKEND` because `none` is a
- *  sentinel, not a tier a model can be declared to support — a model's own
- *  catalog answer must not be read as "this model does not reason". */
-const NO_REASONING_BACKENDS = new Set(['claude']);
-
-/** Add the Off choice ahead of the tiers, leaving an empty answer empty: a model
- *  the catalog says cannot reason has nothing to turn off. */
-const withNoReasoningOption = (backend: string, efforts: string[]): string[] =>
-  NO_REASONING_BACKENDS.has(backend) && efforts.length > 0 && !efforts.includes(NO_REASONING_EFFORT)
-    ? [NO_REASONING_EFFORT, ...efforts]
-    : efforts;
-
 // Resolve the selectable effort values for a backend + model.
 //
 // A model's own entry is the answer, whichever backend it came from: the Hub
@@ -105,9 +86,6 @@ const withNoReasoningOption = (backend: string, efforts: string[]): string[] =>
 // catalog loads. An empty entry under this model's own key is a statement —
 // "this model does not reason" — and resolves to no efforts, not to the
 // generic ladder.
-//
-// On a backend that can switch reasoning off, a non-empty answer also gains the
-// Off sentinel ahead of its tiers (see `withNoReasoningOption`).
 export function resolveEffortOptions(
   backend: string,
   model: string | null | undefined,
@@ -115,7 +93,7 @@ export function resolveEffortOptions(
 ): string[] {
   const modelKey = model ?? '';
   if (reasoningOptions && Object.prototype.hasOwnProperty.call(reasoningOptions, modelKey)) {
-    return withNoReasoningOption(backend, selectableEfforts(reasoningOptions[modelKey]));
+    return selectableEfforts(reasoningOptions[modelKey]);
   }
   const shared = SHARED_DEFAULT_EFFORT_BACKENDS.has(backend)
     && reasoningOptions
@@ -123,7 +101,7 @@ export function resolveEffortOptions(
     ? reasoningOptions['']
     : undefined;
   const values = shared ? selectableEfforts(shared) : [];
-  return withNoReasoningOption(backend, values.length ? values : effortOptionsFor(backend));
+  return values.length ? values : effortOptionsFor(backend);
 }
 
 export function isEffortSupported(

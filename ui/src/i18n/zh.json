@@ -1035,7 +1035,7 @@
           "reasoningEfforts": "推理强度",
           "customEffort": "自定义档位",
           "customEffortPlaceholder": "如 medium",
-          "effortNote": "档位按原样发送给供应商；不选则请求不带 effort 参数。",
+          "effortNote": "仅声明该模型支持的选项。在 Agent 中选择“关闭”才会禁用扩展思考；选项列表为空不等于关闭。其他档位按原样转发。",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -4220,6 +4220,7 @@
       "searchModels": "搜索模型",
       "noModelMatch": "无匹配模型",
       "effortOptions": {
+        "none": "关闭",
         "minimal": "极简",
         "low": "低",
         "medium": "中",
