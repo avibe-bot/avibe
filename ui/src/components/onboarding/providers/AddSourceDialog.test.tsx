@@ -351,8 +351,11 @@ describe('AddSourceDialog — detected', () => {
 
   it('marks what is already there and offers no choice about it', async () => {
     renderDialog({
-      detected: [slot('openai'), slot('gemini')],
-      sources: [source({ id: 'src_openai', vendor: 'openai' })],
+      detected: [slot('openai'), slot('gemini', { mask: 'sk-…3456' })],
+      // The same credential, not merely the same brand: both masks come from the
+      // server's one masking function, so this is the only evidence either side has
+      // that the native store and the Hub hold one key.
+      sources: [source({ id: 'src_openai', vendor: 'openai', masked_credential: 'sk-…9f21' })],
     });
     const user = userEvent.setup();
     const [added, open] = [...document.querySelectorAll<HTMLButtonElement>('.setup-add-row')];
@@ -365,6 +368,28 @@ describe('AddSourceDialog — detected', () => {
     await user.click(open);
     expect(onToggleDetected).toHaveBeenCalledTimes(1);
     expect(onToggleDetected.mock.calls[0][0]).toMatchObject({ vendor: 'gemini' });
+  });
+
+  it('offers a second key under a brand that is already connected', async () => {
+    renderDialog({
+      detected: [slot('openai')],
+      // Same provider, different key. A vendor match is not evidence of a duplicate:
+      // the scan reads native stores and never sees the Hub's inventory, so marking
+      // this 「已添加」 would refuse the one action the row exists for and leave the
+      // capsule counting a key nobody can take.
+      sources: [source({ id: 'src_openai', vendor: 'openai', masked_credential: 'sk-…1111' })],
+    });
+    const user = userEvent.setup();
+    const [second] = [...document.querySelectorAll<HTMLButtonElement>('.setup-add-row')];
+
+    expect(second.dataset.state).toBe('detected');
+    expect(second.disabled).toBe(false);
+    expect(second.getAttribute('aria-pressed')).toBe('false');
+    expect(within(second).queryByText('Added')).toBeNull();
+
+    await user.click(second);
+    expect(onToggleDetected).toHaveBeenCalledTimes(1);
+    expect(onToggleDetected.mock.calls[0][0]).toMatchObject({ vendor: 'openai' });
   });
 
   it('keeps a credential nobody may take here, and says why instead of offering it', async () => {
@@ -792,6 +817,35 @@ describe('AddSourceDialog — what comes back from an authorization', () => {
     act(() => oauth.current?.onClose());
 
     // And when the flow does hand back, there is nothing left to add here.
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('asks for one read when a landing reports itself twice', async () => {
+    const row = source({ id: 'src_claude', vendor: 'anthropic' });
+    await signIn();
+
+    // How the shipped flow really reports a success: the source, then the
+    // argument-less call, both in the same breath. The second one means 「the rows
+    // you are holding are stale」 — and the only row it can be about is the one the
+    // first call just handed over, whose read is already on its way. A second
+    // request for the same inventory is two list reads racing, and the stage draws
+    // whichever answers last.
+    act(() => {
+      oauth.current?.onConnected(row, { added_to: ['claude'], adopted_by: ['claude'] });
+      oauth.current?.onConnected();
+    });
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(onAdded).toHaveBeenCalledWith({
+      source: row,
+      added_to: ['claude'],
+      adopted_by: ['claude'],
+    });
+    expect(onAdded).not.toHaveBeenCalledWith(null);
+
+    // And the extra call changed nothing about the handback: the flow's own panel
+    // still owns the close, and this frame still goes with it.
+    act(() => oauth.current?.onClose());
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 

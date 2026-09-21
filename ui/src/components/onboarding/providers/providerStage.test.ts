@@ -290,16 +290,47 @@ describe('unlistedDetected', () => {
     expect(detected.map((slot) => slot.vendor)).toEqual(['gemini']);
   });
 
-  it('never offers to review a brand that is already connected', () => {
-    const detected = unlistedDetected({
+  it('still offers a detected credential whose brand is already connected', () => {
+    // The scan reads native stores and knows nothing about what the Hub already
+    // holds, so a row sharing a brand with a connected source is a second key
+    // until something compares the credentials. The stage collapsing the two into
+    // one card is presentation; letting that collapse answer 「is there another key
+    // on this machine」 is how a row the capsule still counts disappears from the
+    // stage AND from the only pane that could take it.
+    const input = {
       sources: [
-        source({ id: 'src_1', vendor: 'openai' }),
-        source({ id: 'src_2', vendor: 'anthropic' }),
+        source({ id: 'src_1', vendor: 'openai', masked_credential: 'sk-…1111' }),
+        source({ id: 'src_2', vendor: 'anthropic', masked_credential: 'sk-…2222' }),
       ],
       scan: scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai' })),
-    });
+    };
 
-    expect(detected).toEqual([]);
+    // One card per brand, as before: two connected facts, no third slot.
+    expect(providerSlots(input).map((slot) => [slot.vendor, slot.kind])).toEqual([
+      ['openai', 'connected'],
+      ['anthropic', 'connected'],
+    ]);
+    // And the row is reviewable, carrying its own masked credential so the person
+    // can tell it apart from the key already connected under that brand.
+    expect(unlistedDetected(input).map((slot) => [slot.vendor, slot.kind, slot.mask])).toEqual([
+      ['openai', 'detected', 'sk-…9f21'],
+    ]);
+  });
+
+  it('keeps an alias-collapsed detection reviewable behind the card that absorbed it', () => {
+    // `google` and `gemini` are one brand, so the stage draws one card — the
+    // connected one, because it is a fact. The detection behind it is still a
+    // separate native store, and Add more is where it stays reachable.
+    const input = {
+      sources: [source({ id: 'src_1', vendor: 'gemini', masked_credential: 'sk-…1111' })],
+      scan: scanOf(row({ id: 'mig_g', backend: 'opencode', kind: 'opencode_provider', vendor: 'google' })),
+    };
+
+    expect(providerSlots(input).map((slot) => [slot.vendor, slot.kind])).toEqual([
+      ['gemini', 'connected'],
+      ['openai', 'empty'],
+    ]);
+    expect(unlistedDetected(input).map((slot) => slot.vendor)).toEqual(['gemini']);
   });
 });
 

@@ -419,6 +419,42 @@ describe('ImportKeysNotice — hosted by a screen that already scanned', () => {
     expect(screen.getByText('Migrated 1 · 1 API key still available')).toBeTruthy();
   });
 
+  it('brings the receipt back when the host imports against a dismissal it honoured', async () => {
+    // Dismissed on an earlier visit, so the capsule opens hidden — and the footer
+    // CTA can still submit that very batch, because the stage and the action read
+    // the scan, not this signature. Once it lands, `imported` is the answer to
+    // something the person just asked for; a remembered opinion about the offer
+    // cannot outrank it, and the remainder has to come back with it.
+    writeMigrationDismissed([CLAUDE_KEY, OPENCODE_ZHIPU]);
+    serve(FULL_SCAN);
+    const { show } = renderHosted({ candidates: [CLAUDE_KEY, OPENCODE_ZHIPU] });
+    expect(screen.queryByText(/API keys to import/)).toBeNull();
+
+    show({ candidates: [OPENCODE_ZHIPU], imported: 1 });
+
+    expect(screen.getByText('Migrated 1 · 1 API key still available')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Review migration' })).toBeTruthy();
+  });
+
+  it('keeps a dismissed receipt closed until something new lands', async () => {
+    serve(FULL_SCAN);
+    const { show } = renderHosted({ candidates: [OPENCODE_ZHIPU], imported: 1 });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss import notice' }));
+    expect(screen.queryByText(/Migrated/)).toBeNull();
+
+    // The host's ordinary re-renders — a rescan that found the same remainder —
+    // are not news, and a capsule returning on each one is the nag the dismissal
+    // exists to prevent.
+    show({ candidates: [OPENCODE_ZHIPU], imported: 1 });
+    expect(screen.queryByText(/Migrated/)).toBeNull();
+
+    // A second batch landing is news.
+    show({ candidates: [], imported: 2 });
+    expect(screen.getByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
+  });
+
   it('closes the receipt without remembering an empty set', async () => {
     serve(FULL_SCAN);
     renderHosted({ candidates: [], imported: 2 });

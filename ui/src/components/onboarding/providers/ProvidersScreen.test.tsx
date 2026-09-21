@@ -86,6 +86,14 @@ const UNSUPPORTED = runtimeOf('not_installed', {
   manifest: { name: 'cliproxyapi', resolution: 'unsupported', version: '1.0.0', source_sha: 'sha', assets: [] },
 });
 
+// The same host with an engine already up on it. Health and install admission are
+// separate facts on purpose: the manifest has no asset for this platform, and the
+// runtime running here arrived some other way. Reads and writes to it are fine; only
+// something that would install one is not.
+const UNSUPPORTED_RUNNING = runtimeOf('ok', {
+  manifest: { name: 'cliproxyapi', resolution: 'unsupported', version: '1.0.0', source_sha: 'sha', assets: [] },
+});
+
 const CODEX_KEY: MigrationItem = {
   id: 'mig_codex_key',
   backend: 'codex',
@@ -585,6 +593,36 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(cardFor('zhipuai').dataset.state).toBe('connected'));
   });
 
+  it('keeps a detected key reachable behind the connected card of the same brand', async () => {
+    // The stage draws one OpenAI card, and it draws the fact: a source exists. The
+    // native store beside it still holds a DIFFERENT key — the scan never reads the
+    // Hub's inventory, so it cannot be a duplicate of the connected one — and the
+    // capsule counts it. A row the capsule counts and no pane can act on is the
+    // contradiction this pins: Add more is where it stays reachable.
+    serve({
+      sources: [source({ id: 'src_openai', vendor: 'openai', masked_credential: 'sk-…1111' })],
+      scan: [CODEX_KEY],
+    });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(cardFor('openai').dataset.state).toBe('connected'));
+    expect(cards().filter((card) => card.dataset.state === 'detected')).toHaveLength(0);
+    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+
+    const addMore = cards().find((card) => card.dataset.state === 'add');
+    await user.click(addMore as HTMLElement);
+    const dialog = await screen.findByRole('dialog');
+
+    // Listed, under its own masked credential, and pressable — not marked 「已添加」
+    // because a brand it shares with a source is not the key that source holds.
+    const row = within(dialog).getByRole('button', { name: /Select existing OpenAI/ });
+    expect(row.dataset.state).toBe('detected');
+    expect((row as HTMLButtonElement).disabled).toBe(false);
+    expect(within(row).getByText(/sk-…9f21/)).toBeTruthy();
+  });
+
   it('still offers a take-over the scan found while the inventory beside it is unread', async () => {
     // Two reads, two questions. Taking over a key the scan found does not depend on
     // knowing what else is already there.
@@ -922,6 +960,49 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
   });
 
+  it('refuses a take-over the host cannot install an engine for, and still writes a key', async () => {
+    // A running engine on a host with no published runtime asset for its platform.
+    // The take-over is the one write on this screen with an install still waiting
+    // behind it: `apply_native_migration` ensures the runtime dependency before it
+    // touches a credential, and that ensure refuses an unsupported platform ahead of
+    // the branch that would have reused the engine already up — so the batch comes
+    // back 422 however healthy the engine is.
+    serve({ runtime: UNSUPPORTED_RUNNING, scan: [CODEX_KEY] });
+    const { handle } = renderScreen({ runtimeRead: readyRegion(UNSUPPORTED_RUNNING) });
+    await settled();
+    const user = userEvent.setup();
+
+    // The offer is still made and the review still opens. What the scan found is
+    // worth reading, and Settings is where it can be acted on.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(handle);
+    const review = await screen.findByRole('dialog');
+    expect(within(review).getByText(CODEX_KEY.masked_detail!)).toBeTruthy();
+    const start = within(review).getByRole<HTMLButtonElement>('button', { name: /Start migration/ });
+    expect(start.disabled).toBe(true);
+    await user.click(start);
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+    await user.click(within(review).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+
+    // And nothing else is narrowed. A key is a write to an engine that is up, which
+    // this one is; refusing it because a fresh install would fail would strand a
+    // working machine on a boundary that is not about writing.
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: source({ id: 'src_new', vendor: 'custom' }),
+      added_to: [],
+      adopted_by: [],
+    });
+    await user.click(cards()[2]);
+    const add = await screen.findByRole('dialog');
+    await user.click(within(add).getByRole('button', { name: 'API Key' }));
+    await user.type(within(add).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(add).getByLabelText('API key'), 'sk-live-1');
+    await user.click(within(add).getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => expect(modelsApi.createApiKeySource).toHaveBeenCalledTimes(1));
+  });
+
   it('settles a batch it had already sent, whatever the screen admits by the time it answers', async () => {
     serve({ scan: [CODEX_KEY] });
     const gate = deferred<void>();
@@ -1093,6 +1174,52 @@ describe('ProvidersScreen — the engine', () => {
     // another. That last one is the only thing that turns the card and the footer
     // around — the attempt's own success is not the machine answering.
     await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(3));
+  });
+
+  it('stays retryable when the answer still calls for a resume after a spent attempt', async () => {
+    // The local attempt succeeded — the engine started, there was nothing to adopt —
+    // and the read that followed it still says stopped. That read is the authority
+    // here, and 「my attempt did not fail」 is not evidence against it. With the
+    // attempt already spent for this demand, an idle card leaves nothing on the
+    // screen that could start the engine while Continue stays blocked for a reason
+    // the card does not give.
+    serve({ runtime: runtimeOf('not_started') });
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
+    // The attempt asks the shell for the read that would turn the card around.
+    await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(1));
+
+    // And the shell's answer is 「still stopped」.
+    await show({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
+    // Retryable, not retried: a demand this screen has already attempted once must
+    // not re-arm itself, or a machine the engine keeps dying on becomes a loop of
+    // installs nobody asked for.
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+    // No step is named, because nothing failed. What the card reports is that the
+    // engine is not ready and that asking again is possible.
+    expect(gatewayCard().dataset.failedStep).toBeUndefined();
+
+    await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
+
+    // Same rule as a failed attempt: the press asks for a read, and only the answer
+    // arms anything.
+    expect(retrySetup).toHaveBeenCalledTimes(2);
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+
+    // And the card the press was made on is still there while that read is in
+    // flight. This is the state the shell really hands down first — the previous
+    // value degraded to 「refreshing」 — and a verdict recomputed from it would take
+    // the Retry away from under the person who just pressed it and replace it with
+    // an idle card claiming the engine is fine.
+    await show({ runtimeRead: beginRegionRead(readyRegion(runtimeOf('not_started'))) });
+    expect(gatewayCard().dataset.state).toBe('failed');
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+
+    await show({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(2));
   });
 
   it('admits one engine mutation at a time, whatever else on the screen has failed', async () => {

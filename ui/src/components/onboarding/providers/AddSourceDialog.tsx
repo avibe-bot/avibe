@@ -57,7 +57,7 @@ import { serverText } from '@/components/settings/models/serverCopy';
 import { subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
 import type { Source } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
-import { providerBrandLabel, providerVendorId } from '@/components/settings/providers/providerIdentity';
+import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import type { TranslationKey } from '@/i18n/types';
 
 import { usableSource, type ProviderSlot } from './providerStage';
@@ -229,8 +229,18 @@ export const AddSourceDialog: React.FC<{
   // while the dialog was open — falls back rather than rendering nothing.
   const active = methods.includes(method) ? method : methods[0];
 
-  const addedVendors = React.useMemo(
-    () => new Set(sources.filter(usableSource).map((source) => providerVendorId(source.vendor))),
+  // 「已添加」 is a claim about a credential, not about a brand. The scan reads native
+  // stores and never sees the Hub's inventory, so the only evidence that a detected
+  // row and a connected source are one key is the mask — and it is real evidence:
+  // both sides come from the server's single masking function. Marking by vendor
+  // instead would disable the second key someone keeps under a provider they have
+  // already connected, while the capsule behind this pane goes on counting it.
+  const addedCredentials = React.useMemo(
+    () => new Set(
+      sources.filter(usableSource)
+        .map((source) => source.masked_credential?.trim())
+        .filter((mask): mask is string => Boolean(mask)),
+    ),
     [sources],
   );
 
@@ -306,6 +316,13 @@ export const AddSourceDialog: React.FC<{
     // where we are. Landing on it would close this dialog on someone's cancelled
     // sign-in and report it as a provider they added.
     if (!source) {
+      // Except immediately behind this flow's own landing. A success is reported by
+      // two calls in one breath — the source, then the argument-less one — and the
+      // second is not news about anything: the row it would say had gone stale is
+      // the one just created, and the read that describes it is already in flight.
+      // Asking again sends a second inventory read racing the first, so which of
+      // the two the stage ends up drawing is decided by whichever answers last.
+      if (authorizedLanded.current) return;
       void onAdded(null).catch(() => undefined);
       return;
     }
@@ -458,7 +475,7 @@ export const AddSourceDialog: React.FC<{
                     key={slot.vendor}
                     slot={slot}
                     selected={isSelected(slot)}
-                    added={addedVendors.has(slot.vendor)}
+                    added={slot.mask !== null && addedCredentials.has(slot.mask)}
                     onToggle={() => onToggleDetected(slot)}
                   />
                 ))}

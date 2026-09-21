@@ -316,15 +316,24 @@ export function providerSlots(input: {
  * This is what the add dialog's 已检测到 tab lists, and whether it has anything to
  * list is what decides the tab exists at all: a tab repeating the two cards
  * immediately behind it offers nothing, and an empty tab is worse than an absent
- * one. Sources occupy too, so a brand already connected never comes back as
- * something to review.
+ * one.
+ *
+ * What it subtracts is the detected cards, and only those. A connected card also
+ * occupies its brand's slot — that collapse is presentation, and it is right — but
+ * the scan has no knowledge of the Hub's inventory: it reads native stores, so a
+ * row under a connected brand is a second credential until something compares the
+ * two. Letting the stage's brand set answer that question is how a row the capsule
+ * still counts becomes reachable from nowhere. Whether it is the same key is a
+ * question about credentials, and the pane that lists it is where it is answered.
  */
 export function unlistedDetected(input: {
   sources: readonly Source[];
   scan: MigrationScan | null;
 }): ProviderSlot[] {
-  const shown = new Set(providerSlots(input).map((slot) => slot.vendor));
-  return detectedProviders(input.scan).filter((slot) => !shown.has(slot.vendor));
+  const drawn = new Set(
+    providerSlots(input).filter((slot) => slot.kind === 'detected').map((slot) => slot.vendor),
+  );
+  return detectedProviders(input.scan).filter((slot) => !drawn.has(slot.vendor));
 }
 
 /** Whether a detected card is currently consented to. A connected card is never

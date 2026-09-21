@@ -34,7 +34,12 @@ import type { AgentBackend, RuntimeDependency, Source } from '@/components/setti
 
 import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
-import { setupNavigationReady, type SetupScreenHandle, type SetupScreenProps } from '../setupFlow';
+import {
+  setupCanAttemptInstall,
+  setupNavigationReady,
+  type SetupScreenHandle,
+  type SetupScreenProps,
+} from '../setupFlow';
 import { AddSourceDialog } from './AddSourceDialog';
 import { DestinationRow } from './DestinationRow';
 import { GatewayCard, type GatewayPhase } from './GatewayCard';
@@ -77,14 +82,46 @@ const OUTBOUND_DELAY_MS = 570;
  *  it opens on what the authoritative read called for and follows the lifecycle
  *  helper's own report across the install/start boundary. */
 type GatewayRun =
+  /** Nothing outstanding: either nothing has been attempted for the current
+   *  authorization, or one is about to be armed for it. */
   | { kind: 'idle' }
   | { kind: 'running'; step: 'install' | 'start' }
-  | { kind: 'failed'; step: GatewayAdoptionFailure['step'] };
+  /**
+   * Every step reported success, and the read this screen asked for on the strength
+   * of that is outstanding. Kept apart from `idle` because success is not a claim
+   * that the engine is ready — only the shell's read says that — and `against` is
+   * the evidence the request was made on, so the answer can be told apart from the
+   * stale read the attempt itself ran against. It is a waiting room: the answer
+   * turns it into one of the states above or below.
+   */
+  | { kind: 'settled'; against: GatewayEvidence }
+  /** A dead end with a Retry beside it. `step` names the step that failed where one
+   *  did, and is `null` where none did — every step reported success and the machine
+   *  the shell then read still asks to be resumed. There is nothing to name there,
+   *  and naming one would be a report of a failure that did not happen. */
+  | { kind: 'failed'; step: GatewayAdoptionFailure['step'] | null };
 
 /** Everything the shell hands down that decides whether an attempt is authorized at
  *  all: the runtime read and the two configuration facts beside it. A retry holds the
  *  set it was pressed against, and is answered when any part of it is replaced. */
 type GatewayEvidence = Pick<SetupScreenProps, 'runtimeRead' | 'gatewayEnabled' | 'capability'>;
+
+/**
+ * Whether the shell has ANSWERED a read this screen asked for.
+ *
+ * Two things have to be true, and they are different things. The evidence must have
+ * moved off what the request was made against — the only read a request can see is
+ * the one it was made from, so that read is never its answer. And what replaced it
+ * must be an answer at all: the shell reports a read STARTING before it reports what
+ * it found — `refreshing` over the old value, a configuration back to 「pending」 —
+ * and treating one of those as the reply loses the request the person is waiting on.
+ */
+const gatewayReadAnswered = (against: GatewayEvidence | null, now: GatewayEvidence): boolean =>
+  (against === null
+    || against.runtimeRead !== now.runtimeRead
+    || against.gatewayEnabled !== now.gatewayEnabled
+    || against.capability !== now.capability)
+  && gatewayEvidenceSettled(now);
 
 /** Locale-correct enumeration without inventing a separator string for each language.
  *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
@@ -250,6 +287,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // that is still in flight. Captured synchronously below, before any await.
     const resumeRuntimeRef = React.useRef<RuntimeDependency | null>(null);
     resumeRuntimeRef.current = intent.kind === 'resume' ? intent.runtime : null;
+    // What the shell is handing down right now, for the attempt to record its own
+    // refresh request against when it completes. An attempt spans awaits, so the
+    // props its closure captured are a memory of the evidence rather than the
+    // evidence — and the whole point of the record is which read came after it.
+    const evidenceRef = React.useRef<GatewayEvidence>({ runtimeRead, gatewayEnabled, capability });
+    evidenceRef.current = { runtimeRead, gatewayEnabled, capability };
 
     React.useEffect(() => {
       if (!active || resumeStep === null || attemptedRef.current === gatewayToken) return;
@@ -290,7 +333,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             ? { ok: true as const }
             : await resumeGatewayAdoption(modelsApi, agentReads, backend);
           if (superseded()) return;
-          setGatewayRun(outcome.ok ? { kind: 'idle' } : { kind: 'failed', step: outcome.failure.step });
+          setGatewayRun(outcome.ok
+            // Recorded against the evidence standing NOW, in the same update that
+            // ends the attempt: the refresh below is this screen asking a question,
+            // and the read it is asking about is by definition the next one.
+            ? { kind: 'settled', against: evidenceRef.current }
+            : { kind: 'failed', step: outcome.failure.step });
           // The engine moved; the shell's read still describes where it was. Asking
           // for that read again is what turns the card from 「正在启动」 to 「运行中」
           // and unblocks Continue — without it the attempt succeeds and the screen
@@ -323,20 +371,13 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
 
     React.useEffect(() => {
       if (!active || !resumeRequested) return;
-      const against = requestedAgainstRef.current;
-      // The same read and the same configuration the press was made against: the shell
-      // has not answered yet, and nothing here is new information.
-      if (against !== null
-        && against.runtimeRead === runtimeRead
-        && against.gatewayEnabled === gatewayEnabled
-        && against.capability === capability) return;
-      // Different, and still not an answer. The shell reports its read starting before
-      // it reports what it found — `refreshing` over the old value, a configuration
-      // back to 「pending」 — and every one of those states looks like 「nothing to
-      // resume」 from here. Spending the request on one loses it: the person pressed
-      // Retry, the read they asked for lands a moment later saying the engine is
-      // stopped, and nothing starts it.
-      if (!gatewayEvidenceSettled({ capability, gatewayEnabled, runtimeRead })) return;
+      // Nothing to act on until the shell has answered the read this press asked for:
+      // the same read and the same configuration it was made against is not new
+      // information, and a different one that has not landed yet is not an answer
+      // either. Spending the request on one loses it — the person pressed Retry, the
+      // read they asked for arrives a moment later saying the engine is stopped, and
+      // nothing starts it.
+      if (!gatewayReadAnswered(requestedAgainstRef.current, { runtimeRead, gatewayEnabled, capability })) return;
       requestedAgainstRef.current = null;
       setResumeRequested(false);
       // Only an answer that still calls for a resume re-arms one. A configuration that
@@ -347,6 +388,19 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       setGatewayRun({ kind: 'idle' });
       setGatewayToken((token) => token + 1);
     }, [active, resumeRequested, runtimeRead, gatewayEnabled, capability, resumeStep]);
+
+    // The other half of the same rule, for the refresh an ATTEMPT asks for when it
+    // finishes. The answer to that one may not re-arm anything — a machine the engine
+    // keeps dying on would reinstall forever without a person ever asking — so it is
+    // recorded instead: a demand still standing is a dead end, and a dead end on this
+    // screen is the card with the Retry on it. Recorded rather than re-derived each
+    // render, because the press that follows starts another read, and a verdict
+    // recomputed from a read in flight would take its own card away mid-press.
+    React.useEffect(() => {
+      if (gatewayRun.kind !== 'settled') return;
+      if (!gatewayReadAnswered(gatewayRun.against, { runtimeRead, gatewayEnabled, capability })) return;
+      setGatewayRun(resumeStep === null ? { kind: 'idle' } : { kind: 'failed', step: null });
+    }, [gatewayRun, runtimeRead, gatewayEnabled, capability, resumeStep]);
 
     // Supply recovers on its own, because its failures are reads: a source list or a
     // scan that could not be fetched is what breaks the sentence, and the gateway
@@ -396,6 +450,20 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // boundary is about installing, not about writing.
     const hubAdmitted = ready && intent.kind === 'running';
     const writeAdmitted = active && hubAdmitted && !gatewayBusy && !verifying;
+
+    // The one write on this screen that installs. `apply_native_migration` ensures the
+    // runtime dependency before it touches a credential, and it does so unconditionally
+    // — on a host whose runtime manifest resolves to unsupported that ensure fails ahead
+    // of the branch that would have reused the engine already running, so the whole
+    // batch comes back 422 no matter how healthy the engine is. Offering it there is
+    // offering something the server has already decided to refuse.
+    //
+    // It narrows nothing else. A source, a key or an OAuth authorization is a write to
+    // an engine that is up, and the paragraph above is why that stays available: the
+    // boundary is about installing one, and this is the only button behind which an
+    // install is still waiting to happen.
+    const migrationAdmitted = writeAdmitted
+      && setupCanAttemptInstall(capability, gatewayEnabled, runtimeRead);
 
     const openAdd = React.useCallback((more: boolean, vendor: string | null) => {
       if (!writeAdmitted || sourceRead !== 'read') return;
@@ -676,11 +744,13 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             eligible={isImportableKey}
             takeable={isImportableKey}
             value={selection}
-            // Same admission, same reason as the add dialog: a take-over migrates keys
-            // INTO the Hub, so an engine that stopped while this was open has nothing to
-            // migrate them into. The review stays readable and cancellable; only the
-            // batch is refused. Settings passes nothing and keeps writing, as it always has.
-            writable={writeAdmitted}
+            // The add dialog's admission plus the one thing only this batch needs: an
+            // engine that stopped while the review was open has nothing to migrate keys
+            // into, and a host that cannot install one has a server-side refusal waiting
+            // behind the button. Either way the review stays readable and cancellable and
+            // only the batch is refused — and Settings passes nothing and keeps writing,
+            // as it always has.
+            writable={migrationAdmitted}
             onChange={(next) => changeSelection(next.selectedBackends)}
             onApplied={(applied) => {
               // `onApplied(0)` is a refresh trigger, not a receipt: the takeover reports

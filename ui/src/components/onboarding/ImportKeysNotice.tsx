@@ -52,8 +52,22 @@ export const ImportKeysNotice: React.FC<{
   const [ownCandidates, setCandidates] = React.useState<MigrationItem[]>([]);
   const [ownImported, setImported] = React.useState(0);
   const [dialogOpen, setDialogOpen] = React.useState(false);
-  const [dismissed, setDismissed] = React.useState(false);
+  /**
+   * The imported count this capsule was last dismissed against, `null` while it has
+   * never been.
+   *
+   * A dismissal is a statement about the offer the person was looking at, and it is
+   * spent the moment an import lands: the receipt for what they just asked for is
+   * the one thing this capsule exists to report, and the remainder beside it is how
+   * a partial selection gets finished. Remembering WHICH result the decision was
+   * made against is what separates 「the same thing again」 from 「something new
+   * happened」 — and it is read during render, so a stale dismissal can never draw
+   * an empty frame first and correct itself afterwards.
+   */
+  const [dismissedAt, setDismissedAt] = React.useState<number | null>(null);
   const [scanToken, setScanToken] = React.useState(0);
+  const candidates = hostedCandidates ?? ownCandidates;
+  const imported = hostedImported ?? ownImported;
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -84,7 +98,13 @@ export const ImportKeysNotice: React.FC<{
         // Only the first scan consults the persisted dismissal. A rescan follows an
         // import the person just asked for, and hiding their own result because an
         // older batch was once dismissed would lose the outcome report.
-        if (scanToken === 0) setDismissed(isMigrationDismissed(keys));
+        if (scanToken === 0) {
+          // Adopted as a decision about nothing-imported-yet, which is what it is:
+          // the only thing that moves this capsule's count is an import, and an
+          // import bumps the token above. So at token 0 the count is `0`, and the
+          // first one to land is news the dismissal cannot outrank.
+          setDismissedAt(isMigrationDismissed(keys) ? 0 : null);
+        }
       })
       .catch(() => {
         // A failed scan must not keep advertising the previous rows: the dialog it
@@ -96,22 +116,24 @@ export const ImportKeysNotice: React.FC<{
     };
   }, [hosted, modelHubEnabled, routeSurfaceActive, scanToken]);
 
-  const candidates = hostedCandidates ?? ownCandidates;
-  const imported = hostedImported ?? ownImported;
-
   // A hosted capsule has no first scan to hang the dismissal check on, so the first
   // batch the host delivers plays that part. Later batches are the host's own rescan
   // after an import, and hiding someone's result because an older batch was once
   // dismissed would lose the outcome report — the same reason the scan path only
-  // consults it at token 0.
+  // consults it at token 0. The latch is what makes this once-only, which is why
+  // `imported` can be read straight from the render scope: a re-run on a batch that
+  // landed reaches it and returns without doing anything.
   const consultedRef = React.useRef(false);
   React.useEffect(() => {
     if (!hosted || consultedRef.current || (hostedCandidates?.length ?? 0) === 0) return;
     consultedRef.current = true;
-    setDismissed(isMigrationDismissed(hostedCandidates ?? []));
-  }, [hosted, hostedCandidates]);
+    setDismissedAt(isMigrationDismissed(hostedCandidates ?? []) ? imported : null);
+  }, [hosted, hostedCandidates, imported]);
 
   const remaining = candidates.length;
+  // Hidden while the result standing now is the one that was dismissed. An import
+  // that has landed since is news, and news reopens the capsule.
+  const dismissed = dismissedAt !== null && imported <= dismissedAt;
   // The capability gate belongs to the path that would otherwise call the scan
   // itself. A host that already scanned has better evidence than this hook, which
   // resolves its own failures to `false` and would hide a real offer on a blip.
@@ -124,7 +146,7 @@ export const ImportKeysNotice: React.FC<{
     // dismissed earlier would start nagging again. With nothing left to import there
     // is nothing to remember: this is just closing a receipt.
     if (remaining > 0) writeMigrationDismissed(candidates);
-    setDismissed(true);
+    setDismissedAt(imported);
   };
 
   const message = imported === 0
