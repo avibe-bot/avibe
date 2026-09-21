@@ -2654,6 +2654,7 @@
       "replied": "已回复",
       "loadMore": "加载更多",
       "moreUnreadBeyond": "还有未读会话在后面的分页里,点击「加载更多」查看。",
+      "moreUnreadInFull": "有未读会话不在这个预览里,打开完整收件箱查看。",
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
