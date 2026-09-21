@@ -35,6 +35,7 @@ OPENCODE_REASONING_VARIANTS: Final[tuple[str, ...]] = (
 # level, so Anthropic-compatible providers translate it to a disabled thinking
 # block rather than an enabled one naming this value.
 _NO_REASONING_VARIANT: Final[str] = "none"
+
 _CUSTOM_PROVIDER_META_KEY = "vibe_remote"
 _CUSTOM_PROVIDER_ADAPTERS = {
     "openai-compatible": "@ai-sdk/openai-compatible",
