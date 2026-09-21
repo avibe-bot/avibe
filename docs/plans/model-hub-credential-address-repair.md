@@ -69,9 +69,13 @@ A service-level repair over the whole config, not a config-load rewrite and not
 a per-Source call. Three pieces:
 
 - `EngineAdapter.credential_address(credential_ref)`
-  (`vibe/model_hub_runtime/adapter.py`) answers the address custody minted for
-  one credential, read from `credential_metadata_if_present(...)["prefix"]` —
-  the same field discovery compares against. `None` when custody has no record,
+  (`vibe/model_hub_runtime/adapter.py`) answers whichever address the engine
+  would actually compose, settled the same way `bind_source` settles it: the
+  credential's own recorded `prefix`, else the prefix the bound `SourceRecord`
+  holds. Only an OAuth credential records one of its own — `store_api_key`
+  writes none — so an answer drawn from the credential alone reported *no*
+  address for a Source the engine addresses perfectly well, and the repair then
+  declined exactly the ids that needed it. `None` when nothing records one,
   which is the honest answer and means the caller must leave the id alone.
 - `core/handlers/model_hub/address_repair.py` is pure: given a `model_hub`
   payload and `{source_id: proven_address}`, it returns the repaired payload and
@@ -159,6 +163,46 @@ bare gives way to the holder (the row the product has been listing, metering and
 resolving against, which names nothing the repaired one does not); and among two
 repaired entries meeting only because the address came off, the first wins,
 which is discovery's own policy.
+
+### An addressed menu entry never routed
+
+Renaming a menu id looks like it could move which Source a turn lands on, so it
+is worth stating what the addressed spelling could do before the repair: it
+could not complete a call.
+
+`effective_model_route` (`resolver.py:261`) takes the manual route first.
+Without one it requires the id to be present in `agent.models`, then builds a
+hop per eligible Source in `agent.sources.order`, each hop carrying that
+Source's **own** inventory id. Two shapes are reachable and both fail:
+
+- the Source's inventory carries the same addressed spelling — the shape this
+  bug produces, since discovery wrote the addressed name into both — so the
+  hop's `model_id` is addressed, the unconditional composition at
+  `client.py:368` sends `<prefix>/<prefix>/<model>`, and the engine answers
+  `model_not_found` (400);
+- the inventory carries the bare name, so the literal comparison in
+  `matching_v1_model_id` matches nothing and the request ends as zero hops
+  (`mapping_target_unavailable`, 409) — or, through a passthrough-eligible
+  `api_key` Source (`source_supports_passthrough`, `resolver.py:257`), as the
+  same double-addressed 400.
+
+So an addressed menu entry with no manual route has no working Source binding
+for the rename to move. Where such an entry *did* work, it worked **through** a
+manual route, whose hop names its Source and a bare model id; that route is
+carried through the rename intact, merging hop-wise behind a bare key where one
+already exists. This is why the justification is mechanical rather than a
+product judgment about what a user meant by checking that box.
+
+What does change: someone who was aiming at a particular Source through an
+entry that only ever errored now gets a working call, which may resolve to the
+first eligible Source in `agent.sources.order` rather than the one they had in
+mind. That is a broken selection becoming a working one, not a pin being
+silently moved, and the mechanism that does pin a Source — a manual route — is
+unchanged and still available.
+
+Falsifiable claim: an addressed menu entry, with no manual route, that
+completed a call before the repair. If one exists, the rename does move a live
+binding and this reasoning needs replacing.
 
 ### The ledger is deliberately excluded
 
