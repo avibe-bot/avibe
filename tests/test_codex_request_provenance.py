@@ -274,6 +274,16 @@ def test_late_request_on_same_route_never_claims_newer_turn(tmp_path):
         assert late.turn_id is None
         late.mark_downstream_canceled()
 
+    # Off its own route, a handle whose turn has settled has nothing left to
+    # vouch for the model, so it fails closed rather than routing unattributed.
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata_old,
+    ) as stale_switch:
+        assert stale_switch.resolution_model("other-alias") is None
+        stale_switch.mark_downstream_canceled()
+
     with registry.gateway_terminalizer(
         backend="codex",
         token=token,

@@ -511,9 +511,10 @@ def render_turn_outcome_copy(
 TURN_REQUEST = "turn"
 
 # How many models beyond its own route one turn may route on its own handle.
-# A model change costs one — the outgoing model the thread is re-serialised
-# under — so this is headroom, not a budget any real turn spends.
-_MAX_CONTINUATION_MODELS_PER_TURN = 8
+# A turn migrates away from exactly one model — the outgoing one the thread is
+# re-serialised under — however many requests that re-serialisation takes, so
+# one distinct id is the whole legitimate need and anything past it is refused.
+_MAX_CONTINUATION_MODELS_PER_TURN = 1
 
 
 @dataclass
@@ -1630,7 +1631,13 @@ class TurnCorrelationRegistry:
                 return caller_model_id, True
             # Completed turn IDs are intentionally not retained. A valid
             # process-owned route handle can route a late continuation, but it
-            # cannot claim a newer active turn.
+            # cannot claim a newer active turn. Off the route it cannot even do
+            # that: the turn whose migration would have vouched for the model is
+            # gone, so nothing here is left to bound or credit the request, and
+            # a model change never re-serialises a thread whose turn has already
+            # settled.
+            if not on_route:
+                return None, False
             return caller_model_id, False
         route = credential.route
         if route is None:
