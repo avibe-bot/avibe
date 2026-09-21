@@ -1382,11 +1382,11 @@ def test_steer_memory_unavailable_keeps_human_input_independent_of_optional_impo
     ("incoming_owner", "incoming_resource", "expected"),
     [
         ({"platform": "avibe", "user_id": "local", "is_dm": False}, None, True),
-        ({"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, None, False),
-        ({"platform": "avibe", "user_id": "local", "is_dm": False}, {"sub": "other"}, False),
+        ({"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, None, True),
+        ({"platform": "avibe", "user_id": "local", "is_dm": False}, {"sub": "other"}, True),
     ],
 )
-def test_steer_memory_unavailable_preserves_delegated_authority_boundaries(
+def test_steer_memory_unavailable_keeps_delegated_policy_without_readable_scope(
     managers,
     monkeypatch,
     incoming_owner,
@@ -1397,6 +1397,7 @@ def test_steer_memory_unavailable_preserves_delegated_authority_boundaries(
     manager.controller.config.memory = SimpleNamespace(enabled=True)
     manager.controller.memory_runtime = None
     manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
+    manager.controller._memory_scopes_by_session = {}
     owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
     resource = {"sub": "local"}
     active = _steer_memory_payload(
@@ -1413,6 +1414,41 @@ def test_steer_memory_unavailable_preserves_delegated_authority_boundaries(
     deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
 
     assert manager._compatible_steer_memory_authority("turn", deliveries) is expected
+
+
+@pytest.mark.parametrize(
+    ("incoming_owner", "incoming_resource"),
+    [
+        ({"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, None),
+        ({"platform": "avibe", "user_id": "local", "is_dm": False}, {"sub": "other"}),
+    ],
+)
+def test_steer_memory_unavailable_preserves_recorded_scope_boundaries(
+    managers,
+    monkeypatch,
+    incoming_owner,
+    incoming_resource,
+):
+    manager, _other, _engine, _engine_b, _starts = managers
+    manager.controller.config.memory = SimpleNamespace(enabled=True)
+    manager.controller.memory_runtime = None
+    manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
+    manager.controller._memory_scopes_by_session = {"ses_fsm": object()}
+    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
+    active = _steer_memory_payload(
+        source="harness",
+        owner=owner,
+        resource_user_context={"sub": "local"},
+    )
+    incoming = _steer_memory_payload(
+        source="harness",
+        owner=incoming_owner,
+        resource_user_context=incoming_resource or {"sub": "local"},
+    )
+    incoming["id"] = "incoming"
+    deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
+
+    assert manager._compatible_steer_memory_authority("turn", deliveries) is False
 
 
 @pytest.mark.anyio
