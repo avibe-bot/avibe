@@ -769,7 +769,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
                     "requests": -4,
                     "token_reports": True,
                     "input_tokens": "many",
-                    "output_tokens": USAGE_COUNTER_CEILING + 1,
+                    "output_tokens": 1.5,
                 }
             ]
         ),
@@ -781,7 +781,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
     assert row["token_reports"] == 0
     assert row["input_tokens"] == 0
     assert row["cached_input_tokens"] == 0
-    assert row["output_tokens"] == USAGE_COUNTER_CEILING
+    assert row["output_tokens"] == 0
 
 
 @pytest.mark.parametrize(
@@ -1176,15 +1176,16 @@ def test_a_cached_input_share_survives_a_window_past_the_per_report_ceiling(
     assert totals["cached_input_tokens"] / totals["input_tokens"] == pytest.approx(0.95)
 
 
-def test_a_persisted_counter_is_bounded_by_what_the_read_contract_carries(
+def test_a_persisted_counter_past_the_representation_drops_its_row(
     tmp_path: Path,
 ) -> None:
-    """The one bound this module keeps, and the reason it is that number.
+    """The one bound this module keeps, and why it drops rather than saturates.
 
-    `usage-summary.schema.json` is JSON the settings page reads into doubles, so
-    a counter past 2**53 - 1 cannot be published without a reader losing it. That
-    is a claim about the contract, and no sum this module writes can reach it:
-    the probe has to come from a file nothing here would have produced.
+    A counter past 2**53 - 1 is not a count the file can hold, and no sum this
+    module writes can reach it, so the probe has to come from a file nothing here
+    would have produced. Saturating it would publish a number nobody spent — and
+    saturating this row's input and cached-input together would publish it as a
+    100% cached share, the exact artifact this ledger exists to not produce.
     """
 
     ledger = _ledger(tmp_path)
@@ -1208,9 +1209,62 @@ def test_a_persisted_counter_is_bounded_by_what_the_read_contract_carries(
         encoding="utf-8",
     )
 
+    assert ledger.window(days=30, now=NOW) == []
+    assert ledger.summary(days=30, now=NOW)["totals"] == {
+        "requests": 0,
+        "token_reports": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+    }
+
+
+def test_a_merge_the_file_cannot_hold_is_published_exactly_and_never_persisted(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Where an exact merge outgrows the file, and what each surface does with it.
+
+    Two duplicate-keyed rows are something only a corrupt or hand-merged file
+    holds, and `_read` folds them exactly — so their sum can exceed what a counter
+    is written and read back as, on a value that was admitted one row at a time.
+
+    The two surfaces answer differently on purpose. The published summary stays
+    the exact sum, because reducing an aggregate to keep a row writable is the
+    defect this ledger was fixed for. The file refuses the row instead of storing
+    a counter its next read could not use, which is also what heals it: the bucket
+    disappears rather than saturating, and the next call starts a row that means
+    what it says.
+    """
+
+    half = USAGE_COUNTER_CEILING // 2 + 1
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    duplicate = {
+        "day": local_usage_day(NOW).isoformat(),
+        "source_id": "src_a",
+        "model_id": "model-x",
+        "requests": 1,
+        "token_reports": 1,
+        "input_tokens": half,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "last_metered_at": NOW.isoformat(),
+    }
+    ledger.path.write_text(json.dumps([duplicate, dict(duplicate)]), encoding="utf-8")
+
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 2 * half
+
+    with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.usage"):
+        ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
+
+    assert any("outgrew what the file can carry" in record.message for record in caplog.records)
+    assert json.loads(ledger.path.read_text(encoding="utf-8")) == []
+
+    ledger.record(source_id="src_a", model_id="model-x", usage=None, at=NOW)
     totals = ledger.summary(days=30, now=NOW)["totals"]
-    assert totals["input_tokens"] == USAGE_COUNTER_CEILING
-    assert totals["cached_input_tokens"] == USAGE_COUNTER_CEILING
+    assert totals["requests"] == 1
+    assert totals["input_tokens"] == 0
 
 
 @pytest.mark.parametrize(

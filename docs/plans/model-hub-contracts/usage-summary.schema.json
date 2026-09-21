@@ -52,10 +52,9 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
     },
     "Count": {
-      "description": "One metered count. The maximum is the largest integer a consumer reading this document into IEEE-754 doubles holds exactly (2^53 - 1), so it bounds what a reader can carry rather than what a user may spend: every count here is the exact sum of per-call reports, each already bounded where it entered the wire. A producer must not clamp an aggregate to keep it small — a truncated total is indistinguishable from a real one.",
+      "description": "One metered count: the exact sum of the per-call reports inside the window, each already bounded where it entered the wire. Deliberately unbounded here, because how much a user spends is not the producer's to cap and a producer must never clamp an aggregate to keep it small — a truncated total is indistinguishable from a real one, and clamping a subset and its superset together forces a ratio such as a cached-input share to exactly 100%. A consumer reading this document into IEEE-754 doubles still holds every count the producer's own arithmetic can reach exactly: the store caps a persisted counter at 2^53 - 1 by its representation, so only a corrupt or hand-edited store can publish a window total above that, where a value off by one part in 9e15 is the honest answer and a capped one is not.",
       "type": "integer",
-      "minimum": 0,
-      "maximum": 9007199254740991
+      "minimum": 0
     },
     "Counters": {
       "type": "object",
