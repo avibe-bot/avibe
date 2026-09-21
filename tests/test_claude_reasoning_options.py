@@ -126,6 +126,22 @@ def test_model_reasoning_resolver_does_not_leak_another_model_map() -> None:
     assert resolve_model_reasoning_options(reasoning_options, "other-model", fallback) == fallback
 
 
+def test_normalize_claude_reasoning_effort_accepts_the_off_sentinel() -> None:
+    # "none" is the explicit "do not think" value. Unlike a tier it is not gated
+    # by the model's declared ladder, or an Agent could never turn thinking off
+    # on a model whose catalog omits it.
+    assert normalize_claude_reasoning_effort("claude-sonnet-4-5", "none") == "none"
+    assert normalize_claude_reasoning_effort("claude-opus-4-6", "none") == "none"
+    assert normalize_claude_reasoning_effort("claude-future-6", "none", ["low", "ultra"]) == "none"
+
+
+def test_claude_reasoning_options_keep_off_out_of_the_tier_list() -> None:
+    # Off is a switch, not a rung: the option list stays tiers-only so neither
+    # the catalog nor the provenance ladder advertises it as a capability.
+    for model in (None, "claude-opus-5", "claude-sonnet-4-5"):
+        assert "none" not in [item["value"] for item in build_claude_reasoning_options(model)]
+
+
 def test_normalize_claude_reasoning_effort_drops_invalid_efforts() -> None:
     assert normalize_claude_reasoning_effort("claude-sonnet-4-5", "max") is None
     assert normalize_claude_reasoning_effort("claude-opus-4-6", "xhigh") is None

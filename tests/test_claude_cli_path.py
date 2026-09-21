@@ -236,6 +236,40 @@ def test_session_handler_uses_native_cli_launch_reasoning_catalog(
     assert captured["options"].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "32000"
 
 
+def test_session_handler_turns_thinking_off_for_explicit_none(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """An Agent set to the Off sentinel must disable thinking, not pick a tier."""
+
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager.get_channel_routing = lambda _key: RoutingSettings(
+        model="claude-opus-4-6",
+        reasoning_effort="none",
+    )
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    assert captured["options"].thinking == {"type": "disabled"}
+    # ``thinking`` and ``effort`` are mutually exclusive: an effort here would
+    # re-enable the reasoning the Agent asked to turn off.
+    assert getattr(captured["options"], "effort", None) is None
+
+
 @pytest.mark.parametrize("channel", ["hub", "native_cli"])
 @pytest.mark.parametrize("explicit", [None, "", "333333"])
 @pytest.mark.parametrize("has_metadata", [False, True])

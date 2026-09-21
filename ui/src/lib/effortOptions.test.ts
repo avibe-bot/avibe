@@ -39,6 +39,19 @@ describe('effort options', () => {
     expect(isEffortSupported('codex', 'future-model', 'ultra', reasoningOptions)).toBe(true);
   });
 
+  it('offers an explicit Off on Claude ahead of its tiers', () => {
+    const reasoningOptions = {
+      'claude-opus-5': [{ value: 'high', label: 'High' }],
+    };
+
+    expect(resolveEffortOptions('claude', 'claude-opus-5', reasoningOptions)).toEqual(['none', 'high']);
+    // Off is not a tier, so it is valid whatever the model declares...
+    expect(isEffortSupported('claude', 'claude-opus-5', 'none', reasoningOptions)).toBe(true);
+    // ...while a backend that cannot switch reasoning off never grows the choice.
+    expect(isEffortSupported('opencode', 'claude-opus-5', 'none', reasoningOptions)).toBe(false);
+    expect(isEffortSupported('codex', 'claude-opus-5', 'none', reasoningOptions)).toBe(false);
+  });
+
   it('treats an explicitly empty entry as "no efforts", not as a missing answer', () => {
     const reasoningOptions = {
       '': [{ value: 'low', label: 'Low' }],
@@ -51,7 +64,7 @@ describe('effort options', () => {
     expect(isEffortSupported('claude', 'no-reasoning-model', 'medium', reasoningOptions)).toBe(false);
     expect(isEffortSupported('claude', 'no-reasoning-model', null, reasoningOptions)).toBe(true);
     // A key nobody wrote still falls back, including to the catalog default set.
-    expect(resolveEffortOptions('claude', 'unlisted-model', reasoningOptions)).toEqual(['low']);
+    expect(resolveEffortOptions('claude', 'unlisted-model', reasoningOptions)).toEqual(['none', 'low']);
   });
 
   it('honours OpenCode per-model answers and keeps its fallback for models it never names', () => {
@@ -86,7 +99,7 @@ describe('effort options', () => {
       'sentinel-only': [{ value: '__default__', label: 'Default' }],
     };
 
-    expect(resolveEffortOptions('claude', 'sentinel-plus', reasoningOptions)).toEqual(['ultra']);
+    expect(resolveEffortOptions('claude', 'sentinel-plus', reasoningOptions)).toEqual(['none', 'ultra']);
     expect(resolveEffortOptions('claude', 'sentinel-only', reasoningOptions)).toEqual([]);
   });
 

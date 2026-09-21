@@ -17,6 +17,11 @@ _REASONING_FALLBACK_OPTIONS = [
 
 _REASONING_VARIANT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
 
+# An Agent may state it wants no reasoning at all. This is distinct from an
+# unset effort, which lets the backend pick its own default (usually thinking
+# on), so it travels as a truthy sentinel rather than as an empty value.
+NO_REASONING_EFFORT = "none"
+
 _REASONING_VARIANT_LABELS = {
     "none": "None",
     "minimal": "Minimal",
@@ -667,5 +672,10 @@ def normalize_claude_reasoning_effort(
 
     if not effort:
         return None
+    # "No reasoning" is not a tier Claude takes through ``effort``; the caller
+    # translates it into ``thinking: {"type": "disabled"}``. It is valid for any
+    # model, so it bypasses the per-model tier list.
+    if effort == NO_REASONING_EFFORT:
+        return NO_REASONING_EFFORT
     allowed = {item["value"] for item in build_claude_reasoning_options(target_model, reasoning_efforts)}
     return effort if effort in allowed else None

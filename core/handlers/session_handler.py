@@ -1500,7 +1500,10 @@ class SessionHandler(BaseHandler):
             if model_hub_launch is not None and model_hub_launch.backend == "claude"
             else effective_model
         )
-        from modules.agents.opencode.utils import normalize_claude_reasoning_effort
+        from modules.agents.opencode.utils import (
+            NO_REASONING_EFFORT,
+            normalize_claude_reasoning_effort,
+        )
 
         catalog_efforts = (
             model_hub_launch.reasoning_efforts
@@ -1608,7 +1611,12 @@ class SessionHandler(BaseHandler):
         cli_path_override = self._get_claude_cli_path_override()
         if cli_path_override:
             option_kwargs["cli_path"] = cli_path_override
-        if effective_effort:
+        if effective_effort == NO_REASONING_EFFORT:
+            # Claude takes "no reasoning" as an explicit thinking switch, not as
+            # an effort tier. ``thinking`` wins over ``effort``, so the two are
+            # mutually exclusive: passing an effort here would re-enable it.
+            option_kwargs["thinking"] = {"type": "disabled"}
+        elif effective_effort:
             option_kwargs["effort"] = effective_effort
         # Only set allowed_tools if agent file specifies tools.
         # Omitting the field keeps SDK default tool behavior.
@@ -1627,7 +1635,9 @@ class SessionHandler(BaseHandler):
             logger.info(f"  Subagent: {effective_agent}")
         if effective_model:
             logger.info(f"  Model: {effective_model}")
-        if effective_effort:
+        if effective_effort == NO_REASONING_EFFORT:
+            logger.info("  Thinking: disabled")
+        elif effective_effort:
             logger.info(f"  Effort: {effective_effort}")
 
         # Log if we're resuming a session
