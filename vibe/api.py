@@ -7197,39 +7197,28 @@ def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     return isinstance(restart, dict) and bool(restart.get("ok"))
 
 
-def _agent_runtime_fingerprint(name: str, path: str | None = None) -> tuple[str | None, str | None]:
-    """Capture the effective CLI path and version for an install comparison.
+def _agent_runtime_fingerprint(name: str) -> tuple[str, str, str] | None:
+    """Measure the configured CLI, not another installation found by name.
 
-    A missing version is intentionally preserved as unknown. Callers should
-    refresh conservatively when either side cannot be measured, because a
-    successful package-manager command does not prove that the running
-    controller's effective runtime stayed unchanged.
+    Include the persisted launch path as well as its resolved target: changing
+    an alias still requires the controller to load the new configuration.
+    Unknown configuration, paths, or versions cannot prove a no-op.
     """
-    resolved_path = path or resolve_cli_path(name)
-    if not resolved_path:
-        return None, None
     try:
+        config = V2Config.load()
+        if config.load_warnings:
+            return None
+        configured_path = getattr(config.agents, name).cli_path or name
+        resolved_path = resolve_cli_path(configured_path)
+        if not resolved_path:
+            return None
         version = _probe_cli_version(resolved_path)
+        if not version:
+            return None
+        return configured_path, os.path.realpath(resolved_path), version
     except Exception as exc:  # noqa: BLE001
         logger.debug("Agent runtime fingerprint probe failed for %s: %s", name, exc)
-        version = None
-    return os.path.realpath(resolved_path), version
-
-
-def _agent_runtime_changed(
-    before: tuple[str | None, str | None],
-    after: tuple[str | None, str | None],
-) -> bool:
-    """Return whether an install may have changed the effective CLI runtime."""
-    before_path, before_version = before
-    after_path, after_version = after
-    if before_path != after_path:
-        return True
-    if not before_path or not after_path:
-        return True
-    if before_version is None or after_version is None:
-        return True
-    return before_version != after_version
+        return None
 
 
 def start_agent_install_job(name: str) -> dict:
@@ -7273,12 +7262,8 @@ def start_agent_install_job(name: str) -> dict:
             result = install_agent(name)
             if result.get("ok") and refresh_supported:
                 try:
-                    result_path = result.get("path")
-                    runtime_after = _agent_runtime_fingerprint(
-                        name,
-                        result_path if isinstance(result_path, str) else None,
-                    )
-                    if runtime_before is None or _agent_runtime_changed(runtime_before, runtime_after):
+                    runtime_after = _agent_runtime_fingerprint(name)
+                    if runtime_before is None or runtime_before != runtime_after:
                         result["restart"] = restart_backend(
                             name,
                             metadata={"reason": "agent_install_job", "source": "ui_api"},
@@ -7291,7 +7276,6 @@ def start_agent_install_job(name: str) -> dict:
                         result["restart"] = {
                             "ok": True,
                             "skipped": True,
-                            "message": "Backend runtime unchanged; refresh skipped",
                         }
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
