@@ -457,7 +457,11 @@ describe('SettingsLayout', () => {
     window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/platforms/groups');
     renderLayout('/settings/platforms/groups');
 
-    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    // Models comes from the same response, so its row appearing is how this
+    // test knows the projection has actually landed — an absent Channels row is
+    // also what a pending read looks like.
+    await waitFor(() => expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy());
+    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
     expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBeNull();
   });
 
@@ -469,8 +473,26 @@ describe('SettingsLayout', () => {
     window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
     renderLayout('/settings/platforms/groups');
 
-    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    await waitFor(() => expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy());
     expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBe('/settings/backends');
+  });
+
+  it.each([
+    ['while its projection is still pending', () => new Promise<never>(() => {})],
+    ['when its projection could not be read', () => Promise.reject(new Error('offline'))],
+  ])('keeps a feature-gated section remembered %s', async (_case, configResponse) => {
+    // The rail hides a row it cannot vouch for, which is the right default for
+    // the rail and the wrong one for a stored preference: an owner who opens
+    // Channels and leaves before the read settles must not come back to
+    // General. Only a response that says the feature is off may forget it.
+    api.getConfig.mockReturnValue(configResponse());
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/platforms/groups');
+    renderLayout('/settings/platforms/groups');
+
+    expect(await screen.findByText('groups-body')).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+      .toBe('/settings/platforms/groups');
   });
 
   it('records a section again once its row comes back', async () => {

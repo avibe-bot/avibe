@@ -249,9 +249,13 @@ export const SettingsLayout: React.FC = () => {
   const setupOriginPath = useSettingsOverlayContext()?.location.pathname;
   const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
   const standaloneMenu = useStandaloneSettingsMenu();
-  const [modelHubVisible, setModelHubVisible] = useState(false);
-  const [memoryVisible, setMemoryVisible] = useState(false);
-  const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
+  // `undefined` until the projection that gates the row arrives, and again if it
+  // could not be read. The rail treats it as hidden either way, exactly as
+  // before; the section memory below is the consumer that has to tell "not
+  // known yet" apart from "known to be gone".
+  const [modelHubVisible, setModelHubVisible] = useState<boolean | undefined>(undefined);
+  const [memoryVisible, setMemoryVisible] = useState<boolean | undefined>(undefined);
+  const [channelSettingsVisible, setChannelSettingsVisible] = useState<boolean | undefined>(undefined);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
   // Settings is a standalone page: ordinary sections use one 944px outer
@@ -284,7 +288,7 @@ export const SettingsLayout: React.FC = () => {
           }
         })
         .catch(() => {
-          if (!cancelled && request === memoryRequest) setMemoryVisible(false);
+          if (!cancelled && request === memoryRequest) setMemoryVisible(undefined);
         });
     };
     const requestedConfigVersion = configVersion;
@@ -294,8 +298,8 @@ export const SettingsLayout: React.FC = () => {
       })
       .catch(() => {
         if (!cancelled && requestedConfigVersion === configVersion) {
-          setModelHubVisible(false);
-          setChannelSettingsVisible(false);
+          setModelHubVisible(undefined);
+          setChannelSettingsVisible(undefined);
         }
       });
     refreshMemoryVisibility();
@@ -324,11 +328,9 @@ export const SettingsLayout: React.FC = () => {
     [capabilities.can_manage_instance, channelSettingsVisible, memoryVisible, modelHubVisible],
   );
 
-  const visibleSectionPaths = useMemo(
-    () => new Set(visibleGroups.flatMap((group) => group.items.flatMap(
-      (item) => [item.path, ...(item.children ?? []).map((child) => child.path)],
-    ))),
-    [visibleGroups],
+  const featureVisibility = useMemo(
+    () => ({ models: modelHubVisible, memory: memoryVisible, channels: channelSettingsVisible }),
+    [channelSettingsVisible, memoryVisible, modelHubVisible],
   );
 
   const activeTrail = useMemo(() => {
@@ -371,18 +373,21 @@ export const SettingsLayout: React.FC = () => {
   // recorded: a detail page inside a section resumes at the section that owns
   // it, which is the row the rail can show as current.
   //
-  // Only a row the rail is offering may be remembered, and this is the one
-  // place that knows which those are: turning Memory off, or the last
-  // channel-capable platform, takes a row out of the list while its page stays
-  // routed, and a memory of it would keep landing later entries on a section
-  // with nothing in the rail to match. So the same pass that records an
-  // offered row forgets an unoffered one.
+  // A feature-gated row (Models, Memory, Channels) can leave the rail while its
+  // page stays routed, and a memory of it would keep landing later entries on a
+  // section with nothing in the rail to match — so this is also where such a
+  // memory is dropped. Both halves move on settled evidence only: the gate is a
+  // projection of config that is unknown until it arrives and unknown again if
+  // it could not be read, and neither of those is grounds to touch a preference
+  // in either direction. Not recording costs one visit's worth of memory;
+  // forgetting on a pending read would spend the preference itself.
   useEffect(() => {
     const section = activeTrail.at(-1);
     if (!section) return;
-    if (visibleSectionPaths.has(section.path)) writeLastSettingsSection(section.path);
-    else forgetLastSettingsSection(section.path);
-  }, [activeTrail, visibleSectionPaths]);
+    const gate = section.feature ? featureVisibility[section.feature] : true;
+    if (gate) writeLastSettingsSection(section.path);
+    else if (gate === false) forgetLastSettingsSection(section.path);
+  }, [activeTrail, featureVisibility]);
 
   // The root is the phone's section list — the one screen a viewport with no
   // rail beside the page can navigate from, and what its entry points at. A
