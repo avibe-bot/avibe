@@ -552,6 +552,10 @@
 .model-hub-route-ordinal[data-origin="passthrough"] { color: var(--gold-ink); background: var(--model-hub-gold-1a); }
 .model-hub-route-custom { display: grid; grid-template-columns: minmax(80px, auto) minmax(0, 1fr); gap: var(--model-hub-route-custom-gap, 8px); align-items: center; padding: 0 12px var(--model-hub-route-custom-pad-block-end, 12px); font-size: 12px; }
 .model-hub-route-custom select { min-width: 0; height: var(--model-hub-route-custom-source-height, 32px); border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 0 8px; }
+/* The label term of the budgeted band, drawn rather than assumed: a bare
+   `line-height: normal` is font metrics, and a band the panel's arithmetic
+   depends on may not be a different height on the machine that renders it. */
+.model-hub-route-custom label { line-height: var(--model-hub-route-custom-label-height, 18px); }
 .model-hub-default-counts { margin-top: auto; padding: 20px; font-size: 12px; color: var(--muted); }
 .model-hub-recorded-turn { display: flex; flex-direction: column; gap: 6px; margin: 0 20px 16px; padding: 12px; border-left: 2px solid var(--destructive-ink); font-size: 12px; overflow-wrap: anywhere; color: var(--muted); }
 .model-hub-recorded-turn strong { color: var(--destructive-ink); }
@@ -1108,21 +1112,44 @@
      rather than a number someone re-eyeballs. A band added to the panel without
      a term here is what `modelHubStylePolicy.test.ts` fails on: the manual
      source/model pair was added straight into the flex column, nothing
-     recomputed, and the list — the only child that can give — went to a sliver. */
-  --model-hub-route-selector-search-height: 34px;
+     recomputed, and the list — the only child that can give — went to a sliver.
+     Each term is what its band draws, hairline included, and the rendered band
+     census in `e2e/model-catalog/route-direct-edit.spec.ts` measures every one
+     of them against the band on screen: a term that drifts low is a panel that
+     overflows the bound it just declared, one that drifts high is room taken
+     off the list for nothing. */
+  --model-hub-route-selector-hairline: 1px;
+  /* The popover draws that same hairline around itself, and `max-height` is
+     border-box: a bound written in band space is two pixels short of the column
+     it has to hold, which is the confirm row's own border painting over it. */
+  --model-hub-route-selector-frame: calc(var(--model-hub-route-selector-hairline) * 2);
+  --model-hub-route-selector-search-input: 34px;
+  --model-hub-route-selector-search-height: calc(
+    var(--model-hub-route-selector-search-input) + var(--model-hub-route-selector-hairline)
+  );
   --model-hub-route-selector-head-height: 26px;
-  --model-hub-route-selector-foot-height: 49px;
+  --model-hub-route-selector-confirm-height: 33px;
+  --model-hub-route-selector-foot-pad-block: 8px;
+  --model-hub-route-selector-foot-height: calc(
+    var(--model-hub-route-selector-hairline) +
+      var(--model-hub-route-selector-foot-pad-block) * 2 +
+      var(--model-hub-route-selector-confirm-height)
+  );
   /* What the disclosure's own toggle draws. Budgeted only where it is
      rendered: a subscription-only inventory has no model ID to type, so the
      panel there is genuinely one band shorter and must not be held open for a
      row that is not on screen. */
   --model-hub-route-selector-manual-row: 30px;
   --model-hub-route-selector-manual-height: 0px;
-  /* What the disclosure adds when it is opened: the source select, the shared
-     input at the height its primitive draws (h-9), the gap between their rows
-     and the band's own bottom padding. Terms rather than an override of the
-     primitive: if that height changes, the rendered geometry test fails on the
-     under-counted band instead of this panel silently shrinking it. */
+  /* What the disclosure adds when it is opened. The pair is a two-column grid,
+     so what it adds is one complete field column — the label, the gap the
+     shared `Field` draws under it, and the taller of the two controls — plus
+     the band's own bottom padding. Summing both controls would budget a second
+     row that is not on screen. Terms rather than an override of the primitives:
+     if one of those heights changes, the rendered census fails on the term
+     instead of this panel silently mis-budgeting the band. */
+  --model-hub-route-custom-label-height: 18px;
+  --model-hub-route-custom-field-gap: 8px;
   --model-hub-route-custom-source-height: 32px;
   --model-hub-route-custom-model-height: 36px;
   --model-hub-route-custom-gap: 8px;
@@ -1151,7 +1178,7 @@
      may not do is take the panel below its own fixed bands: there the panel
      would stop drawing its border around the confirm row instead of shrinking. */
   max-height: max(
-    var(--model-hub-route-selector-bands),
+    calc(var(--model-hub-route-selector-bands) + var(--model-hub-route-selector-frame)),
     min(
       var(--model-hub-route-selector-max),
       var(--model-hub-route-selector-room)
@@ -1159,13 +1186,17 @@
   );
 }
 .model-hub-route-selector--manual {
-  --model-hub-route-selector-manual-height: var(--model-hub-route-selector-manual-row);
+  --model-hub-route-selector-manual-height: calc(
+    var(--model-hub-route-selector-hairline) + var(--model-hub-route-selector-manual-row)
+  );
 }
 .model-hub-route-selector--manual-open {
   --model-hub-route-selector-manual-fields-height: calc(
-    var(--model-hub-route-custom-source-height) +
-      var(--model-hub-route-custom-model-height) + var(--model-hub-route-custom-gap) +
-      var(--model-hub-route-custom-pad-block-end)
+    var(--model-hub-route-custom-label-height) + var(--model-hub-route-custom-field-gap) +
+      max(
+        var(--model-hub-route-custom-source-height),
+        var(--model-hub-route-custom-model-height)
+      ) + var(--model-hub-route-custom-pad-block-end)
   );
 }
 .model-hub-route-selector-manual-toggle {
@@ -1182,7 +1213,7 @@
   border-color: var(--model-hub-wash-14);
 }
 .model-hub-route-selector [cmdk-input] {
-  height: 34px;
+  height: var(--model-hub-route-selector-search-input);
   padding-block: 0;
   font-size: 12px;
   line-height: 17px;
@@ -1212,7 +1243,7 @@
     0px,
     calc(
       min(var(--model-hub-route-selector-max), var(--model-hub-route-selector-room)) -
-        var(--model-hub-route-selector-bands)
+        var(--model-hub-route-selector-frame) - var(--model-hub-route-selector-bands)
     ),
     var(--model-hub-route-selector-list-min)
   );
@@ -1230,12 +1261,11 @@
 }
 .model-hub-route-candidate[data-selected="true"] .model-hub-route-candidate-model { color: inherit; }
 .model-hub-route-selector-foot {
-  padding: 8px 10px;
+  padding: var(--model-hub-route-selector-foot-pad-block) 10px;
   border-color: var(--model-hub-wash-14);
 }
 .model-hub-route-selector-confirm {
   --model-hub-route-selector-confirm-size: 12px;
-  --model-hub-route-selector-confirm-height: 33px;
   height: var(--model-hub-route-selector-confirm-height);
   border-radius: var(--model-hub-dialog-action-radius);
   font-size: var(--model-hub-route-selector-confirm-size);

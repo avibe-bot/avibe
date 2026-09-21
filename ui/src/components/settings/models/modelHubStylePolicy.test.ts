@@ -243,7 +243,7 @@ describe('Model Hub visual token policy', () => {
     const list = surfaceCssBody.match(/\.model-hub-route-selector-list\s*\{([^}]*)\}/)?.[1] ?? '';
 
     expect(selector).toContain('--radix-popover-content-available-height');
-    expect(selector).toMatch(/max-height:\s*max\(\s*var\(--model-hub-route-selector-bands\),\s*min\(\s*var\(--model-hub-route-selector-max\),\s*var\(--model-hub-route-selector-room\)/);
+    expect(selector).toMatch(/max-height:\s*max\(\s*calc\(var\(--model-hub-route-selector-bands\) \+ var\(--model-hub-route-selector-frame\)\),\s*min\(\s*var\(--model-hub-route-selector-max\),\s*var\(--model-hub-route-selector-room\)/);
     expect(list).toContain('overflow-y: auto');
   });
 
@@ -268,7 +268,7 @@ describe('Model Hub visual token policy', () => {
     // it does not — a floor held past that point would not produce a list, only
     // a confirm button below the fold, which is unreachable under a popover
     // that neither flips nor scrolls the page.
-    expect(list).toMatch(/min-height:\s*clamp\(\s*0px,\s*calc\(\s*min\(var\(--model-hub-route-selector-max\), var\(--model-hub-route-selector-room\)\) -\s*var\(--model-hub-route-selector-bands\)\s*\),\s*var\(--model-hub-route-selector-list-min\)\s*\)/);
+    expect(list).toMatch(/min-height:\s*clamp\(\s*0px,\s*calc\(\s*min\(var\(--model-hub-route-selector-max\), var\(--model-hub-route-selector-room\)\) -\s*var\(--model-hub-route-selector-frame\) - var\(--model-hub-route-selector-bands\)\s*\),\s*var\(--model-hub-route-selector-list-min\)\s*\)/);
     expect(px(selector, '--model-hub-route-selector-list-min'))
       .toBeGreaterThanOrEqual(px(candidate, 'min-height') * 3);
 
@@ -284,15 +284,23 @@ describe('Model Hub visual token policy', () => {
     const summed = [...(selector.match(/--model-hub-route-selector-bands:([^;]*);/)?.[1] ?? '')
       .matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1]);
     expect(summed).toEqual(bands);
-    // And the bands plus the full floor fit under the cap, so the fullest panel
-    // that is still folded — the disclosure rendered, its fields away — reaches
-    // three rows rather than stopping short of its own floor.
-    expect(bands
-      .map((band) => (band === '--model-hub-route-selector-manual-height'
-        ? '--model-hub-route-selector-manual-row' : band))
-      .reduce((total, band) => total + px(selector, band), 0)
-      + px(selector, '--model-hub-route-selector-list-min'))
-      .toBeLessThanOrEqual(px(selector, '--model-hub-route-selector-max'));
+
+    // What each term comes to is a rendered length — a term is a composition of
+    // other terms and jsdom resolves no `calc()` — so the arithmetic itself
+    // (every term against the band it draws, and the folded bands plus the
+    // floor still under the cap) is measured in the rendered census in
+    // `e2e/model-catalog/route-direct-edit.spec.ts`. What belongs here is the
+    // shape that arithmetic rests on: the bands are drawn with a hairline
+    // between them and the popover draws one around itself, and `max-height` is
+    // border-box. Left out, both were the panel overflowing the bound it had
+    // just declared by exactly the border it keeps around the confirm row.
+    expect(selector).toMatch(
+      /--model-hub-route-selector-frame:\s*calc\(var\(--model-hub-route-selector-hairline\) \* 2\)/,
+    );
+    for (const band of ['search-height', 'foot-height']) {
+      expect(selector.match(new RegExp(`--model-hub-route-selector-${band}:([^;]*);`))?.[1])
+        .toContain('var(--model-hub-route-selector-hairline)');
+    }
 
     // Each half of the disclosure is a band only where it is drawn — an
     // inventory with nothing to type by hand renders neither, and a folded one
@@ -304,17 +312,24 @@ describe('Model Hub visual token policy', () => {
       surfaceCssBody.match(new RegExp(`\\.model-hub-route-selector--${modifier}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
     expect(px(selector, '--model-hub-route-selector-manual-height')).toBe(0);
     expect(state('manual\\b')).toMatch(
-      /--model-hub-route-selector-manual-height:\s*var\(--model-hub-route-selector-manual-row\)/,
+      /--model-hub-route-selector-manual-height:\s*calc\(\s*var\(--model-hub-route-selector-hairline\) \+ var\(--model-hub-route-selector-manual-row\)\s*\)/,
     );
     expect(px(selector, '--model-hub-route-selector-manual-fields-height')).toBe(0);
     const opened = state('manual-open');
     expect([...opened.matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1])).toEqual([
+      '--model-hub-route-custom-label-height',
+      '--model-hub-route-custom-field-gap',
       '--model-hub-route-custom-source-height',
       '--model-hub-route-custom-model-height',
-      '--model-hub-route-custom-gap',
       '--model-hub-route-custom-pad-block-end',
     ]);
     expect(opened).toMatch(/--model-hub-route-selector-manual-fields-height:\s*calc\(/);
+    // The pair is a two-column grid, so what it adds is the taller field column
+    // — not both controls summed as though one sat under the other, which is a
+    // row's worth of list room given up for nothing.
+    expect(opened).toMatch(
+      /max\(\s*var\(--model-hub-route-custom-source-height\),\s*var\(--model-hub-route-custom-model-height\)\s*\)/,
+    );
 
     // The toggle draws the height its own term names, not the budgeted one:
     // that one is zero unless the panel says the row is there.
