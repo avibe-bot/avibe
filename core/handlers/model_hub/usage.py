@@ -16,13 +16,13 @@ zero usage. And nothing here ever feeds admission, routing, or cooldown — a
 hostile upstream must not be able to change resolution behavior by lying about
 usage.
 
-What "bounded" bounds is the file: a fixed number of daily rows, over a fixed
-retention window, holding counters a fixed representation can carry. It was never
-a bound on the counts themselves — how much a user spends is not ours to cap — so
-every aggregate here is an exact sum, and `USAGE_COUNTER_CEILING` constrains only
-what crosses into the file and back out of it. A row whose counters that
-representation cannot hold is dropped at whichever door it reaches, loudly, rather
-than rewritten into a number nobody spent.
+What "bounded" bounds is the file: a fixed number of daily rows over a fixed
+retention window, each carrying counters the settings page can still read back
+exactly. It was never a bound on the counts themselves — how much a user spends
+is not ours to cap — so every aggregate here is an exact sum, and
+`USAGE_COUNTER_CEILING` constrains only what crosses into the file and back out
+of it. A row carrying a counter past it is dropped at whichever door it reaches,
+loudly, rather than rewritten into a number nobody spent.
 """
 
 from __future__ import annotations
@@ -50,25 +50,40 @@ logger = logging.getLogger(__name__)
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
-# The largest integer the file's counters carry exactly. They are JSON read into
-# IEEE-754 doubles, so past 2**53 - 1 a counter comes back as a neighbouring value
-# and no reader can tell which one was written.
+# The largest integer the settings page holds exactly. Nothing on this side of the
+# wire needs it: `json.loads` reads a counter of any size into an exact `int`, and
+# so do the rpc and client hops. The doubles appear one boundary later, in the
+# browser parsing the published summary, and this is the only number in the module
+# that comes from there — which is worth saying plainly, because calling it a
+# property of the file is what made it look reusable as a bound on a sum.
 #
-# It bounds a representation, not a user. An aggregate is the exact sum of reports
-# already bounded where they entered the wire, and how many calls a user makes is
-# not ours to cap — which is why this is deliberately not the per-report ceiling,
-# why it is measured from the representation rather than declared as a policy (the
-# rule `_carried` already applies to instants), and why nothing between the file's
-# two doors clamps to it. Nothing this module writes can approach it either: every
-# persisted counter is a sum of `stream_wire.USAGE_REPORT_TOKEN_CEILING`-bounded
-# increments, so reaching it would take some nine million maximal calls inside a
-# single day.
+# It is applied at the file's doors because that is where a value can still be
+# refused. A published aggregate is a sum, and refusing a sum is the defect this
+# module was fixed for; admitting a row only up to this instead bounds every
+# published count at `USAGE_MAX_ROWS` times it, a range the consumer holds as a
+# finite double and the contract can therefore declare and satisfy — with no
+# ceiling anywhere on how much a user may spend.
 #
-# What it actually guards is a corrupt or hand-edited file, and there it drops the
-# row rather than saturating it. A saturated counter is a number nobody spent, and
-# saturating a subset and its superset together forces a cached-input share to
-# exactly 100% — the artifact this module exists to not produce.
+# Deliberately not the per-report ceiling, and nothing between the two doors
+# clamps to it. Nothing this module writes can approach it either: a window spans
+# at most `USAGE_RETENTION_DAYS` days of calls each bounded by
+# `stream_wire.USAGE_REPORT_TOKEN_CEILING`, so what it actually guards is a corrupt
+# or hand-edited file. There it drops the row rather than saturating it: a
+# saturated counter is a number nobody spent, and saturating a subset with its
+# superset forces a cached-input share to exactly 100% — the artifact this module
+# exists to not produce.
 USAGE_COUNTER_CEILING: Final = 2**53 - 1
+# The largest count `summary` can publish, and the maximum
+# `usage-summary.schema.json` declares. Derived, never enforced: a published count
+# is a sum over the window's rows, the file holds at most `USAGE_MAX_ROWS` of them,
+# and each counter is admitted only up to `USAGE_COUNTER_CEILING`. Saying it out
+# loud is what lets the contract carry a maximum that is both true and satisfiable;
+# the two things tried before were a maximum the producer could violate, and none
+# at all, which left a consumer nothing to size against and said nothing about
+# where exactness ends. Every value in the range is a finite double, only the part
+# above `USAGE_COUNTER_CEILING` rounds, and reaching that at all takes a corrupt
+# file — a window spans at most `USAGE_RETENTION_DAYS` days of real calls.
+USAGE_PUBLISHED_COUNT_BOUND: Final = USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
 # Anything older than every instant this ledger can hold, so a row that never
 # recorded one sorts as the least recently metered.
 _OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
@@ -152,7 +167,8 @@ def _counter(value: object) -> Optional[int]:
     does know.
 
     A value above `USAGE_COUNTER_CEILING` is the opposite problem. It carries a
-    magnitude the file cannot represent, so every substitute invents one, and an
+    magnitude no published document could carry to its reader, so every substitute
+    invents one in its place, and an
     invented counter that large dominates whatever aggregate it enters; saturating
     it would additionally hand a subset and its superset the same number and force
     a cached-input share to exactly 100%. So that row is not read at all. It is
@@ -160,8 +176,8 @@ def _counter(value: object) -> Optional[int]:
     takes it out of the file.
 
     No reading of a real count is refused here: the ceiling is a property of the
-    representation, and `_write` is what keeps this module from ever persisting a
-    counter past it.
+    consumer, and `_write` is what keeps this module from ever persisting a counter
+    past it.
     """
 
     if not isinstance(value, int) or isinstance(value, bool):
@@ -466,13 +482,13 @@ class BoundedUsageLedger:
         """Persist the rows the file can hold, at both of the capacities it has.
 
         `max_rows` is one and has always been applied here. The other is what a
-        counter can be written as and read back as, and it needs the same door for
-        a reason the exact merges upstream make unavoidable: folding an increment
-        onto a row near the ceiling, or merging two duplicate-keyed rows a corrupt
-        file holds, can produce a counter this file cannot carry. Persisting it
-        would put the loss somewhere worse than here — the next read would find a
-        row it cannot use, and the usage would go missing with nothing having said
-        so.
+        stored counter may be without putting the published document out of the
+        range its reader holds exactly, and it needs the same door for a reason
+        the exact merges upstream make unavoidable: folding an increment onto a row
+        near the ceiling, or merging two duplicate-keyed rows a corrupt file holds,
+        can produce a counter past it. Persisting that would put the loss somewhere
+        worse than here — the next read would find a row it cannot use, and the
+        usage would go missing with nothing having said so.
 
         So the row stops where it stops fitting, once, with its identity in the
         log. That is also what heals the file: a bucket whose stored counters were
