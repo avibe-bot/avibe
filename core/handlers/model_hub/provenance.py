@@ -1562,13 +1562,15 @@ class TurnCorrelationRegistry:
             # anything else. Answering it a second time here would duplicate
             # that authority and report an unconfigured model as an
             # incompatible request.
-            if gateway_model_id in {
-                route.gateway_request_model_id,
-                route.resolved_model_id,
-            }:
-                # On its own route the prepared caller model is the answer: it
-                # is the id the launch was told to send, which the wire id may
-                # be an upstream spelling of.
+            if gateway_model_id == route.gateway_request_model_id:
+                # The one id that proves a request is on its own route: what
+                # Avibe told this launch to send. The route's upstream target
+                # proves nothing, because menu ids and upstream ids are
+                # separate namespaces that may be spelled the same — reading
+                # that spelling as this route's would send the outgoing
+                # model's re-serialisation down the new route, to another
+                # source under another model. Where no distinct id was minted
+                # the two coincide, and this one comparison covers both.
                 caller_model_id = route.requested_model_id
             else:
                 caller_model_id = gateway_model_id

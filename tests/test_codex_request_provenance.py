@@ -432,17 +432,59 @@ def test_handle_routes_every_model_its_process_names_in_any_order(tmp_path):
             return model, terminalizer.turn_id
 
     # Some other configured model first, then the outgoing one the thread is
-    # re-serialised under, then the turn's own route by both of its spellings.
+    # re-serialised under, then the turn's own route.
     assert route("alias-other") == ("alias-other", "turn-many")
     assert route("alias-old") == ("alias-old", "turn-many")
     assert route("alias") == ("alias", "turn-many")
-    assert route("shared-upstream") == ("alias", "turn-many")
+    # The route's upstream target is a name in another namespace, so it routes
+    # as itself like any other id the handle did not mint.
+    assert route("shared-upstream") == ("shared-upstream", "turn-many")
     # A turn's own request closes the handle to nothing: a retry of the
     # migration hop behind it is the same request on the same handle.
     assert route("alias-old") == ("alias-old", "turn-many")
     trace = registry._traces["turn-many"]
     assert not trace.ambiguous
     assert "turn-many" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
+
+
+def test_outgoing_model_survives_an_upstream_name_collision(tmp_path):
+    """Menu ids and upstream target ids are separate namespaces that collide.
+
+    A route proves one spelling of itself: the id Avibe told the launch to
+    send. An outgoing menu model spelled like the new route's upstream target
+    is not that, and reading it as this route's would send the outgoing
+    model's re-serialisation down the new route — another source, another
+    model — which is the aliasing a per-route handle exists to prevent.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-new",
+        requested_model_id="alias-new",
+        # The new route relays through a source whose upstream model happens to
+        # be spelled like the menu model the thread is migrating away from.
+        resolved_model_id="gpt-5.5",
+        gateway_request_model_id="alias-new",
+    )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as migration:
+        assert migration.resolution_model("gpt-5.5") == "gpt-5.5"
+        assert migration.turn_id == "turn-new"
+        migration.mark_downstream_canceled()
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as turn:
+        assert turn.resolution_model("alias-new") == "alias-new"
+        assert turn.turn_id == "turn-new"
+        turn.mark_downstream_canceled()
 
 
 def test_retirement_revokes_explicit_auth_and_preserves_exact_closed_fact(tmp_path):
