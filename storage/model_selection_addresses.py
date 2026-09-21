@@ -1,15 +1,24 @@
 """Take a credential's address out of persisted model selections.
 
-A model id is a *selection* in these tables, not a record of one: a turn reads
+A model id is a *selection* in these stores, not a record of one: a turn reads
 them back to decide what it asks for. The precedence a turn resolves is the
 session's pin, then the channel's routing override, then the Vibe Agent's own
 model, so all three are selections and all three can hold an id an older
 release offered — the menu is where a user picked one, and every one of these
-rows is a copy of what the menu said at the time.
+rows is a copy of what the menu said at the time. A reclaimed session's
+settings snapshot is a fourth: a selection with no row left to sit on, held
+until the Session that replaces it is created.
 
 Repairing the Model Hub catalog alone would leave them naming a model that no
 longer exists under that name. Repairing them is the other half of the same
 write: one id, every place it is a key.
+
+``core.vibe_agents._rebind_agent_references`` already solves this shape for a
+renamed Agent, and its reach is the one this call matches: every persisted copy
+of the identifier, plus the settings revision that tells a live reader its
+cache is stale. A write that lands in the database but not in the revision is
+half a repair — ``V2SettingsStore.maybe_reload`` never looks, so the turn keeps
+resolving the address out of memory.
 
 A run's recorded model and a usage ledger's key are deliberately *not* here.
 Those are records of a call that was made, not inputs to one that will be, and
@@ -32,7 +41,9 @@ from sqlalchemy.engine import Engine
 
 from core.handlers.model_hub.identifiers import model_id_without_credential_addresses
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_sessions, agents, scope_settings
+from storage.models import agent_sessions, agents, run_definitions, scope_settings
+from storage.session_reclaim import SESSION_SETTINGS_SNAPSHOT_KEY
+from storage.settings_revision import mark_runtime_settings_changed
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +85,7 @@ def remove_credential_addresses_from_selections(
         return 0
     engine = engine or get_cached_sqlite_engine()
     moved = 0
+    scope_moved = 0
     with engine.begin() as connection:
         for table, key, column in _SELECTION_COLUMNS:
             rows = connection.execute(
@@ -89,7 +101,19 @@ def remove_credential_addresses_from_selections(
                     update(table).where(key == row_key).values({column.key: identity})
                 )
                 moved += 1
-        moved += _repaired_routing_payloads(connection, known)
+                if table is scope_settings:
+                    scope_moved += 1
+        routing_moved = _repaired_routing_payloads(connection, known)
+        moved += routing_moved
+        scope_moved += routing_moved
+        moved += _repaired_session_snapshots(connection, known)
+        if scope_moved:
+            # Published in the same transaction, so a reader sees the repaired
+            # rows and the new revision together or neither. Without it the
+            # settings store keeps serving what it cached at load: the IM turn
+            # resolves the stale override, and the next same-scope save writes
+            # it back.
+            mark_runtime_settings_changed(connection)
     return moved
 
 
@@ -138,4 +162,65 @@ def _repaired_routing_payloads(connection: Any, known: frozenset[str]) -> int:
             )
         )
         moved += changed
+    return moved
+
+
+def _repaired_session_snapshots(connection: Any, known: frozenset[str]) -> int:
+    """Rewrite the model a reclaimed Session's settings snapshot still pins.
+
+    ``run_definitions`` carries no model column, so a ``create_once`` Task that
+    outlived its Session keeps the selection here and
+    ``_rebind_create_once_session`` writes it straight onto the replacement
+    Session. A snapshot left addressed re-seeds the exact value this repair
+    removed, onto a row created after the catalog stopped offering it, and
+    nothing runs the repair a second time.
+
+    Soft-deleted definitions are included. The rename path skips them because
+    it keeps live bindings pointed at the right Agent; this one makes the
+    address absent from storage, and a row that is only marked deleted still
+    stores it.
+    """
+
+    rows = connection.execute(
+        select(run_definitions.c.id, run_definitions.c.metadata_json)
+    ).all()
+    moved = 0
+    for definition_id, raw in rows:
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.debug(
+                "model hub: unreadable definition metadata for %s", definition_id
+            )
+            continue
+        snapshot = (
+            payload.get(SESSION_SETTINGS_SNAPSHOT_KEY)
+            if isinstance(payload, dict)
+            else None
+        )
+        if not isinstance(snapshot, dict):
+            continue
+        value = snapshot.get("model")
+        if not isinstance(value, str) or not value:
+            continue
+        identity = model_id_without_credential_addresses(value, known)
+        if identity == value:
+            continue
+        connection.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == definition_id)
+            .values(
+                metadata_json=json.dumps(
+                    {
+                        **payload,
+                        SESSION_SETTINGS_SNAPSHOT_KEY: {**snapshot, "model": identity},
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        )
+        moved += 1
     return moved

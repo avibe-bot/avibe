@@ -124,17 +124,28 @@ back, in this precedence, to decide what it asks for
 | `scope_settings.settings_json` → `routing.{model,model_override,opencode_model,claude_model,codex_model}` | A channel's routing override; read **before** the column | Renamed |
 | `scope_settings.model` | The same override, column form | Renamed |
 | `agents.model` | The Vibe Agent's own model | Renamed |
+| `run_definitions.metadata_json` → `session_settings_snapshot.model` | A reclaimed Session's pin, held for the Session that replaces it | Renamed |
 | `agent_runs.model` | A record of a call that was made | **Not** renamed |
 | `skill_usage_daily.model` | A metering key | **Not** renamed |
 
-The split is selection versus record. The first four decide a future request;
+The split is selection versus record. The first five decide a future request;
 leaving one addressed keeps the Agent broken after the catalog is repaired —
 the failure only changes from a double-addressed `model_not_found` to a
 `mapping_target_unavailable`. The last two describe calls already made, and
 rewriting them would restate history.
 
-`run_definitions` has no model column at all: a scheduled run resolves its
-model live through its Agent, so it inherits the repair for free.
+The snapshot is the one selection with no row of its own, and the reason a
+"`run_definitions` has no model column" reading of the schema is not enough.
+`session_reclaim` writes it precisely *because* the column does not exist: a
+`create_once` Task whose Session was torn down would otherwise re-resolve
+against scope defaults and silently change model, so the pin is parked in
+definition metadata and `_rebind_create_once_session` writes it back onto the
+replacement Session. An addressed snapshot therefore re-seeds the value on a
+row created *after* the config witness was cleared, where no later demand runs
+the repair again. Soft-deleted definitions are included: the rename path skips
+them because it keeps live bindings correct, while this repair is making the
+address absent from storage, and a row that is only marked deleted still
+stores it.
 
 The hub proves which addresses are addresses; it does not own these rows. It
 hands the proven set to `repair_model_selections`, which the controller wires
@@ -163,6 +174,37 @@ bare gives way to the holder (the row the product has been listing, metering and
 resolving against, which names nothing the repaired one does not); and among two
 repaired entries meeting only because the address came off, the first wins,
 which is discovery's own policy.
+
+### A reader already holding the answer
+
+The settings store is the other thing a committed row does not reach.
+`V2SettingsStore` serves channel routing from memory and reloads only when
+`runtime_settings_revision` differs from the one it observed
+(`v2_settings.py:531`), so a repair that rewrites `scope_settings` and stops
+there is half a repair: the IM turn keeps resolving the address the store
+cached at load, and the next same-scope save writes it back to disk. The
+repair therefore publishes `mark_runtime_settings_changed` in its own
+transaction, so a reader sees the repaired rows and the new revision together
+or neither.
+
+Only a scope movement publishes. An Agent's model and a Session's pin are read
+from their row on every turn — `VibeAgentStore` holds no cache — and that
+revision gates the settings domain alone, so republishing for them would make
+every live store reload for a change it does not hold.
+
+Together with the backend refresh above, this is the whole set of live readers:
+the engine projection, the running backend's catalog, and the settings store.
+
+**Why these two were missed, and the shape that finds them.** Both gaps are one
+class — *a copy of a selection that outlives the row it was read from*, whether
+it outlives it in another table or in memory. `core.vibe_agents`'s
+`_rebind_agent_references` already solves exactly this class for a renamed
+Agent, and its reach is the checklist: every persisted copy of the identifier
+(`agent_sessions`, `agent_runs`, `scope_settings` column **and**
+`settings_json`, `run_definitions` column **and** `metadata_json`), plus the
+settings revision. Enumerating the schema found the four columns; only the
+rename precedent finds the snapshot and the revision. A future identifier
+migration should start from that function, not from the column list.
 
 ### An addressed menu entry never routed
 
@@ -314,6 +356,11 @@ tries again.
 
 - all three selections a turn resolves lose the address, including every key a
   scope's routing payload can spell one under;
+- a reclaimed Session's `session_settings_snapshot` loses it too — soft-deleted
+  definitions included — while everything the snapshot is not survives the
+  rewrite;
+- a repaired scope publishes a new `runtime_settings_revision`, and a repair
+  that moved no scope leaves it alone;
 - an identity no address proves is left alone, including a foreign minted
   address and the upstream slashes;
 - a second pass finds nothing left to move, an empty proof set touches nothing,
