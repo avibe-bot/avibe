@@ -84,6 +84,8 @@ class _Controller:
         self.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
         self.agent_service = SimpleNamespace(agents={}, _turn_gates={})
         self.config = SimpleNamespace(language="en")
+        self.memory_runtime = SimpleNamespace()
+        self._memory_implementation_error = None
         self.statuses: list[tuple[str, str]] = []
 
     @staticmethod
