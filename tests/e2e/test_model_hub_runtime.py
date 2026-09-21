@@ -43,11 +43,44 @@ def _local_engine_manifest() -> str:
     return str(path.resolve())
 
 
-def _engine_app(model_hub_app_factory):
+def _engine_app(model_hub_app_factory, *, before_start=None):
     manifest = _local_engine_manifest()
-    return model_hub_app_factory(
-        extra_env={"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest}
+    kwargs = {
+        "extra_env": {"VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH": manifest}
+    }
+    if before_start is not None:
+        kwargs["before_start"] = before_start
+    return model_hub_app_factory(**kwargs)
+
+
+def _seed_stopped_runtime(app: ModelHubTestApp) -> None:
+    """Keep installation from inheriting the fresh-install runtime intent."""
+
+    script = """
+from config.v2_config import MODEL_HUB_BACKENDS, V2Config
+
+config = V2Config.default()
+config.model_hub.enabled = False
+for backend in MODEL_HUB_BACKENDS:
+    config.model_hub.agents[backend].mode = "direct"
+config.update.auto_update = False
+config.update.check_interval_minutes = 0
+config.save()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=app.repo_root,
+        env=app.env,
+        capture_output=True,
+        timeout=20,
     )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).decode(
+            "utf-8", errors="replace"
+        )
+        raise AssertionError(
+            f"could not seed stopped Model Hub runtime: {output}"
+        )
 
 
 @contextmanager
@@ -93,7 +126,9 @@ def _isolated_engine_adapter(tmp_path, monkeypatch):
             supervisor.stop()
 
 
-def _install_engine(app) -> list[str]:
+def _install_engine(
+    app, *, expected_final_health: str | None = None
+) -> list[str]:
     observed: list[str] = []
     response = app.client.post("/api/models/runtime/install", {})
     body = response.json()
@@ -119,7 +154,13 @@ def _install_engine(app) -> list[str]:
         if health != "installing":
             break
         time.sleep(0.1)
-    assert latest["status"]["health"] == "not_started", latest
+    if expected_final_health is None:
+        # A freshly started fixture restores the enabled runtime intent before
+        # this endpoint is called, so installation may settle with the engine
+        # already running. Both states are valid outcomes of install.
+        assert latest["status"]["health"] in {"not_started", "ok"}, latest
+    else:
+        assert latest["status"]["health"] == expected_final_health, latest
     assert latest["status"]["verified"] is True
     return observed
 
@@ -657,8 +698,14 @@ def test_a2_offline_engine_install_start_stop_and_hardened_config(
 ) -> None:
     """A2: install/start/stop preserves the hardened engine configuration."""
 
-    with _engine_app(model_hub_app_factory) as app:
-        observed = _install_engine(app)
+    with _engine_app(
+        model_hub_app_factory,
+        before_start=_seed_stopped_runtime,
+    ) as app:
+        observed = _install_engine(
+            app,
+            expected_final_health="not_started",
+        )
         assert "installing" in observed
 
         started = app.client.post("/api/models/runtime/start", {})
@@ -708,7 +755,7 @@ def test_a3_runtime_stop_reports_every_blocking_backend(
     body = refused.json()
     assert refused.status == 409, body
     assert body["error"] == "runtime_in_use"
-    assert body["backends"] == ["claude", "codex"]
+    assert body["backends"] == ["claude", "codex", "opencode"]
 
 
 def test_a5_controller_restart_during_oauth_poll_reports_engine_down(
