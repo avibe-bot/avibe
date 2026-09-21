@@ -800,8 +800,153 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
     return migrated
 
 
+def _migrate_model_hub_credential_addresses(payload: dict) -> dict:
+    """Drop credential addresses from model names an earlier release stored.
+
+    The engine addresses a credential through the model field of one outbound
+    request, so a call spells its target ``<source prefix>/<model>``. Releases
+    before this one persisted what the engine's management API answered with,
+    which is already addressed, so a stored inventory id could carry the address
+    of the credential that served it. Composition then addressed it a second
+    time and the engine refused the call, and resolution — which compares a
+    menu id against an inventory id literally — matched nothing either.
+
+    A bounded repair rather than a rule in the admission path. Discovery now
+    removes the address of the credential it is discovering, at the boundary
+    where the address enters, so no newly written file carries one; what remains
+    is files already written, and this is the compatibility boundary that reads
+    them. Nothing here is claimed about a name a caller sends afterwards.
+
+    Only rows discovery produced are touched. Those are the only rows an address
+    could have reached, and it means a model a person added by hand is never
+    renamed, however it is spelled. A config file records no prefix to compare
+    against — that lives with the credential — so the address is recognised by
+    its minted shape, which is safe exactly because of that provenance limit.
+
+    Unwrapping can land a discovered row on a name a manual row already holds,
+    which is the shape left behind when someone added the bare name by hand to
+    work around this bug. The manual row wins: it carries a display name,
+    reasoning efforts, and a provenance a person chose, and the discovered row
+    duplicates an identity rather than adding one. Next discovery re-attaches
+    upstream metadata to the surviving row.
+
+    Any shape this cannot read is returned untouched, so the strict parse that
+    follows still reports it rather than having it quietly repaired here.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload
+    raw_sources = model_hub.get("sources")
+    if not isinstance(raw_sources, list):
+        return payload
+
+    from core.handlers.model_hub.identifiers import model_id_without_credential_address
+
+    healed_sources: list[dict] = []
+    # Per Source, the addressed spellings this repair renamed and what each
+    # became. A route hop is rewritten only if it names one of these, so a hop
+    # is never redirected to a model this file does not show it already meant.
+    renamed: dict[str, dict[str, str]] = {}
+    changed = False
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            return payload
+        models = source.get("models")
+        source_id = source.get("id")
+        if not isinstance(models, list) or not isinstance(source_id, str):
+            healed_sources.append(source)
+            continue
+        # Which rows this repair moves, and which names it is not moving. Read
+        # before anything is rewritten, because a name a row already holds
+        # outranks one this repair would move onto it however the file orders
+        # the two — a manual row a person added by hand to work around this
+        # bug most of all.
+        settled: dict[str, str] = {}
+        held: set[str] = set()
+        for model in models:
+            if not isinstance(model, dict):
+                return payload
+            model_id = model.get("id")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            identity = (
+                model_id_without_credential_address(model_id)
+                if model.get("origin") == "discovered"
+                else model_id
+            )
+            if identity == model_id:
+                held.add(model_id)
+            else:
+                settled[model_id] = identity
+
+        healed_models: list[dict] = []
+        moved: set[str] = set()
+        for model in models:
+            model_id = model.get("id")
+            identity = settled.get(model_id) if isinstance(model_id, str) else None
+            if identity is None:
+                # Untouched, including a row this file lists twice: a duplicate
+                # this repair did not create is still the strict parse's to report.
+                healed_models.append(model)
+                continue
+            changed = True
+            if identity in held or identity in moved:
+                continue
+            moved.add(identity)
+            healed_models.append({**model, "id": identity})
+        if settled:
+            renamed[source_id] = settled
+        healed_sources.append({**source, "models": healed_models})
+
+    if not changed:
+        return payload
+
+    healed_hub = {**model_hub, "sources": healed_sources}
+    agents = model_hub.get("agents")
+    if isinstance(agents, dict):
+        healed_agents: dict[str, object] = {}
+        for backend, agent in agents.items():
+            routes = agent.get("routes") if isinstance(agent, dict) else None
+            if not isinstance(routes, dict):
+                healed_agents[backend] = agent
+                continue
+            healed_routes: dict[str, object] = {}
+            for requested, route in routes.items():
+                hops = route.get("hops") if isinstance(route, dict) else None
+                if not isinstance(hops, list):
+                    healed_routes[requested] = route
+                    continue
+                healed_hops: list[object] = []
+                # Which hop already holds each pair, and whether this repair is
+                # what put it there. A hop is dropped only where renaming is
+                # what made the two identical; a route that already listed one
+                # hop twice still reaches the strict parse that refuses it.
+                settled_hops: dict[tuple[str, str], bool] = {}
+                for hop in hops:
+                    if isinstance(hop, dict):
+                        source_id = hop.get("source_id")
+                        model_id = hop.get("model_id")
+                        if isinstance(source_id, str) and isinstance(model_id, str):
+                            identity = renamed.get(source_id, {}).get(model_id)
+                            if identity is not None:
+                                hop = {**hop, "model_id": identity}
+                                model_id = identity
+                            earlier = settled_hops.get((source_id, model_id))
+                            if earlier is not None and (identity is not None or earlier):
+                                continue
+                            settled_hops[(source_id, model_id)] = identity is not None
+                    healed_hops.append(hop)
+                healed_routes[requested] = {**route, "hops": healed_hops}
+            healed_agents[backend] = {**agent, "routes": healed_routes}
+        healed_hub["agents"] = healed_agents
+
+    return {**payload, "model_hub": healed_hub}
+
+
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
+    migrated = _migrate_model_hub_credential_addresses(migrated)
     migrated, catalog_changed, catalog_warnings = _migrate_legacy_opencode_catalog(migrated)
     model_hub_changed = changed or catalog_changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
@@ -2729,16 +2874,10 @@ class ModelHubModelConfig:
         # config, so no admission path can invent a second spelling for one
         # model and split its usage across two ledger rows. New-admission checks
         # stay with callers: this constructor also reads older persisted files.
-        # A credential address is unwrapped as part of that settling, and not
-        # inside `normalized_model_id`, because that spelling is also what a
-        # usage ledger key is derived from and its historical encoding is fixed.
-        from core.handlers.model_hub.identifiers import (
-            model_id_without_credential_address,
-            normalized_model_id,
-        )
+        from core.handlers.model_hub.identifiers import normalized_model_id
 
         return cls(
-            id=model_id_without_credential_address(normalized_model_id(model_id)),
+            id=normalized_model_id(model_id),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             reasoning_efforts_source=reasoning_efforts_source,
@@ -3077,15 +3216,9 @@ class ModelHubRouteHopConfig:
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
         # Keep saved targets in the same canonical namespace as inventory evidence.
-        from core.handlers.model_hub.identifiers import (
-            model_id_without_credential_address,
-            normalized_model_id,
-        )
+        from core.handlers.model_hub.identifiers import normalized_model_id
 
-        return cls(
-            source_id=source_id,
-            model_id=model_id_without_credential_address(normalized_model_id(model_id)),
-        )
+        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}

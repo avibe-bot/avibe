@@ -50,6 +50,10 @@ def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
     one-shot script keeps one spelling in memory no matter which release wrote
     the file, and the next ordinary write persists it.
 
+    A record names the prefix it is addressed by, so only that exact address is
+    removed. Nothing is claimed about any other name: a model whose own identity
+    happens to be spelled like an address belongs to whoever named it.
+
     Unwrapping can collapse two stored names onto one identity. The strict
     parse below refuses a repeated reasoning key and a repeated route target,
     so this keeps the first of each instead: a file that loads today must keep
@@ -58,12 +62,17 @@ def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
     so the parse still reports it.
     """
 
+    prefix = payload.get("prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return payload
+
     healed = dict(payload)
     model_ids = payload.get("model_ids")
     if isinstance(model_ids, list):
         healed["model_ids"] = list(
             dict.fromkeys(
-                model_id_without_credential_address(str(model)) for model in model_ids
+                model_id_without_credential_address(str(model), prefix)
+                for model in model_ids
             )
         )
     route_model_ids = payload.get("route_model_ids")
@@ -72,7 +81,8 @@ def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         healed["route_model_ids"] = list(
             dict.fromkeys(
-                model_id_without_credential_address(model) for model in route_model_ids
+                model_id_without_credential_address(model, prefix)
+                for model in route_model_ids
             )
         )
     reasoning_efforts = payload.get("model_reasoning_efforts")
@@ -83,7 +93,7 @@ def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
         healed_efforts: dict[str, Any] = {}
         for model_id, efforts in reasoning_efforts:
             healed_efforts.setdefault(
-                model_id_without_credential_address(model_id), efforts
+                model_id_without_credential_address(model_id, prefix), efforts
             )
         healed["model_reasoning_efforts"] = [
             [model_id, efforts] for model_id, efforts in healed_efforts.items()
@@ -584,9 +594,19 @@ class EngineStateStore:
                 if credential["kind"] == "oauth" and not allowed_origins:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
+                # Settle the address this Source is reached by before reading any
+                # model name, so a name carrying it is unwrapped against the one
+                # prefix that owns it rather than against the shape of a prefix.
+                prefix = (
+                    str(credential["prefix"])
+                    if credential.get("prefix")
+                    else previous.prefix
+                    if previous
+                    else f"avibe-{secrets.token_hex(12)}"
+                )
                 model_ids = tuple(
                     dict.fromkeys(
-                        model_id_without_credential_address(str(model).strip())
+                        model_id_without_credential_address(str(model).strip(), prefix)
                         for model in binding.model_ids
                     )
                 )
@@ -597,7 +617,9 @@ class EngineStateStore:
                     raise EngineStateError("invalid route model id")
                 reasoning_by_model: dict[str, tuple[str, ...]] = {}
                 for model_id, efforts in binding.model_reasoning_efforts:
-                    normalized_model_id = model_id_without_credential_address(str(model_id).strip())
+                    normalized_model_id = model_id_without_credential_address(
+                        str(model_id).strip(), prefix
+                    )
                     if not normalized_model_id or normalized_model_id not in model_ids:
                         raise EngineStateError("reasoning model id is not registered")
                     if normalized_model_id in reasoning_by_model:
@@ -620,18 +642,12 @@ class EngineStateStore:
                         route_model_ids=tuple(
                             sorted(
                                 {
-                                    model_id_without_credential_address(model)
+                                    model_id_without_credential_address(model, prefix)
                                     for model in route_model_ids
                                 }
                             )
                         ),
-                        prefix=(
-                            str(credential["prefix"])
-                            if credential.get("prefix")
-                            else previous.prefix
-                            if previous
-                            else f"avibe-{secrets.token_hex(12)}"
-                        ),
+                        prefix=prefix,
                         model_reasoning_efforts=tuple(reasoning_by_model.items()),
                     )
                 )
@@ -651,7 +667,9 @@ class EngineStateStore:
                 raise EngineStateError("source is not registered")
             models = tuple(
                 dict.fromkeys(
-                    model_id_without_credential_address(str(model).strip())
+                    model_id_without_credential_address(
+                        str(model).strip(), current.prefix
+                    )
                     for model in model_ids
                 )
             )

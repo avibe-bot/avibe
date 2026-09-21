@@ -2100,7 +2100,11 @@ class CLIProxyEngineAdapter:
                 "/auth-files/models",
                 query={"name": str(metadata["auth_name"])},
             )
-            return _discovered_models(payload)
+            prefix = metadata.get("prefix")
+            return _discovered_models(
+                payload,
+                str(prefix) if isinstance(prefix, str) and prefix else None,
+            )
         normalized_base_url = await asyncio.to_thread(
             self.state_store.validate_api_key_target,
             credential_ref,
@@ -2904,7 +2908,10 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     return inventory
 
 
-def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...]:
+def _discovered_models(
+    payload: Mapping[str, Any],
+    prefix: str | None = None,
+) -> tuple[DiscoveredModel, ...]:
     models = payload.get("models")
     if not isinstance(models, list):
         return ()
@@ -2914,11 +2921,12 @@ def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
         if not isinstance(value, str) or not value:
             continue
-        # The engine answers with the name it addresses this credential by. The
-        # address is how one call reaches one credential, never part of what the
-        # model is called, so it is unwrapped here — at the boundary it enters
-        # the product — rather than by every later reader of the inventory.
-        value = model_id_without_credential_address(value)
+        # This is the one place an address enters the product: the engine answers
+        # with the name it addresses this credential by. It is removed here, at
+        # that boundary, rather than by every later reader of the inventory — and
+        # only the address of the credential being discovered, so a model whose
+        # own name is spelled like one is left as upstream named it.
+        value = model_id_without_credential_address(value, prefix)
         if not value or value in seen:
             continue
         seen.add(value)

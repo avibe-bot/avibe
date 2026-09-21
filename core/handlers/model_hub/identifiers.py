@@ -17,31 +17,45 @@ USAGE_LEDGER_KEY_MAX_LENGTH = (
     USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
 )
 
-# The engine addresses a credential through the model name and no other field,
-# so an outbound call spells one as ``<source prefix>/<model>``. That prefix is
-# the address of a credential, never part of a model's identity, and it is
-# minted per Source as ``avibe-`` plus twelve random bytes. Match that minted
-# spelling exactly rather than any leading segment: an upstream identity may
-# legitimately carry a slash of its own — OpenRouter's ``anthropic/claude-x``,
-# Together's ``meta-llama/Llama-3-70b`` — and stripping one of those would
-# rename the model instead of unwrapping an address.
-_CREDENTIAL_ADDRESS = re.compile(r"avibe-[0-9a-f]{24}")
+# The shape a Source prefix is minted in: ``avibe-`` plus twelve random bytes.
+# Only ever used to recognise an address in a record that does not say which one
+# it carries; wherever the owning prefix is known, it is compared literally.
+_CREDENTIAL_ADDRESS_SHAPE = re.compile(r"avibe-[0-9a-f]{24}")
 
 
-def model_id_without_credential_address(value: str) -> str:
+def model_id_without_credential_address(value: str, prefix: str | None = None) -> str:
     """Return the identity ``value`` names, with no credential address around it.
 
-    The engine's management API answers with names it has already addressed, so
-    a discovered identity arrives wrapped and a persisted one may have been
-    stored wrapped by an earlier release. Unwrapping repeatedly rather than once
-    makes the result total: whatever this returns carries no address, so a
-    caller never has to ask how many an identity accumulated.
+    The engine addresses a credential through the model name and no other field,
+    so an outbound call spells one as ``<source prefix>/<model>``. That prefix is
+    the address of a credential, never part of a model's identity.
+
+    ``prefix`` is the address of the credential this identity belongs to. Given
+    one, only that exact address is removed, so nothing is claimed about any
+    other name: reserving the whole ``avibe-<hex>/`` namespace would rewrite an
+    upstream identity that happened to be spelled that way, and an identity is
+    not ours to rename. Callers that hold the owning Source or credential always
+    pass it.
+
+    Without one, the address is recognised by its minted shape. That is for a
+    record which stores no prefix of its own to compare against — a config file
+    an earlier release wrote — and it is why that path is confined to rows
+    discovery produced, which are the only rows an address can have reached.
+
+    Unwrapping repeatedly rather than once makes the result total: whatever this
+    returns carries no address, so a caller never has to ask how many one
+    identity accumulated across releases.
     """
 
     identity = value
     while True:
         address, separator, remainder = identity.partition("/")
-        if not separator or not remainder or not _CREDENTIAL_ADDRESS.fullmatch(address):
+        if not separator or not remainder:
+            return identity
+        if prefix is not None:
+            if address != prefix:
+                return identity
+        elif not _CREDENTIAL_ADDRESS_SHAPE.fullmatch(address):
             return identity
         identity = remainder
 
