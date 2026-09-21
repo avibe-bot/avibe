@@ -8,7 +8,6 @@ import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
-import { SETTINGS_LANDING_PATH } from '../../lib/adminNavigation';
 import { useAuthAccount } from '../../lib/useAuthAccount';
 import { useShowPageInventory } from '../useShowPages';
 import { MoreAccountSection, MoreAppearanceSection, MoreConnectionSection } from '../workbench/MorePage';
@@ -224,9 +223,13 @@ export const MobileDockDrawer: React.FC<{ open: boolean; onClose: () => void }> 
 
         {/* Footer chip row — the absorbed More-page content. 设置 navigates; 账号
             and 更多 open a small overflow sheet. Appearance lives inside 更多 so
-            the three English labels fit without truncation. */}
+            the three English labels fit without truncation.
+
+            设置 goes to the Settings root, which on a phone IS the section list:
+            a viewport with no rail beside the page has to be handed the menu, or
+            the way to every other section is a Back the user has to discover. */}
         <div className="mt-4 flex items-stretch gap-2 border-t border-border pt-3">
-          <Link to={SETTINGS_LANDING_PATH} onClick={onClose} className={chipClass}>
+          <Link to="/settings" onClick={onClose} className={chipClass}>
             <Settings className="size-4 shrink-0" />
             <span className="truncate">{t('more.controlPanel')}</span>
           </Link>
