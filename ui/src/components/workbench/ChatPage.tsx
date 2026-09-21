@@ -1281,16 +1281,19 @@ export const ChatPage: React.FC = () => {
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
-    if (!sessionId) return;
+    if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
-      if (isCurrentRequest && !isCurrentRequest()) return;
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
-      if (!claimQueueSnapshot()) return;
-      setQueue(res.queued ?? []);
+      if (isCurrentRequest && !isCurrentRequest()) return null;
+      if (sessionId !== sessionIdRef.current) return null; // switched chats mid-fetch
+      if (!claimQueueSnapshot()) return null;
+      const queued = res.queued ?? [];
+      setQueue(queued);
+      return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
+      return null;
     }
   }, [api, beginQueueSnapshotRead, sessionId]);
 
@@ -2337,12 +2340,13 @@ export const ChatPage: React.FC = () => {
     // failed or ambiguous request never hides work the user may need to retry.
     setSendingQueueNow(true);
     setError(null);
+    const messageId = queue[0].id;
     // A turn is about to run (the flushed queue) — reflect it immediately so
     // Stop stays available even if the controller's turn.start is missed/delayed
     // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
     markWorking();
     try {
-      const res = await api.sendQueuedNow(sid, queue[0].id);
+      const res = await api.sendQueuedNow(sid, messageId);
       // Drop every effect from a request that lost ownership while it was in
       // flight, including responses that arrive after a newer send starts.
       if (!isCurrentRequest()) return;
@@ -2351,7 +2355,10 @@ export const ChatPage: React.FC = () => {
         // queue intact — keep Stop visible so the user can still interrupt it
         // (Codex P2). Other failures mean no turn is running → clear working.
         if (res.code !== 'stop_failed') setWorking(false);
-        setError(res.detail ? String(res.detail) : t('chat.queue.sendFailed'));
+        // Response detail is a transport/controller diagnostic, not
+        // user-facing copy. In particular, do not leak raw socket errors from
+        // the controller-unavailable path into the chat.
+        setError(t('chat.queue.sendFailed'));
       } else if (res?.status === 'queued') {
         setError(t(res.reason === 'attachments_unavailable'
           ? 'chat.queue.attachmentsUnavailable'
@@ -2370,16 +2377,20 @@ export const ChatPage: React.FC = () => {
       // The same ownership guard applies to failures: an older request must not
       // clear the new chat's working state or surface a stale error.
       if (isCurrentRequest()) {
-        setWorking(false);
         // The server may have settled or retired the row even when this
         // request failed at the transport boundary. Re-read the authoritative
         // queue so an old browser snapshot does not remain visible forever.
-        await refreshQueue(isCurrentRequest);
-        // Do not expose transport/backend exception text here. It is not
-        // actionable for the user and used to be rendered as "couldn't
-        // contact the agent", even when the original queued Delivery was
-        // still safely retained for retry.
-        setError(t('chat.queue.sendFailed'));
+        const refreshedQueue = await refreshQueue(isCurrentRequest);
+        // The request may have lost ownership while the authoritative refresh
+        // was in flight. Recheck before touching shared ChatPage state.
+        if (!isCurrentRequest()) return;
+        setWorking(false);
+        const stillQueued = refreshedQueue?.some((item) => item.id === messageId) ?? false;
+        // If the row is absent (or the refresh failed), the transport outcome
+        // is ambiguous. Do not tell the user to retry until they have checked
+        // the authoritative state, since the controller may already have
+        // accepted and retired the delivery.
+        setError(t(stillQueued ? 'chat.queue.sendFailed' : 'chat.queue.sendStatusUnknown'));
       }
     } finally {
       if (isCurrentRequest()) {
