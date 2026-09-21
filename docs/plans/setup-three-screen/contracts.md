@@ -1,21 +1,22 @@
 # Setup three-screen — contracts C1–C6
 
-Status: **PR0 repaired interface proposal**, audited against head
-`890014421ff855e0d2476c9179dbf5a10bb1eca3`. The handoff remains unchanged user source.
+Status: **PR0 interface proposal; D10 owner-ratified**, audited against head
+`08b82658bbbf3e3e952fa1007c13f93fbca51410`. The handoff remains unchanged user source.
 The approved `model-hub-native-takeover.md` supplies runtime/custody precedent; the
 orchestrator adopts its automatic runtime preparation and the routine decisions in plan §10.
 The owner reaffirmed on 2026-09-21 12:56 +08 that setup uses Model Hub; disabling it
 belongs to Settings afterward. There is no Direct setup branch, including explicit opt-out.
-That decision does not adopt D10, authorize feature implementation or extend #2065 merge
-authority to #2082. Current repair authorization covers PR0 only.
+At 13:19 +08 the owner ratified D10: setup delegates migration takeover to the existing
+migration feature. C1/C6 supersede the handoff's copy-only, unchanged-connection and atomic-
+rollback promises for this flow; they do not alter the source handoff.
 
-C2–C6 specify concrete technical mappings; C1's migration entries and C6's setup apply path
-remain **provisional on D10**, the conflict between the handoff's copy-only promise and
-approved complete-group takeover. D4/D9 is orchestrator-ratified as a bounded technical interpretation, not owner feature
-approval. D11 is also orchestrator-ratified after separate frontend/backend verification of the
-corrected transport boundary; it is not a new product question. No whole-program
-freeze or feature dispatch is claimed before that reconciliation and the requested owner
-confirmation. A lane reports gaps instead of inventing a parallel contract.
+C1–C6 now specify the selected custody behavior and concrete technical mappings. D4/D9 is
+orchestrator-ratified as a bounded technical interpretation. D11 is also orchestrator-ratified
+for its config transport boundary. C6 now distinguishes controller-owned startup recovery
+from browser observation and conditional retry, with separate composed owner evidence. Product
+ratification does not authorize feature dispatch or extend #2065 merge authority to #2082;
+requested feature authorization and contracts-on-master remain gates. Current work is PR0
+only. A lane reports gaps instead of inventing a parallel contract.
 
 | Contract | Where it lives | Owner |
 | --- | --- | --- |
@@ -44,14 +45,15 @@ Copy ownership and current implementation constraints:
    `onboarding.setup.*` and `onboarding.route.*` leaves plus the two changed
    `onboarding.setup.title` / `.subtitle` headings. `_changed_existing` carries an `owner`
    per row, and that field — not this sentence — settles a dispute.
-2. **Import wording is provisional on D10.** The fixture contains one coherent proposed
-   takeover version, marked by `_provisional_copy`; it removes copy-only and unchanged-state
-   claims. The original handoff is preserved in its own file. These marked strings cannot
-   ship until the owner chooses custody behavior. The confirmation uses the exact approved
-   Chinese consequence sentence and **Not now / Start migration**. `MigrationDialog` is the
-   takeover owner; setup copy scope and controlled selection are required L2 adaptations,
-   not existing props. Settings keeps its current rendering. Counts describe migration items;
-   an `applied` receipt alone does not establish assistant readiness.
+2. **Migration takeover wording is selected by owner D10 (2026-09-21 13:19 +08).**
+   `_migration_copy` records the selected copy and behavior. It supersedes copy-only,
+   unchanged-connection and atomic-rollback promises for this flow; the source handoff stays
+   unchanged. The existing migration feature presents the exact approved Chinese consequence
+   and **Not now / Start migration**; only its explicit confirmation applies credentials.
+   Setup supplies discovery/selection context and consumes confirmed results. Its copy scope
+   and controlled selection need a minimal adaptation of `MigrationDialog`, not a separate
+   migration coordinator. Settings keeps its existing rendering and broader migration scope.
+   Counts describe migration items; an `applied` receipt alone does not establish readiness.
 3. **The plural-family rule is local to the new keys.** 66 existing `{{count}}` strings
    outside `settings.models` ship without families, so a bundle-wide redline would fail
    today; this round holds the new keys to it instead of retrofitting the app.
@@ -66,7 +68,8 @@ and the shell-owned `SetupFlowState`.
   Consumers use `setFlowState(previous => ({ ...previous, changedField }))`, including
   asynchronous completions. Replacing captured state loses other screens' intervening work.
   `providerSelection` holds the complete ephemeral `MigrationScan` and selected backend
-  consent groups; `routeOrder` holds `(source_id, model_id)` rows, never source IDs alone.
+  consent groups shared with the existing migration owner, not an apply/recovery journal;
+  `routeOrder` holds `(source_id, model_id)` rows, never source IDs alone.
   Neither is a second source of truth for persisted readiness.
 - The shell renders the single primary and Back actions. Each `onActionChange` and
   `onNavigate` callback is bound to the emitting screen and activation; the shell rejects
@@ -81,7 +84,9 @@ and the shell-owned `SetupFlowState`.
   or publish the active action. Ignore stale read completions using an activation/request
   generation, not unmount cleanup alone. Leaving and returning never replays a mutation.
 - Server facts (CLI presence, backend enablement, sources and routes) are re-read on active
-  entry and after mutations. Preserve unconfirmed drafts across those reads; C6 defines scan
+  entry and after mutations. C4/C6 require the existing Agent collection authority to deep-refresh
+  cached CLI presence after install/path/config changes and before completion; ordinary list
+  reads alone cannot establish that freshness. Preserve unconfirmed drafts across those reads; C6 defines scan
   reconciliation, route targets and preservation of dirty target baselines. `setupFlow.test.ts` consumes the actual
   props with React state and checks navigation plus a late update, not just initial values.
 
@@ -97,7 +102,8 @@ loading stays read-only; entering active providers starts D11, never merely moun
 **Setup has one fixed sequence, `SETUP_SCREENS`: intro → providers → assistants.** Capability,
 installation support and errors never remove providers or create a Direct branch. Back uses
 `setupBackTarget(SETUP_SCREENS,current)` and keeps drafts. Host support is learned after
-D11 bootstrap on active provider entry; do not require it before reaching that entry.
+D11 bootstrap on active provider entry; controller recovery already enforces server admission
+before the browser can read support. Do not require an RPC before reaching its bootstrap path.
 Unsupported/error holds the current step. Clear obsolete action publications on navigation;
 only the active owner may retry, claim the CTA or navigate.
 
@@ -140,7 +146,8 @@ Three small predicates define distinct necessary conditions, not complete readin
 A fresh runtime payload with `enabled === false` also blocks these gates even if an older
 config read said true. Its optional field may be absent on older payloads, so fresh validated
 config remains required. `runtime_start` writes saved `enabled = true`; therefore configuration
-recheck must precede automatic ensure/start, not just installation. Never turn a deliberate
+recheck must precede any browser-requested ensure/start, not just installation. Controller
+startup independently re-reads persisted intent through its existing recovery owner (C6). Never turn a deliberate
 stop into a start while recovering setup.
 
 Unsupported/non-running holds Continue and completion on the same flow with C1's truthful
@@ -161,6 +168,14 @@ explicit recheck; no automatic impossible-install loop. A later failure on assis
 that screen's drafts and recovery/Back action. A running Hub needs no install to continue.
 
 ## C3 — geometry and DOM hooks
+
+**Task-specific design provenance.** The owner-supplied handoff §12 selects
+`../avibe-docs/design_desktop.pen` and Show session `ses36vg559de2` for these setup frames.
+That task-specific direction overrides the repository AGENTS default `design.pen` for this
+work only. Do not replace/copy either canvas or change the repository-wide rule. The handoff
+remains immutable. PR0 has not inspected native Pencil frames: L1–L3 must inspect/export the
+named frames and verify their token/geometry mapping before UI implementation and fidelity
+claims. Source literals are reference measurements, not CSS prescriptions.
 
 **Anchor pair.** One `.onboarding-setup-footer` rendered by the shell, containing one
 `.onboarding-action-w.onboarding-primary-action` and, below it, one
@@ -203,7 +218,9 @@ the tier variables screens 2 and 3 need from handoff §9. A screen stylesheet
 (`onboarding-providers.css`, `onboarding-assistants.css`) consumes `--ob-*`, may restate a
 value inside the SAME bands scoped to its own root, and may not invent a new band. No new
 literal colors anywhere: values come from the `index.css` token scale or from `--ob-*`, and
-`validate:theme` / `glowScale.test.mjs` keep that true.
+`validate:theme` / `glowScale.test.mjs` keep that true. Active/hover card shadow uses
+`var(--ob-active-shadow)`, already backed by `--shadow-glow-onboarding-mint`; its theme-specific
+values stay in the shared tokens. Hover has no translate or scale.
 
 **Motion bail-out.** Under `prefers-reduced-motion`, a hidden page, or an explicit pause the
 handoff is skipped and the screen changes instantly; on phones the view scrolls to top
@@ -227,7 +244,7 @@ and Agent name** to backend connection/CLI reads and `AgentSupply.named_agents`.
 
 | Condition for the same candidate | Authoritative read / rule |
 | --- | --- |
-| installed and backend enabled | `api.detectCli(cli_path)`, `AgentSupply.cli_present`, `getBackendConnection(backend).enabled`; stale or failed reads cannot prove readiness |
+| installed and backend enabled | `api.detectCli(cli_path)`, freshly corroborated `AgentSupply.cli_present` through `createAgentCollectionReadAuthority.refresh()` and `getBackendConnection(backend).enabled`; stale/failed refresh or read cannot prove readiness |
 | Hub runtime running | `getRuntimeStatus()` with health `ok` or `degraded`; mode alone is not runtime readiness |
 | model and route runnable | backend mode `hub`; that candidate's `named_agents` row has nonempty `effective_model_id`, `supply_status` in `ok` / `degraded`, and no `route_unconfigured` reason. `waiting`, `interrupted`, null or absent rows do not pass |
 | application and custody | `getBackendConnection.ready === true` (including permission and matching credential ownership) and `application === 'applied'` are required alongside this candidate's route. Confirmed `stopped` permits bootstrap/recovery, never workspace readiness; draining/failed/unknown cannot enable entry |
@@ -236,13 +253,27 @@ Do not read backend-level `selected_model_id` to reject a different candidate: i
 only `selected_by_agent`. The runnable-hop owner is the server resolver; neither an unrelated
 healthy source nor a client `routeOrder` proves readiness. Revalidate on the completion click.
 
+**CLI freshness owner.** `Controller` caches CLI presence; an ordinary `listAgents()` cannot
+refresh it after installation. Use one shared `createAgentCollectionReadAuthority(modelsApi)`
+for all setup supply reads. On active assistant entry, after install/CLI-path/agent-config
+changes, and before corroborating completion, await `refresh()`: it calls
+`refreshAgentPresence()` (`?refresh_cli_presence=1`) then a generation-controlled list read.
+Consume only its `{kind: 'current', value}` result, not the raw refresh endpoint payload.
+A concurrent newer generation can supersede that list read; hold completion and use the
+same authority's current reconciliation/retry result. Failed or stale results retain display
+only and keep Retry reachable. Invalidate superseded reads when a relevant mutation starts;
+CLI detection success alone cannot release the gate. Re-read connection/config and join fresh
+named-Agent supply by backend/name; this presence refresh is not authentication or route proof.
+
 D11 establishes config persistence and controller availability on active provider entry
 **before** Hub-dependent screen-2 work (C6). Enabled capability is a prerequisite; no bootstrap
 expansion is needed for an excluded Direct branch.
 `ModelHubRemoteService` uses the controller socket; `engine_down` on a missing socket is
 neither an unsupported manifest nor proof of a bad model route. If the controller stops
 later, retain a reachable start/retry action using confirmed application `stopped`, bootstrap
-it and re-read runtime, connection and candidate supply before allowing completion. Startup
+it, let controller-owned recovery run, and re-read runtime, connection and candidate supply
+before allowing completion. Reuse recovered health; do not send a second unconditional
+ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
@@ -311,17 +342,17 @@ of silently changing either the handoff or another owner.
 
 | Element | Producer → consumer and rule |
 | --- | --- |
-| scan and discovery | `scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row for grouping. Compute group closure/blockers before the actionable capsule count; a blocked detected key remains visible with its reason but is not advertised as importable |
+| scan and discovery | existing migration feature `modelsApi.scanMigration().items` → full `providerSelection.scan`; `isImportableKey` identifies entry-point keys only. Keep every row; reuse its group closure/blockers before the actionable capsule count; a blocked detected key remains visible with its reason but is not advertised as importable |
 | candidate identity | `MigrationItem.id` is selection identity, never vendor alone. Use `providerLabel` / `providerVendorId` as `MigrationDialog.ItemRow` does. Optional vendor/name/mask may be absent: generic mark plus `masked_detail`, never infer vendor from backend or fabricate a mask. Show every `source_paths` locator; only when absent use `migration.source.<backend>`. `notes_key` is an explanation, not origin |
 | cards | slots 1–2 show detected/provider identities then existing sources, with OpenAI/Anthropic placeholders if needed; slot 3 is Add more. Vendor grouping is presentation only: multiple keys from one vendor retain separate IDs and may require whole backend selection |
 | selected and connected | selected means complete consent group selected; a blocked group is disabled with its reason. Added/connected treatment follows confirmed source IDs from `listSources` and status `active` / `standby`; `verification_pending` is disclosed as unverified, not rejected as unusable (the shipped resolver accepts standby). One vendor's healthy source does not prove every key/card connected or a runnable assistant |
 | counts | CTA count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. Capsule count = distinct key IDs in complete, unblocked, key-only groups, independent of selection. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
 | capsule | retain dismissal signature owner `modelHubMigrationDismiss` and the reserved slot. Existing `ImportKeysNotice` scans/owns a dialog internally: L2 must adapt it to the shared scan/selection owner before claiming consistency; it is not a drop-in consumer of C2 |
-| import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 blocks wiring apply under copy-only promises |
+| import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 delegates confirmation/apply/recovery to the existing migration feature; setup never applies from selection or normal navigation |
 | add — API key | shared `AddApiKeyDialog` form: observe then create with the confirmed observation, preserve its existing unknown-write recovery. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready |
 | add — subscription | reuse `subscriptionOptions.ts` / `OAuthConnectDialog` / `OAuthFlowParts` for the offered product vendors, custody choice and flow ownership. Setup limits the shipped vendor list to OpenAI/Anthropic per handoff; there is no callable vendor-capability-list API in `ModelsApi`, and no such producer should be invented. `getOAuthStatus` / `submitOAuth` return `OAuthResult`; terminal create carries `created.source` and placement tails. Do not create the source a second time or equate terminal OAuth with assistant readiness |
 | picker order | `apiKeyVendors.ts` reads `vibe/data/api_key_vendors.json`; first eight in file order, remainder plus custom. No browser re-sort or prototype Cohere |
-| runtime | with capability enabled, active provider entry performs D11 config/bootstrap then runtime reads (D3). Automatically ensure only with admitted installation support; running health remains independent. Unsupported/error stays on the normal flow with C2 retry/guide/Back. No enable/install confirmation or automatic credential takeover |
+| runtime | with enabled capability and saved intent, D11 starts only a confirmed stopped controller; its existing recovery owns initial ensure/start and server admission. The browser then observes health and only requests admitted recovery if still needed (D3). Healthy-engine writes follow the operation table below, independently of new-install permission. Unsupported/non-running or unread stays on the normal flow with retry/guide/Back; no install-confirmation or automatic credential takeover |
 | first entry | cards → inbound wires → gateway → outbound wires → destinations, about 1.1s; C3 bail-outs; no production reset/replay control |
 
 #### Complete consent groups (current thread `PRRT_kwDOPbFPYs6kOVg6`)
@@ -335,52 +366,67 @@ impact. A non-`import` row blocks its entire linked group. Toggling any member s
 deselects the full linked import group; never submit a partial backend.
 
 C2 stores `{ scan: MigrationScan | null, selectedBackends: AgentBackend[] }`, where the
-backend list is the union of complete unblocked groups. Derive apply IDs from the **same scan**:
-all `proposed_action === 'import'` rows whose backend is selected, once per ID. Validate closure
-and blockers again before apply. With setup's API-key-only requirement, an otherwise importable
-OAuth member also blocks the group for this entry point; show it and explain that the full
-migration is available in Settings. Never silently import OAuth or drop it from a batch.
+backend list is the union of complete unblocked groups. The adapted migration owner derives
+apply IDs from the **same scan**: all `proposed_action === 'import'` rows whose backend is
+selected, once per ID, and validates closure/blockers again before its confirmed apply. With
+setup's API-key-only requirement, an otherwise importable OAuth member also blocks the group
+for this entry point; show it and explain that the full migration is available in Settings.
+Never silently import OAuth or drop it from a batch.
 
-L2 must reuse/extract the dialog's group calculation and adapt it to controlled selection;
-current `MigrationDialog` has only `open/onClose/onApplied/eligible` props and local `items`
-selection. Do not bolt on an independent item-ID selection engine for cards or the Detected
-tab. Rescans invalidate old item IDs: preserve selection only for unchanged complete groups;
+L2 makes the smallest controlled-state/copy adaptation of the existing dialog/grouping
+owner so discovery cards, capsule and Detected tab consume that same feature. Current
+`MigrationDialog` has only `open/onClose/onApplied/eligible` props and local `items` selection;
+the shared state/copy inputs and setup key-only whole-group constraint are future adaptation
+work, not already shipped props. Keep one grouping/confirmation/apply/recovery owner: no
+independent item-ID selection engine, setup-specific migration coordinator or retry engine.
+Rescans invalidate old item IDs: preserve selection only for unchanged complete groups;
 changed membership/custody requires renewed review, and failed rescans disable apply rather
 than submitting stale IDs. Default-selection applies only to fully importable, unblocked
 initial groups, respecting the server's `selected` flags.
 
-On confirmed apply, clear the applied group selection, increment the confirmed batch count
-once, then refresh scan, sources and supplies. `applied` is a receipt count, not assistant
-readiness. On unknown transport outcome, reconcile the submitted batch before retrying or
-showing “nothing changed”; the same IDs can resume/replay a receipt. No fabricated partial
-success UI, but no promise of rollback either: takeover recovery can retain changed custody.
+The migration owner publishes confirmed results; setup clears confirmed group selection,
+increments the receipt-derived batch count once, then refreshes scan, sources and supplies.
+`applied` counts migration items, not assistant readiness. Today's `onApplied(number)` carries
+a count only, and `onApplied(0)` is also called for `migration_credentials_invalid` to refresh
+the caller. Treat zero as refresh-only, not proof of completed takeover; preserve the owner's
+error/recovery UI. Any receipt distinction needed by setup belongs in the same small owner
+adaptation, not guessed from local selection. Unknown transport outcomes remain with that
+feature's reconciliation/recovery; the server journal and same item IDs can resume/replay the
+operation. Setup neither retries apply itself nor fabricates a rollback or partial success.
 
-#### Import custody choice — D10 (only product blocker)
+#### Migration takeover — D10 (owner-ratified 2026-09-21 13:19 +08)
 
-`migration_apply` → `apply_native_migration` provisions sources, removes replaced native
-credentials/direct-routing fields, commits Hub mode/placement and journals recovery.
-`set_agent_mode(..., 'hub')` re-scans under the migration/native-writer guard and rejects
-**any** remaining native row for that backend with `mode_switch_blocked`. A copy endpoint
-alone therefore cannot preserve native credentials and still admit that backend to Hub.
-Tests prove global/project keys are removed, unrelated MCP/name data survives and
-post-exposure failures retain the current credential owner for recovery.
+Owner decision: “setup只负责默认使用模型网关，不负责迁移，采用 迁移接管 实现”. Setup owns the
+Hub journey, discovery/entry presentation, assistant readiness and receipt-derived display
+state. The existing migration feature retains migration behavior through this call chain:
 
-Two alternatives for the owner, prepared as one coherent C1 proposal:
+`MigrationDialog` / shared grouping → `modelsApi.scanMigration` / `applyMigration` →
+service `migration_scan` / `migration_apply` → `apply_native_migration` and its journal.
 
-- **Recommended: reuse approved complete-group takeover.** Cards and Detected actions open
-  the same review; no apply on selection, navigation or runtime startup. Show every linked
-  backend/file, the exact consequence `迁移后，CLI的认证信息将完全交由模型网关管理`, and
-  **Not now / Start migration**. Confirm invokes the single server apply owner, which owns
-  mode and cleanup together. Not now leaves native state/mode unchanged. Preserve unrelated
-  settings; keep setup API-key-only, blocking mixed OAuth groups. Completion means takeover
-  and cleanup completed; failure/unknown state requires reconciliation/recovery, never a
-  blanket atomic rollback or unchanged assistant-connections promise. C1 marks this proposed
-  setup behavior/copy provisional; existing product approval does not silently amend handoff.
-- **Preserve the literal handoff:** separately design server-side credential copying **and**
-  native coexistence/Hub-mode admission, including writer ownership, refresh and precedence.
-  The scan's opaque IDs/masks cannot feed `createApiKeySource` as secret material. This is a
-  backend/custody expansion outside PR0 and the planned reuse lane, not merely a copy endpoint.
-  It remains unapproved; no partial implementation is presented as a complete solution.
+The backend owner provisions sources, removes replaced native credentials/direct-routing
+fields, commits Hub mode/placement, and owns transaction/recovery. Tests prove global/project
+key cleanup, preservation of unrelated MCP/name settings, and retained custody for recovery
+after exposure. Setup must not duplicate cleanup, custody writes, mode transition, rollback
+or retry machinery, and must not send a second mode PATCH after successful apply.
+
+Cards, capsule and Detected actions delegate to this feature's complete-group review. Keep
+every required backend/file visible and show the exact consequence
+`迁移后，CLI的认证信息将完全交由模型网关管理`, with **Not now / Start migration**. Only the latter
+explicit confirmation invokes apply. New/incomplete takeover invokes server dependency ensure
+before credential withdrawal and again before sync/start; it retains installation admission
+even when a healthy engine exists (operation table below). Selection, setup entry, gateway installation/start and
+normal navigation are never consent. Not now leaves native authentication and mode unchanged.
+Setup's entry remains API-key-only: mixed OAuth or non-importable groups are blocked as a
+whole, with the broader migration feature remaining in Settings. Unrelated settings stay
+preserved; source/assistant readiness is re-read after the feature's confirmed result.
+
+This selected behavior expressly supersedes the handoff's copy-only, unchanged-assistant-
+connections and atomic-rollback promises for this flow. Success reports the migration owner's
+completed takeover/cleanup; failure or unknown outcome requires its reconciliation/recovery,
+which can retain changed credential custody. C1's selected copy describes those consequences.
+No credential-copy alternative or new native-coexistence design is part of the implementation.
+The original handoff remains immutable, and D10 adoption is not permission to migrate real
+credentials during PR0 or to start feature lanes.
 
 #### Controller bootstrap — D11 (orchestrator-ratified technical sequence)
 
@@ -445,7 +491,21 @@ After verified config, a fresh connection with confirmed `application === 'stopp
 `control('start')` from `useStatus`; an applied controller is reused. Draining/failed/unknown
 uses existing recovery/read paths, never an inferred restart. The control consumer checks
 its HTTP rejection and returned body `ok === true`/`action === 'start'`, then re-reads backend
-application and controller RPC availability before Hub engine operations. StatusProvider's
+application and controller RPC availability. Controller startup itself calls
+`_recover_runtime_owners()` → real `ModelHubService.recover_runtime_intent()` →
+`_prepare_engine_for_demand()` → adapter ensure and start for saved enabled intent. This can
+install/start Hub before the browser's first runtime RPC; the browser does not own or precede
+that recovery. `EngineRuntimeManager` / `ManagedRuntimeManager.ensure` resolves host archive
+admission before fetching/installing runtime assets. Unsupported rejects there; optional Hub
+recovery failure is caught by Controller, which continues other owners and retains blocked
+Hub readiness. Manifest lookup may occur; no claim of zero filesystem bookkeeping or network
+manifest resolution is made. Disabled intent is not enabled by recovery; previously confirmed
+migration journals and orphan install claims retain their existing recovery owners.
+
+After controller readiness, read the recovery outcome. A fresh healthy Hub needs no browser
+ensure/start/restart. If recovery failed or health remains stopped/missing, C6 below governs
+an explicit/active recovery attempt using fresh config and runtime evidence. A `down` status
+can be the service's projection of failed demand, not proof of installed bytes. StatusProvider's
 `refreshStatus()` only refreshes service status and may return null; neither it nor a cached
 status alone proves config persistence or backend readiness. Missing CLI, sources, routes
 and incomplete setup do not forbid controller startup. Bad existing platform configuration
@@ -459,58 +519,74 @@ HTTP cache; direct POST leaves cached config and convergence subscribers untouch
 unknown POST and invalid GET stay distinguishable. Separate hermetic backend fixtures drive
 real config POST/GET, persistence and connection/control handlers with a fake process launch
 and the existing real-loop readiness harness. They prove fresh seed, existing-state
-preservation and controller startup without sources or completed setup. These are separate
-transport/server proofs, **not browser/server E2E**, full Controller construction or a shipped
-setup bootstrap implementation.
+preservation and control-handler startup without sources or completed setup; their fake
+process did not prove actual Controller runtime recovery. Round-8 external composed tests
+separately invoke the real Controller recovery method, service, adapter, installer and
+supervisor with test-owned archives/storage and synthetic process/health peers: unsupported
+refuses artifact installation/start while other owners recover, supported default-on restores,
+disabled intent stays disabled, and later status reads do not repeat completed recovery.
+`runtime_status` can reconcile an orphan installation claim through the existing owner; it
+is not universally side-effect-free. These are separate transport/server/composed proofs,
+**not browser/server E2E**, full Controller construction or a shipped setup implementation.
 
-#### Ensure runtime, then prepare adoption
+#### Observe recovered runtime, then prepare adoption
 
-0. D11 establishes controller availability before these RPC reads; a stopped application
-   is distinct from an installed-but-stopped Hub engine. A missing socket is not an
-   unsupported manifest.
-1. An active screen/action owner obtains a fresh `getRuntimeStatus()`; a failed or stale read
-   cannot authorize installation. Check `runtimeCanAttemptInstall(runtime)` **before** invoking
-   any potentially installing helper or endpoint, including adoption, source observation/create,
-   OAuth, migration apply and mode preparation. If unsupported and not running, show C2's
-   recoverable environmental failure; keep providers, recheck/guide/Back and drafts, with no
-   installation, mode change or Direct completion. Every retry first repeats the authoritative
-   read; `unresolved` remains install-admitted, while read failures authorize no writes.
-   The server remains the final platform authority if conditions change after the read.
-   If already running (`ok`/`degraded`), preserve read/route access and Continue regardless of
-   install admission. `get_agent_sources`, chain reads/preview and pure exact-hop reorder do
-   not install: `_write_agent_chain` calls `_commit_synced`, whose unchanged bindings save
-   without engine restart. Keep their ordinary route/write guards and readback. Potentially
-   installing source/adoption operations remain blocked; no blanket ban on healthy Hub use.
-2. With admitted install support, automatically on active entry (approved D3), call
-   `resumeInstallAndStartRuntime` with fresh runtime for **all backend modes**, including already-Hub. It installs or
-   observes installation and starts when needed. `installAndStartStep` only classifies;
-   `installRuntimeUntilSettled` does not start. None enforces `runtimeCanAttemptInstall`.
-   Observe progress through `onRuntime`, handle `failedStep`, and re-read runtime; only
-   `runtimeIsRunning` (`ok` / `degraded`) proves running. Already-Hub + stopped/missing engine
-   takes this path too when admitted; unsupported retains recovery without attempting install.
-3. Adoption is a separate step. `resumeGatewayAdoption` reads agents, returns immediately
-   for Hub (`runtime: null`, no scan), otherwise re-reads/ensures runtime and returns candidates
-   filtered to one backend. It **never** sets mode or applies migration and has no support
-   check. Setup should compose step 2 with a full `scanMigration()` for consent instead of
-   treating this helper's `ok` as readiness or its filtered candidates as a grouping input.
-4. After runtime readiness and install admission, prepare the backend needed by a configuration action: native
-   rows → full group review/apply subject to D10; no native rows →
-   `setAgentMode(backend, 'hub')` directly, without another confirmation. The apply owner
-   already commits mode; do not issue a second mode PATCH after migration.
-   The service can still refuse `mode_switch_blocked` if native state changes. Re-read mode
-   before eligibility: Direct has `sources: null`. A manual source creation does not prove
-   the backend has switched. Runtime installation, scan, apply, mode and route writes are
-   separate outcomes, each read back before the next dependent operation.
+0. D11 establishes controller availability; server-owned auto-recovery has already attempted
+   saved intent with installer admission. A missing socket/read error is not an unsupported
+   manifest. Preserve pending/error and Retry/Back; do not manufacture readiness.
+1. The active owner obtains fresh config intent and `getRuntimeStatus()`. If health is already
+   `ok`/`degraded`, reuse it regardless of manifest install admission. Ordinary source/route/
+   OAuth/mode work follows the table below and each existing owner's health, custody and
+   consent guards. Completion still uses C4; unsupported never creates Direct setup.
+2. If engine recovery is still needed, require `setupCanAttemptInstall` / authoritative
+   `runtimeCanAttemptInstall` before browser ensure/install/start or helpers that may invoke
+   them. `unresolved` is admitted; unsupported and failed/stale reads are not. With admitted
+   support and saved enabled intent, `resumeInstallAndStartRuntime` resumes the needed phases
+   for any backend mode, including already-Hub stopped/missing. Observe `onRuntime`, handle
+   `failedStep`, then read back health. `installAndStartStep` only classifies;
+   `installRuntimeUntilSettled` does not start. None of these helpers preflights support.
+   No second unconditional lifecycle call follows successful controller recovery. Unsupported
+   without running health holds the normal flow with recheck/guide/Back and intact drafts.
+3. `resumeGatewayAdoption` is not a readiness/consent owner: it returns early for Hub with
+   `runtime: null`, otherwise can ensure/start and returns backend-filtered candidates; it
+   never changes mode/applies migration or checks support. Do not wrap healthy-engine actions
+   in it just to impose an install gate. Reuse observed health and delegate full-scan consent
+   to the D10 migration owner. If used for recovery, it needs the installing-path gate.
+4. For a ready runtime, native rows delegate to existing complete-group review and explicit
+   migration apply, with its actual ensure dependency; no native rows use the guarded
+   `setAgentMode(backend, 'hub')` path without an extra confirmation/install gate. Migration
+   already commits mode, so never follow it with another mode PATCH. Concurrent native state
+   can still cause `mode_switch_blocked`. Read mode before eligibility (Direct has
+   `sources: null`), and read each dependent write back. Runtime recovery, consent, source
+   creation, mode and route writes are separate outcomes.
+
+**Operation ownership at `08b82658bb` (not a universal mutation gate):**
+
+| Setup operation | Actual dependency and admission |
+| --- | --- |
+| Runtime ensure/install/start; non-Hub `resumeGatewayAdoption` | Can call installer ensure. `runtime_start` also writes enabled intent and ensures before adapter start. Browser requests require fresh enabled config/support; server installer remains authoritative, including controller startup and other server-owned demand paths |
+| API-key observe/create | Service `_observe_source_payload` provisions temporary material and probes through the adapter; create provisions and commits through `_commit_synced`. No installer ensure. With fresh healthy Hub, permit the existing form despite unsupported new installation; retain credential cleanup, nonce/unknown-write reconciliation and upstream failure semantics |
+| OAuth start/status/submit and source completion | Existing OAuth owner calls its channel adapter. Hub adapter uses supervisor `client()`/`ensure_running()` on existing bytes and management endpoints; completion commits source projection. Native channel retains its separate auth/custody owner. No installer ensure in this flow. Keep single-flow, consent, cancellation, created-receipt and unknown-write handling |
+| Mode change without native rows | `set_agent_mode` guards/drains native writers, rescans under lock and uses `_commit_synced`. No ensure; native rows are rejected, never silently taken over. Fresh health/config and mode readback remain required |
+| Migration scan / apply | Full scan is discovery, not consent. New/incomplete `apply_native_migration._resume_takeover` explicitly ensures before native withdrawal and before sync/start; retain installing-path admission and journal recovery. A completed receipt replay returns before ensure. Healthy health alone cannot bypass this dependency; do not change migration semantics to remove it |
+| Source/mode writes that change engine bindings | `_commit_synced` persists and calls adapter `sync_sources`; it waits for active transports and restarts a running engine via the existing verified disk binary, without installer ensure. Restart can fail if that binary/permissions/health is unavailable; owner restoration may also fail. Surface errors and re-read persisted config/runtime/receipts before retry, never claim atomic rollback |
+| Exact route reads/preview/reorder | Pure chain reorder has unchanged bindings, so `_commit_synced` saves without restart or install. Keep exact-hop/menu-model eligibility, per-target guards and readback |
+
+Thus a usable running Hub is not disabled merely by `manifest.resolution === 'unsupported'`.
+New takeover can still be blocked by its real ensure dependency; manual sources, existing
+OAuth and guarded no-native mode configuration remain available under their own guards.
+An unsupported host with neither usable Hub nor an admitted recovery path cannot complete
+the default journey. Read failures authorize neither lifecycle writes nor completion.
 
 ### Screen 3 — assistants (current thread `PRRT_kwDOPbFPYs6kOVg4`)
 
 | Element | Producer → consumer and rule |
 | --- | --- |
-| installed | `api.detectCli(path)` at intro transition and active assistant entry; `AgentSupply.cli_present` corroborates. Staying mounted is not permission for hidden polling |
-| install | explicit `api.installAgent(name)` then detect the returned path; retain failure/output; one loading indicator |
+| installed | detect configured path and deep-refresh through the shared `createAgentCollectionReadAuthority` on active assistant entry and before completion; consume its current result as C4 specifies. Cached `listAgents` alone is insufficient. Hidden screens do not poll |
+| install | explicit `api.installAgent(name)` then detect the returned/configured path and await the collection authority refresh/current result. Path/agent-config changes have the same refresh requirement. Pending/stale/failed refresh holds completion and exposes Retry; retain install output and one loading indicator |
 | enabled | existing Switch config write, followed by `getBackendConnection` and Agent reads. Saved config reconciles live backends; no second restart |
 | upgrade | `BackendLifecycleChip.onVisual` still owns probe/write, activity-gated; update coexists with enabled state |
-| route control | **every installed/enabled assistant has an action**, including Direct, empty route, missing model and read failure. Enabled-capability setup opens Hub configuration/recovery: show its own `named_agents` model when routed, otherwise `onboarding.setup.configureRoute`. Opening requires no resolved route; mutations require C6 preflight/consent. Unsupported offers recheck/guide, not native auth as a setup bypass. A disabled configuration retains C2 configuration recovery, never a Direct setup dialog. Busy operations may temporarily disable action |
+| route control | **every installed/enabled assistant has an action**, including Direct, empty route, missing model and read failure. Enabled-capability setup opens Hub configuration/recovery: show its own `named_agents` model when routed, otherwise `onboarding.setup.configureRoute`. Opening requires no resolved route; mutations use C6 operation-specific admission/consent. Unsupported without running Hub offers recheck/guide, not native auth as a setup bypass. A disabled configuration retains C2 configuration recovery, never a Direct setup dialog. Busy operations may temporarily disable action |
 | candidate identity | use the setup target policy below; identify backend + Agent name and exact menu model, independently of the global default. C4 may preserve a runnable custom default outside these edit targets |
 | add model source | `onNavigate('providers')` preserves the dirty route draft and closes the route dialog; reopening restores it. Done returns focus to the invoking chip/configure action |
 | all uninstalled | three install actions, workspace entry disabled, Back still available |
@@ -629,9 +705,9 @@ L3 must port these cases to its real consuming coordinator.
 
 | Repeated root class | Whole boundary audited / remaining evidence |
 | --- | --- |
-| route identity / eligibility / readiness | action availability → named Agent+backend → mode → menu model → exact chain → default readback. C4/C6 define reachable configuration, explicit targets, exact-pair projection, partial-write/readback and default preservation; composed fixtures exercise the mapping |
-| lifecycle / capability / readiness | enabled setup prerequisite → active-provider config/bootstrap → fresh support/health → admitted ensure-runtime or in-place recovery → full scan → consent → mode readback. Default Hub requirement and independent healthy-Hub use are preserved; no unsupported-to-Direct conversion. `gatewayAdoption.test.ts` proves helper scope only; it is not a screen-2 preflight test. Future L2 tests must cover unsupported with zero writes, already-Hub missing/stopped, controller stopped (D11, bootstrap fixture available), start failure, Direct with native blockers |
-| producer / consumer / state | C2 React consuming test covers cross-screen state plus a late functional update. Full scan → transitive backend groups → complete apply IDs follows `MigrationDialog` and its grouping tests; L2 still needs a consuming integration test after adapting that owner |
-| duplicated instructions / copy | plan §§4/9/10, C1 metadata and C2/C4/C6 reviewed together. Automatic runtime setup reuses approved precedent; D10 alone withholds migration copy/apply binding. Source-ranking substitution and false approval/rollback claims are removed; handoff remains unchanged user source |
+| route identity / eligibility / readiness | refreshed current CLI presence (existing generation owner) → action availability → named Agent+backend → mode → menu model → exact chain → default readback. C4/C6 define reachable configuration, explicit targets, exact-pair projection, partial-write/readback and default preservation; composed fixtures exercise the mapping |
+| lifecycle / capability / readiness | enabled setup prerequisite → active-provider persistence → controller recovery/server admission → browser observation → operation-specific recovery/consent → readback. Default Hub requirement and independent healthy-Hub use are preserved; no unsupported-to-Direct conversion. `gatewayAdoption.test.ts` proves helper scope only; it is not a screen-2 preflight test. Future L2 tests must cover unsupported with zero runtime artifact installation/start, healthy-engine source writes and restart failure, already-Hub missing/stopped, real controller recovery (external composed fixture available), start failure and native blockers |
+| producer / consumer / state | C2 React consuming test covers cross-screen state plus a late functional update. Full scan → transitive backend groups → complete apply IDs follows `MigrationDialog` and its grouping tests; L2 still needs a consuming integration test for discovery → owner confirmation → receipt/readback, including no implicit apply and unchanged Settings behavior |
+| duplicated instructions / copy | plan §§4/9/10, C1 metadata and C2/C4/C6 reviewed together. Automatic runtime setup reuses approved precedent; owner D10 selects existing migration takeover and supersedes the handoff promises; setup owns only discovery/context/result presentation. Task-specific design source overrides the general default; existing theme shadow token replaces the literal prescription. Source-ranking substitution and false approval/rollback claims are removed; handoff remains unchanged user source |
 
 PR0 tests do not claim a shipped screen or an end-to-end migration/route implementation.

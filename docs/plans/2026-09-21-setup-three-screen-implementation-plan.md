@@ -5,18 +5,17 @@ The owner's explicit merge authority covered #2065 only. Current orchestrator re
 from `ses8dhcc2zq62` authorize PR0 repair, not #2082 merge or feature implementation.
 The owner reaffirmed on 2026-09-21 12:56 +08 that setup uses Model Hub and disabling it
 belongs to Settings afterward. No unsupported/error/explicitly-disabled Direct setup branch
-is part of the contract. That decision does not
-approve D10 or feature/merge authority. Routine orchestrator choices remain distinct from
-the **D10 custody choice** in §10. D4/D9
-routing is orchestrator-ratified as a bounded technical interpretation; the corrected D11
-transport sequence is also ratified after separate frontend/backend proofs and an independent
-10-test transport rerun; no unresolved API design is delegated to the owner.
+is part of the contract. At 13:19 +08 the owner ratified D10: reuse the existing migration
+takeover feature; setup presents discovery/context and consumes confirmed results. Migration
+confirmation, cleanup, custody, mode transition and recovery stay with their existing owner.
+Neither decision grants feature/merge authority. D4/D9 routing and the corrected D11 transport
+remain orchestrator-ratified technical mappings, with separate frontend/backend evidence.
 
 Shared detail lives in `docs/plans/setup-three-screen/contracts.md` (C3–C6),
-`copy-contract.json` (C1, one takeover proposal with explicitly provisional migration entries),
-and `ui/src/components/onboarding/setupFlow.ts` (C2). The handoff remains unchanged user
-source. C1 migration copy and C6 setup apply cannot bind until D10 is decided; this is not
-a claim that the entire program is frozen or authorized for dispatch.
+`copy-contract.json` (C1, selected takeover copy) and `ui/src/components/onboarding/setupFlow.ts`
+(C2). The handoff remains unchanged user source. Owner D10 supersedes its copy-only,
+unchanged-connection and atomic-rollback promises for this flow. Custody is settled; feature
+start still requires separate authorization and contracts on master.
 
 Sources and provenance:
 
@@ -32,7 +31,7 @@ Sources and provenance:
 - Design source: `../avibe-docs/design_desktop.pen`, board index in the handoff §12.
 - Product baseline: `origin/master` at `31c4e831b`, which is `a07acee02` plus the merged
   #2065. This is the initial planning baseline, not a claim about today's primary checkout.
-  This repair re-read shipped owners from the assigned head `890014421f`; primary dirty
+  This repair re-read shipped owners from the assigned head `08b82658bb`; primary dirty
   files were not edited.
 
 ## 1. Goal
@@ -48,8 +47,8 @@ Direct completion or silent rewrite. Post-setup Settings remains separately owne
 The design is not a new surface bolted onto the old one: screen 1 already ships, screen 3
 is a restructure of what ships, and screen 2 is a new composition of Model Hub APIs that
 already ship. C6 defines explicit model-chain projection and controller/runtime ordering
-against those owners. The handoff's copy-only import promise conflicts with existing custody
-policy; D10 must resolve that product choice before implementing setup migration.
+against those owners. Owner-ratified D10 adopts existing migration takeover; setup does not
+implement credential migration. Discovery cards/capsule/entry remain consumers of that feature.
 
 ## 2. Baseline and preconditions
 
@@ -86,7 +85,7 @@ policy; D10 must resolve that product choice before implementing setup migration
 | Assistant cards, install/detect/enable | `steps/AgentDetection.tsx` (606 lines), `onboarding/AssistantRow.tsx`, `settings/BackendLifecycleChip.tsx` | shipped; restructured by screen 3 |
 | Per-assistant connection dialog | `onboarding/BackendConnectionDialog.tsx` | leaves setup; existing Settings/backend Direct support remains unchanged |
 | Discovery capsule + dismissal memory | `onboarding/ImportKeysNotice.tsx`, `lib/modelHubMigrationDismiss.ts` | shipped; C6 identifies copy and scan-ownership gaps before moving it to screen 2 |
-| Import batch dialog | `settings/models/MigrationDialog.tsx`, `migrationScan.ts` (`importableKeys`, `isImportableKey`, `scanMigrationWhenEnabled`) | shipped takeover/grouping owner; needs controlled state adaptation, and D10 withholds setup takeover adoption |
+| Import batch dialog | `settings/models/MigrationDialog.tsx`, `migrationScan.ts` (`importableKeys`, `isImportableKey`, `scanMigrationWhenEnabled`) | owner-ratified D10 reuse; minimal controlled-state/copy adaptation, one migration confirmation/apply/recovery owner |
 | Add API key: vendor picker, observe → create | `settings/models/AddApiKeyDialog.tsx` (41 KB impl, 40 KB tests), `apiKeyVendors.ts`, `vendorMarks.ts`, `vendorGlyph.tsx` | shipped; needs its form extracted so a tabbed stable frame can host it (D2) |
 | Subscription sign-in | `modelsApi.startOAuth/getOAuthStatus/submitOAuth/cancelOAuth`, `settings/models/OAuthConnectDialog.tsx`, `settings/oauth/OAuthFlowParts.tsx` | shipped; subscription tab drives it |
 | Added providers, masked keys, vendor identity | `modelsApi.listSources()`, `Source{vendor, display_name, masked_credential, account_label, state, models}` | shipped; screen 2's connected cards |
@@ -162,7 +161,7 @@ outbound wires → three assistant destinations → summary line → reserved ca
   provider-card wide, 72 high (phone: min 72), two centred lines, no logo, and takes a
   connected treatment once a provider is ready.
 - **Summary line** (`aria-live`): pending selection / added / error / none, with the
-  C1 text subject to D10 provisional migration entries; no copy-only guarantee with takeover apply.
+  C1 selected takeover copy; counts/status follow the existing migration owner, with no copy-only guarantee.
 - **Capsule.** `ImportKeysNotice` moves here, keeping its persisted non-nagging
   dismissal. Count only keys in complete unblocked key-only groups (C6), with blocked
   detections still visible for explanation; give it a reserved slot so dismissing it
@@ -171,11 +170,14 @@ outbound wires → three assistant destinations → summary line → reserved ca
   capsule and Detected tab share `providerSelection`; L2 must adapt/extract the existing
   `MigrationDialog` owner because its shipped props keep local state. Preserve blockers and
   linked rows outside the entry filter. API-key-only setup cannot submit mixed OAuth groups.
-  Setup adoption of apply is provisional on D10. The proposed primary/Detected action opens
-  review, displays the exact approved consequence and Not now / Start migration; only that
-  confirmation applies. Runtime preparation and selecting a group do not consent to takeover. On confirmed
-  success, count `result.applied` once per batch and refresh scan/sources/supplies; do not
-  count it as keys without proof or equate completion with assistant readiness.
+  Owner-ratified D10 delegates primary/Detected actions to that feature's review with the
+  exact consequence and Not now / Start migration; only its explicit confirmation applies.
+  Setup/L2 adapts presentation/context and consumes confirmed results; it owns no migration
+  coordinator, cleanup, custody/mode transition, rollback or retry engine. Setup entry, runtime
+  preparation, selection and normal navigation do not consent to takeover. On a confirmed
+  receipt, count `applied` once and refresh real scan/sources/supplies. Existing `onApplied(0)`
+  can be an error-triggered refresh, not completed takeover; preserve owner errors/recovery.
+  No second mode PATCH follows successful apply, and migration success alone is not readiness.
 - **Add-source dialog.** One stable frame (C5) with three methods: Detected (only when
   unlisted candidates exist; complete-group selection; required rows/blockers stay visible),
   Subscription (OpenAI/ChatGPT and Anthropic/Claude, using the shipped subscription
@@ -187,17 +189,21 @@ outbound wires → three assistant destinations → summary line → reserved ca
   handoff §15). Progress follows real stages; failure keeps drafts, and unknown writes are reconciled
   before retrying. Read `SourceCreated` / `OAuthResult.created` and refresh server facts as C6
   requires; never create a source twice after OAuth success.
-- **Primary action states.** Proposed `查看 N 项并继续` / `查看 N 项迁移状态` open the
+- **Primary action states.** `查看 N 项并继续` / `查看 N 项迁移状态` open the
   shared confirmation/recovery; `继续，选择 AI 助手` continues only when no pending apply
   needs review; `添加订阅或 API Key` opens Add; connecting/checking states disable it.
-  C1 migration actions remain provisional on D10. Selecting cards never applies credentials.
+  These actions delegate migration work to the existing feature. Selecting cards never applies credentials.
 - **Bootstrap/runtime.** With capability and saved runtime intent enabled, the shell's active provider-entry owner
   uses D11's CSRF-aware JSON POST `{}`, HTTP/body validation and uncached GET/readback before
   connection/start calls. Unknown writes need persistence reconciliation, not a cached GET
   or empty `mutateConfig([])`. Fresh config is installed in shell state; direct fetch does
   not clear ApiContext cache or emit convergence. Reuse a running controller or start only
-  a confirmed stopped one, then read runtime. D3 preflights every
-  potentially installing path, ensures admitted runtime and reads back running health.
+  a confirmed stopped one, then read runtime. Controller startup itself owns the first
+  runtime recovery (`_recover_runtime_owners()` → `recover_runtime_intent()`), including
+  server-side installer admission, so the browser observes that outcome and requests
+  admitted recovery only when the engine is still missing. D3 preflights every
+  browser-initiated potentially installing path, ensures admitted runtime and reads back
+  running health; no second unconditional lifecycle call follows a successful recovery.
   Unsupported/non-running keeps providers, drafts, Back, recheck and C1's installation-guide
   action. Errors stay errors; successful retry resumes the same flow. Healthy running Hub
   reads/routes and Continue remain usable despite unsupported install admission. No extra
@@ -254,7 +260,12 @@ an available named Agent; write/read back `setup_completed` last. Re-pin the aff
 `WizardCompletion.test.tsx` invariants deliberately. The all-backend correlation is new L3
 orchestration, not behavior today's OpenCode helper already provides. Installation support
 does not change this Hub requirement: no usable running Hub means enabled setup cannot
-complete. Recheck/guide/Back remain available. Disabled configuration also holds setup,
+complete. Recheck/guide/Back remain available. CLI presence is corroborated through the
+existing generation owner — `createAgentCollectionReadAuthority.refresh()`, which runs
+`refreshAgentPresence()` (`?refresh_cli_presence=1`) and then a generation-controlled list
+read — after an in-wizard install or path change and before completion; a cached
+`listAgents()` snapshot or a superseded/failed refresh is not readiness evidence. Disabled
+configuration also holds setup,
 preserving saved preferences/custody and existing management boundaries; it never creates
 Direct completion. C4 records this owner-ratified known-by-design boundary, not a review waiver.
 
@@ -282,7 +293,10 @@ stays disabled and unmoved throughout.
 No new literal colors: the handoff's hex values map onto the existing token scale, and
 missing tokens are added to `index.css` rather than hardcoded (`validate:theme` and
 `glowScale.test.mjs` guard this). Card hover is the restrained mint border plus
-`0 2px 16px -4px #5bffa038` with no translate or scale.
+`var(--ob-active-shadow)` — already shipped and backed by `--shadow-glow-onboarding-mint`,
+whose blur/spread/alpha follow the theme — with no translate or scale. The handoff's hex
+value is a design reference, never a CSS literal; a lane that needs a value the scale lacks
+adds a token instead of pasting the hex.
 
 Extend #2065's `--ob-*` tier system to all screens under C3's existing media-query bands.
 Map the handoff's desktop/phone measurements into those tokens; do not independently add
@@ -299,10 +313,10 @@ source of key names; handoff §8 is where its strings came from. New namespaces:
 welcome/access ones are L1's, the two setup headings are L3's. The capsule keeps
 `settings.models.importNotice.*` for the discovery sentence, help link and dismissal label,
 and the import dialog keeps `settings.models.migration.{blocked,errors,notes,source}.*` for
-the explanations it renders, while setup chrome reads `onboarding.import.*`, subject to D10. `_provisional_copy`
-withholds the migration entries from shipping until the custody choice is made. D8 is the
-orchestrator's setup copy-scope decision; adapting the component remains future L2 work. No
-display string is hardcoded in a component.
+the explanations it renders, while setup chrome reads `onboarding.import.*`. `_migration_copy`
+records D10's owner-ratified takeover copy and the delegation boundary. D8 allocates setup
+copy scope; the minimal shared-owner adaptation remains future L2 work, preserving Settings
+rendering and behavior. No display string is hardcoded in a component.
 
 ### 4.10 Accessibility
 
@@ -314,14 +328,14 @@ is not closable mid-progress); non-current screens `hidden`/`inert`.
 
 ## 5. Contracts proposed by PR0
 
-PR0 carries six boundaries. They are not dispatch-ready until the explicit dependencies
-in §10 are settled; no lane may reinterpret them independently:
+PR0 carries six boundaries with D10's custody choice settled. Feature dispatch still requires
+separate owner authorization and contracts on master; no lane may reinterpret them independently:
 
 - **C1 Copy** → `docs/plans/setup-three-screen/copy-contract.json`. Allocated
   key names, the six shipped strings they change, and the existing strings they reuse (fixture metadata);
   validated for zh/en parity, complete `_one`/`_other` families on every `{{count}}`
   string, no nested-before-literal collision and identical placeholders per key. Key names
-  are allocated across lanes; migration wording/behavior remains provisional on D10.
+  are allocated across lanes; migration wording follows owner-ratified D10 and its existing feature owner.
 - **C2 Flow interface** → `ui/src/components/onboarding/setupFlow.ts`, with
   `setupFlow.test.ts` covering sequence, navigation and actual React consumption of shared
   state, including a late update after another screen changes the route draft.
@@ -342,7 +356,7 @@ in §10 are settled; no lane may reinterpret them independently:
 | --- | --- | --- | --- |
 | L0 contracts | orchestrator; current repair delegated to this executor | `docs/plans/2026-09-21-setup-three-screen-*.md`, `onboarding/setupFlow.ts`, the C1 fixture | product behavior |
 | L1 shell + intro + motion | codex | `Wizard.tsx` (flow machine region), `steps/Welcome.tsx`, `onboarding/setupHandoff.ts`, `onboarding.css` shell/tier/CTA sections, `AccessTiles.tsx`, `ui/e2e/onboarding-fidelity/{fixture.tsx,support.ts,geometry.spec.ts,loop.spec.ts}`, i18n `onboarding.flow.*` and the four changed welcome/access strings | screen 2/3 internals |
-| L2 providers screen | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, `ImportKeysNotice.tsx`, the `AddApiKeyDialog` form extraction, `MigrationDialog`'s copy scope, new `ui/e2e/onboarding-fidelity/{provider-support.ts,providers.spec.ts}` and `hub-ownership.spec.ts`, i18n `onboarding.providers.*` / `onboarding.import.*` | `Wizard.tsx` outside the screen registry entry it adds last, screen 3 files, `onboarding.css`, L1's `fixture.tsx` / `support.ts` / `geometry.spec.ts` |
+| L2 providers screen | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, `ImportKeysNotice.tsx`, the `AddApiKeyDialog` form extraction, `MigrationDialog`'s minimal controlled-state/copy adaptation and shared grouping reuse, new `ui/e2e/onboarding-fidelity/{provider-support.ts,providers.spec.ts}` and `hub-ownership.spec.ts`, i18n `onboarding.providers.*` / `onboarding.import.*` | `Wizard.tsx` outside the screen registry entry it adds last, screen 3 files, migration backend/cleanup/custody/recovery semantics, `onboarding.css`, L1's `fixture.tsx` / `support.ts` / `geometry.spec.ts` |
 | L3 assistants + gate | codex | `AssistantRow.tsx`, `steps/AgentDetection.tsx`, new `onboarding/DefaultRouteDialog.tsx`, new `onboarding-assistants.css`, `Wizard.tsx` `complete()` region, `ui/e2e/onboarding-fidelity/connections.spec.ts`, i18n `onboarding.setup.*` / `onboarding.route.*` and the two changed setup headings | screen 2 files, `onboarding.css` shell sections |
 | L4 scenarios + acceptance | codex | `tests/scenarios/auth_setup/**`, acceptance evidence, owner checklist | UI implementation |
 
@@ -374,8 +388,9 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
   dialogs, the capsule move, the shared API-key form extraction — is new files plus shared-owner
   adaptations, and it builds against C2 with its own test harness. It declares
   `requires #PR1 merged first`, and its one `Wizard.tsx` registry line plus its fixture
-  integration land as a final commit after PR1 is on `master`. D10 must be decided and C6 bootstrap/runtime composition ratified first. No stacked PR: the base stays
-  `master`.
+  integration land as a final commit after PR1 is on `master`. D10 and C6 bootstrap/runtime
+  composition are ratified; feature authorization and PR0-on-master still gate dispatch.
+  No stacked PR: the base stays `master`.
 - **PR3** (L3) forks after PR1 merges, using the orchestrator-ratified D4/D9 mapping. It rewrites the assistants
   screen and `complete()`, and PR1 rewrites the machine around `complete()` in the same
   file; two lanes editing one restructuring is a conflict that is not mechanical to resolve.
@@ -400,6 +415,11 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
 - Cross-boundary: at least one end-to-end case that pierces shell → screen 2 → screen 3 →
   `complete()` with real (non-ASCII) data, since two mocked halves prove nothing about the
   boundary.
+- Migration consumption: L2 tests cards/capsule/Detected → the existing complete-group
+  confirmation → confirmed receipt → refreshed source/supply presentation. Verify no apply
+  from selection/navigation/runtime start, Not now preserves native state, mixed OAuth groups
+  remain blocked for setup, zero/error callbacks do not claim success, and Settings behavior
+  survives the controlled-state/copy adaptation. Recovery stays with the existing feature.
 - Backend: `tests/scenarios/auth_setup` closed-loop cases updated in PR4, with scenario IDs
   visible in the tests and the PR bodies.
 - Acceptance: the owner's cloud target, with a ~10-minute checklist derived from handoff §14
@@ -427,8 +447,10 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
   an admitted ensure-runtime phase for every mode, and separate native consent/mode adoption.
   Unsupported holds the normal flow with recovery/Back; a healthy running Hub stays usable.
   Helper `ok` alone cannot prove readiness.
-- **Import custody and copy.** The handoff's preservation promise contradicts shipped takeover.
-  D10 is a product decision/backend dependency; changing just the verb to “import” cannot fix it.
+- **Migration ownership and copy.** Owner D10 supersedes the handoff's preservation promises.
+  Reuse existing complete-group confirmation and backend takeover/journal; setup must not
+  accidentally become a second migration/retry owner or promise rollback. Preserve unrelated
+  settings and consume confirmed receipts rather than inferring readiness from selection.
 - **Controller not running.** D11: Hub reads are IPC-backed; a stopped application cannot
   satisfy them before bootstrap. D11's active provider-entry operation seeds/readbacks config
   before connection calls, avoiding legacy empty-Slack startup, then starts only a confirmed
@@ -441,34 +463,80 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
 
 ### 9.1 Review-loop record and current repair contract
 
-The orchestrator independently fetched 20 threads: 19 resolved, one unresolved at dispatch.
-Seven findings-bearing review heads: `d9c62aa2eb` (2), `cf3b47e8cd` (4), `5ea80ceeec` (4),
-`de9c324872` (4), `f177ead2c2` (4), `616a0b539d` (1), `890014421f` (1): 20 findings total.
-Counts use original review commits; review 5263128282 on published `890014421f` is terminal.
-This is orchestrator-provided inventory, not a new executor GitHub read.
+The orchestrator inventoried all paginated threads at each round. Current totals: 25 findings
+across eight findings-bearing review heads — `d9c62aa2eb` (2), `cf3b47e8cd` (4),
+`5ea80ceeec` (4), `de9c324872` (4), `f177ead2c2` (4), `616a0b539d` (1), `890014421f` (1),
+`08b82658bb` (5) — with 21 resolved and four open at this update. Counts use each finding's
+original review commit. Review `5263295829` on published `08b82658bb` is terminal, and all 18
+of that head's checks succeeded; a green CI run is not a review pass, so no pass is claimed.
+This is orchestrator-provided inventory, not an executor GitHub read.
 
-Diagnosis and scope decision: the repeated lifecycle/capability class became a scope error:
-review inferred a second setup journey from separately existing Settings/Direct capability.
-The owner explicitly resolved that boundary. Retract both automatic unsupported-to-Direct
-fallback and retained capability-off setup compatibility, plus the proposed common bootstrap
-expansion for that excluded path. Keep normal Hub D11 bootstrap, runtime support checks,
-healthy Hub access, error/retry/Back and drafts. The five-file correction is contractual and
-pure helper/test work; no runtime architecture, Settings/backend change or feature lane.
+Diagnosis and scope decision. Two distinct roots produced the repeated lifecycle/capability
+findings, and they need different treatments:
+
+1. **A product-boundary scope error (rounds 6–7).** Review inferred a second setup journey
+   from separately existing Settings/Direct capability. The owner resolved that boundary:
+   setup uses Model Hub, and disabling it is a post-setup Settings action. Both the automatic
+   unsupported-to-Direct fallback and the retained capability-off setup branch were retracted,
+   along with the bootstrap expansion proposed for that excluded path. Normal Hub D11
+   bootstrap, runtime support checks, healthy Hub access, error/retry/Back and drafts are
+   unchanged.
+2. **Invented browser ownership over existing server owners (round 8).** The contract had the
+   browser preflight installation before a controller start that already performs its own
+   recovery and server-side admission, gate non-installing engine writes with an
+   install-admission predicate, read a cached CLI snapshot as presence evidence, and prescribe
+   a literal color beside its own token rule. Each correction names the real owner instead of
+   adding a mechanism: controller-owned startup recovery, an operation table separating
+   installing from healthy-engine writes, the shipped CLI generation authority, and the shipped
+   shadow token.
+
+The published five-file Hub-contract correction was contractual and pure helper/test work.
+This update is limited to three documentation/metadata files: no runtime architecture,
+Settings/backend change, executable contract change or feature lane.
 
 | Thread | Owner-ratified boundary / executable evidence |
 | --- | --- |
 | `PRRT_kwDOPbFPYs6kO76r` / `4059240601` | No Direct completion on unsupported hosts. Normal three-screen sequence and fresh Hub gates remain, with no unsupported installation; retry/Back/drafts and healthy existing Hub use are tested |
 | `PRRT_kwDOPbFPYs6kPKSx` / `4059328091` | Disabled gateway is not a supported Direct setup branch. No provider skip or bootstrap expansion for it. Preserve disabled config, expose prerequisite/recovery, and leave post-setup Settings choices untouched; consumer verifies no install or completion |
+| `PRRT_kwDOPbFPYs6kPhkJ` / `4059468857` | C4 now requires corroborated presence through the shipped generation authority (`createAgentCollectionReadAuthority.refresh()` → `refreshAgentPresence()` then a generation-controlled list read) after install/path change and before completion. Consumers prove install-then-refresh eligibility, post-refresh current read, superseded reconciliation, failure holding and the real two-call transport |
+| `PRRT_kwDOPbFPYs6kPhkR` / `4059468865` | C6's operation table scopes install admission to operations that can ensure/install, and admits healthy-engine observe/create/OAuth/mode/chain writes under their own guards. A composed backend case proves a binding write restarts the existing verified binary with zero installer calls while an unchanged-binding write does not restart |
+| `PRRT_kwDOPbFPYs6kPhkV` / `4059468870` | Owner-supplied handoff designates `avibe-docs/design_desktop.pen` and Show session `ses36vg559de2` for these setup frames; that task-specific source overrides the repository's general default. Recorded as known-by-design in the PR body; no canvas substitution, no design-file edit, native frame verification still required of the visual lanes |
+| `PRRT_kwDOPbFPYs6kPhkZ` / `4059468875` | §4.8 and C3 name `var(--ob-active-shadow)` (backed by `--shadow-glow-onboarding-mint`) instead of a literal hex shadow; handoff hex values are design references, and a missing value becomes a token |
+| `PRRT_kwDOPbFPYs6kPhkc` / `4059468880` | The observation was right and no new mechanism was added: C6/D11 now state that controller startup owns the first runtime recovery and server-side installer admission, the browser observes that outcome and requests admitted recovery only if the engine is still missing, and no second unconditional lifecycle call follows. Composed backend cases exercise the real `Controller._recover_runtime_owners()` → `recover_runtime_intent()` → adapter/supervisor/installer chain |
 
 Repeated classes audited together: exact Agent/menu-model/pair identity and readback (D4/D9);
-enabled prerequisite → active-provider persistence → confirmed start → admission/health →
-consent (D3/D11); complete scan groups and React functional state consumers (C2/C6); plan/type/
-copy and authority consistency (C1–C6). D10 remains pending and unchanged. The known-by-design
-ledger resolves only these product-boundary requests, not correctness/review/CI gates.
+enabled prerequisite → active-provider persistence → controller recovery/server admission →
+browser observation → operation-specific recovery/consent → readback (D3/D11); complete scan
+groups and React functional state consumers (C2/C6); plan/type/copy and authority consistency
+(C1–C6). Owner D10 now selects the existing migration feature; this update changes
+plan/contracts/C1 metadata only, with unchanged C2 state and consuming tests.
+Locale/plural/placeholder and scope checks cover these edits; unaffected executable-suite and
+build evidence below is reused. The known-by-design ledger resolves only the named
+product-boundary and design-provenance requests, not correctness/review/CI gates.
 
-Current correction: ten `setupFlow.test.ts` tests pass, covering the fixed journey, disabled
-prerequisite (deployment and saved intent separately), unsupported no-install/no-Direct entry, independent healthy Hub use, retry/Back,
-drafts and late functional state updates. Changed-file ESLint, dedicated consuming-test
+Round-8 evidence, independently rerun by the orchestrator against this worktree: five frontend
+consumers of the real CLI generation authority and real `modelsApi` transport
+(`agentPresence.test.ts`), and four composed backend cases driving the real controller recovery
+chain with a test-owned artifact (`test_round8_recovery.py`) — unsupported host resolves no
+archive and performs no install/start while other controller owners still complete, supported
+default-on recovers exactly once, explicit disabled intent is preserved with zero lifecycle
+calls, repeated RPC status reads never replay lifecycle, and a healthy engine's binding write
+restarts the existing binary without installer admission. Both live outside the PR as design
+proofs; L2/L3 must port them to their real owners. C1 parity (109 keys per locale),
+`git diff --check` and file-scope checks pass. No feature E2E, deployed verification or visual
+acceptance is claimed.
+
+Provenance of this update: the delegated executor produced the four contract corrections and
+both proofs, then its session failed twice at the model layer
+(`model_hub_recovery_exhausted`) with local edits intact. The orchestrator verified the diff
+and reran both proof suites itself, completed the remaining documentation, review record and
+publication material, and published. Single-writer discipline held: the executor run was
+terminal and its queue empty before the orchestrator edited.
+
+Published Hub-contract correction evidence: ten `setupFlow.test.ts` tests passed, covering the
+fixed journey, disabled prerequisite (deployment and saved intent separately), unsupported
+no-install/no-Direct entry, independent healthy Hub use, retry/Back, drafts and late functional
+state updates. Changed-file ESLint, dedicated consuming-test
 TypeScript validation, UI build, C1 parity/plural/placeholder checks (109 keys per locale) and
 `git diff --check` pass. These consumers use synthetic runtime/connection evidence; they do
 not prove feature E2E or backend authentication. The ten external frontend transport tests
@@ -496,9 +564,10 @@ a consuming test before delivery continues.
 ## 10. Decisions, provenance and remaining binding conditions
 
 The owner explicitly reaffirmed Model Hub setup with disabling only in Settings afterward;
-this supersedes both orchestrator interpretations of Direct setup compatibility. It does not approve all D2–D9 decisions or D10.
-Existing product contracts remain reusable evidence; routine technical choices belong to
-the orchestrator. The user's confirmation
+this supersedes both orchestrator interpretations of Direct setup compatibility. At 13:19 +08
+the owner separately ratified D10's existing migration takeover and setup-consumer boundary.
+These decisions do not approve all other technical/design choices. Existing product contracts
+remain reusable evidence; routine technical choices belong to the orchestrator. The user's confirmation
 before feature implementation and explicit authority before #2082 merge remain outstanding.
 
 | ID | Provenance / current choice |
@@ -510,9 +579,9 @@ before feature implementation and explicit authority before #2082 merge remain o
 | D5 — setup prerequisite | Owner-ratified Hub-only setup; unsupported/error/disabled config never creates Direct completion. Disabling belongs to Settings afterward. C4 retains correlated Hub readiness and healthy Hub independent of installation; C2 preserves config, retry/guide/Back and drafts. Specific known-by-design resolution, no gate waiver |
 | D6 — handoff §13 | Concise recommendations: destinations logo/name, reference English wording, capsule restoration, dashed Add-more. No native Pencil inspection or design-source synchronization claimed |
 | D7 — vendor list | Orchestrator decision: shipped catalog/order, no prototype Cohere; no backend catalog change |
-| D8 — copy scope | Orchestrator decision: setup copy scope separate from Settings; migration portion remains provisional on owner D10. Controlled state/copy adaptation is future L2 work |
+| D8 — copy scope | Orchestrator decision: setup copy scope separate from Settings, with takeover copy selected by owner D10. Minimal controlled-state/copy adaptation of the existing migration owner is future L2 work |
 | D9 — row identity | Orchestrator-ratified technical interpretation with D4. Model-ranked `(source_id, model_id)` remains required. Unapproved source-ranking substitution withdrawn. Exact menu model vs upstream model, membership projection and successful manual-override readback specified with D4; no arbitrary Agent-model changes |
-| D10 — import custody | **Only product choice. Recommended:** reuse approved complete-group takeover with exact consequence + Not now / Start migration, preserving unrelated settings and setup API-key-only scope; remove copy-only/unchanged-connections/atomic-rollback promises. **Literal handoff alternative:** copying plus explicit native coexistence/Hub-admission redesign; a copy-only endpoint alone cannot pass `set_agent_mode`'s guarded native-row rejection. Backend/custody expansion remains unapproved. C1 supplies one coherent provisional takeover version |
+| D10 — migration ownership | **Owner-ratified 2026-09-21 13:19 +08:** reuse existing migration takeover. Setup owns discovery/entry/context and receipt-derived presentation; `MigrationDialog`/grouping, scan/apply APIs, `migration_apply`, `apply_native_migration` and journal retain confirmation, cleanup, custody/mode transition and recovery. Exact consequence + Not now / Start migration, API-key-only setup entry, mixed OAuth group blockers, unrelated settings preserved. Supersedes handoff copy-only/unchanged-connections/atomic-rollback promises; no separate setup migration mechanism |
 | D11 — controller bootstrap | Orchestrator-ratified corrected sequence: active provider entry with enabled capability and saved runtime intent → CSRF-aware `apiFetch` POST `{}` with JSON Content-Type and HTTP/body validation → uncached GET parse installed in shell config state → successful connection read proving persisted config → confirmed stopped/start/readiness → Hub runtime sequence. `mutateConfig([])` rejects before transport; no change to that validator. Direct fetch has no ApiContext cache/convergence side effects. Unknown writes stay pending until existence is proved; GET defaults alone cannot prove persistence. Separate frontend transport and backend fixture evidence, not E2E |
 
 D4/D9 fixture results: exact same-source model pairs persist distinctly; disjoint native
@@ -524,10 +593,11 @@ it. The composed fixture contains the proposed projection coordinator and calls 
 primitives; it is not production L3 code. Existing primitive tests cover model prefill, exact
 route guards and unknown-write readback independently.
 
-D10 determines only migration-specific copy, consent/application and receipt/recovery wiring.
-C2's full scan + backend-group draft and functional setter remain usable for the recommended
-path. If the owner chooses literal copying/coexistence, reconcile those migration interfaces
-before dispatch; do not treat this draft as a frozen backend contract for that alternative.
+D10 settles migration behavior and copy while retaining C2's full scan + backend-group draft
+and functional setter as presentation/context state. L2 shares that state through the existing
+feature's minimal controlled adaptation and consumes confirmed receipts; it does not own a
+migration transaction or native credential material. No executable interface change is needed
+for ratification. Merge #2082 and feature start remain separately gated.
 
 ## 11. Out of scope
 

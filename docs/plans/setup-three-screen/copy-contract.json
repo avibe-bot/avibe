@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "C1 — setup three-screen copy",
-    "status": "PR0 interface proposal. Migration keys under _provisional_copy are one coherent takeover alternative, awaiting owner D10; they are not shipping authorization. Original handoff remains unchanged in its source file.",
+    "status": "PR0 interface proposal. D10 owner-ratified on 2026-09-21 13:19 +08: reuse existing migration takeover; setup delegates through discovery/context and confirmed results. Selected copy under _migration_copy supersedes handoff copy-only, unchanged-connection and atomic-rollback promises for this flow. Source handoff unchanged; feature/merge authorization remains separate.",
     "source": "docs/plans/2026-09-21-setup-three-screen-handoff.md §4/§5/§8, reconciled against the strings already shipped on master 31c4e831b.",
     "ownership": {
       "onboarding.flow.*": "L1",
@@ -13,7 +13,7 @@
       "PR0 adds no key to ui/src/i18n/*.json. Each lane lands the keys it owns together with the component that references them, because keyCoverage.test.ts reads the literal keys out of the app source.",
       "Every string that interpolates {{count}} ships a complete _one/_other family in BOTH bundles; zh repeats the same value so locale parity stays a plain set equality. This is the rule settings.models already enforces by test (copyAgreement.test.ts) and the class it exists to prevent.",
       "{{names}} is a joined list, so it may never be the subject of a singular verb in English.",
-      "Orchestrator D8 allocates setup vocabulary separately from Settings. D10 must adopt setup takeover behavior before _provisional_copy ships; no copy-only or unchanged-native-state claims may accompany migration_apply.",
+      "Orchestrator D8 allocates setup vocabulary separately from Settings. Owner D10 selects existing migration takeover on 2026-09-21 13:19 +08. Setup delegates confirmation/apply/recovery to that feature; no copy-only, unchanged-connection or atomic-rollback promise accompanies migration_apply.",
       "No string in this contract is a credential example. The prototype's sk-demo-example placeholder and its 交互演示，请勿输入真实凭据 / 正在保存模拟配置… lines are preview-only and must not ship (handoff §15).",
       "Model-ranked route rows use exact source/upstream-model pairs. C6 specifies displayed Agent/menu-model targets, backend subsets, divergent hydration and per-target readback. Shared does not mean every model is eligible for every assistant."
     ]
@@ -376,8 +376,8 @@
       }
     }
   },
-  "_provisional_copy": {
-    "decision": "D10: recommended complete-group takeover; owner choice still required before setup migration ships. The literal copy alternative also needs native coexistence/Hub admission design.",
+  "_migration_copy": {
+    "decision": "D10 owner-ratified 2026-09-21 13:19 +08: setup owns the default Hub journey and consumes the existing migration takeover feature. Its confirmation, native cleanup, custody/mode transition, transaction and journal recovery retain their existing owners; no setup-specific migration mechanism.",
     "keys": [
       "onboarding.providers.summarySelectedNote",
       "onboarding.providers.addDetectedNote",
@@ -408,10 +408,11 @@
       "onboarding.import.remaining_other"
     ],
     "behavior": [
-      "Cards, Detected tab and primary action open one complete-group review; selection or runtime start never applies credentials. Only Start migration confirms; Not now keeps native authentication and mode unchanged.",
-      "Show exact approved consequence sentence from model-hub-native-takeover.md. Preserve unrelated settings; apply owns credential cleanup and Hub mode/placement together.",
-      "Setup remains API-key-only: show but block whole groups containing OAuth or non-importable rows. Counts are migration items, not inferred keys or Sources.",
-      "Unknown or failed apply requires readback/recovery before retry; no blanket atomic rollback, copy-only or unchanged-assistant-connections promise."
+      "Cards, capsule, Detected tab and migration-entry CTA delegate selection/context to the existing complete-group review. Setup entry, selection, normal navigation and runtime install/start never apply credentials. Only Start migration confirms; Not now keeps native authentication and mode unchanged.",
+      "Show the exact approved consequence sentence from model-hub-native-takeover.md. MigrationDialog/grouping and modelsApi scan/apply delegate to service migration_apply, apply_native_migration and its journal; they own cleanup, custody, Hub mode/placement and recovery. No second mode PATCH after successful apply; unrelated settings stay preserved.",
+      "Setup entry remains API-key-only: show but block whole groups containing OAuth or non-importable rows. The broader migration feature remains in Settings. Counts are confirmed migration items, not inferred keys or Sources.",
+      "Setup refreshes real sources/supplies and updates presentation from confirmed receipts; zero/error refresh callbacks are not completed takeover. Unknown or failed apply stays with the existing migration recovery owner. No setup-specific retry engine, custom rollback, copy-only or unchanged-assistant-connections promise.",
+      "Only minimal controlled-state/copy adaptation of the existing migration feature is planned. Original handoff content remains unchanged; the selected contract supersedes its incompatible migration promises. D10 ratification grants no feature dispatch, merge or real-credential migration authority to PR0."
     ]
   }
 }
