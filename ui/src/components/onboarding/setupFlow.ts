@@ -81,18 +81,25 @@ export type SetupFlowState = {
   importedCount: number;
   /** Source ids added through the "Add more" card, which is what its badge counts. */
   addedThroughMore: string[];
-  /** The route dialog's working PREFERENCE, as source ids, preferred first. Hydrated from
-   *  the persisted per-backend orders every time the screen is entered, so a stateful
-   *  installation opens on its real rows; empty means "not derived yet", never "no route".
-   *  It is not an entry-gate input — C4 reads the server, because a gate resting on client
-   *  draft state would block an installation that already has valid persisted routes.
+  /** The route dialog's working PREFERENCE, as source ids, preferred first. Hydrated by
+   *  MERGING every enabled backend's persisted order — the backend that will run establishes
+   *  precedence, and ids found only on the others are appended in their own persisted order —
+   *  because a write replaces that backend's enabled subset, so a preference missing a source
+   *  another backend relies on would silently disable its supply. Empty means "not derived
+   *  yet", never "no route".
    *
-   *  It is also not what gets written. `AgentSupply.sources.order` is each backend's own
-   *  eligible subset, so a write projects this list through `eligibilityOf` per backend —
-   *  after that backend is in `hub` mode, since Direct reports `sources: null` and reads
-   *  every source ineligible — and skips a backend whose projection is empty rather than
-   *  sending an order the server rejects with `invalid_source_order`. See C6. */
+   *  Hydrate only before the first edit or while `routeOrderDirty` is false, and reconcile
+   *  after a confirmed write. A dirty draft survives screen navigation — that is the reason
+   *  this state lives in the shell — so leaving through the dialog's "add model source" exit
+   *  and coming back must not throw the user's ordering away.
+   *
+   *  It is not an entry-gate input: C4 reads the server, because a gate resting on client
+   *  draft state would block an installation that already has valid persisted routes. Nor is
+   *  it what gets written verbatim — see C6 for the per-backend projection and its owner. */
   routeOrder: string[];
+  /** Whether `routeOrder` holds an edit the server has not confirmed. Decides if a re-entry
+   *  may hydrate; a confirmed write clears it. */
+  routeOrderDirty: boolean;
 };
 
 export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
@@ -100,12 +107,21 @@ export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
   importedCount: 0,
   addedThroughMore: [],
   routeOrder: [],
+  routeOrderDirty: false,
 };
 
 /**
- * The capability read as a three-state, because two states cannot express "not read yet".
- * `useModelHubCapability()` returns `boolean | null`; map it at the boundary with
- * `setupCapability` and never branch on the raw value.
+ * The capability read as a three-state, because two states cannot express "no authoritative
+ * answer yet".
+ *
+ * The producer matters: `disabled` must mean an authoritative read that says the deployment
+ * turned Model Hub off, never a request that failed. `useModelHubCapability()` catches its
+ * own error and resolves to `false`, so it cannot distinguish the two and is NOT a safe
+ * producer here; derive the value from the config the Wizard has already loaded
+ * (`modelHubEnabledFromConfig`, the same projection `readOpencodeSetupRoutes` uses), which is
+ * authoritative because the shell does not render without a successful config read. Anything
+ * less stays `pending`, and `setupNavigationReady` keeps the user on the introduction until it
+ * settles.
  */
 export type SetupCapability = 'pending' | 'enabled' | 'disabled';
 

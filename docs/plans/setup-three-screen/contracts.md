@@ -59,12 +59,18 @@ and the shell-owned `SetupFlowState`. Two rules are the point of the file:
 - **All screens stay mounted.** An inactive screen is `hidden` + `inert`, never unmounted,
   so its state survives navigation without being lifted. Anything the server owns
   (installed CLIs, enabled backends, persisted sources) is read, not mirrored;
-  `SetupFlowState` holds only what no server does.
+  `SetupFlowState` holds only what no server does — including the route dialog's unconfirmed
+draft and its `routeOrderDirty` flag, so an edit survives a round trip to screen 2.
 
-`setupCapability(boolean | null)` maps `useModelHubCapability()`'s read onto
+`setupCapability(boolean | null)` maps an authoritative capability read onto
 `'pending' | 'enabled' | 'disabled'`, and `setupScreenSequence(capability)` encodes the
 degradation: three screens normally, `intro → assistants` when a deployment explicitly
-disables Model Hub. A `pending` capability returns the full sequence, and that return is not
+disables Model Hub. The producer matters as much as the mapping: `disabled` means an
+authoritative read that says the deployment turned Model Hub off, never a request that
+failed, so it is derived from the config the Wizard has already loaded
+(`modelHubEnabledFromConfig`) rather than from `useModelHubCapability()`, which catches its
+own error and resolves to `false` — collapsing a transient failure into a screen the
+deployment never asked to lose. A `pending` capability returns the full sequence, and that return is not
 the wait — `setupNavigationReady(capability)` is. The shell must hold the user on the
 introduction with the primary action disabled until it is true, because entering the
 providers screen on a guess and then removing it when the read resolves to `disabled`
@@ -226,9 +232,47 @@ a claim here contradicting the implementation reports it instead of following it
 | enabled | the identity Switch's existing write path | disabling preserves configuration and says so (`onboarding.setup.disabledNotice`) |
 | update available / update | `BackendLifecycleChip` with `onVisual` | the chip still owns the probe and the write; the card only draws the reported visual, and an update coexists with the enabled state |
 | default-model chip | the candidate Agent's own `named_agents` entry (`effective_model_id`, `supply_status`) | rendered only when the assistant is enabled and that Agent's route resolves; it shows the model this Agent would actually ask for, not the backend-level projection, which is null whenever the default Agent belongs to another backend |
-| route preference hydration | `getAgentSources(backend)` for each enabled backend | the dialog's list is derived from persisted state and never left at an empty client default: prefer the order of the backend that will run (the default Vibe Agent's), else the longest persisted order, else the ordering the server reports for that backend's eligible sources. Every re-entry re-derives it, so persisted state stays authoritative — a stateful installation opens on its real rows and can satisfy C4 without any write |
-| backend mode | `resumeGatewayAdoption` → `setAgentMode(backend, 'hub')` | the shipped sequence in `BackendSupplyModeCard.setMode` and `SettingsModelsPage`: adoption ensures the engine first and hands back that backend's migration candidates, and only a backend with none is switched straight to hub. Eligibility is read AFTER the switch, from the echoed `AgentSupply`, because in Direct mode `sources` is `null` and `eligibilityOf` marks every source ineligible — projecting first would skip every Direct backend, so setup could never establish a route on a fresh or Direct installation |
-| route dialog list | the hydrated preference, projected to rows | row = provider mark + model name + `服务名 · 首选/备用 N`; up/down disabled at the ends; a single route shows the "already preferred" note |
-| route write | `putAgentSources(backend, { order })` per enabled backend | one shared PREFERENCE, projected per backend, because the contract has no global route object and `AgentSupply.sources.order` is that backend's eligible subset: the server rejects a foreign or ineligible id with `invalid_source_order`. Project through `eligibilityOf(agent, sourceId)` in `settings/models/eligibility.ts` — the only place the UI reads eligibility, never a re-derived predicate — keeping the shared relative order, and skip a backend whose projection is empty instead of writing it an empty order; the dialog says which backends were skipped and why, from the eligibility `reason_key`. Guard handling is `SourceOrderDrawer.save`'s and is not reimplemented: echo the server's exact `would_remove_hops` / `would_interrupt` back once with `force: true` for `source_in_route_chain` / `source_last_supplier`, a changed plan still fails, and an unknown-write outcome re-reads before any retry. A native ChatGPT or Claude subscription is the common asymmetric case: eligible for its own client only, so a shared preference legitimately reaches one backend and not the others |
 | 添加模型来源 | `onNavigate('providers')` | the footer's other exit is 完成, which closes and returns focus to the chip |
-| all-uninstalled case | the three rows above | three install actions, primary action disabled, and going back to screen 2 stays available |
+| all-uninstalled case | the install, enable and route rows above | three install actions, primary action disabled, and going back to screen 2 stays available |
+
+### Route mapping — L3-owned, frozen in its own PR
+
+The route dialog's data mapping is deliberately NOT specified here. It has one owner (L3), no
+other lane consumes it, and three review rounds showed that prescribing hub mechanics from a
+document produces a second, drift-prone copy of what the service already defines. L3 resolves
+it against the implementation, pins it with tests, and records the resolved mapping in its PR
+body. What this file does carry is the decision that bounds the choice and the traps already
+paid for.
+
+**D9 — the dialog ranks SOURCES, not free model choices.** Its rows are the sources that can
+serve the assistant's selected menu model, each drawn with its provider mark, its display
+name and the model id it would serve, ranked 首选 / 备用 N; the write is the per-backend
+source order through the shipped owner (`SourceOrderDrawer.save`'s semantics, guard echo
+included). Exact per-model hop editing stays where it already lives — Settings'
+`RouteChainDialog` — which the dialog's own 添加模型来源 exit and Settings both reach. The
+alternative, ranking arbitrary `(source, model)` pairs through `putAgentChain`, was rejected:
+`putAgentSources` replaces source membership and order and names no model, so model-ranked
+rows either cannot be derived unambiguously or would save a source priority while claiming to
+save a model route. If L3 finds the design's rows cannot be rendered truthfully as source
+identities, that is a report to the orchestrator, not a silent switch to the chain APIs.
+
+Traps already paid for, which L3's implementation and tests must satisfy:
+
+1. **Hydration merges, it does not pick.** With disjoint persisted orders — Claude and Codex
+   each on its own native subscription — taking one backend's order drops the other's source
+   id, the later projection can only filter ids already present, and that backend ends up
+   skipped with a route nobody can view or reorder. Merge deterministically: the backend that
+   will run establishes precedence, ids found only on other enabled backends are appended in
+   their persisted order, and a write never omits a source a backend currently has enabled
+   unless the user removed it in the dialog.
+2. **A dirty draft survives navigation.** Reordering and then leaving through 添加模型来源 must
+   not rehydrate over the edit; `SetupFlowState.routeOrderDirty` decides, and a confirmed
+   write reconciles and clears it.
+3. **Mode before eligibility.** In Direct mode `sources` is `null` and `eligibilityOf` marks
+   every source ineligible, so a projection-first sequence skips every Direct backend and a
+   fresh installation can never establish a route. Switch and re-read first, through the
+   shipped adoption path.
+4. **Readiness is per candidate Agent.** `AgentSupply.selected_model_id` describes only the
+   route named by `selected_by_agent` and is null when the default Agent belongs to another
+   backend; correlate `listVibeAgents()` candidates with their `named_agents` entry instead
+   (C4).

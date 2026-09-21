@@ -174,6 +174,9 @@ only when installed) → divider → status pill → description → action row.
 - **Default model route dialog**: shared ordered list, `提供商 logo + 模型名 + 服务名 ·
   首选/备用 N`, up/down with first/last disabled, single-route note, footer
   `添加模型来源` (→ screen 2) + `完成`, focus back to the chip.
+  The rows rank SOURCES that can serve the assistant's selected model, each labelled with the
+  model id it would serve — see D9. The mapping's mechanics are L3's to resolve against the
+  implementation and freeze in its own PR; contracts.md carries the decision and the traps.
 - **Per-assistant connection dialogs are removed from onboarding.** `BackendConnectionDialog`
   stays for Settings; setup no longer opens it. This is what forces the gate rewrite below.
 - All-uninstalled case: three `立即安装` cards, primary action disabled, and the user can
@@ -398,6 +401,28 @@ correlates `listVibeAgents()` candidates with their `named_agents` entry, and C2
 `SetupCapability` with `setupNavigationReady` as the explicit wait, so the shell cannot read
 a returned sequence as permission to navigate. Both briefs were swept for the same members.
 
+Round 4 (head `de9c3248`) confirmed that shrinking was the right move but had not gone far
+enough in the one place it mattered. Four findings, all in the route mapping: hydration that
+picks one backend's order and so drops a source another backend depends on; rows ranked as
+models against a mutation that writes source membership and names no model; rehydration that
+discards a dirty draft on screen navigation; and a capability producer
+(`useModelHubCapability()`) that collapses a failed request into `false`, which the
+degradation rule then reads as an explicit opt-out.
+
+The scope decision therefore moved again, this time by ownership rather than by wording: the
+route mapping leaves this contract entirely. It has one owner, no cross-lane consumer, and
+three rounds of evidence that specifying hub mechanics from a document produces a drift-prone
+second copy. C6 now states only the decision that bounds the choice (D9: the dialog ranks
+sources) and the four traps as requirements, and L3 resolves the mechanics against the
+implementation, pins them with tests and records them in its PR. The two findings that were
+genuinely cross-lane stayed and were fixed in the interface itself, where a test can hold
+them: `SetupFlowState` gained `routeOrderDirty` with the hydrate-and-reconcile rule, and C2
+names the authoritative capability producer instead of the convenient hook.
+
+The standing rule this leaves for L1–L4: a contract states an interface, an owner and a trap.
+It does not restate mechanics its owner already implements, and any claim about shipped
+behavior is read out of the implementation before it is written down.
+
 ## 10. Decisions
 
 D1 was settled by the owner on 2026-09-21 09:30 and executed at 09:31. D2–D8 are adopted
@@ -452,6 +477,19 @@ contract-preserving, and any of them can still be overruled before its lane merg
   copy scope instead of one side being renamed, with a test holding the Settings rendering
   unchanged. Unifying the two words app-wide stays a separate product-voice decision,
   recorded here so it is not lost.
+- **D9 — what the route dialog ranks (new, found in round 4). Adopted: sources, not free
+  model choices.** Its rows are the sources that can serve the assistant's selected menu
+  model, drawn with provider mark, display name and the model id each would serve, ranked
+  首选 / 备用 N; the write is the per-backend source order through the shipped owner. Exact
+  per-model hop editing stays in Settings' `RouteChainDialog`. The reason is the mutation
+  surface: `putAgentSources` replaces source membership and order and names no model, so
+  model-ranked rows either cannot be derived unambiguously or would save a source priority
+  while telling the user it saved a model route. Rejected: ranking arbitrary
+  `(source, model)` pairs through `putAgentChain` per backend per model, which needs a model
+  context the design's single list does not have and duplicates a surface Settings already
+  owns. This is the owner-visible interpretation of an approved design, so it is recorded as
+  a decision rather than absorbed: if the rows cannot be rendered truthfully as source
+  identities, L3 reports it instead of switching mutation surface on its own.
 
 ## 11. Out of scope
 

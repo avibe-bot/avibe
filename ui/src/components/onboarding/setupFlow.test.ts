@@ -69,12 +69,13 @@ describe('setup back target', () => {
 });
 
 describe('shell-owned flow state', () => {
-  it('starts with nothing selected, imported, added or ordered', () => {
+  it('starts with nothing selected, imported, added or ordered, and no dirty draft', () => {
     expect(INITIAL_SETUP_FLOW_STATE).toEqual({
       providerSelection: [],
       importedCount: 0,
       addedThroughMore: [],
       routeOrder: [],
+      routeOrderDirty: false,
     });
   });
 });
