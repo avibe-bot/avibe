@@ -4338,6 +4338,8 @@
       "sendNow": "立即发送",
       "sendingNow": "发送中…",
       "confirmingNow": "发送状态未确认",
+      "sendFailed": "暂时无法发送这条消息，请稍后重试。",
+      "sendStatusUnknown": "暂时无法确认发送结果，请先查看会话记录和队列，避免重复发送。",
       "sendDeferred": "暂时无法发送到当前任务，消息仍保留在队列中。",
       "attachmentsUnavailable": "部分附件已不可用，原消息仍保留在队列中。请重新上传附件后再发送。",
       "sendReconciling": "暂时无法确认这条消息是否发送成功。消息已保留，系统不会重复发送；请刷新页面查看最新状态。",

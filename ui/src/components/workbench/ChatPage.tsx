@@ -1281,16 +1281,19 @@ export const ChatPage: React.FC = () => {
   // The send-while-busy queue (pending messages shown above the composer).
   // Re-fetched on mount + on every ``queue.updated`` (enqueue / flush / remove).
   const refreshQueue = useCallback(async (isCurrentRequest?: () => boolean) => {
-    if (!sessionId) return;
+    if (!sessionId) return null;
     const claimQueueSnapshot = beginQueueSnapshotRead(sessionId);
     try {
       const res = await api.listSessionQueue(sessionId, { cache: false });
-      if (isCurrentRequest && !isCurrentRequest()) return;
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
-      if (!claimQueueSnapshot()) return;
-      setQueue(res.queued ?? []);
+      if (isCurrentRequest && !isCurrentRequest()) return null;
+      if (sessionId !== sessionIdRef.current) return null; // switched chats mid-fetch
+      if (!claimQueueSnapshot()) return null;
+      const queued = res.queued ?? [];
+      setQueue(queued);
+      return queued;
     } catch {
       /* leave the last-known queue; the next queue.updated refetches */
+      return null;
     }
   }, [api, beginQueueSnapshotRead, sessionId]);
 
@@ -1591,6 +1594,8 @@ export const ChatPage: React.FC = () => {
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
     bootstrapRequestGenerationRef.current += 1;
+    // Returning to the same session must not revive an earlier send's ownership.
+    queueSendGenerationRef.current += 1;
     turnEpochRef.current += 1;
     // The gate is session-scoped. A PATCH for the previous chat may still be
     // pending after navigation, but it must never hold the new chat's bootstrap
@@ -2337,21 +2342,36 @@ export const ChatPage: React.FC = () => {
     // failed or ambiguous request never hides work the user may need to retry.
     setSendingQueueNow(true);
     setError(null);
-    // A turn is about to run (the flushed queue) — reflect it immediately so
-    // Stop stays available even if the controller's turn.start is missed/delayed
-    // (especially for the idle-flush case that starts a fresh turn) (Codex P2).
+    const messageId = queue[0].id;
+    // Reflect admission immediately, but only undo this optimistic working
+    // state if no newer authoritative Turn event has arrived in the meantime.
     markWorking();
+    const turnEpochAtSend = turnEpochRef.current;
+    const reconcileFailure = async (keepWorking = false) => {
+      const refreshedQueue = await refreshQueue(isCurrentRequest);
+      if (!isCurrentRequest()) return;
+      if (!keepWorking && turnEpochAtSend === turnEpochRef.current) setWorking(false);
+      // HTTP refusals and transport failures have the same evidence boundary:
+      // retry advice is safe only for this exact, still-unfenced Delivery.
+      // A gone/fenced row or an unreadable/superseded snapshot is ambiguous.
+      const retryable = refreshedQueue?.some(
+        (item) => item.id === messageId && !isQueueDeliveryFenced(item),
+      ) ?? false;
+      setError(t(retryable ? 'chat.queue.sendFailed' : 'chat.queue.sendStatusUnknown'));
+    };
     try {
-      const res = await api.sendQueuedNow(sid, queue[0].id);
+      const res = await api.sendQueuedNow(sid, messageId);
       // Drop every effect from a request that lost ownership while it was in
       // flight, including responses that arrive after a newer send starts.
       if (!isCurrentRequest()) return;
       if (res && res.ok === false) {
         // stop_failed: the controller left the ORIGINAL turn running and the
-        // queue intact — keep Stop visible so the user can still interrupt it
-        // (Codex P2). Other failures mean no turn is running → clear working.
-        if (res.code !== 'stop_failed') setWorking(false);
-        setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
+        // queue intact — preserve the existing Stop visibility behavior.
+        // Response detail is a transport/controller diagnostic, not
+        // user-facing copy. Reconcile even HTTP failures such as stale_head:
+        // another tab may already have sent the clicked Delivery.
+        await reconcileFailure(res.code === 'stop_failed');
+        return;
       } else if (res?.status === 'queued') {
         setError(t(res.reason === 'attachments_unavailable'
           ? 'chat.queue.attachmentsUnavailable'
@@ -2359,19 +2379,18 @@ export const ChatPage: React.FC = () => {
       } else if (res?.status === 'empty') {
         // Nothing was actually flushed (a stale queue item already gone) — no
         // turn is starting, so drop the optimistic working state + resync.
-        setWorking(false);
+        if (turnEpochAtSend === turnEpochRef.current) setWorking(false);
       } else {
         // A successful admission may only claim the compatible prefix.
         // Re-read the authoritative queue instead of assuming the whole visible
         // batch was flushed.
       }
       await refreshQueue(isCurrentRequest);
-    } catch (err) {
+    } catch {
       // The same ownership guard applies to failures: an older request must not
       // clear the new chat's working state or surface a stale error.
       if (isCurrentRequest()) {
-        setWorking(false);
-        setError(errorMessage(err) ?? String(err));
+        await reconcileFailure();
       }
     } finally {
       if (isCurrentRequest()) {

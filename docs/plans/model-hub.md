@@ -963,8 +963,15 @@ state set; prose cannot add another runtime health value. `RuntimeDependency.ena
 is orthogonal persisted user intent. New configurations default it to true without an
 enable-confirmation dialog. The additive persisted
 `model_hub.runtime_default_applied: bool` marker defaults to true; a pre-marker disk
-shape is upgraded once to `enabled: true` and the marker is then persisted. Later
-explicit Stop writes `enabled: false` and does not get re-enabled by that one-time
+shape is upgraded once to `enabled: true` and the marker is then persisted by
+service startup after acquiring the instance lock. Ordinary config reads only
+project compatible shapes in memory and retain the pending marker as false;
+unrelated settings or Memory writes do not consume it. Installing a newer CLI must not rewrite
+the shared file ahead of an older running service (see
+[migration ownership](model-hub-upgrade-config-compatibility.md)). Explicit
+Start/Stop consume the marker together with their enabled intent, including an
+already-disabled Stop; a refused/failed Stop leaves both unchanged.
+Stop writes `enabled: false` and does not get re-enabled by that one-time
 defaulting rule. Service startup starts the runtime only when the persisted intent is
 true, and a transient process loss changes health, never this switch state.
 

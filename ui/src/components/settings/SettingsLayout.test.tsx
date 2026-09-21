@@ -13,6 +13,8 @@ import {
 } from '@/lib/settingsOverlay';
 import { ShellSidebarContext } from '@/context/ShellSidebarContext';
 import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
+import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '@/lib/settingsSectionMemory';
+import { ModelHubCapabilityGate } from './models/ModelHubCapabilityGate';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -82,12 +84,23 @@ type SettingsTestEntry = string | {
   state?: unknown;
 };
 
+// Model Hub is the one section that answers a disabled feature with a redirect
+// of its own. Off by default because the gate renders nothing until its config
+// read lands, which the synchronous layout cases below would not survive; the
+// case that is about the redirect opts in and gets the real gate.
+const modelHubRoute = (gated: boolean) => (gated
+  ? <ModelHubCapabilityGate><div>models-body</div></ModelHubCapabilityGate>
+  : <div>models-body</div>);
+
 // `shellHasSidebar` stands in for what AppShell publishes around this layout.
 // It defaults to the context's own default — an ordinary shell route, which is
 // what every case but the sidebar-less one below is about.
 const renderLayout = (
   entry: SettingsTestEntry,
-  { shellHasSidebar = true }: { shellHasSidebar?: boolean } = {},
+  { shellHasSidebar = true, gateModelHub = false }: {
+    shellHasSidebar?: boolean;
+    gateModelHub?: boolean;
+  } = {},
 ) => render(
   <MemoryRouter initialEntries={[entry]}>
     <ShellSidebarContext.Provider value={shellHasSidebar}>
@@ -96,7 +109,8 @@ const renderLayout = (
         <Route path="general" element={<div>general-body</div>} />
         <Route path="backends" element={<div>backends-body</div>} />
         <Route path="backends/claude" element={<div>claude-body</div>} />
-        <Route path="models" element={<div>models-body</div>} />
+        <Route path="models" element={modelHubRoute(gateModelHub)} />
+        <Route path="memory" element={<div>memory-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
         <Route path="shortcuts" element={<div>shortcuts-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
@@ -407,24 +421,87 @@ describe('SettingsLayout', () => {
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
-  it('opens General from /settings even after a remembered Backends visit', async () => {
-    // Ordinary Settings is a destination, not a resume: whatever the last visit
-    // was, the landing is the section every role can read.
-    window.localStorage.setItem('avibe.settings.last-path', '/settings/backends');
+  it('resumes the remembered section from /settings', async () => {
+    // Ordinary Settings is a return, not a first read: the section the rail was
+    // left on is the one the next entry opens.
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+    media.matches = true;
+    renderLayout('/settings');
+
+    expect(await screen.findByText('backends-body')).toBeTruthy();
+    expect(screen.queryByText('general-body')).toBeNull();
+  });
+
+  it('records the section a detail page belongs to, not the detail page', async () => {
+    media.matches = true;
+    renderLayout('/settings/backends/claude');
+
+    expect(await screen.findByText('claude-body')).toBeTruthy();
+    // A provider page is inside Backends, and Backends is the row the rail can
+    // show as current, so that is what a later entry has to be able to resume.
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+      .toBe('/settings/backends');
+  });
+
+  it.each([
+    ['a section that no longer exists', '/settings/retired-section'],
+    ['a section this visitor may not open', '/settings/service'],
+  ])('falls back to General for %s', async (_case, remembered) => {
+    // An owner's remembered page can outlive the capability that let them read
+    // it, and a release can retire a section under a path storage still holds.
+    // Neither may hand anyone a route the rail would not offer them today.
+    authorization.capabilities.can_manage_instance = false;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, remembered);
     media.matches = true;
     renderLayout('/settings');
 
     expect(await screen.findByText('general-body')).toBeTruthy();
-    expect(screen.queryByText('backends-body')).toBeNull();
+    expect(screen.queryByText('service-body')).toBeNull();
+  });
+
+  it('keeps remembering a section whose rail row a feature flag took down', async () => {
+    // Memory's row leaves the rail when memory is switched off, but the page
+    // stays the setup surface — the one the Dependencies page's Configure
+    // button links to. Being somewhere the rail cannot show as current is a
+    // real place to be, so it is a real place to come back to.
+    renderLayout('/settings/memory');
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
+    });
+
+    api.getMemorySettings.mockResolvedValueOnce({ status: 'ok', enabled: false });
+    act(() => window.dispatchEvent(new Event('avibe:memory-settings-changed')));
+
+    // The row going is how this test knows the projection settled; before that
+    // an absent row is only a read that has not landed.
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'settings.sections.memory' })).toBeNull();
+    });
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+      .toBe('/settings/memory');
+  });
+
+  it('follows a disabled section to the page it redirects to', async () => {
+    // Model Hub answers a disabled hub with its own redirect, so a resumed
+    // memory of it does not strand anyone: the section it lands on is the one
+    // recorded, and the next entry opens there.
+    api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: false } } });
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/models');
+    media.matches = true;
+    renderLayout('/settings', { gateModelHub: true });
+
+    expect(await screen.findByText('backends-body')).toBeTruthy();
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+      .toBe('/settings/backends');
   });
 
   it.each([
     ['/settings/backends', 'backends-body'],
     ['/settings/platforms', 'platforms-body'],
     ['/settings/remote-access', 'remote-access-body'],
-  ])('keeps the explicit deep link %s authoritative over the landing page', (path, body) => {
+  ])('keeps the explicit deep link %s authoritative over the resumed section', (path, body) => {
     media.matches = true;
-    window.localStorage.setItem('avibe.settings.last-path', '/settings/service');
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/service');
     renderLayout(path);
 
     expect(screen.getByText(body)).toBeTruthy();
@@ -436,10 +513,10 @@ describe('SettingsLayout', () => {
     media.matches = false;
     renderLayout('/settings');
 
-    // This root is the phone's section-NAVIGATION screen, not its ordinary way
-    // in: the dock chip goes straight to General at every width (see
-    // MobileDockDrawer). Redirecting the root as well would leave General's back
-    // row pointing at a screen that bounces the user back to General.
+    // This root IS the phone's ordinary way in — the dock chip points here (see
+    // MobileDockDrawer), because one screen at a time means the section list is
+    // the only place every other section is reachable from. Only a desktop,
+    // which keeps the rail beside the page, resolves it through to a section.
     const general = screen.getByRole('link', { name: 'settings.sections.general' });
     expect(general.getAttribute('href')).toBe('/settings/general');
     expect(screen.queryByText('general-body')).toBeNull();
@@ -449,7 +526,20 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.backToSections' }).getAttribute('href')).toBe('/settings');
   });
 
-  it('selects General when a mobile root viewport becomes desktop', async () => {
+  it('selects the resumed section when a mobile root viewport becomes desktop', async () => {
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+    renderLayout('/settings');
+
+    expect(screen.queryByText('backends-body')).toBeNull();
+    act(() => {
+      media.matches = true;
+      media.listeners.forEach((listener) => listener({ matches: true } as MediaQueryListEvent));
+    });
+
+    await waitFor(() => expect(screen.getByText('backends-body')).toBeTruthy());
+  });
+
+  it('selects General when a mobile root viewport becomes desktop with nothing to resume', async () => {
     renderLayout('/settings');
 
     expect(screen.queryByText('general-body')).toBeNull();

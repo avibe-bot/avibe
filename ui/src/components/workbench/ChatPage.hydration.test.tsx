@@ -296,6 +296,273 @@ describe('ChatPage transcript hydration', () => {
     expect(mocks.api.cancelSession).not.toHaveBeenCalled();
   });
 
+  it('refreshes a stale queue snapshot after send-now transport failure', async () => {
+    const queued = {
+      ...queuedMessage('stale-queued-row', 'stale queued row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [queued],
+      turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
+    mocks.api.sendQueuedNow.mockRejectedValue(new Error('socket unavailable'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    const button = await screen.findByRole('button', { name: 'chat.queue.sendNow' });
+    expect(screen.getByText(queued.text)).toBeTruthy();
+    fireEvent.click(button);
+
+    await screen.findByText('chat.queue.sendStatusUnknown');
+    await waitFor(() => expect(screen.queryByText(queued.text)).toBeNull());
+    expect(mocks.api.listSessionQueue).toHaveBeenCalledWith('session-new', { cache: false });
+    expect(screen.queryByText('chat.stopFailed')).toBeNull();
+  });
+
+  it('does not overwrite a newer chat after a stale send-now refresh finishes', async () => {
+    const queued = {
+      ...queuedMessage('stale-send-row', 'stale send row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    const queueRefresh = deferred<{ queued: (typeof queued)[] }>();
+    let holdQueueRefresh = false;
+    mocks.api.getSession.mockImplementation((id: string) => Promise.resolve({ id }));
+    mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve({
+      ...bootstrapPayload(id),
+      queued: id === 'session-new' ? [queued] : [],
+      turn_state: id === 'session-new' ? running : idleTurnState,
+    }));
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockImplementation((id: string) => {
+      if (id === 'session-new' && holdQueueRefresh) return queueRefresh.promise;
+      return Promise.resolve({ queued: id === 'session-new' ? [queued] : [] });
+    });
+    mocks.api.sendQueuedNow.mockImplementation(async () => {
+      holdQueueRefresh = true;
+      throw new Error('socket unavailable');
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route
+            path="/chat/:sessionId"
+            element={(
+              <>
+                <SessionSwitcher sessionId="session-other" />
+                <ChatPage />
+              </>
+            )}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.queue.sendNow' }));
+    await waitFor(() => expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith('session-new', 'stale-send-row'));
+    fireEvent.click(screen.getByRole('button', { name: 'switch chat' }));
+    await act(async () => queueRefresh.resolve({ queued: [] }));
+
+    await waitFor(() => expect(screen.queryByText('chat.queue.sendStatusUnknown')).toBeNull());
+    expect(screen.queryByText('chat.queue.sendFailed')).toBeNull();
+  });
+
+  it.each(
+    ['rejected send', 'refused send', 'accepted send', 'rejected refresh', 'refused refresh']
+      .flatMap((phase) => [false, true].map((newerSend) => ({ phase, newerSend }))),
+  )('does not revive a stale $phase after A → B → A (new send: $newerSend)', async ({ phase, newerSend }) => {
+    const queued = {
+      ...queuedMessage('stale-return-row', 'stale return row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    const send = deferred<{ ok: boolean; code?: string; status?: string }>();
+    const nextSend = deferred<{ ok: boolean; status: string }>();
+    const queueRefresh = deferred<{ queued: (typeof queued)[] }>();
+    const settleSend = () => {
+      if (phase.startsWith('rejected')) send.reject(new Error('socket unavailable'));
+      else if (phase.startsWith('refused')) send.resolve({ ok: false, code: 'stale_head' });
+      else send.resolve({ ok: true, status: 'accepted' });
+    };
+    mocks.api.getSession.mockImplementation((id: string) => Promise.resolve({ id }));
+    mocks.api.getSessionBootstrap.mockImplementation((id: string) => Promise.resolve({
+      ...bootstrapPayload(id),
+      queued: id === 'session-new' ? [queued] : [],
+      turn_state: running,
+    }));
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockReturnValue(queueRefresh.promise);
+    mocks.api.sendQueuedNow.mockReturnValueOnce(send.promise).mockReturnValue(nextSend.promise);
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes>
+          <Route
+            path="/chat/:sessionId"
+            element={(
+              <>
+                <SessionSwitcher sessionId="session-other" />
+                <SessionSwitcher sessionId="session-new" label="return chat" />
+                <ChatPage />
+              </>
+            )}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.queue.sendNow' }));
+    await waitFor(() => expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith('session-new', 'stale-return-row'));
+    if (phase.endsWith('refresh')) {
+      await act(async () => settleSend());
+      await waitFor(() => expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(1));
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'switch chat' }));
+    await waitFor(() => expect(mocks.composer?.sessionId).toBe('session-other'));
+    expect(screen.queryByText(queued.text)).toBeNull();
+    fireEvent.click(await screen.findByRole('button', { name: 'return chat' }));
+    await screen.findByText(queued.text);
+    if (newerSend) fireEvent.click(screen.getByRole('button', { name: 'chat.queue.sendNow' }));
+    if (phase.endsWith('send')) await act(async () => settleSend());
+    await act(async () => queueRefresh.resolve({ queued: [] }));
+
+    expect(screen.queryByText('chat.queue.sendStatusUnknown')).toBeNull();
+    expect(screen.queryByText('chat.queue.sendFailed')).toBeNull();
+    expect(screen.getByText(queued.text)).toBeTruthy();
+    expect(mocks.composer?.busy).toBe(true);
+    const button = screen.getByRole('button', {
+      name: newerSend ? 'chat.queue.sendingNow' : 'chat.queue.sendNow',
+    }) as HTMLButtonElement;
+    expect(button.disabled).toBe(newerSend);
+    expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(phase.endsWith('refresh') ? 1 : 0);
+    expect(mocks.api.cancelSession).not.toHaveBeenCalled();
+    if (newerSend) {
+      await act(async () => nextSend.resolve({ ok: true, status: 'accepted' }));
+      expect(screen.queryByRole('button', { name: 'chat.queue.sendingNow' })).toBeNull();
+    }
+  });
+
+  it.each(
+    ['transport', 'stale_head', 'internal_unavailable', 'ordering_fence', 'stop_failed'].flatMap((failure) =>
+      ['queued', 'gone', 'unreadable', 'superseded', 'pending_steer', 'steering', 'reconciling_steer'].map((state) => ({
+        failure, state,
+      })),
+    ),
+  )('reconciles $failure against an exact row that is $state', async ({ failure, state }) => {
+    const queued = {
+      ...queuedMessage('stale-head-row', 'stale head row'),
+      state: 'queued',
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    const otherRow = { ...queued, id: 'another-row', text: 'another queued message' };
+    const queueRefresh = deferred<{ queued: (typeof queued)[] }>();
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [queued],
+      turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockReturnValue(queueRefresh.promise);
+    mocks.api.sendQueuedNow.mockImplementation(async () => {
+      if (failure === 'transport') throw new Error('controller socket unavailable');
+      return { ok: false, code: failure, detail: 'controller socket unavailable' };
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.queue.sendNow' }));
+
+    await waitFor(() => expect(mocks.api.listSessionQueue).toHaveBeenCalledTimes(1));
+    // Never flash retry advice before the reconciliation evidence arrives.
+    expect(screen.queryByText('chat.queue.sendFailed')).toBeNull();
+    if (state === 'superseded') {
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [otherRow] });
+      act(() => {
+        mocks.events?.onTurnStart({ session_id: 'session-new' });
+        mocks.events?.onQueueUpdated({ session_id: 'session-new' });
+      });
+      await screen.findByText(otherRow.text);
+      expect(screen.queryByText(queued.text)).toBeNull();
+    }
+    await act(async () => {
+      if (state === 'unreadable') queueRefresh.reject(new Error('queue unavailable'));
+      else queueRefresh.resolve({
+        queued: state === 'gone' ? [otherRow] : [
+          { ...queued, state: state === 'superseded' ? 'queued' : state }, otherRow,
+        ],
+      });
+    });
+    const expectedNotice = state === 'queued' ? 'chat.queue.sendFailed' : 'chat.queue.sendStatusUnknown';
+    await screen.findByText(expectedNotice);
+    expect(screen.queryByText('controller socket unavailable')).toBeNull();
+    if (state !== 'queued') expect(screen.queryByText('chat.queue.sendFailed')).toBeNull();
+    if (state === 'gone' || state === 'superseded') {
+      expect(screen.queryByText(queued.text)).toBeNull();
+      expect(screen.getByText(otherRow.text)).toBeTruthy();
+    } else {
+      expect(screen.getByText(queued.text)).toBeTruthy();
+    }
+    if (['pending_steer', 'steering', 'reconciling_steer'].includes(state)) {
+      const name = state === 'reconciling_steer' ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow';
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+      // The server's fence remains authoritative, but the HTTP invocation's
+      // spinner must already be released once that fence settles.
+      mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued, otherRow] });
+      act(() => mocks.events?.onQueueUpdated({ session_id: 'session-new' }));
+    }
+    const retryButton = await screen.findByRole('button', { name: 'chat.queue.sendNow' });
+    expect((retryButton as HTMLButtonElement).disabled).toBe(false);
+    expect(mocks.composer?.busy).toBe(failure === 'stop_failed' || state === 'superseded');
+    expect(mocks.api.sendQueuedNow).toHaveBeenCalledTimes(1);
+    expect(mocks.api.cancelSession).not.toHaveBeenCalled();
+  });
+
+  it('does not present send-now refusal as a stop failure', async () => {
+    const queued = {
+      ...queuedMessage('refused-queued-row', 'refused queued row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [queued],
+      turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued] });
+    mocks.api.sendQueuedNow.mockResolvedValue({
+      ok: false,
+      code: 'internal_unavailable',
+      detail: 'controller socket unavailable',
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.queue.sendNow' }));
+
+    await screen.findByText('chat.queue.sendFailed');
+    expect(screen.queryByText('chat.stopFailed')).toBeNull();
+    expect(screen.queryByText('controller socket unavailable')).toBeNull();
+    expect(screen.getByText(queued.text)).toBeTruthy();
+  });
+
   it.each(['accepted', 'queued'])('restores a confirming image on reload and follows $status settlement', async (settlement) => {
     const image = {
       ...queuedMessage('queued-image', ''),

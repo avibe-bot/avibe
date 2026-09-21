@@ -31,10 +31,8 @@ import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
-import {
-  isOwnerOnlyPath,
-  SETTINGS_LANDING_PATH,
-} from '../lib/adminNavigation';
+import { isOwnerOnlyPath } from '../lib/adminNavigation';
+import { useSettingsResumePath } from '../lib/settingsSectionMemory';
 import {
   closeSettingsOverlay,
   isChromelessShellPath,
@@ -178,6 +176,10 @@ export const AppShell: React.FC = () => {
   // implies visible, so the mount site has to carry the viewport too.
   const isDesktop = useIsDesktop();
   const { capabilities } = useInstanceAuthorization();
+  // Where the sidebar's Settings control points: the section this device was
+  // left on, or General when there is none to resume. Subscribed, because the
+  // rail that moves it can be in another tab of the same origin.
+  const settingsEntryPath = useSettingsResumePath(capabilities.can_manage_instance);
   const api = useApi();
   const location = useLocation();
   const navigate = useNavigate();
@@ -506,7 +508,10 @@ export const AppShell: React.FC = () => {
             ) : (
               <Link
                 data-settings-toggle="true"
-                to={SETTINGS_LANDING_PATH}
+                // Resolved on the link rather than left to the Settings root
+                // to redirect, so the click paints the section in one frame and
+                // the href names where it goes.
+                to={settingsEntryPath}
                 title={t('appShell.openControlPanel')}
                 aria-label={t('appShell.openControlPanel')}
                 className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"

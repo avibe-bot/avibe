@@ -80,7 +80,9 @@ def apply_claude_sdk_patches():
 def load_config() -> Any:
     from config.v2_config import V2Config
 
-    return V2Config.load()
+    # main() acquires the instance lock first: a newly installed CLI or a
+    # rejected second service must not migrate an older live reader's config.
+    return V2Config.load(persist_migrations=True)
 
 
 def ensure_sqlite_state(*args, **kwargs):

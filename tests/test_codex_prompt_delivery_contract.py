@@ -18,6 +18,7 @@ from unittest.mock import Mock
 from aiohttp import web
 import pytest
 
+from core.prompt_registry import prompt_text
 from modules.agents.codex.agent import CodexAgent
 from modules.agents.codex.transport import CodexTransport
 from modules.im import MessageContext
@@ -292,6 +293,8 @@ async def test_production_agent_instructions_are_last_in_native_baseline_and_ove
         assert baseline.startswith("# Avibe")
         assert baseline.endswith("\n\n" + custom)
         assert baseline.count(custom) == 1
+        guidance = prompt_text("codex-skill-reuse")
+        assert baseline.count(guidance) == 1
         assert "## Session Title" in baseline
         thread_id = await agent._start_or_resume_thread(
             harness.native, request, developer_instructions=baseline,
@@ -300,6 +303,7 @@ async def test_production_agent_instructions_are_last_in_native_baseline_and_ove
         await harness.finish_turn()
         native_text = "\n".join(_developer_texts(harness.requests[-1]))
         assert native_text.count(baseline) == 1
+        assert native_text.count(guidance) == 1
         assert "<avibe_runtime_instructions>" not in native_text
 
         updated_custom = "Updated Agent：保留 {new}。"
@@ -311,6 +315,7 @@ async def test_production_agent_instructions_are_last_in_native_baseline_and_ove
             await harness.finish_turn()
         text = "\n".join(_developer_texts(harness.requests[-1]))
         snapshot = "<avibe_runtime_instructions>\n\n" + updated + "\n</avibe_runtime_instructions>"
+        assert snapshot.count(guidance) == 1
         assert text.count(snapshot) == 1
         assert text.count(baseline) == 1  # Delivery is not destructive history replacement.
 

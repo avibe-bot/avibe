@@ -7197,6 +7197,30 @@ def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     return isinstance(restart, dict) and bool(restart.get("ok"))
 
 
+def _agent_runtime_fingerprint(name: str) -> tuple[str, str, str] | None:
+    """Measure the configured CLI, not another installation found by name.
+
+    Include the persisted launch path as well as its resolved target: changing
+    an alias still requires the controller to load the new configuration.
+    Unknown configuration, paths, or versions cannot prove a no-op.
+    """
+    try:
+        config = V2Config.load()
+        if config.load_warnings:
+            return None
+        configured_path = getattr(config.agents, name).cli_path or name
+        resolved_path = resolve_cli_path(configured_path)
+        if not resolved_path:
+            return None
+        version = _probe_cli_version(resolved_path)
+        if not version:
+            return None
+        return configured_path, os.path.realpath(resolved_path), version
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Agent runtime fingerprint probe failed for %s: %s", name, exc)
+        return None
+
+
 def start_agent_install_job(name: str) -> dict:
     """Start backend CLI install/upgrade in a background job.
 
@@ -7233,13 +7257,26 @@ def start_agent_install_job(name: str) -> dict:
 
     def _worker() -> None:
         try:
+            refresh_supported = supports_runtime_refresh(name)
+            runtime_before = _agent_runtime_fingerprint(name) if refresh_supported else None
             result = install_agent(name)
-            if result.get("ok") and supports_runtime_refresh(name):
+            if result.get("ok") and refresh_supported:
                 try:
-                    result["restart"] = restart_backend(
-                        name,
-                        metadata={"reason": "agent_install_job", "source": "ui_api"},
-                    )
+                    runtime_after = _agent_runtime_fingerprint(name)
+                    if runtime_before is None or runtime_before != runtime_after:
+                        result["restart"] = restart_backend(
+                            name,
+                            metadata={"reason": "agent_install_job", "source": "ui_api"},
+                        )
+                    else:
+                        logger.info(
+                            "Skipping %s backend refresh after install: effective CLI runtime unchanged",
+                            name,
+                        )
+                        result["restart"] = {
+                            "ok": True,
+                            "skipped": True,
+                        }
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Backend refresh after %s install job failed: %s",
