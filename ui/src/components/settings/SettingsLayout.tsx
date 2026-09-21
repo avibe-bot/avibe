@@ -29,11 +29,7 @@ import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
-import {
-  forgetLastSettingsSection,
-  settingsResumePath,
-  writeLastSettingsSection,
-} from '@/lib/settingsSectionMemory';
+import { settingsResumePath, writeLastSettingsSection } from '@/lib/settingsSectionMemory';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
@@ -249,13 +245,9 @@ export const SettingsLayout: React.FC = () => {
   const setupOriginPath = useSettingsOverlayContext()?.location.pathname;
   const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
   const standaloneMenu = useStandaloneSettingsMenu();
-  // `undefined` until the projection that gates the row arrives, and again if it
-  // could not be read. The rail treats it as hidden either way, exactly as
-  // before; the section memory below is the consumer that has to tell "not
-  // known yet" apart from "known to be gone".
-  const [modelHubVisible, setModelHubVisible] = useState<boolean | undefined>(undefined);
-  const [memoryVisible, setMemoryVisible] = useState<boolean | undefined>(undefined);
-  const [channelSettingsVisible, setChannelSettingsVisible] = useState<boolean | undefined>(undefined);
+  const [modelHubVisible, setModelHubVisible] = useState(false);
+  const [memoryVisible, setMemoryVisible] = useState(false);
+  const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
   // Settings is a standalone page: ordinary sections use one 944px outer
@@ -288,7 +280,7 @@ export const SettingsLayout: React.FC = () => {
           }
         })
         .catch(() => {
-          if (!cancelled && request === memoryRequest) setMemoryVisible(undefined);
+          if (!cancelled && request === memoryRequest) setMemoryVisible(false);
         });
     };
     const requestedConfigVersion = configVersion;
@@ -298,8 +290,8 @@ export const SettingsLayout: React.FC = () => {
       })
       .catch(() => {
         if (!cancelled && requestedConfigVersion === configVersion) {
-          setModelHubVisible(undefined);
-          setChannelSettingsVisible(undefined);
+          setModelHubVisible(false);
+          setChannelSettingsVisible(false);
         }
       });
     refreshMemoryVisibility();
@@ -326,11 +318,6 @@ export const SettingsLayout: React.FC = () => {
       }),
     })).filter((group) => group.items.length > 0),
     [capabilities.can_manage_instance, channelSettingsVisible, memoryVisible, modelHubVisible],
-  );
-
-  const featureVisibility = useMemo(
-    () => ({ models: modelHubVisible, memory: memoryVisible, channels: channelSettingsVisible }),
-    [channelSettingsVisible, memoryVisible, modelHubVisible],
   );
 
   const activeTrail = useMemo(() => {
@@ -373,21 +360,18 @@ export const SettingsLayout: React.FC = () => {
   // recorded: a detail page inside a section resumes at the section that owns
   // it, which is the row the rail can show as current.
   //
-  // A feature-gated row (Models, Memory, Channels) can leave the rail while its
-  // page stays routed, and a memory of it would keep landing later entries on a
-  // section with nothing in the rail to match — so this is also where such a
-  // memory is dropped. Both halves move on settled evidence only: the gate is a
-  // projection of config that is unknown until it arrives and unknown again if
-  // it could not be read, and neither of those is grounds to touch a preference
-  // in either direction. Not recording costs one visit's worth of memory;
-  // forgetting on a pending read would spend the preference itself.
+  // Where the person actually is, is the whole input. A feature-gated row
+  // (Models, Memory, Channels) can leave the rail while its page stays routed,
+  // and that does not make the page the wrong place to be: Memory with memory
+  // off is the setup surface, and a Model Hub that is off redirects itself —
+  // which arrives here as the section it redirected to and corrects the memory
+  // on its own. Nothing here consults the feature projections the rail draws
+  // rows from, so a pending or failed read can neither erase a preference nor
+  // record the wrong one.
   useEffect(() => {
     const section = activeTrail.at(-1);
-    if (!section) return;
-    const gate = section.feature ? featureVisibility[section.feature] : true;
-    if (gate) writeLastSettingsSection(section.path);
-    else if (gate === false) forgetLastSettingsSection(section.path);
-  }, [activeTrail, featureVisibility]);
+    if (section) writeLastSettingsSection(section.path);
+  }, [activeTrail]);
 
   // The root is the phone's section list — the one screen a viewport with no
   // rail beside the page can navigate from, and what its entry points at. A

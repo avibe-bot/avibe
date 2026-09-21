@@ -21,16 +21,19 @@ import { isApplicationRouteHref } from './applicationRoutes';
  * storage degrades to the ordinary landing instead of throwing, and a change
  * event so a link rendered elsewhere can follow the rail.
  *
- * What may be resumed is checked twice, because the two failures have different
- * shapes. Here: the value has to name a route this release still declares and a
- * section this visitor's capabilities allow. In the rail (which is the only
- * place that knows): a row a feature flag has taken off screen stops being
- * remembered at all.
+ * What may be resumed is a question about the route, not about the feature
+ * flags: the value has to name a route this release still declares, and a
+ * section this visitor's capabilities allow. A feature flag decides which rows
+ * the rail advertises, not which pages a person may stand on — Memory with
+ * memory switched off is the setup surface the Dependencies page's Configure
+ * button links to, and Model Hub with the hub switched off redirects itself
+ * (ModelHubCapabilityGate), which moves this memory to wherever it lands.
+ * `pwaRouteMemory` restores the very same paths on the very same terms.
  */
 export const SETTINGS_LAST_SECTION_STORAGE_KEY = 'avibe.settings.last-section.v1';
 export const SETTINGS_LAST_SECTION_CHANGED_EVENT = 'avibe:settings-last-section-changed';
 
-type SectionStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+type SectionStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 function browserStorage(storage?: SectionStorage): SectionStorage | undefined {
   return storage ?? (typeof window !== 'undefined' ? window.localStorage : undefined);
@@ -61,28 +64,6 @@ export function writeLastSettingsSection(path: string, storage?: SectionStorage)
     target.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, path);
   } catch {
     // View memory is best-effort in private browsing and restricted storage contexts.
-    return;
-  }
-  announceSectionChange();
-}
-
-/**
- * Drop the memory when it names `path` — the rail calling this has just found
- * that row gone from the section list, so what it remembers is a section the
- * next entry would open with nothing in the rail to show as current.
- *
- * Scoped to one path on purpose: feature visibility is projected from config
- * the rail is still fetching, so "not on screen yet" and "taken off screen" are
- * the same state for a moment. Forgetting only the record that names the
- * section in front of the user keeps that moment from clearing an unrelated
- * one, and the rail writes it straight back once the projection arrives.
- */
-export function forgetLastSettingsSection(path: string, storage?: SectionStorage): void {
-  try {
-    const target = browserStorage(storage);
-    if (!target || target.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY) !== path) return;
-    target.removeItem(SETTINGS_LAST_SECTION_STORAGE_KEY);
-  } catch {
     return;
   }
   announceSectionChange();

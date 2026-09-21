@@ -14,6 +14,7 @@ import {
 import { ShellSidebarContext } from '@/context/ShellSidebarContext';
 import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '@/lib/settingsSectionMemory';
+import { ModelHubCapabilityGate } from './models/ModelHubCapabilityGate';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -83,12 +84,23 @@ type SettingsTestEntry = string | {
   state?: unknown;
 };
 
+// Model Hub is the one section that answers a disabled feature with a redirect
+// of its own. Off by default because the gate renders nothing until its config
+// read lands, which the synchronous layout cases below would not survive; the
+// case that is about the redirect opts in and gets the real gate.
+const modelHubRoute = (gated: boolean) => (gated
+  ? <ModelHubCapabilityGate><div>models-body</div></ModelHubCapabilityGate>
+  : <div>models-body</div>);
+
 // `shellHasSidebar` stands in for what AppShell publishes around this layout.
 // It defaults to the context's own default — an ordinary shell route, which is
 // what every case but the sidebar-less one below is about.
 const renderLayout = (
   entry: SettingsTestEntry,
-  { shellHasSidebar = true }: { shellHasSidebar?: boolean } = {},
+  { shellHasSidebar = true, gateModelHub = false }: {
+    shellHasSidebar?: boolean;
+    gateModelHub?: boolean;
+  } = {},
 ) => render(
   <MemoryRouter initialEntries={[entry]}>
     <ShellSidebarContext.Provider value={shellHasSidebar}>
@@ -97,7 +109,8 @@ const renderLayout = (
         <Route path="general" element={<div>general-body</div>} />
         <Route path="backends" element={<div>backends-body</div>} />
         <Route path="backends/claude" element={<div>claude-body</div>} />
-        <Route path="models" element={<div>models-body</div>} />
+        <Route path="models" element={modelHubRoute(gateModelHub)} />
+        <Route path="memory" element={<div>memory-body</div>} />
         <Route path="replies" element={<div>replies-body</div>} />
         <Route path="shortcuts" element={<div>shortcuts-body</div>} />
         <Route path="service" element={<div>service-body</div>} />
@@ -446,65 +459,40 @@ describe('SettingsLayout', () => {
     expect(screen.queryByText('service-body')).toBeNull();
   });
 
-  it('stops remembering a section whose row the rail no longer offers', async () => {
-    // Channels comes and goes with the enabled platforms, and its page stays
-    // routed after the row leaves. A memory of it would keep opening a section
-    // the rail has nothing to show as current.
-    api.getConfig.mockResolvedValue({
-      capabilities: { model_hub: { enabled: true } },
-      platforms: { enabled: ['wechat'] },
+  it('keeps remembering a section whose rail row a feature flag took down', async () => {
+    // Memory's row leaves the rail when memory is switched off, but the page
+    // stays the setup surface — the one the Dependencies page's Configure
+    // button links to. Being somewhere the rail cannot show as current is a
+    // real place to be, so it is a real place to come back to.
+    renderLayout('/settings/memory');
+    await waitFor(() => {
+      expect(screen.getByRole('link', { name: 'settings.sections.memory' })).toBeTruthy();
     });
-    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/platforms/groups');
-    renderLayout('/settings/platforms/groups');
 
-    // Models comes from the same response, so its row appearing is how this
-    // test knows the projection has actually landed — an absent Channels row is
-    // also what a pending read looks like.
-    await waitFor(() => expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy());
-    expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull();
-    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBeNull();
-  });
+    api.getMemorySettings.mockResolvedValueOnce({ status: 'ok', enabled: false });
+    act(() => window.dispatchEvent(new Event('avibe:memory-settings-changed')));
 
-  it("leaves another section's memory alone while a row is still loading", async () => {
-    api.getConfig.mockResolvedValue({
-      capabilities: { model_hub: { enabled: true } },
-      platforms: { enabled: ['wechat'] },
+    // The row going is how this test knows the projection settled; before that
+    // an absent row is only a read that has not landed.
+    await waitFor(() => {
+      expect(screen.queryByRole('link', { name: 'settings.sections.memory' })).toBeNull();
     });
-    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
-    renderLayout('/settings/platforms/groups');
-
-    await waitFor(() => expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy());
-    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBe('/settings/backends');
-  });
-
-  it.each([
-    ['while its projection is still pending', () => new Promise<never>(() => {})],
-    ['when its projection could not be read', () => Promise.reject(new Error('offline'))],
-  ])('keeps a feature-gated section remembered %s', async (_case, configResponse) => {
-    // The rail hides a row it cannot vouch for, which is the right default for
-    // the rail and the wrong one for a stored preference: an owner who opens
-    // Channels and leaves before the read settles must not come back to
-    // General. Only a response that says the feature is off may forget it.
-    api.getConfig.mockReturnValue(configResponse());
-    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/platforms/groups');
-    renderLayout('/settings/platforms/groups');
-
-    expect(await screen.findByText('groups-body')).toBeTruthy();
-    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
     expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
-      .toBe('/settings/platforms/groups');
+      .toBe('/settings/memory');
   });
 
-  it('records a section again once its row comes back', async () => {
-    api.getConfig.mockResolvedValue({
-      capabilities: { model_hub: { enabled: true } },
-      platforms: { enabled: ['slack'] },
-    });
-    renderLayout('/settings/platforms/groups');
+  it('follows a disabled section to the page it redirects to', async () => {
+    // Model Hub answers a disabled hub with its own redirect, so a resumed
+    // memory of it does not strand anyone: the section it lands on is the one
+    // recorded, and the next entry opens there.
+    api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: false } } });
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/models');
+    media.matches = true;
+    renderLayout('/settings', { gateModelHub: true });
 
-    await waitFor(() => expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy());
+    expect(await screen.findByText('backends-body')).toBeTruthy();
     expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
-      .toBe('/settings/platforms/groups');
+      .toBe('/settings/backends');
   });
 
   it.each([

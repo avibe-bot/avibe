@@ -3,13 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { SETTINGS_LANDING_PATH } from './adminNavigation';
 import {
   SETTINGS_LAST_SECTION_STORAGE_KEY,
-  forgetLastSettingsSection,
   readLastSettingsSection,
   settingsResumePath,
   writeLastSettingsSection,
 } from './settingsSectionMemory';
 
-type SectionStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+type SectionStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 const storageHolding = (section?: string): SectionStorage => {
   const entries = new Map<string, string>();
@@ -17,14 +16,12 @@ const storageHolding = (section?: string): SectionStorage => {
   return {
     getItem: (key) => entries.get(key) ?? null,
     setItem: vi.fn((key, value) => { entries.set(key, value); }),
-    removeItem: vi.fn((key) => { entries.delete(key); }),
   };
 };
 
 const blockedStorage: SectionStorage = {
   getItem: () => { throw new Error('storage blocked'); },
   setItem: () => { throw new Error('storage blocked'); },
-  removeItem: () => { throw new Error('storage blocked'); },
 };
 
 describe('settings section memory', () => {
@@ -62,19 +59,6 @@ describe('settings section memory', () => {
       .toBe(SETTINGS_LANDING_PATH);
   });
 
-  it('forgets only the record that names the section the rail dropped', () => {
-    const dropped = storageHolding('/settings/memory');
-    forgetLastSettingsSection('/settings/memory', dropped);
-    expect(readLastSettingsSection(dropped)).toBeNull();
-
-    // A section whose row is merely still loading must not clear a memory of a
-    // different one: the two states are indistinguishable for a moment.
-    const other = storageHolding('/settings/backends');
-    forgetLastSettingsSection('/settings/memory', other);
-    expect(readLastSettingsSection(other)).toBe('/settings/backends');
-    expect(other.removeItem).not.toHaveBeenCalled();
-  });
-
   it('does not rewrite the section it already holds', () => {
     const storage = storageHolding('/settings/backends');
     writeLastSettingsSection('/settings/backends', storage);
@@ -85,4 +69,15 @@ describe('settings section memory', () => {
     expect(settingsResumePath(true, storageHolding('/settings/service')))
       .toBe('/settings/service');
   });
+
+  it.each(['/settings/memory', '/settings/models', '/settings/platforms/groups'])(
+    'resumes %s whatever its feature flag is doing',
+    (remembered) => {
+      // A feature flag decides which rows the rail advertises, not which pages a
+      // person may be on: Memory with memory off is its setup surface, and a
+      // Model Hub that is off redirects itself. Reading config here would only
+      // let a pending or failed projection throw away a preference.
+      expect(settingsResumePath(true, storageHolding(remembered))).toBe(remembered);
+    },
+  );
 });
