@@ -462,6 +462,12 @@ export type GatewayIntent =
   /** No authoritative answer yet, or one that authorizes nothing. The shell owns
    *  the read and its recovery; the card waits rather than inventing a verdict. */
   | { kind: 'waiting' }
+  /** The read failed and asking again is worth doing. Distinct from `waiting`, which
+   *  is a read still in flight: this one has nothing coming unless someone asks. The
+   *  contract is explicit that a read error shows the runtime-unread copy *with
+   *  retry* rather than the unsupported notice, and without this kind the two are
+   *  the same silent `idle` card. */
+  | { kind: 'unreadable' }
   /** The engine is missing or stopped and this screen may resume it. `runtime` is the
    *  authoritative snapshot the step was read from, carried so the resume starts from
    *  the state that authorized it rather than reading the same thing a second time. */
@@ -490,6 +496,19 @@ export function gatewayIntent(input: {
 }): GatewayIntent {
   if (setupHubRunning(input.runtimeRead)) return { kind: 'running' };
   if (!setupNavigationReady(input.capability, input.gatewayEnabled)) return { kind: 'waiting' };
+  // A read that failed, asked before anything else is decided from it. `loading` and
+  // a refresh-degraded read are both a read in flight and stay quiet; a first read
+  // that failed (`unread`) and a later one that failed over stale data
+  // (`degraded/read_failed`) are not coming back on their own. Non-retryable is left
+  // waiting on purpose: the shell owns the read, and a Retry that cannot help is a
+  // worse answer than none.
+  const unreadable = foldRegionRead(input.runtimeRead, {
+    loading: () => false,
+    ready: () => false,
+    unread: (retryable) => retryable,
+    degraded: (_stale, cause, retryable) => cause === 'read_failed' && retryable,
+  });
+  if (unreadable) return { kind: 'unreadable' };
   const runtime = foldRegionRead(input.runtimeRead, {
     loading: () => null,
     unread: () => null,
@@ -512,8 +531,27 @@ export type ProviderActionKind =
   | 'retryImport'
   | 'continue'
   | 'add'
+  | 'retrySupply'
   | 'connecting'
   | 'checking';
+
+/**
+ * What the screen actually knows about the source inventory.
+ *
+ * An empty list and a list the screen could not read look identical once they are
+ * both `Source[]`, and the difference is the whole question the primary action is
+ * answering: offering 「添加」 against an answer nobody has is how a second copy of
+ * a credential that already exists gets written. So the answer and the absence of
+ * one are separate states here, and the absence is not silent — the contract's rule
+ * for every setup supply read is that a failed result keeps Retry reachable.
+ */
+export type SupplyState =
+  /** A read is in flight and nothing has landed yet. */
+  | { kind: 'reading' }
+  /** A read failed. Nothing is coming unless someone asks again. */
+  | { kind: 'unreadable' }
+  /** An authoritative answer, whichever way it went. */
+  | { kind: 'read'; hasSource: boolean };
 
 export type ProviderActionState = {
   kind: ProviderActionKind;
@@ -544,7 +582,8 @@ export function providerAction(input: {
   pendingCount: number;
   /** A batch failed and has not been retried. */
   importFailed: boolean;
-  hasSource: boolean;
+  /** What is known about the inventory, not what happens to be in it. */
+  supply: SupplyState;
   /** The engine is installing or starting. */
   gatewayBusy: boolean;
   /** The engine is up and serving — the authoritative read, not the attempt. */
@@ -555,9 +594,14 @@ export function providerAction(input: {
   if (input.gatewayBusy) return { kind: 'connecting', count: 0 };
   if (input.verifying) return { kind: 'checking', count: 0 };
   if (input.pendingCount > 0) {
+    // Ahead of the inventory on purpose: a scan that arrived is an answer of its
+    // own, and taking over a key it found does not depend on knowing what else is
+    // already there.
     return { kind: input.importFailed ? 'retryImport' : 'import', count: input.pendingCount };
   }
-  if (input.hasSource) return { kind: 'continue', count: 0, blocked: !input.gatewayRunning };
+  if (input.supply.kind === 'reading') return { kind: 'checking', count: 0 };
+  if (input.supply.kind === 'unreadable') return { kind: 'retrySupply', count: 0 };
+  if (input.supply.hasSource) return { kind: 'continue', count: 0, blocked: !input.gatewayRunning };
   return { kind: 'add', count: 0 };
 }
 
@@ -584,11 +628,18 @@ export const ACTION_LABEL = {
   retryImport: 'onboarding.providers.actionRetryImport',
   continue: 'onboarding.providers.actionContinue',
   add: 'onboarding.providers.actionAdd',
+  // The shared label, not a new one: the contract lets the active owner publish
+  // Retry as the CTA while Continue is held, and this is that.
+  retrySupply: 'common.retry',
   connecting: 'onboarding.providers.actionConnecting',
   checking: 'onboarding.providers.actionChecking',
 } as const satisfies Record<ProviderActionKind, TranslationKey | PluralBase<ParseKeys>>;
 
 const BUSY_ACTIONS = new Set<ProviderActionKind>(['connecting', 'checking']);
+
+/** The arrow means the press leaves this screen. Adding a provider and asking for a
+ *  read again both stay here, so neither wears it. */
+const STAYS_HERE = new Set<ProviderActionKind>(['add', 'retrySupply']);
 
 /** The C2 action the shell renders. The screen never draws the button itself. */
 export function providerSetupAction(state: ProviderActionState): SetupAction {
@@ -598,6 +649,6 @@ export function providerSetupAction(state: ProviderActionState): SetupAction {
     ...(state.count > 0 ? { labelArgs: { count: state.count } } : {}),
     disabled: busy || state.blocked === true,
     busy,
-    icon: busy ? 'spinner' : state.kind === 'add' ? 'none' : 'arrow-right',
+    icon: busy ? 'spinner' : STAYS_HERE.has(state.kind) ? 'none' : 'arrow-right',
   };
 }

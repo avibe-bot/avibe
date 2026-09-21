@@ -27,10 +27,18 @@ const PHASE_LINE = {
 
 const BUSY: ReadonlySet<GatewayPhase> = new Set<GatewayPhase>(['installing', 'starting']);
 
-/** Where 「查看安装指南」 goes. The docs site is the project's own published
- *  troubleshooting surface; a deeper path would be one this screen invented, and a
- *  link that 404s is worse than one that lands a page away from the answer. */
-const INSTALL_GUIDE_URL = 'https://docs.avibe.bot';
+/** Where 「查看安装指南」 goes: the guide the contract names, in the language the
+ *  person is reading. It ships a Chinese counterpart, and sending someone who is
+ *  reading Chinese to the English file is a worse answer than the docs root — which
+ *  is what this used to be, and which left them to find the page themselves while
+ *  the screen they are on is the one they cannot get past. */
+const INSTALL_GUIDE_URL = {
+  en: 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md',
+  zh: 'https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md',
+} as const;
+
+const installGuideUrl = (language: string): string =>
+  (language.toLowerCase().startsWith('zh') ? INSTALL_GUIDE_URL.zh : INSTALL_GUIDE_URL.en);
 
 /**
  * @param failedStep Which step of the lifecycle failed, published as a DOM hook
@@ -47,7 +55,7 @@ export const GatewayCard: FC<{
   failedStep?: GatewayAdoptionFailure['step'] | null;
   onRetry?: (() => void) | null;
 }> = ({ phase, failedStep, onRetry }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const busy = BUSY.has(phase);
   const bad = phase === 'failed' || phase === 'unsupported';
 
@@ -88,7 +96,7 @@ export const GatewayCard: FC<{
           the recheck to come back differently — which is why C1 ships the label. */}
       {phase === 'unsupported' && (
         <Button variant="link" size="sm" className="setup-gateway-help gap-1.5 px-0" asChild>
-          <a href={INSTALL_GUIDE_URL} target="_blank" rel="noopener noreferrer">
+          <a href={installGuideUrl(i18n.language)} target="_blank" rel="noopener noreferrer">
             {t('onboarding.providers.gatewayEnvironmentHelp')}
             <ExternalLink className="size-[13px]" aria-hidden="true" />
           </a>

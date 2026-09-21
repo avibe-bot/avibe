@@ -19,7 +19,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
-import { readyRegion, type RegionRead } from '@/components/settings/models/regionRead';
+import { readyRegion, unreadRegion, type RegionRead } from '@/components/settings/models/regionRead';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import type {
   AgentSupply,
@@ -227,7 +227,12 @@ const Harness: React.FC<ScreenOptions & { handle: React.RefObject<SetupScreenHan
 const renderScreen = (options: ScreenOptions = {}) => {
   const handle = React.createRef<SetupScreenHandle | null>();
   const view = render(<Harness handle={handle} {...options} />);
-  return { ...view, handle };
+  /** Change the shell's half of the contract without remounting: the wizard hiding
+   *  this screen, or handing down a runtime read that moved. */
+  const show = async (next: ScreenOptions) => {
+    await act(async () => { view.rerender(<Harness handle={handle} {...options} {...next} />); });
+  };
+  return { ...view, handle, show };
 };
 
 const cards = () => [...document.querySelectorAll<HTMLElement>('.setup-provider-card')];
@@ -499,6 +504,60 @@ describe('ProvidersScreen — the stage', () => {
     await waitFor(() => expect(cardFor('openai').dataset.state).toBe('detected'));
     expect(summary()?.dataset.tone).toBe('error');
   });
+
+  it('says it is still looking before the first inventory read lands', async () => {
+    // Not 「添加」. An empty list and a list nobody has read yet are the same
+    // `Source[]`, and the difference is the whole question the button is answering.
+    serve();
+    const read = deferred<Source[]>();
+    vi.mocked(modelsApi.listSources).mockReturnValue(read.promise);
+    renderScreen();
+
+    await waitFor(() => expect(lastAction()).toBeTruthy());
+    expect(lastAction()).toMatchObject({
+      labelKey: 'onboarding.providers.actionChecking',
+      disabled: true,
+      busy: true,
+    });
+
+    await act(async () => { read.resolve([]); });
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd'));
+  });
+
+  it('offers to ask again, not to add, when the inventory could not be read', async () => {
+    // 「添加」 against an unread inventory is the same button on a machine that
+    // already holds the credential as on one that holds nothing — which is how a
+    // second copy of an existing key gets written.
+    serve();
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    const { handle } = renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('common.retry'));
+    expect(lastAction()).toMatchObject({ disabled: false, busy: false, icon: 'none' });
+
+    vi.mocked(modelsApi.listSources)
+      .mockImplementation(async () => [source({ id: 'src_zhipu', vendor: 'zhipuai' })]);
+    await activate(handle);
+
+    // Asking again is the whole action, and the answer it gets is what the screen
+    // then offers. No dialog: nothing was added here.
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => expect(cardFor('zhipuai').dataset.state).toBe('connected'));
+  });
+
+  it('still offers a take-over the scan found while the inventory beside it is unread', async () => {
+    // Two reads, two questions. Taking over a key the scan found does not depend on
+    // knowing what else is already there.
+    serve({ scan: [CODEX_KEY] });
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    expect(lastAction().labelArgs).toEqual({ count: 1 });
+  });
 });
 
 describe('ProvidersScreen — the import capsule', () => {
@@ -728,10 +787,31 @@ describe('ProvidersScreen — the engine', () => {
     expect(modelsApi.startRuntime).not.toHaveBeenCalled();
     expect(within(gatewayCard()).getByRole('button', { name: 'Retry' })).toBeTruthy();
     // On its own a recheck is a button that will keep saying no. The guide is the
-    // other half of the answer: what would have to change for it to say yes.
+    // other half of the answer: what would have to change for it to say yes — so it
+    // is the installation page the contract names, not the docs root, which leaves
+    // someone to find that page themselves from the one screen they cannot get past.
     const guide = within(gatewayCard()).getByRole('link', { name: 'View installation guide' });
-    expect(guide.getAttribute('href')).toBe('https://docs.avibe.bot');
+    expect(guide.getAttribute('href'))
+      .toBe('https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI.md');
     expect(guide.getAttribute('rel')).toContain('noopener');
+  });
+
+  it('sends a Chinese reader to the guide that is written in Chinese', async () => {
+    // The guide ships a translated counterpart. Handing someone reading Chinese the
+    // English file is a worse answer than the one above.
+    serve({ runtime: UNSUPPORTED });
+    await act(async () => { await i18n.changeLanguage('zh'); });
+    try {
+      renderScreen({ runtimeRead: readyRegion(UNSUPPORTED) });
+      await settled();
+
+      await waitFor(() => expect(gatewayCard().dataset.state).toBe('unsupported'));
+      const guide = within(gatewayCard()).getByRole('link', { name: '查看安装指南' });
+      expect(guide.getAttribute('href'))
+        .toBe('https://github.com/avibe-bot/avibe/blob/master/docs/INSTALL_FOR_AI_ZH.md');
+    } finally {
+      await act(async () => { await i18n.changeLanguage('en'); });
+    }
   });
 
   it('offers no guide for a failure a guide would not explain', async () => {
@@ -854,6 +934,86 @@ describe('ProvidersScreen — the engine', () => {
     // the button belongs to.
     expect(actions).toEqual([]);
     expect(screen.queryByText(/API key to import/)).toBeNull();
+  });
+
+  it('lets an install it started finish after the wizard hides the screen', async () => {
+    // The mutation is on the server either way. Abandoning the attempt when the
+    // screen is merely hidden leaves the card stuck on 「正在安装」, the shell's read
+    // describing a machine that has since changed, and nothing to reconcile either.
+    serve({ runtime: runtimeOf('not_installed') });
+    const install = deferred<RuntimeDependency>();
+    vi.mocked(modelsApi.installRuntime).mockReturnValue(install.promise);
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('not_installed')) });
+
+    await waitFor(() => expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1));
+    await show({ active: false });
+
+    await act(async () => { install.resolve(runtimeOf('not_started')); });
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
+    // The engine moved, so the read that describes it is asked for again.
+    await waitFor(() => expect(retrySetup).toHaveBeenCalled());
+
+    // And coming back finds the finished attempt rather than launching a second
+    // install over it.
+    await show({ active: true });
+    await act(async () => { await Promise.resolve(); });
+    expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1);
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('installs once under a StrictMode replay, and does not abandon what it started', async () => {
+    // The app mounts under StrictMode, which runs every effect's cleanup and then the
+    // effect again. Both halves of the attempt have to survive that: the guard, or it
+    // installs twice; the attempt's identity, or the replay's cleanup discards a
+    // mutation the server is performing and the card never leaves 「正在安装」.
+    serve({ runtime: runtimeOf('not_installed') });
+    const install = deferred<RuntimeDependency>();
+    vi.mocked(modelsApi.installRuntime).mockReturnValue(install.promise);
+    const handle = React.createRef<SetupScreenHandle | null>();
+    render(
+      <React.StrictMode>
+        <Harness handle={handle} runtimeRead={readyRegion(runtimeOf('not_installed'))} />
+      </React.StrictMode>,
+    );
+
+    await waitFor(() => expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1));
+    await act(async () => { install.resolve(runtimeOf('not_started')); });
+
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('idle'));
+    expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the engine could not be read rather than showing an idle one', async () => {
+    // The read failed and asking again is worth doing. Folded into 「waiting」 this
+    // renders as the idle card: the engine looks fine while Continue stays disabled
+    // for a reason nothing on screen gives.
+    serve();
+    renderScreen({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    await settled();
+
+    expect(gatewayCard().dataset.state).toBe('failed');
+    expect(within(gatewayCard()).getByText('Model Hub is not ready. Try again.')).toBeTruthy();
+    // The runtime-unread copy, never the unsupported notice: nothing has been read
+    // about this host, so nothing can be said about what it supports.
+    expect(within(gatewayCard()).queryByRole('link')).toBeNull();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+
+    await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
+    // The shell owns the read; this screen owns the attempt. Both are re-armed,
+    // because either one could be what is stale.
+    expect(retrySetup).toHaveBeenCalled();
+  });
+
+  it('stays quiet about a failed read there is nothing to ask again about', async () => {
+    // The shell owns the read and has declared this one beyond retrying. A Retry
+    // that cannot help is a worse answer than none.
+    serve();
+    renderScreen({ runtimeRead: unreadRegion<RuntimeDependency>(false) });
+    await settled();
+
+    expect(gatewayCard().dataset.state).toBe('idle');
+    expect(within(gatewayCard()).queryByRole('button')).toBeNull();
   });
 
   it('waits rather than acting on a configuration that turned the gateway off', async () => {

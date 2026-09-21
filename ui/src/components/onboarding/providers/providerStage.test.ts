@@ -599,13 +599,35 @@ describe('gatewayIntent', () => {
   });
 
   it.each([
-    ['loading', loadingRegion<RuntimeDependency>()],
-    ['unread', unreadRegion<RuntimeDependency>()],
-    ['degraded', degradedRegion<RuntimeDependency>('read_failed')],
-  ] as const)('authorizes nothing on a %s read', (_label, runtimeRead) => {
-    // None of these is evidence the engine is absent. Acting on one would install
-    // over a Hub that is merely unreachable this second.
+    ['still in flight', loadingRegion<RuntimeDependency>()],
+    ['already being retried', degradedRegion(runtime('ok'), 'refreshing', true)],
+    ['failed with nothing to ask again', unreadRegion<RuntimeDependency>(false)],
+    ['failed a second time with nothing to ask again', degradedRegion(runtime('ok'), 'read_failed', false)],
+  ] as const)('authorizes nothing, and asks for nothing, on a read %s', (_label, runtimeRead) => {
+    // None of these is evidence the engine is absent — acting on one would install
+    // over a Hub that is merely unreachable this second — and none of them is
+    // something the person can do anything about either, so the card stays quiet.
     expect(gatewayIntent({ ...enabled, runtimeRead })).toEqual({ kind: 'waiting' });
+  });
+
+  it.each([
+    ['a first read that failed', unreadRegion<RuntimeDependency>()],
+    ['a later read that failed', degradedRegion(runtime('ok'), 'read_failed', true)],
+  ] as const)('says %s is worth asking again, rather than showing an idle engine', (_label, runtimeRead) => {
+    // The distinction `waiting` cannot carry: nothing is coming unless someone asks.
+    // Folded into `waiting` this renders as the idle card — the engine looks fine
+    // while Continue stays disabled for a reason nothing on screen gives.
+    expect(gatewayIntent({ ...enabled, runtimeRead })).toEqual({ kind: 'unreadable' });
+  });
+
+  it('holds a failed read behind the gates that have not opened yet', () => {
+    // A retry here would re-read a runtime the flow is not admitted to use. The
+    // pending capability is the thing to wait for, and it is the shell's to resolve.
+    expect(gatewayIntent({
+      capability: 'pending',
+      gatewayEnabled: null,
+      runtimeRead: unreadRegion<RuntimeDependency>(),
+    })).toEqual({ kind: 'waiting' });
   });
 
   it('waits rather than re-enabling a configuration someone turned off', () => {
@@ -773,15 +795,23 @@ describe('usableSource', () => {
 });
 
 describe('providerAction', () => {
-  const state = (over: Partial<Parameters<typeof providerAction>[0]> = {}) => providerAction({
-    pendingCount: 0,
-    importFailed: false,
-    hasSource: false,
-    gatewayBusy: false,
-    gatewayRunning: true,
-    verifying: false,
-    ...over,
-  });
+  // `hasSource` stays a shorthand for the common case — a read that landed, saying
+  // this — so the cases below read as what they are about. `supply` is passed whole
+  // when what the case is about is the read itself.
+  const state = (
+    over: Partial<Parameters<typeof providerAction>[0]> & { hasSource?: boolean } = {},
+  ) => {
+    const { hasSource = false, ...rest } = over;
+    return providerAction({
+      pendingCount: 0,
+      importFailed: false,
+      supply: { kind: 'read', hasSource },
+      gatewayBusy: false,
+      gatewayRunning: true,
+      verifying: false,
+      ...rest,
+    });
+  };
 
   it('offers to add when there is nothing yet', () => {
     expect(state()).toEqual({ kind: 'add', count: 0 });
@@ -820,6 +850,29 @@ describe('providerAction', () => {
 
   it('reports a connection being read back ahead of what it would unlock', () => {
     expect(state({ verifying: true, hasSource: true })).toEqual({ kind: 'checking', count: 0 });
+  });
+
+  it('says it is still looking rather than offering to add against an unread inventory', () => {
+    // 「添加」 here is the same button on a machine that already has credentials as
+    // on one that has none, which is how a second copy of an existing key gets
+    // written before the first read even lands.
+    expect(state({ supply: { kind: 'reading' } })).toEqual({ kind: 'checking', count: 0 });
+  });
+
+  it('offers to ask again when the inventory could not be read', () => {
+    // Not 「添加」: nothing is known about what is there. Not silence either — the
+    // contract keeps Retry reachable on every failed supply read.
+    expect(state({ supply: { kind: 'unreadable' } })).toEqual({ kind: 'retrySupply', count: 0 });
+    expect(providerSetupAction(state({ supply: { kind: 'unreadable' } })))
+      // No arrow: the press stays on this screen.
+      .toMatchObject({ labelKey: 'common.retry', disabled: false, busy: false, icon: 'none' });
+  });
+
+  it('still takes over a key a failed inventory read knows nothing about', () => {
+    // The scan answered even though the source list did not, and taking over what
+    // it found does not depend on knowing what else is already there.
+    expect(state({ supply: { kind: 'unreadable' }, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
+    expect(state({ supply: { kind: 'reading' }, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
   });
 });
 

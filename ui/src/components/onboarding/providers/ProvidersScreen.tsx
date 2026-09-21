@@ -120,7 +120,14 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     const [agentReads] = React.useState(createAgentCollectionReadAuthority);
 
     const [sources, setSources] = React.useState<Source[]>([]);
-    const [supplyFailed, setSupplyFailed] = React.useState(false);
+    // Whether the list above is an answer. It starts as neither empty nor absent but
+    // unknown, because that is what it is before the first read lands. It tracks the
+    // SOURCE read alone: a scan that failed says nothing about whether a credential
+    // exists, and only this read can answer that.
+    const [sourceRead, setSourceRead] = React.useState<'reading' | 'unreadable' | 'read'>('reading');
+    const [scanFailed, setScanFailed] = React.useState(false);
+    // The sentence is about the picture, which either read can leave incomplete.
+    const supplyFailed = sourceRead === 'unreadable' || scanFailed;
     const [supplyToken, setSupplyToken] = React.useState(0);
     const [gatewayRun, setGatewayRun] = React.useState<GatewayRun>({ kind: 'idle' });
     const [gatewayToken, setGatewayToken] = React.useState(0);
@@ -157,6 +164,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
+      // A re-read is a read: while it is in flight the screen is back to not knowing,
+      // which is what a retry means and what the action should say.
+      setSourceRead('reading');
       void (async () => {
         // Settled independently, because they answer different questions. A scan that
         // fails says nothing about the sources, and discarding a source list that did
@@ -167,10 +177,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           modelsApi.scanMigration(),
         ]);
         if (cancelled) return;
-        // Either failure is still a failure: what the screen cannot report is exactly
-        // what the sentence and its retry exist to say.
-        setSupplyFailed(read.status === 'rejected' || scan.status === 'rejected');
-        if (read.status === 'fulfilled' && read.value.kind === 'current') setSources(read.value.value);
+        // A stale source read is neither an answer nor a failure: a newer generation
+        // superseded it, and that newer one is what will settle this.
+        if (read.status === 'rejected') setSourceRead('unreadable');
+        else if (read.value.kind === 'current') {
+          setSources(read.value.value);
+          setSourceRead('read');
+        }
+        // Either failure is still a failure for the sentence: what the screen cannot
+        // report is exactly what it and its retry exist to say.
+        setScanFailed(scan.status === 'rejected');
         if (scan.status === 'rejected') return;
         const scanned = scan.value;
         // Read outside the updater and written after it: an updater has to be pure,
@@ -197,23 +213,34 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
 
     // ── Gateway ─────────────────────────────────────────────────────────────
 
-    // One attempt per activation, per explicit retry. Not per intent change: the
-    // intent is recomputed from a read the shell refreshes, and re-running on every
-    // recomputation would reinstall in a loop while an install was still settling.
+    // Which attempt the gateway effect has already made, named by the token that
+    // armed it — so it is both the guard against making it twice and the identity of
+    // the live one. `gatewayToken` only ever increases, so an attempt is superseded
+    // exactly when this no longer holds its token.
+    //
+    // One attempt per explicit retry. Not per intent change: the intent is recomputed
+    // from a read the shell refreshes, and re-running on every recomputation would
+    // reinstall in a loop while an install was still settling. Not per activation
+    // either — an attempt outlives the screen being hidden, so re-arming on re-entry
+    // could launch a second install over one still running. Coming back to a failed
+    // attempt finds it on the card, with its retry.
+    //
+    // And nothing else supersedes one. A closure flag would be flipped by the effect's
+    // cleanup, which runs when the screen is merely hidden and again on every
+    // StrictMode replay — abandoning a mutation the server is still performing,
+    // leaving the card stuck on 「正在安装」 and the shell's runtime read describing a
+    // machine that has since changed. What supersedes an attempt is another attempt.
     const attemptedRef = React.useRef<number | null>(null);
-    React.useEffect(() => {
-      if (!active) attemptedRef.current = null;
-    }, [active]);
 
     // Held in a ref for the same reason the publication is: a shell whose callback is
-    // re-created each render would otherwise re-run the effect below, and its cleanup
-    // cancels an attempt that is still in flight.
+    // re-created each render would otherwise re-run the effect below, re-arming an
+    // attempt that is still in flight.
     const refreshRuntimeRef = React.useRef(onRetrySetup);
     refreshRuntimeRef.current = onRetrySetup;
 
     const resumeStep = intent.kind === 'resume' ? intent.step : null;
     // The snapshot the step was read from, held for the same reason the callbacks are:
-    // it is a new object on every read, and depending on it would cancel an attempt
+    // it is a new object on every read, and depending on it would re-arm an attempt
     // that is still in flight. Captured synchronously below, before any await.
     const resumeRuntimeRef = React.useRef<RuntimeDependency | null>(null);
     resumeRuntimeRef.current = intent.kind === 'resume' ? intent.runtime : null;
@@ -223,7 +250,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       const runtime = resumeRuntimeRef.current;
       if (runtime === null) return;
       attemptedRef.current = gatewayToken;
-      let cancelled = false;
+      const superseded = () => attemptedRef.current !== gatewayToken;
       setGatewayRun({ kind: 'running', step: resumeStep });
       void (async () => {
         try {
@@ -238,9 +265,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             // Install and start are one press and two waits; the helper reports the
             // crossing, so the card can say which one it is in.
             const step = installAndStartStep(value);
-            if (!cancelled && step !== 'complete') setGatewayRun({ kind: 'running', step });
+            if (!superseded() && step !== 'complete') setGatewayRun({ kind: 'running', step });
           });
-          if (cancelled) return;
+          if (superseded()) return;
           if (started.failedStep !== null) {
             setGatewayRun({ kind: 'failed', step: started.failedStep });
             // A failed install or start changed supervisor health; the shell's read
@@ -251,12 +278,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           // Then what there is to adopt, which may be nothing: no CLI on this machine
           // is not a gateway failure, and the engine is up either way.
           const agents = await agentReads.refresh();
-          if (cancelled) return;
+          if (superseded()) return;
           const backend = agents.kind === 'current' ? adoptionBackend(agents.value) : null;
           const outcome = backend === null
             ? { ok: true as const }
             : await resumeGatewayAdoption(modelsApi, agentReads, backend);
-          if (cancelled) return;
+          if (superseded()) return;
           setGatewayRun(outcome.ok ? { kind: 'idle' } : { kind: 'failed', step: outcome.failure.step });
           // The engine moved; the shell's read still describes where it was. Asking
           // for that read again is what turns the card from 「正在启动」 to 「运行中」
@@ -266,10 +293,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           // And an engine that just came up can answer reads that failed before it did.
           if (outcome.ok) setSupplyToken((token) => token + 1);
         } catch {
-          if (!cancelled) setGatewayRun({ kind: 'failed', step: 'read' });
+          if (!superseded()) setGatewayRun({ kind: 'failed', step: 'read' });
         }
       })();
-      return () => { cancelled = true; };
     }, [active, resumeStep, gatewayToken, agentReads]);
 
     const retryGateway = React.useCallback(() => {
@@ -290,14 +316,26 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           ? 'failed'
           : intent.kind === 'unsupported'
             ? 'unsupported'
-            : 'idle';
+            // A read this screen could not make wears the same not-ready line and the
+            // same retry as an attempt that failed. The contract asks for exactly
+            // that — the runtime-unread copy with retry, never the unsupported
+            // notice — and the alternative is the idle card, which says the engine is
+            // fine while Continue stays disabled for a reason nothing on screen gives.
+            : intent.kind === 'unreadable'
+              ? 'failed'
+              : 'idle';
 
     // ── The action the shell renders ────────────────────────────────────────
 
     const action = providerAction({
       pendingCount: pending.length,
       importFailed,
-      hasSource: sources.some(usableSource),
+      // What the screen knows, not what the list happens to hold: an inventory it
+      // could not read is not an empty one, and 「添加」 offered against it is how a
+      // credential that already exists gets written a second time.
+      supply: sourceRead === 'read'
+        ? { kind: 'read', hasSource: sources.some(usableSource) }
+        : { kind: sourceRead },
       gatewayBusy,
       // The authoritative read, not this screen's attempt: an attempt that reported
       // success is not the engine answering, and C4 gates the next screen on the read.
@@ -339,6 +377,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           case 'add':
             setAddDialog({ more: true, vendor: null });
             return;
+          case 'retrySupply':
+            // Asking again is the whole action. The effect flips back to 「reading」 on
+            // its way in, so the button reports the retry it just started.
+            setSupplyToken((token) => token + 1);
+            return;
           default:
             // Busy. The shell already renders the action disabled; ignoring the call
             // rather than trusting that is what makes it unrepresentable.
@@ -371,13 +414,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       try {
         try {
           const read = await sourceReads.refresh();
-          if (read.kind === 'current') setSources(read.value);
+          if (read.kind === 'current') {
+            setSources(read.value);
+            setSourceRead('read');
+          }
         } catch {
           // The write may well have landed; what failed is the read that would show
           // it. The dialog swallows a rejection here to stay closable, so saying so
           // is this screen's job — keeping the old list silently would report a
           // provider that exists as one that does not.
-          setSupplyFailed(true);
+          setSourceRead('unreadable');
         }
         const id = created?.source.id;
         if (!viaMore || !id) return;
