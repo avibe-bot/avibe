@@ -3,6 +3,8 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from vibe import api
 from vibe.ui_server import app
@@ -227,6 +229,15 @@ def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
     monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "codex")
     monkeypatch.setattr(
         api,
+        "_agent_runtime_fingerprint",
+        lambda name, path=None: (
+            ("/usr/local/bin/codex", "1.0.0")
+            if path is None
+            else ("/usr/local/bin/codex", "1.0.1")
+        ),
+    )
+    monkeypatch.setattr(
+        api,
         "install_agent",
         lambda name: {"ok": True, "message": "Installed", "output": "done", "path": "/usr/local/bin/codex"},
     )
@@ -248,6 +259,110 @@ def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
     assert result["ok"] is False
     assert result["message"] == "refresh timeout"
     assert result["restart"] == {"ok": False, "message": "refresh timeout"}
+
+
+def test_install_job_skips_refresh_when_runtime_is_unchanged(monkeypatch):
+    monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "claude")
+    monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "claude")
+    fingerprint = ("/usr/local/bin/claude", "2.1.278")
+    monkeypatch.setattr(api, "_agent_runtime_fingerprint", lambda name, path=None: fingerprint)
+    monkeypatch.setattr(
+        api,
+        "install_agent",
+        lambda name: {"ok": True, "message": "Already current", "output": "up to date", "path": fingerprint[0]},
+    )
+    monkeypatch.setattr(api, "restart_backend", lambda *args, **kwargs: pytest.fail("refresh should be skipped"))
+    with api._AGENT_INSTALL_JOB_LOCK:
+        api._AGENT_INSTALL_JOBS.clear()
+        api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
+
+    started = api.start_agent_install_job("claude")
+    deadline = time.time() + 2.0
+    result = {}
+    while time.time() < deadline:
+        result = api.get_agent_install_job(started["job_id"], backend="claude")
+        if result.get("status") != "running":
+            break
+        time.sleep(0.01)
+
+    assert result["status"] == "succeeded"
+    assert result["ok"] is True
+    assert result["restart"]["ok"] is True
+    assert result["restart"]["skipped"] is True
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [
+        (("/usr/local/bin/claude", "2.1.278"), ("/usr/local/bin/claude", "2.1.279")),
+        (("/usr/local/bin/claude", "2.1.278"), ("/Users/test/.local/bin/claude", "2.1.278")),
+    ],
+    ids=["version-changed", "path-changed"],
+)
+def test_install_job_refreshes_when_runtime_changes(monkeypatch, before, after):
+    monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "claude")
+    monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "claude")
+    fingerprints = iter([before, after])
+    monkeypatch.setattr(api, "_agent_runtime_fingerprint", lambda name, path=None: next(fingerprints))
+    monkeypatch.setattr(
+        api,
+        "install_agent",
+        lambda name: {"ok": True, "message": "Upgraded", "output": "updated", "path": after[0]},
+    )
+    refreshed = []
+    monkeypatch.setattr(
+        api,
+        "restart_backend",
+        lambda name, **kwargs: refreshed.append((name, kwargs)) or {"ok": True, "message": "refreshed"},
+    )
+    with api._AGENT_INSTALL_JOB_LOCK:
+        api._AGENT_INSTALL_JOBS.clear()
+        api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
+
+    started = api.start_agent_install_job("claude")
+    deadline = time.time() + 2.0
+    result = {}
+    while time.time() < deadline:
+        result = api.get_agent_install_job(started["job_id"], backend="claude")
+        if result.get("status") != "running":
+            break
+        time.sleep(0.01)
+
+    assert result["status"] == "succeeded"
+    assert result["restart"] == {"ok": True, "message": "refreshed"}
+    assert refreshed == [("claude", {"metadata": {"reason": "agent_install_job", "source": "ui_api"}})]
+
+
+def test_install_job_does_not_refresh_when_install_fails(monkeypatch):
+    monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "claude")
+    monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "claude")
+    monkeypatch.setattr(
+        api,
+        "_agent_runtime_fingerprint",
+        lambda name, path=None: ("/usr/local/bin/claude", "2.1.278"),
+    )
+    monkeypatch.setattr(
+        api,
+        "install_agent",
+        lambda name: {"ok": False, "message": "Upgrade failed", "output": "error", "path": None},
+    )
+    monkeypatch.setattr(api, "restart_backend", lambda *args, **kwargs: pytest.fail("refresh should not run"))
+    with api._AGENT_INSTALL_JOB_LOCK:
+        api._AGENT_INSTALL_JOBS.clear()
+        api._AGENT_INSTALL_LATEST_BY_BACKEND.clear()
+
+    started = api.start_agent_install_job("claude")
+    deadline = time.time() + 2.0
+    result = {}
+    while time.time() < deadline:
+        result = api.get_agent_install_job(started["job_id"], backend="claude")
+        if result.get("status") != "running":
+            break
+        time.sleep(0.01)
+
+    assert result["status"] == "failed"
+    assert result["ok"] is False
+    assert "restart" not in result
 
 
 def test_vibe_agent_routes_return_structured_client_errors(monkeypatch, tmp_path):

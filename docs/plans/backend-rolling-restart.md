@@ -38,6 +38,11 @@ Codex and Claude may later prepare a new generation during DRAINING, but only if
 their adapters can prove isolated ownership. That optimization does not change
 the Session protocol.
 
+Agent CLI install/upgrade jobs request this cutover only when the effective CLI
+path or reported version changes. A successful install whose path and version
+remain unchanged skips the refresh; if either fingerprint cannot be measured,
+the job refreshes conservatively.
+
 ## Timeout
 
 Draining is bounded. At the deadline, the coordinator:

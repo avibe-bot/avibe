@@ -7197,6 +7197,41 @@ def _agent_install_job_succeeded(result: dict, name: str) -> bool:
     return isinstance(restart, dict) and bool(restart.get("ok"))
 
 
+def _agent_runtime_fingerprint(name: str, path: str | None = None) -> tuple[str | None, str | None]:
+    """Capture the effective CLI path and version for an install comparison.
+
+    A missing version is intentionally preserved as unknown. Callers should
+    refresh conservatively when either side cannot be measured, because a
+    successful package-manager command does not prove that the running
+    controller's effective runtime stayed unchanged.
+    """
+    resolved_path = path or resolve_cli_path(name)
+    if not resolved_path:
+        return None, None
+    try:
+        version = _probe_cli_version(resolved_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Agent runtime fingerprint probe failed for %s: %s", name, exc)
+        version = None
+    return os.path.realpath(resolved_path), version
+
+
+def _agent_runtime_changed(
+    before: tuple[str | None, str | None],
+    after: tuple[str | None, str | None],
+) -> bool:
+    """Return whether an install may have changed the effective CLI runtime."""
+    before_path, before_version = before
+    after_path, after_version = after
+    if before_path != after_path:
+        return True
+    if not before_path or not after_path:
+        return True
+    if before_version is None or after_version is None:
+        return True
+    return before_version != after_version
+
+
 def start_agent_install_job(name: str) -> dict:
     """Start backend CLI install/upgrade in a background job.
 
@@ -7233,13 +7268,31 @@ def start_agent_install_job(name: str) -> dict:
 
     def _worker() -> None:
         try:
+            refresh_supported = supports_runtime_refresh(name)
+            runtime_before = _agent_runtime_fingerprint(name) if refresh_supported else None
             result = install_agent(name)
-            if result.get("ok") and supports_runtime_refresh(name):
+            if result.get("ok") and refresh_supported:
                 try:
-                    result["restart"] = restart_backend(
+                    result_path = result.get("path")
+                    runtime_after = _agent_runtime_fingerprint(
                         name,
-                        metadata={"reason": "agent_install_job", "source": "ui_api"},
+                        result_path if isinstance(result_path, str) else None,
                     )
+                    if runtime_before is None or _agent_runtime_changed(runtime_before, runtime_after):
+                        result["restart"] = restart_backend(
+                            name,
+                            metadata={"reason": "agent_install_job", "source": "ui_api"},
+                        )
+                    else:
+                        logger.info(
+                            "Skipping %s backend refresh after install: effective CLI runtime unchanged",
+                            name,
+                        )
+                        result["restart"] = {
+                            "ok": True,
+                            "skipped": True,
+                            "message": "Backend runtime unchanged; refresh skipped",
+                        }
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "Backend refresh after %s install job failed: %s",
