@@ -197,8 +197,8 @@ def _render_options(raw: object) -> dict[str, Any]:
     options: dict[str, Any] = {}
     for name, value in raw.items():
         field = f"options.{name}"
-        # Agent text has one JSON owner: the existing top-level field.
-        if name not in parameters or name == "agent_instructions":
+        # Agent text and backend each have one JSON owner: their top-level fields.
+        if name not in parameters or name in {"agent_instructions", "backend"}:
             raise PromptRenderInputError("unknownField", field=field)
         if name == "context" and isinstance(value, dict):
             unknown = set(value) - set(MessageContext.__dataclass_fields__)
@@ -239,7 +239,7 @@ def render_prompt_context(request: dict[str, Any]) -> dict[str, Any]:
         raise PromptRenderInputError("invalidField", field="agent_instructions")
     options = _render_options(request.get("options", {}))
     options.setdefault("include_codex_generated_images", backend == "codex")
-    blocks = build_system_prompt_blocks(agent_instructions=agent_instructions, **options)
+    blocks = build_system_prompt_blocks(agent_instructions=agent_instructions, backend=backend, **options)
     if backend == "codex":
         blocks = runtime_snapshot_blocks(blocks)
     text = join_prompt_blocks(blocks)

@@ -80,6 +80,7 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("forked-session-prompt", "Forked Session Prompt", "forked-session.md", trailing_newlines=2, placeholders=("source_session_id", "default_session_id")),
     PromptModule("base-capabilities-body", "Base Capabilities Body", "base-capabilities.md", trailing_newlines=1),
     PromptModule("skills-prompt", "Skills Usage", "skills.md", leading_newlines=2, trailing_newlines=2),
+    PromptModule("codex-skill-reuse", "Codex Skill Reuse", "codex-skill-reuse.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("codex-generated-images", "Codex-generated images", "codex-generated-images.md", leading_newlines=1, trailing_newlines=1, placeholders=("example_uri",)),
     PromptModule("show-pages-prompt", "Show Pages Prompt", "show-pages.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("quick-replies-prompt", "Quick Replies Prompt", "quick-replies.md", leading_newlines=1, trailing_newlines=1),

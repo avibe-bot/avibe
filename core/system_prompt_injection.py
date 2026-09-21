@@ -199,6 +199,7 @@ def _context_block(
 def build_system_prompt_blocks(
     *,
     agent_instructions: str = "",
+    backend: str = "",
     include_quick_replies: bool = True,
     include_codex_generated_images: bool = False,
     include_context_guidance: bool = True,
@@ -239,6 +240,8 @@ def build_system_prompt_blocks(
         if correction:
             blocks.append(RenderedPromptBlock("forked-session-prompt", correction))
     blocks.append(render_prompt_block("base-capabilities-body"))
+    if backend == "codex":
+        blocks.append(render_prompt_block("codex-skill-reuse"))
     if include_codex_generated_images:
         blocks.append(_codex_generated_images_block())
     blocks.append(render_prompt_block("show-pages-prompt"))

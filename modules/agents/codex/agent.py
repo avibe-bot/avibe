@@ -2959,6 +2959,7 @@ class CodexAgent(BaseAgent):
         instructions = await asyncio.to_thread(
             build_system_prompt_injection,
             agent_instructions=agent_instructions or "",
+            backend="codex",
             include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
             and platform != "wechat",
             include_codex_generated_images=True,
