@@ -93,8 +93,15 @@ test.describe('D: inherited routes, manual editing, and default routing', () => 
       await search.press('Enter');
       await search.press('Tab');
       const selector = page.locator('.model-hub-route-selector');
+      // The manual pair is folded away, so the tab ring reaches its toggle where
+      // it used to reach the first field; opening it from the keyboard has to put
+      // both fields back into that ring, ahead of the confirm button.
+      const manual = selector.getByRole('button', { name: copy('routeDialog.add.manual'), exact: true });
+      await expect(manual).toBeFocused();
+      await manual.press('Enter');
       const source = selector.getByLabel(copy('routeDialog.add.source'), { exact: true });
       const exactModel = selector.getByLabel(copy('routing.exactModel'), { exact: true });
+      await manual.press('Tab');
       await expect(source).toBeFocused();
       await source.press('Tab');
       await expect(exactModel).toBeFocused();

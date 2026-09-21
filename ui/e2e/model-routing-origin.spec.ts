@@ -64,6 +64,7 @@ test('MH-ROUTING-007 restore, undo, cancel, and save preserve explicit route int
     // Undo must preserve the unsaved candidate, not reconstruct the saved route.
     await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).click();
     const selector = page.locator('.model-hub-route-selector');
+    await selector.getByRole('button', { name: copy('routeDialog.add.manual'), exact: true }).click();
     await selector.getByLabel(copy('routeDialog.add.source'), { exact: true }).selectOption(gateway.sources[0].id);
     await selector.getByLabel(copy('routing.exactModel'), { exact: true }).fill(unsavedModel);
     await expect(selector.getByRole('button', { name: copy('routeDialog.add.confirm'), exact: true })).toHaveCount(0);

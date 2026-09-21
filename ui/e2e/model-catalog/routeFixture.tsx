@@ -10,10 +10,17 @@ const origin = (params.get('origin') ?? 'automatic') as AgentChain['route_origin
 const modelId = params.has('long') ? `模型/${'long-model-identity/'.repeat(10)}gpt-test` : 'gpt-test';
 const sources: Source[] = ['a', 'b'].map((id) => ({
   id: `src_${id}`, display_name: id === 'a' ? 'Provider A' : 'Provider B',
-  kind: 'api_key', vendor: 'openai', protocol: 'openai_responses',
+  // `subscription` is the inventory with nothing to type by hand: the picker
+  // renders no manual pair there, so the panel is one band shorter.
+  kind: params.has('subscription') ? 'subscription' : 'api_key',
+  vendor: 'openai', protocol: 'openai_responses',
   supply_channel: 'hub', billing: 'metered', last_discovered_at: null,
   state: { status: 'active', retry_at: null, detail_key: null },
-  models: [{ id: modelId, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null }],
+  // `stocked` gives each source models the chain does not already use, so the
+  // add-hop picker has candidates to draw. Every other case keeps the two-hop
+  // chain it reads today.
+  models: [modelId, ...(params.has('stocked') ? ['gpt-alt-1', 'gpt-alt-2', 'gpt-alt-3', 'gpt-alt-4', 'gpt-alt-5'] : [])]
+    .map((id) => ({ id, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null })),
 }));
 const inheritedHops = sources.map((source) => ({ source_id: source.id, model_id: modelId }));
 const supply: AgentSupply = {
