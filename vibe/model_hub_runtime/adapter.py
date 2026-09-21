@@ -1921,12 +1921,32 @@ class CLIProxyEngineAdapter:
         return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
 
     async def credential_address(self, credential_ref: str) -> str | None:
-        metadata = await asyncio.to_thread(
-            self.state_store.credential_metadata_if_present,
-            credential_ref,
-        )
+        return await asyncio.to_thread(self._credential_address, credential_ref)
+
+    def _credential_address(self, credential_ref: str) -> str | None:
+        """Settle the address the same way ``bind_source`` settles it.
+
+        Only an OAuth credential records an address of its own, and one written
+        by an older release may not have even that. Every other bound Source is
+        addressed by the prefix its record holds, which ``bind_source`` reaches
+        for next. Reading just the credential would therefore report no address
+        for a Source the engine addresses perfectly well, and the repair would
+        decline exactly the ids that need it.
+        """
+
+        metadata = self.state_store.credential_metadata_if_present(credential_ref)
         prefix = (metadata or {}).get("prefix")
-        return prefix if isinstance(prefix, str) and prefix else None
+        if isinstance(prefix, str) and prefix:
+            return prefix
+        record = next(
+            (
+                source
+                for source in self.state_store.list_sources()
+                if source.credential_ref == credential_ref
+            ),
+            None,
+        )
+        return record.prefix if record is not None and record.prefix else None
 
     async def retarget_api_key_credential(
         self,

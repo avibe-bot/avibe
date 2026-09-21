@@ -801,6 +801,35 @@ def test_custody_is_what_proves_an_address(tmp_path) -> None:
     assert asyncio.run(adapter.credential_address("cred_absent0000")) is None
 
 
+def test_custody_answers_for_a_credential_that_records_no_address(tmp_path) -> None:
+    """An API key records no address of its own, and the engine still has one.
+
+    ``bind_source`` settles the address in two steps — the credential's own,
+    else the prefix the bound record already holds — so an answer drawn from
+    only the first reports nothing for a Source the engine addresses perfectly
+    well, and the repair declines exactly the ids that need it. Every bound
+    Source has an address; only some credentials write it down.
+    """
+
+    store = EngineStateStore(tmp_path / "state")
+    store.prepare_instance("install-1")
+    credential_ref = store.store_api_key(
+        "sk-fixture", vendor="openai", protocol="openai_chat",
+    )
+    assert "prefix" not in store.credential_metadata(credential_ref)
+    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
+    adapter.state_store = store
+
+    assert asyncio.run(adapter.credential_address(credential_ref)) is None
+
+    [record] = store.sync_sources(
+        [_sync_binding(credential_ref, vendor="openai", protocol="openai_chat")]
+    )
+
+    assert asyncio.run(adapter.credential_address(credential_ref)) == record.prefix
+    assert record.prefix.startswith("avibe-")
+
+
 class _AddressingAdapter(FakeAdapter):
     """An engine that knows which address belongs to which credential."""
 

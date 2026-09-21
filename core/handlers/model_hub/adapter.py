@@ -537,8 +537,15 @@ class EngineAdapter(Protocol):
         can *prove* an id an older release stored carries one — as opposed to
         guessing from its shape and renaming a vendor's own model.
 
-        None when the credential records no address, including when it is gone.
-        A caller that cannot prove ownership must leave the id alone.
+        Whichever address the engine would actually compose, however custody
+        happens to hold it: one credential records its own, another is
+        addressed by the record its Source is bound through. An implementation
+        that answers from only one of those reports no address for a Source the
+        engine addresses perfectly well.
+
+        None when nothing records an address for this credential, including
+        when it is gone. A caller that cannot prove ownership must leave the
+        id alone.
         """
         ...
 
