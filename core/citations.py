@@ -33,7 +33,7 @@ from urllib.parse import unquote
 
 import idna
 
-from core.reply_enhancer import mask_hidden_and_code
+from core.reply_enhancer import mask_hidden_and_code, percent_encode, spell_uri
 
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
@@ -98,16 +98,13 @@ _IPV4_TOO_LARGE = 1 << 32
 _REFERENCE_RE = re.compile(
     r"&(#[0-9]{1,7}|#[Xx][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});"
 )
-# The characters micromark's ``normalizeUri`` leaves alone. Everything else it
-# percent-encodes, so writing anything else verbatim would make the delivered
-# href differ from the sidecar URL and the badge would stop matching its link.
-_URI_SAFE_RE = re.compile(r"[!#$&-;=?-Z_a-z~]")
-# ``%`` followed by two ASCII alphanumerics is kept as an existing escape.
-_URI_ESCAPE_RE = re.compile(r"%[0-9A-Za-z]{2}")
-# Markdown's own link punctuation. ``normalizeUri`` keeps parentheses, but an
-# unbalanced one truncates the link, so they are encoded here as well - and
-# ``%28``/``%29`` survive it untouched, which keeps the result a fixed point.
-_MARKDOWN_UNSAFE = frozenset("()")
+# What a citation destination has to spell that plain URI spelling does not.
+# ``normalizeUri`` keeps parentheses, but an unbalanced one truncates the link;
+# and an ``&`` that starts a live reference would be resolved a second time on
+# the way out, turning one delivered URL into a different one. Both are written
+# as escapes BEFORE ``spell_uri`` runs, which keeps them untouched - so the
+# result is still a fixed point, and the reference grammar stays defined once.
+_CITATION_UNSAFE_RE = re.compile(rf"[()]|&(?={_REFERENCE_RE.pattern[1:]})")
 # WHATWG forbidden domain code points, checked after percent-decoding. The C0
 # range is there in full: a host is not allowed to hold any of it, and a
 # citation whose host carries one names a page no browser opens.
@@ -357,15 +354,6 @@ def _canonical_host(host: str) -> str:
     return ".".join(str((address >> shift) & 0xFF) for shift in (24, 16, 8, 0))
 
 
-def _percent_encode(char: str) -> str:
-    """Percent-encode one character the way ``encodeURIComponent`` would."""
-    if "\ud800" <= char <= "\udfff":
-        # A lone surrogate is unrepresentable; the renderer substitutes U+FFFD,
-        # so writing anything else would not survive it.
-        char = "\ufffd"
-    return "".join(f"%{byte:02X}" for byte in char.encode("utf-8", "replace"))
-
-
 def _canonical_uri(value: str) -> str:
     """The destination form that survives the Markdown pipeline unchanged.
 
@@ -373,28 +361,15 @@ def _canonical_uri(value: str) -> str:
     encodes what is left. Both are applied here so the URL the backend persists
     is byte-identical to the href the renderer produces from it - which is the
     only reason a badge can be matched to its own link.
+
+    The percent-encoding is ``spell_uri``, the one rule the renderer applies
+    and every consumer of a resolved destination needs. Only what a citation
+    needs on top of it is written here, and it is written as escapes that the
+    shared rule then carries through unchanged.
     """
-    out: list[str] = []
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char == "%":
-            existing = _URI_ESCAPE_RE.match(value, index)
-            if existing:
-                out.append(existing.group(0))
-                index = existing.end()
-                continue
-            out.append("%25")
-        elif char == "&" and _REFERENCE_RE.match(value, index):
-            # Left alone this would be resolved again on the way out, turning
-            # one delivered URL into a different one.
-            out.append("%26")
-        elif char in _MARKDOWN_UNSAFE or not _URI_SAFE_RE.fullmatch(char):
-            out.append(_percent_encode(char))
-        else:
-            out.append(char)
-        index += 1
-    return "".join(out)
+    return spell_uri(
+        _CITATION_UNSAFE_RE.sub(lambda match: percent_encode(match.group()), value)
+    )
 
 
 def _parse_ipv6(value: str) -> Optional[list[int]]:
@@ -666,6 +641,36 @@ def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
         return None
     authority = f"{host}{port}"
     return (f"{userinfo}@{authority}" if userinfo else authority), label_host, rest
+
+
+def restore_ipv6_authority(url: str) -> str:
+    """*url*, already spelled as a URI, with a bracketed IPv6 host readable again.
+
+    An IPv6 host is REQUIRED to be written in brackets, and ``[``/``]`` are two
+    of the characters ``spell_uri`` escapes - so ``https://[::1]/x`` comes out
+    of it spelled ``https://%5B::1%5D/x``, which is not an address any parser
+    opens. The brackets go back in the authority and nowhere else: the same two
+    characters in a path, query or fragment are data, and the consumer spells
+    them ``%5B``/``%5D`` there.
+
+    They go back only when the authority they belong to parses, so a host like
+    ``[nope]`` stays escaped rather than becoming a different URL - and only
+    when one is bracketed at all, so every other address is returned exactly as
+    it came. ``markdown.tsx`` repairs its own hrefs this way, for this reason;
+    this is the same repair on the way to a consumer that has no renderer to do
+    it later.
+    """
+    scheme, separator, remainder = url.partition(":")
+    if not separator or not remainder.startswith("//"):
+        return url
+    end = _AUTHORITY_END_RE.search(remainder, 2)
+    authority = remainder[2 : end.start()] if end else remainder[2:]
+    if _IPV6_OPEN_RE.search(authority) is None:
+        return url
+    parsed = _authority(url, scheme)
+    if parsed is None:
+        return url
+    return f"{scheme}://{parsed[0]}{parsed[2]}"
 
 
 def safe_url(value: Any) -> str:

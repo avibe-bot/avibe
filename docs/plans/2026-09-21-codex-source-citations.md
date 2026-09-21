@@ -196,18 +196,31 @@ blob with no way to reach the page the answer is based on.
   the author did not, and the reader is shown a truncated link with the rest of
   the address beside it as text. What it owes the reader is the page a tap
   opens, not the bytes that carried it there, so two jobs run in order and stay
-  apart. First the address is written the way a URI may be written — RFC 3986
-  says which characters stand for themselves, and `<`, `>` and `|` are not
-  among them, so they leave as `%3C`, `%3E` and `%7C`, along with spaces,
-  control characters, backslashes and backticks, while `%`, the `[]` of an IPv6
-  authority and the `?#&=` an address is structured by are untouched. Then
-  Slack's text-object escaping runs over the result, which is what a query
-  separator needs: `?a=1&b=2` travels as `?a=1&amp;b=2` and is `?a=1&b=2` again
-  to the client, where percent-encoding that `&` would have survived every
-  decoder and opened a different page. This is delivery, not canonicalization —
-  a malformed `%zz`, a bracket in a path and a non-ASCII host are left as the
-  author wrote them, each naming the same page the Web renderer reaches by
-  rewriting it.
+  apart. First the address is written the way the Markdown consumer on the
+  other side writes it. That rule is `core/reply_enhancer.py`'s `spell_uri`,
+  promoted out of `core/citations.py` where it already existed as the
+  renderer-compatible half of `_canonical_uri`: `<`, `>` and `|` leave as
+  `%3C`, `%3E` and `%7C`, along with spaces, control characters, backslashes,
+  backticks, bracket data and a `%` that starts no escape, while `?#&=` and an
+  escape the address already spells are left standing. Then Slack's text-object
+  escaping runs over the result, which is what a query separator needs:
+  `?a=1&b=2` travels as `?a=1&amp;b=2` and is `?a=1&b=2` again to the client,
+  where percent-encoding that `&` would have survived every decoder and opened
+  a different page.
+
+  Picking a different safe set is not a free choice about wire bytes. A bare
+  `%` and a bracket in a path survive URL parsing as distinct spellings, so
+  delivering `…/a%b` where the renderer resolves `…/a%25b` is a different path
+  on any server we do not control — measured, not assumed, by rendering both
+  consumers and comparing `URL.href` over a bounded matrix
+  (`tests/fixtures/link_destination_matrix.json`, asserted from both sides).
+  The one escape that has to come back is the pair of brackets around an IPv6
+  host: they are the authority's syntax rather than data, nothing opens
+  `%5B::1%5D`, and `restore_ipv6_authority` puts them back only there and only
+  when the authority parses — the same repair `markdown.tsx` already performs
+  on its own hrefs. A malformed-looking `%zz` is still left alone, because that
+  is what the consumer's own rule does with it rather than a policy chosen
+  here.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter

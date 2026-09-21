@@ -1105,6 +1105,60 @@ def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:
     return ranges
 
 
+# The characters micromark's ``normalizeUri`` leaves alone. Everything else it
+# percent-encodes when it turns a parsed destination into an href.
+_URI_SAFE_RE = re.compile(r"[!#$&-;=?-Z_a-z~]")
+# ``%`` followed by two ASCII alphanumerics is kept as an existing escape.
+_URI_ESCAPE_RE = re.compile(r"%[0-9A-Za-z]{2}")
+
+
+def percent_encode(char: str) -> str:
+    """Percent-encode one character the way ``encodeURIComponent`` would."""
+    if "\ud800" <= char <= "\udfff":
+        # A lone surrogate is unrepresentable; the renderer substitutes U+FFFD,
+        # so writing anything else would not survive it.
+        char = "\ufffd"
+    return "".join(f"%{byte:02X}" for byte in char.encode("utf-8", "replace"))
+
+
+def spell_uri(value: str) -> str:
+    """Spell a destination the way the Markdown pipeline spells it.
+
+    The rule is micromark's ``normalizeUri``, which every renderer in this
+    product reaches a destination through: a character outside the safe set
+    becomes its percent escape, and a ``%`` that already starts one is left
+    alone so ``%3E`` stays ``%3E`` instead of becoming ``%253E``. A ``%`` that
+    starts nothing - ``%b``, or a ``%`` at the end - is data, and is written
+    ``%25``. That is not a repair policy chosen here: it is what the consumer
+    does, and a destination spelled any other way names a different path.
+
+    Malformed-looking escapes are not repaired, because that rule does not
+    read them: ``%zz`` and ``%2g`` are two ASCII alphanumerics after a ``%``
+    and survive verbatim, which is what the renderer produces for them too.
+
+    Nothing about this is a claim that two spellings of an address are the
+    same page - the destination is simply written the way the consumer writes
+    it, so both arrive at whatever that spelling names.
+    """
+    out: List[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "%":
+            existing = _URI_ESCAPE_RE.match(value, index)
+            if existing:
+                out.append(existing.group(0))
+                index = existing.end()
+                continue
+            out.append("%25")
+        elif _URI_SAFE_RE.fullmatch(char):
+            out.append(char)
+        else:
+            out.append(percent_encode(char))
+        index += 1
+    return "".join(out)
+
+
 def resolve_character_references(text: str) -> str:
     """Resolve CommonMark character references outside code, exactly once.
 

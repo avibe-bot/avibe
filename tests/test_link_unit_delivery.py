@@ -19,6 +19,7 @@ downstream reads them anyway - and what the real Slack client sends for each.
 from __future__ import annotations
 
 import html
+import json
 import re
 import sys
 import unittest
@@ -414,6 +415,15 @@ class TestSlackSpellsTheWholeLabel:
 # asserted on its own so a permissive decoder cannot make a broken delimiter
 # look like a working link, and the address on its own because that - not the
 # spelling - is what the reader was promised.
+# The bounded matrix both consumers are measured on. Shared with
+# ui/src/components/ui/markdown.test.tsx, which renders the same sources
+# through the real Markdown component; see the file's own description.
+_DESTINATION_MATRIX = json.loads(
+    (Path(__file__).resolve().parent / "fixtures/link_destination_matrix.json").read_text(
+        encoding="utf-8"
+    )
+)["cases"]
+
 _DESTINATION_CORPUS = (
     # A delimiter of the wrapper, however the source spells it. Raw, escaped
     # and written as a reference all resolve to the same address, and all three
@@ -448,29 +458,47 @@ _DESTINATION_CORPUS = (
     # ``%3E`` rather than the one the author wrote.
     ("[h](https://example.com/a%3Eb)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
     ("[h](https://example.com/a%26amp%3Bb)", "<https://example.com/a%26amp%3Bb|h>", "https://example.com/a%26amp%3Bb"),
-    # ``%b`` is not an escape at all. Repairing it would be a policy about
-    # addresses; this layer was asked to deliver one, so it leaves it alone.
-    ("[h](https://example.com/a%b)", "<https://example.com/a%b|h>", "https://example.com/a%b"),
-    # Structure a URI is made of survives, because the rule being applied is
-    # the URI's own: an IPv6 authority keeps its brackets, and so do userinfo,
-    # port, query and fragment.
+    # ``%b`` starts no escape, so that ``%`` is a character of the path and is
+    # written ``%25``. Leaving it bare is not the gentler answer: the consumer
+    # on the other side reads a bare ``%`` as data too, so a bare one delivers
+    # a path nobody asked for. ``%zz`` is two ASCII alphanumerics after a
+    # ``%``, which the same rule reads as an escape already spelled - so it is
+    # left standing rather than repaired into something it never said.
+    ("[h](https://example.com/a%b)", "<https://example.com/a%25b|h>", "https://example.com/a%25b"),
+    ("[h](https://example.com/a%zzb)", "<https://example.com/a%zzb|h>", "https://example.com/a%zzb"),
+    # Brackets are the syntax of an IPv6 host and data everywhere else, and the
+    # destination has to say which it means. Only the authority keeps them; the
+    # same two characters in a path, query or fragment are spelled - and
+    # userinfo, port, query and fragment structure survive either way.
     (r"[h](https://[::1]:8443/a\>b)", "<https://[::1]:8443/a%3Eb|h>", "https://[::1]:8443/a%3Eb"),
     (
         "[h](https://u:p@[::1]:8443/a?x=1&y=2)",
         "<https://u:p@[::1]:8443/a?x=1&amp;y=2|h>",
         "https://u:p@[::1]:8443/a?x=1&y=2",
     ),
+    (
+        "[h](https://u:p@[::1]:8443/a[b]?x=[c]#f[d])",
+        "<https://u:p@[::1]:8443/a%5Bb%5D?x=%5Bc%5D#f%5Bd%5D|h>",
+        "https://u:p@[::1]:8443/a%5Bb%5D?x=%5Bc%5D#f%5Bd%5D",
+    ),
+    ("[h](https://example.com/a[b])", "<https://example.com/a%5Bb%5D|h>", "https://example.com/a%5Bb%5D"),
+    # A bracketed host no URL parser accepts stays spelled. Putting brackets
+    # back there would invent an address the source never wrote, and the Web
+    # renderer refuses the same repair for the same reason.
+    ("[h](https://[nope]/x)", "<https://%5Bnope%5D/x|h>", "https://%5Bnope%5D/x"),
     ("[h](https://example.com/p?x=1#f%20g)", "<https://example.com/p?x=1#f%20g|h>", "https://example.com/p?x=1#f%20g"),
-    ("[h](https://example.com/a[b])", "<https://example.com/a[b]|h>", "https://example.com/a[b]"),
     # Characters with no meaning to a URI and none to Slack either, but every
-    # one of them outside the set a URI may hold as itself.
+    # one of them outside the set the consumer leaves standing.
     (r"[h](https://example.com/a\\b)", "<https://example.com/a%5Cb|h>", "https://example.com/a%5Cb"),
     ("[h](https://example.com/q=`x`)", "<https://example.com/q=%60x%60|h>", "https://example.com/q=%60x%60"),
-    # Non-ASCII is the author's spelling of a name, and it is left as it came.
+    # Non-ASCII is spelled, in the host as much as in the path, because that is
+    # what the consumer writes. A URL parser reads that host back as the
+    # punycode it was always going to resolve - a third spelling, and the one
+    # the connection is actually made to.
     (
         "[h](https://例子.测试/路径?q=a&b=c)",
-        "<https://例子.测试/路径?q=a&amp;b=c|h>",
-        "https://例子.测试/路径?q=a&b=c",
+        "<https://%E4%BE%8B%E5%AD%90.%E6%B5%8B%E8%AF%95/%E8%B7%AF%E5%BE%84?q=a&amp;b=c|h>",
+        "https://%E4%BE%8B%E5%AD%90.%E6%B5%8B%E8%AF%95/%E8%B7%AF%E5%BE%84?q=a&b=c",
     ),
     # A scheme that is not http, already delivered today.
     (
@@ -492,20 +520,40 @@ class TestSlackSpellsTheWholeDestination:
     time the wrapper is built - so the destination is finished before the
     wrapper closes over it, the same as the label.
 
-    Two jobs, kept apart. First the address is written the way a URI is allowed
-    to be written: RFC 3986 says which characters may stand for themselves, and
-    ``<``, ``>`` and ``|`` are not among them, so they leave as ``%3C``, ``%3E``
-    and ``%7C`` - along with spaces, controls, backslashes and backticks, and
-    without touching the ``%``, the ``[]`` of an IPv6 authority or the ``?#&=``
-    an address is structured by. Then Slack's own text-object escaping runs over
-    the result, which is what a query ``&`` needs and percent-encoding would
-    destroy.
+    Two jobs, kept apart. First the address is written the way the Markdown
+    consumer on the other side writes it - ``spell_uri``, so ``<``, ``>`` and
+    ``|`` leave as ``%3C``, ``%3E`` and ``%7C`` along with spaces, controls,
+    backslashes, backticks, brackets that are data and a ``%`` that starts no
+    escape, while ``?#&=`` and an escape already spelled are left standing.
+    Then Slack's own text-object escaping runs over the result, which is what a
+    query ``&`` needs and percent-encoding would destroy.
+
+    The wire is asserted here, exactly, because it is what Slack receives. That
+    those bytes and the Web renderer's own href reach one address is a separate
+    claim, and it is measured rather than asserted: see
+    ``test_the_matrix_arrives_at_the_address_the_web_consumer_resolves``.
     """
 
     def test_every_destination_arrives_as_the_address_it_named(self):
         for markdown, wire, address in _DESTINATION_CORPUS:
             assert slack(markdown) == wire, markdown
             assert slack_reads(wire) == (address, "h"), markdown
+
+    def test_the_matrix_arrives_at_the_address_the_web_consumer_resolves(self):
+        """Half of a relationship, and the half this language can measure.
+
+        Listing the Slack spelling beside the Web spelling and calling them
+        equivalent proves nothing about where either one goes. So one bounded
+        matrix is shared with the Web suite: this side asserts what the real
+        adapter decodes out of the wrapper, that side renders the same source
+        through the real Markdown component and asserts a browser URL parser
+        resolves its anchor and this address to one URL. Either side drifting
+        fails one of the two.
+        """
+        for case in _DESTINATION_MATRIX:
+            wire = slack(case["markdown"])
+
+            assert slack_reads(wire)[0] == case["address"], case["markdown"]
 
     def test_a_destination_that_breaks_out_leaves_more_than_one_unit_behind(self):
         """Why the wire is asserted and not just the decoding: the failure shape.

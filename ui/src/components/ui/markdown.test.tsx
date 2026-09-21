@@ -90,11 +90,19 @@ describe('Markdown link destinations', () => {
       String.raw`[h](mailto:a+b@example.com?subject=a\>b)`,
       'mailto:a+b@example.com?subject=a%3Eb',
     ],
-    // The three this renderer spells differently from the Slack adapter. It
-    // rewrites what it is allowed to rewrite; the adapter delivers what it was
-    // given. Same page either way.
+    // A `%` that starts no escape is data and is spelled; one that starts an
+    // escape already spelled is left alone, malformed-looking or not.
     ['[h](https://example.com/a%b)', 'https://example.com/a%25b'],
+    ['[h](https://example.com/a%zzb)', 'https://example.com/a%zzb'],
+    // Brackets are the host's syntax in an authority and data anywhere else,
+    // and a bracketed host this platform rejects is left spelled rather than
+    // repaired into an address the source never wrote.
     ['[h](https://example.com/a[b])', 'https://example.com/a%5Bb%5D'],
+    [
+      '[h](https://u:p@[::1]:8443/a[b]?x=[c]#f[d])',
+      'https://u:p@[::1]:8443/a%5Bb%5D?x=%5Bc%5D#f%5Bd%5D',
+    ],
+    ['[h](https://[nope]/x)', 'https://%5Bnope%5D/x'],
     [
       '[h](https://例子.测试/路径?q=a&b=c)',
       'https://%E4%BE%8B%E5%AD%90.%E6%B5%8B%E8%AF%95/%E8%B7%AF%E5%BE%84?q=a&b=c',
@@ -106,6 +114,29 @@ describe('Markdown link destinations', () => {
     expect(anchor?.getAttribute('href')).toBe(href);
     expect(anchor?.textContent).toBe('h');
   });
+
+  // One shared table with tests/test_link_unit_delivery.py, read at runtime so
+  // the fixture stays outside Vite's module graph. That suite asserts what the
+  // real Slack adapter decodes out of its wrapper for each `markdown`; this one
+  // renders the same source through the real component and asks the platform's
+  // own URL parser whether the anchor it produced and that address are one URL.
+  // Neither suite can drift without the other failing, and neither one claims
+  // the two wires are equal - only that they arrive in the same place.
+  type DestinationCase = { markdown: string; address: string };
+  const destinationMatrix = (JSON.parse(
+    readFileSync(resolve(process.cwd(), '../tests/fixtures/link_destination_matrix.json'), 'utf8'),
+  ) as { cases: DestinationCase[] }).cases;
+
+  it.each(destinationMatrix)(
+    'resolves $markdown to the address the Slack adapter delivers',
+    ({ markdown, address }) => {
+      const { container } = render(<Markdown content={markdown} />);
+      const href = container.querySelector('a')?.getAttribute('href');
+
+      expect(href).toBeDefined();
+      expect(new URL(href as string).href).toBe(new URL(address).href);
+    },
+  );
 
   it('keeps a bare destination and two neighbouring links whole', () => {
     const empty = render(<Markdown content={String.raw`[](https://example.com/a\>b)`} />);
