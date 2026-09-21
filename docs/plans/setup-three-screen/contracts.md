@@ -29,10 +29,12 @@ Three rulings a lane must not re-litigate locally:
 
 1. **PR0 adds no key to the bundles.** `keyCoverage.test.ts` reads the literal keys out of
    the app source, so a key lands with the component that uses it, in the lane that owns
-   both. Namespaces are the ownership boundary: L1 takes `onboarding.flow.*` and the six
-   changed welcome/access strings, L2 takes `onboarding.providers.*` and
-   `onboarding.import.*`, L3 takes the new `onboarding.setup.*` and `onboarding.route.*`
-   leaves and the two changed setup headings.
+   both. Namespaces are the ownership boundary: L1 takes `onboarding.flow.*` and the four
+   changed `onboarding.welcome.*` / `onboarding.access.*` strings, L2 takes
+   `onboarding.providers.*` and `onboarding.import.*`, and L3 takes the new
+   `onboarding.setup.*` and `onboarding.route.*` leaves plus the two changed
+   `onboarding.setup.title` / `.subtitle` headings. `_changed_existing` carries an `owner`
+   per row, and that field — not this sentence — settles a dispute.
 2. **Setup says 导入 / import; Settings keeps 迁移 / migrate.** They are one mechanism
    (`scanMigration` / `applyMigration`) and two vocabularies, because `settings.models`
    copy is fenced by total-scope redlines (`copyAgreement.test.ts`,
@@ -118,7 +120,7 @@ With Model Hub available, `进入工作台` is enabled when all three hold:
 | Input | Producer | Predicate |
 | --- | --- | --- |
 | a ready model source | `modelsApi.listSources()` | at least one source whose `state.status` is a healthy status (not `cooldown`, `needs_action` or `error`) |
-| a default route | `SetupFlowState.routeOrder` plus the persisted per-backend order | the order is non-empty AND every enabled backend reads it back through `getAgentSources(backend)` |
+| a default route | `SetupFlowState.routeOrder` plus each backend's persisted order | the shared order is non-empty AND at least one enabled backend reads back a non-empty projection of it through `getAgentSources(backend)`. A backend whose projection is empty blocks nothing, because eligibility is per backend — see the route-write row in C6 |
 | a usable assistant | `api.detectCli` / `AgentSupply.cli_present`, and the enable write the identity Switch already owns | at least one of Claude Code, Codex, OpenCode is installed AND enabled |
 
 Unchanged from today's `complete()`: a start is issued only from a confirmed `stopped`
@@ -197,6 +199,6 @@ contract passes both sides' unit tests while the behavior silently disagrees.
 | update available / update | `BackendLifecycleChip` with `onVisual` | the chip still owns the probe and the write; the card only draws the reported visual, and an update coexists with the enabled state |
 | default-model chip | `getAgentSources(backend)` → `selected_model_id`, `model_supply` | rendered only when the assistant is enabled and a route resolves |
 | route dialog list | the shared `SetupFlowState.routeOrder`, projected to rows | row = provider mark + model name + `服务名 · 首选/备用 N`; up/down disabled at the ends; a single route shows the "already preferred" note |
-| route write | `putAgentSources(backend, { order })` for every enabled backend, with `setAgentMode(backend, 'hub')` where the backend is still Direct | one shared order, written per backend, because the contract has no global route object. A guard response (`would_interrupt`, `would_remove_hops`) is surfaced for confirmation and never auto-forced; a backend that refuses keeps the dialog open with the reason |
+| route write | `putAgentSources(backend, { order })` per enabled backend, with `setAgentMode(backend, 'hub')` where the backend is still Direct | one shared PREFERENCE, projected per backend, because the contract has no global route object and `AgentSupply.sources.order` is that backend's eligible subset: the server rejects a foreign or ineligible id with `invalid_source_order`. Project through `eligibilityOf(agent, sourceId)` in `settings/models/eligibility.ts` — the only place the UI reads eligibility, never a re-derived predicate — keeping the shared relative order, and skip a backend whose projection is empty instead of writing an empty order. The dialog says which backends were skipped and why, from the eligibility `reason_key`. A guard response (`would_interrupt`, `would_remove_hops`) is surfaced for confirmation and never auto-forced; a backend that refuses keeps the dialog open with the reason. A native ChatGPT or Claude subscription is the common case: it is eligible for its own client only, so a shared order containing it legitimately reaches one backend and not the others |
 | 添加模型来源 | `onNavigate('providers')` | the footer's other exit is 完成, which closes and returns focus to the chip |
 | all-uninstalled case | the three rows above | three install actions, primary action disabled, and going back to screen 2 stays available |

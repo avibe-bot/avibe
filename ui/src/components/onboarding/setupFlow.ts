@@ -81,8 +81,11 @@ export type SetupFlowState = {
   importedCount: number;
   /** Source ids added through the "Add more" card, which is what its badge counts. */
   addedThroughMore: string[];
-  /** The one shared default-route order, as source ids, preferred first. Written to every
-   *  enabled backend — see C6. */
+  /** The one shared default-route PREFERENCE, as source ids, preferred first. This is not
+   *  what gets written: `AgentSupply.sources.order` is each backend's own eligible subset,
+   *  so a write projects this list through `eligibilityOf` per backend and skips a backend
+   *  whose projection is empty rather than sending an order the server rejects with
+   *  `invalid_source_order` — see C6's route-write row. */
   routeOrder: string[];
 };
 

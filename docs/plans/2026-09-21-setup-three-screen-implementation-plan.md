@@ -222,11 +222,16 @@ entry circle 48), and elastic top whitespace on tall screens.
 
 ### 4.9 i18n
 
-Handoff §8 is the frozen copy table (C1). New namespaces `onboarding.shell.*`,
-`onboarding.providers.*`, `onboarding.assistants.*`, `onboarding.route.*`; the capsule and
-import dialog keep their existing `settings.models.importNotice.*` /
-`settings.models.migration*` keys so the shipped strings stay single-sourced. No display
-string is hardcoded in a component.
+C1 (`docs/plans/setup-three-screen/copy-contract.json`) is the frozen copy table and the only
+source of key names; handoff §8 is where its strings came from. New namespaces:
+`onboarding.flow.*` (L1), `onboarding.providers.*` and `onboarding.import.*` (L2), and new
+`onboarding.setup.*` / `onboarding.route.*` leaves (L3). Six shipped strings change: the four
+welcome/access ones are L1's, the two setup headings are L3's. The capsule keeps
+`settings.models.importNotice.*` for the discovery sentence, help link and dismissal label,
+and the import dialog keeps `settings.models.migration.{blocked,errors,notes,source}.*` for
+the explanations it renders, while its own chrome — title, description, action, progress,
+completion, remainder — reads `onboarding.import.*`. That split is D8's copy scope. No
+display string is hardcoded in a component.
 
 ### 4.10 Accessibility
 
@@ -264,9 +269,9 @@ All six are committed by this PR, so every lane forks against one shared referen
 | Lane | Executor | Owns | Must not touch |
 | --- | --- | --- | --- |
 | L0 contracts | pm (this session) | `docs/plans/2026-09-21-setup-three-screen-*.md`, `onboarding/setupFlow.ts`, the C1 fixture | product behavior |
-| L1 shell + intro + motion | codex | `Wizard.tsx` (flow machine region), `steps/Welcome.tsx`, `onboarding/setupHandoff.ts`, `onboarding.css` shell/tier/CTA sections, `AccessTiles.tsx`, `ui/e2e/onboarding-fidelity/{fixture.tsx,support.ts,geometry.spec.ts,loop.spec.ts}`, i18n `onboarding.shell.*` | screen 2/3 internals |
-| L2 providers screen | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, `ImportKeysNotice.tsx`, the `AddApiKeyDialog` form extraction, `ui/e2e/onboarding-fidelity/hub-ownership.spec.ts`, i18n `onboarding.providers.*` | `Wizard.tsx` outside the screen registry entry it adds, screen 3 files, `onboarding.css` |
-| L3 assistants + gate | codex | `AssistantRow.tsx`, `steps/AgentDetection.tsx`, new `onboarding/DefaultRouteDialog.tsx`, new `onboarding-assistants.css`, `Wizard.tsx` `complete()` region, `ui/e2e/onboarding-fidelity/connections.spec.ts`, i18n `onboarding.assistants.*` / `onboarding.route.*` | screen 2 files, `onboarding.css` shell sections |
+| L1 shell + intro + motion | codex | `Wizard.tsx` (flow machine region), `steps/Welcome.tsx`, `onboarding/setupHandoff.ts`, `onboarding.css` shell/tier/CTA sections, `AccessTiles.tsx`, `ui/e2e/onboarding-fidelity/{fixture.tsx,support.ts,geometry.spec.ts,loop.spec.ts}`, i18n `onboarding.flow.*` and the four changed welcome/access strings | screen 2/3 internals |
+| L2 providers screen | claude | new `onboarding/providers/**`, new `onboarding-providers.css`, `ImportKeysNotice.tsx`, the `AddApiKeyDialog` form extraction, `MigrationDialog`'s copy scope, new `ui/e2e/onboarding-fidelity/{provider-support.ts,providers.spec.ts}` and `hub-ownership.spec.ts`, i18n `onboarding.providers.*` / `onboarding.import.*` | `Wizard.tsx` outside the screen registry entry it adds last, screen 3 files, `onboarding.css`, L1's `fixture.tsx` / `support.ts` / `geometry.spec.ts` |
+| L3 assistants + gate | codex | `AssistantRow.tsx`, `steps/AgentDetection.tsx`, new `onboarding/DefaultRouteDialog.tsx`, new `onboarding-assistants.css`, `Wizard.tsx` `complete()` region, `ui/e2e/onboarding-fidelity/connections.spec.ts`, i18n `onboarding.setup.*` / `onboarding.route.*` and the two changed setup headings | screen 2 files, `onboarding.css` shell sections |
 | L4 scenarios + acceptance | codex | `tests/scenarios/auth_setup/**`, acceptance evidence, owner checklist | UI implementation |
 
 Shared-touch files and the rule for each: `ui/src/i18n/{en,zh}.json` — key namespaces are
@@ -282,26 +287,32 @@ predicate strands a first-run user.
 ## 7. Sequencing and PR plan
 
 ```
-D1 (#2065) ──► PR0 contracts ──► PR1 shell+intro+motion ──┬─► PR2 assistants+gate ──┐
-                                                          └─► PR3 providers        ──┴─► PR4 scenarios+acceptance
+D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motion (L1) ──► PR3 assistants+gate (L3) ──┐
+                                       └─► PR2 providers (L2, parallel)  ─────────────────────────────┴─► PR4 scenarios+acceptance (L4)
 ```
 
-- **PR0** (small, docs + two contract files): commit the handoff doc, this plan, the C1
-  copy fixture and `setupFlow.ts`. Merging it first is what makes the parallel lanes safe,
-  and it also clears the untracked-plan defect that currently blocks the primary
-  checkout's fast-forward.
-- **PR1** is behavior-preserving infrastructure: two screens in the new shell, one shared
-  CTA, the handoff, the tier extension, and the geometry specs that hold the anchor
-  invariant. It ships without screen 2 and without changing readiness.
-- **PR2** and **PR3** run in parallel worktrees against the frozen contracts, base
-  `master`, each declaring `requires #PR1 merged first` in its body. Merge order PR2 → PR3
-  (or the reverse) is decided at integration; whoever merges second rebases.
-- **PR4** updates `tests/scenarios/auth_setup/catalog.yaml` and its harness cases for the
-  new flow, and carries the acceptance evidence.
+- **PR0** (docs + two contract files): commit the handoff doc, this plan, the C1 copy
+  fixture and `setupFlow.ts`. Merging it first is what makes the parallel lanes safe, and it
+  also clears the untracked-plan defect that blocks the primary checkout's fast-forward.
+- **PR1** (L1) is behavior-preserving infrastructure: the screen machine in the new shell,
+  one shared action pair, the handoff, the tier extension, and the geometry specs that hold
+  the anchor invariant. It ships without screen 2 and without changing readiness.
+- **PR2** (L2) starts in parallel with PR1, because everything it owns — the stage, the
+  dialogs, the capsule move, the shared API-key form extraction — is new files plus two
+  Settings files, and it builds against C2 with its own test harness. It declares
+  `requires #PR1 merged first`, and its one `Wizard.tsx` registry line plus its fixture
+  integration land as a final commit after PR1 is on `master`. No stacked PR: the base stays
+  `master`.
+- **PR3** (L3) forks after PR1 merges rather than beside it. It rewrites the assistants
+  screen and `complete()`, and PR1 rewrites the machine around `complete()` in the same
+  file; two lanes editing one restructuring is a conflict that is not mechanical to resolve.
+- **PR4** (L4) updates `tests/scenarios/auth_setup/catalog.yaml` and its harness cases for
+  the new flow, and carries the acceptance evidence.
 - Every PR: non-draft, `--base master` verified by reading the PR back, exact-head Codex
   review, zero unresolved threads, CI green, one durable `--forever` combined PR/CI watch
   with `--timeout 0` per `background-watch-hook`, and the review-loop circuit breaker.
-  No merge without explicit owner instruction.
+  No merge without explicit owner instruction. The CI workflow name in this repository is
+  `lint`; it produces every job a check list shows.
 
 ## 8. Validation
 
@@ -360,13 +371,19 @@ contract-preserving, and any of them can still be overruled before its lane merg
   It downloads and installs the managed runtime during first run, which is why it was put to
   the owner rather than assumed. Rejected: an explicit user action (a dead end on first run)
   and an error pointing at Settings.
-- **D4 — the shared default route. Adopted: one order written to every enabled backend.**
+- **D4 — the shared default route. Adopted: one shared preference, projected per backend.**
   The contract has no global route object; ordering is per-backend (`AgentSupply.sources.order`,
-  `putAgentSources`), so the dialog edits one order and writes it per backend, switching a
-  backend to `hub` mode where it is still Direct, and surfaces a guard response for
-  confirmation instead of forcing it. Rejected: per-assistant editing only (contradicts
-  「所有已启用的助手共用」) and a new backend-level global route (a redesign the handoff puts
-  out of scope).
+  `putAgentSources`) and is that backend's ELIGIBLE subset, so the dialog edits one preference
+  and each write projects it through `eligibilityOf`, skipping a backend whose projection is
+  empty and saying so, switching a backend to `hub` mode where it is still Direct, and
+  surfacing a guard response for confirmation instead of forcing it. Writing the identical id
+  list everywhere is not an option: the server rejects a foreign or ineligible source with
+  `invalid_source_order`, which is exactly what a native ChatGPT or Claude subscription shared
+  across three clients would do. The dialog's approved line 「所有已启用的助手共用」 stays as
+  the owner wrote it and the skip notice carries the per-backend truth beside it; if that
+  reading is not what the owner wants, the copy is the thing to change, not the projection.
+  Rejected: per-assistant editing only (contradicts the shared-route design) and a new
+  backend-level global route (a redesign the handoff puts out of scope).
 - **D5 — gate rewrite and hub-disabled degradation. Adopted.** The hub-based predicate in C4
   replaces per-backend connection readiness, the affected `WizardCompletion.test.tsx`
   invariants are re-pinned openly, and an explicitly disabled capability skips screen 2 while
