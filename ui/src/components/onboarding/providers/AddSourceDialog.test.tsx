@@ -583,6 +583,31 @@ describe('AddSourceDialog — what comes back from an authorization', () => {
       added_to: ['claude'],
       adopted_by: ['claude'],
     }));
+    // The read happens BEHIND the flow's own success panel, which owns the report
+    // of where the source landed and the handoff that dismisses it. Replacing that
+    // with this dialog's spinner would discard the one thing worth reading.
+    expect(screen.getByTestId('oauth-stub')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+
+    act(() => oauth.current?.onClose());
+
+    // And when the flow does hand back, there is nothing left to add here.
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it('returns to the frame it was launched from when nothing arrived', async () => {
+    const user = await signIn();
+
+    act(() => oauth.current?.onClose());
+
+    // A cancelled sign-in is not an ending: the method row, the draft and the
+    // chosen brand are all still what they were.
+    await waitFor(() => expect(screen.queryByTestId('oauth-stub')).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(activeMethod()).toBe('subscription');
+    expect(primary().textContent).toContain('Claude');
+
+    await chooseMethod(user, 'API Key');
+    expect(within(body()).getByLabelText('API key')).toBeTruthy();
   });
 });

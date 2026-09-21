@@ -187,6 +187,9 @@ export const AddSourceDialog: React.FC<{
   const [phase, setPhase] = React.useState<WritePhase>({ kind: 'idle' });
   const [continuation] = React.useState(createContinuationSettlement);
   const clientNonce = React.useRef(sourceClientNonce());
+  // Set when an authorization really produced a source. It is what tells that
+  // flow's own close apart from a cancellation: both arrive the same way.
+  const authorizedLanded = React.useRef(false);
   React.useEffect(() => () => continuation.invalidate(), [continuation]);
 
   // A method that stopped existing — the last detected candidate was taken over
@@ -260,8 +263,14 @@ export const AddSourceDialog: React.FC<{
       void onAdded(null).catch(() => undefined);
       return;
     }
-    const seq = continuation.begin();
-    void land(seq, { source, ...(placement ?? { added_to: [], adopted_by: source.adopted_by ?? [] }) });
+    // A source did arrive — and the flow's own success panel is still on screen,
+    // holding the report of where it landed for the 1400ms it owns. Tearing that
+    // down here to show this dialog's spinner would take the one thing the person
+    // was waiting to read. So read back behind it, and let its close be what
+    // closes this frame. The shipped host does exactly this.
+    authorizedLanded.current = true;
+    void onAdded({ source, ...(placement ?? { added_to: [], adopted_by: source.adopted_by ?? [] }) })
+      .catch(() => undefined);
   };
 
   const writing = phase.kind === 'saving' || phase.kind === 'checking';
@@ -458,7 +467,17 @@ export const AddSourceDialog: React.FC<{
           open
           vendor={subscriptionVendor}
           sources={sources}
-          onClose={() => setPhase({ kind: 'idle' })}
+          onClose={() => {
+            if (!authorizedLanded.current) {
+              // Cancelled, failed, or abandoned: back to the frame it was launched
+              // from, with the method and the draft it was launched with.
+              setPhase({ kind: 'idle' });
+              return;
+            }
+            authorizedLanded.current = false;
+            continuation.invalidate();
+            onClose();
+          }}
           onConnected={authorized}
         />
       )}
