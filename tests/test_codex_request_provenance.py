@@ -3,6 +3,7 @@ from __future__ import annotations
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.provenance import (
+    _MAX_CONTINUATION_MODELS_PER_TURN,
     BoundedProvenanceStore,
     PreparedGatewayRoute,
     TurnCorrelationRegistry,
@@ -35,6 +36,7 @@ def _launch(
     requested_model_id: str,
     resolved_model_id: str = "shared-upstream",
     source_id: str = "source",
+    gateway_request_model_id: str | None = None,
 ) -> tuple[str, str, dict[str, str]]:
     token = registry.credentials(
         "codex",
@@ -49,6 +51,7 @@ def _launch(
         requested_model_id=requested_model_id,
         resolved_model_id=resolved_model_id,
         source_id=source_id,
+        gateway_request_model_id=gateway_request_model_id,
         via_mapping=True,
     )
     metadata = registry.gateway_request_metadata(
@@ -300,7 +303,6 @@ def test_invalid_identity_and_live_route_mismatch_fail_closed_without_poisoning(
         {"avibe_route_id": route_a},
         {"avibe_route_id": "foreign-route", "avibe_turn_id": "turn-a"},
         {"avibe_route_id": "路由-非ASCII", "avibe_turn_id": "turn-a"},
-        {"avibe_route_id": route_a, "avibe_turn_id": "turn-a"},
     ]
     for request_metadata in cases:
         with registry.gateway_terminalizer(
@@ -327,6 +329,107 @@ def test_invalid_identity_and_live_route_mismatch_fail_closed_without_poisoning(
 
     assert not registry._traces["turn-a"].ambiguous
     assert not registry._traces["turn-b"].ambiguous
+
+
+def test_live_handle_routes_another_model_and_keeps_its_turn(tmp_path):
+    """A verified handle authenticates a process and a turn, never a model.
+
+    Codex re-serialises a thread under the OUTGOING model before the first turn
+    on a new one, so that hop arrives on the new turn's handle naming the old
+    model. Refusing it here stranded the thread for good. Whether Avibe
+    configured the named model is resolution's question; routing only has to
+    hand the request on and keep it attributed to the turn that made it.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-new",
+        requested_model_id="alias-new",
+        gateway_request_model_id="alias-new",
+    )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as compaction:
+        assert compaction.resolution_model("alias-old") == "alias-old"
+        assert compaction.turn_id == "turn-new"
+        compaction.begin_attempt(
+            source_id="source",
+            resolved_model_id="shared-upstream",
+            channel="hub",
+            via_mapping=True,
+        )
+        compaction.finish_attempt(
+            outcome=_success(),
+            decision=classify_outcome(_success()),
+        )
+
+    with registry.gateway_terminalizer(
+        backend="codex",
+        token=token,
+        request_metadata=metadata,
+    ) as turn:
+        assert turn.resolution_model("alias-new") == "alias-new"
+        assert turn.turn_id == "turn-new"
+        turn.begin_attempt(
+            source_id="source",
+            resolved_model_id="shared-upstream",
+            channel="hub",
+            via_mapping=True,
+        )
+        turn.finish_attempt(
+            outcome=_success(),
+            decision=classify_outcome(_success()),
+        )
+
+    trace = registry._traces["turn-new"]
+    assert not trace.ambiguous
+    assert trace.continuation_model_ids == {"alias-old"}
+    assert "turn-new" not in registry._scopes[("codex", "codex-process")].ambiguous_turns
+
+
+def test_continuation_models_are_bounded_and_refused_in_lockstep(tmp_path):
+    """Past the ceiling the hop is refused, never routed without a turn.
+
+    Routing and attribution have to answer alike: admitting a request the turn
+    could not then be credited with is the split this change exists to remove,
+    so the bound that keeps one turn's set finite closes both at once.
+    """
+
+    registry = _registry(tmp_path)
+    token, _route, metadata = _launch(
+        registry,
+        turn_id="turn-many",
+        requested_model_id="alias",
+        gateway_request_model_id="alias",
+    )
+
+    def route(gateway_model_id: str) -> str | None:
+        with registry.gateway_terminalizer(
+            backend="codex",
+            token=token,
+            request_metadata=metadata,
+        ) as terminalizer:
+            model = terminalizer.resolution_model(gateway_model_id)
+            terminalizer.mark_downstream_canceled()
+            return model
+
+    for number in range(_MAX_CONTINUATION_MODELS_PER_TURN):
+        assert route(f"alias-{number}") == f"alias-{number}"
+    trace = registry._traces["turn-many"]
+    assert len(trace.continuation_model_ids) == _MAX_CONTINUATION_MODELS_PER_TURN
+
+    assert route("alias-overflow") is None
+    assert "alias-overflow" not in trace.continuation_model_ids
+    # One already admitted still routes, and the route's own models never count
+    # against the ceiling at all.
+    assert route("alias-0") == "alias-0"
+    assert route("alias") == "alias"
+    assert route("shared-upstream") == "alias"
+    assert not trace.ambiguous
 
 
 def test_retirement_revokes_explicit_auth_and_preserves_exact_closed_fact(tmp_path):

@@ -510,6 +510,11 @@ def render_turn_outcome_copy(
 # the turn and the request really are one thing.
 TURN_REQUEST = "turn"
 
+# How many models beyond its own route one turn may route on its own handle.
+# A model change costs one — the outgoing model the thread is re-serialised
+# under — so this is headroom, not a budget any real turn spends.
+_MAX_CONTINUATION_MODELS_PER_TURN = 8
+
 
 @dataclass
 class TurnTrace:
@@ -532,11 +537,27 @@ class TurnTrace:
     gateway_source_id: Optional[str] = None
     gateway_request_model_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
+    # Model ids this turn routed on its own verified route handle beyond the
+    # two the route names. A dispatched turn legitimately names another
+    # configured model mid-turn: before a model change Codex re-serialises the
+    # thread under the OUTGOING model, so that hop arrives on the new turn's
+    # handle carrying the old model id. It is still this turn's request, and
+    # attributing it anywhere else loses the whole turn's provenance.
+    continuation_model_ids: set[str] = field(default_factory=set)
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
     admission_closed: bool = False
     outcome_frozen: bool = False
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+
+    def admits_gateway_model(self, gateway_model_id: str) -> bool:
+        """Whether this turn may be credited with a request naming this model."""
+
+        return gateway_model_id in {
+            self.gateway_request_model_id,
+            self.gateway_model_id,
+            *self.continuation_model_ids,
+        }
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -1114,6 +1135,30 @@ class TurnCorrelationRegistry:
             return None
         return key, scope, route, route_id
 
+    def _admit_continuation_model(self, turn_id: str, gateway_model_id: str) -> bool:
+        """Record a model this turn's own route handle routed; call under `_lock`.
+
+        Routing already accepted the request on the turn's verified handle, so
+        attribution has to accept it too. Left out, the hop routes but lands on
+        no turn, and the turn it belongs to settles without it — which is why a
+        turn that has reached the ceiling refuses the request outright rather
+        than routing one it could not then attribute. The ceiling bounds a set
+        whose members a dispatched process names: a real turn adds the one
+        model it is migrating away from, so any turn approaching it has stopped
+        describing a thread we can still account for.
+        """
+
+        trace = self._traces.get(turn_id)
+        if trace is None:
+            return True
+        if (
+            gateway_model_id not in trace.continuation_model_ids
+            and len(trace.continuation_model_ids) >= _MAX_CONTINUATION_MODELS_PER_TURN
+        ):
+            return False
+        trace.continuation_model_ids.add(gateway_model_id)
+        return True
+
     @staticmethod
     def _explicit_turn_owns_route(
         scope: ProcessScope,
@@ -1472,8 +1517,7 @@ class TurnCorrelationRegistry:
                     and trace is not None
                     and not trace.ambiguous
                     and request_id in trace.pending_attempts
-                    and gateway_model_id
-                    in {trace.gateway_request_model_id, trace.gateway_model_id}
+                    and trace.admits_gateway_model(gateway_model_id)
                 ):
                     # Admission may close after this request opened. Its
                     # ownership remains valid through the bounded drain.
@@ -1549,11 +1593,25 @@ class TurnCorrelationRegistry:
             if explicit is None:
                 return None, False
             _key, _scope, route, _route_id = explicit
-            if gateway_model_id not in {
+            on_route = gateway_model_id in {
                 route.gateway_request_model_id,
                 route.resolved_model_id,
-            }:
-                return None, False
+            }
+            if on_route:
+                caller_model_id = route.requested_model_id
+            else:
+                # An explicit handle proves which process holds it and which
+                # turn it was minted for. It deliberately does not fix the
+                # model: a dispatched turn may name another of Avibe's own
+                # models on the way, and Codex always does at a model change,
+                # re-serialising the thread under the OUTGOING model before the
+                # first turn on the new one. Refusing that hop here strands the
+                # thread for good — the re-serialisation never lands, so every
+                # later turn repeats it and fails the same way. Whether Avibe
+                # configured this model is resolution's question, not routing's;
+                # answering it here would both duplicate that authority and
+                # report an unconfigured model as an incompatible request.
+                caller_model_id = gateway_model_id
             identity = self._request_identity(request_metadata)
             assert identity is not None
             _route_id, turn_id = identity
@@ -1564,11 +1622,16 @@ class TurnCorrelationRegistry:
                     route=route,
                 ):
                     return None, False
-                return route.requested_model_id, True
+                if not on_route and not self._admit_continuation_model(
+                    turn_id,
+                    gateway_model_id,
+                ):
+                    return None, False
+                return caller_model_id, True
             # Completed turn IDs are intentionally not retained. A valid
             # process-owned route handle can route a late continuation, but it
             # cannot claim a newer active turn.
-            return route.requested_model_id, False
+            return caller_model_id, False
         route = credential.route
         if route is None:
             # No route was known when this credential was minted: the shared
