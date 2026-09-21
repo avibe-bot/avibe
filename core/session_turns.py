@@ -2690,21 +2690,34 @@ class SessionTurnManager:
     def _compatible_steer_memory_authority(self, turn_id: str, deliveries: list[dict[str, Any]]) -> bool:
         if not bool(getattr(getattr(self.controller.config, "memory", None), "enabled", False)):
             return True
-        from avibe_memory.admission import InboundTurnFacts
+
+        memory_available = (
+            getattr(self.controller, "memory_runtime", None) is not None
+            and getattr(self.controller, "_memory_implementation_error", None) is None
+        )
+        if memory_available:
+            from avibe_memory.admission import InboundTurnFacts
 
         with self._sqlite_engine().connect() as conn:
             initial = delivery_store.delivery_for_turn(conn, turn_id)
             active = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
             incoming = [delivery_store.execution_delivery_payload(conn, row) for row in deliveries]
         payloads = [active, *incoming]
-        admission = self.controller._memory_admission()
+        admission = self.controller._memory_admission() if memory_available else None
         delegated = [delivery_store.memory_owner_from_payload(payload)
                      for payload in payloads if payload.get("source") == "harness"]
         # Revoking a binding must not let foreign input enter a native Turn whose
         # existing scope could become readable again when access is restored.
         has_scope = active.get("session_id") in getattr(self.controller, "_memory_scopes_by_session", {})
-        if not any(owner and (has_scope or admission.admits(InboundTurnFacts(**owner))) for owner in delegated):
-            return True  # Human-only and Memory-ineligible group steering keep their policy.
+        has_delegated_owner = any(delegated)
+        if not has_delegated_owner:
+            return True  # Human-only steering keeps its policy.
+        if memory_available and not any(
+            has_scope or admission.admits(InboundTurnFacts(**owner))
+            for owner in delegated
+            if owner
+        ):
+            return True  # Memory-ineligible delegated input keeps its existing policy.
         authority = delivery_store.memory_authority_for_payload(active)
         return all(delivery_store.memory_authority_for_payload(payload) == authority for payload in incoming)
 
