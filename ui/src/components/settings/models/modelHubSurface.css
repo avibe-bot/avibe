@@ -1111,8 +1111,13 @@
      recomputed, and the list — the only child that can give — went to a sliver. */
   --model-hub-route-selector-search-height: 34px;
   --model-hub-route-selector-head-height: 26px;
-  --model-hub-route-selector-manual-height: 30px;
   --model-hub-route-selector-foot-height: 49px;
+  /* What the disclosure's own toggle draws. Budgeted only where it is
+     rendered: a subscription-only inventory has no model ID to type, so the
+     panel there is genuinely one band shorter and must not be held open for a
+     row that is not on screen. */
+  --model-hub-route-selector-manual-row: 30px;
+  --model-hub-route-selector-manual-height: 0px;
   /* What the disclosure adds when it is opened: the source select, the shared
      input at the height its primitive draws (h-9), the gap between their rows
      and the band's own bottom padding. Terms rather than an override of the
@@ -1122,8 +1127,8 @@
   --model-hub-route-custom-model-height: 36px;
   --model-hub-route-custom-gap: 8px;
   --model-hub-route-custom-pad-block-end: 12px;
-  /* Folded, so zero — which is what lets the room below the trigger bound the
-     panel in the state it opens in, and still leaves its border around the
+  /* Folded, so zero too — which is what lets the room below the trigger bound
+     the panel in the state it opens in, and still leaves its border around the
      confirm row once the pair is on screen. */
   --model-hub-route-selector-manual-fields-height: 0px;
   --model-hub-route-selector-bands: calc(
@@ -1154,6 +1159,9 @@
   );
 }
 .model-hub-route-selector--manual {
+  --model-hub-route-selector-manual-height: var(--model-hub-route-selector-manual-row);
+}
+.model-hub-route-selector--manual-open {
   --model-hub-route-selector-manual-fields-height: calc(
     var(--model-hub-route-custom-source-height) +
       var(--model-hub-route-custom-model-height) + var(--model-hub-route-custom-gap) +
@@ -1161,7 +1169,7 @@
   );
 }
 .model-hub-route-selector-manual-toggle {
-  height: var(--model-hub-route-selector-manual-height);
+  height: var(--model-hub-route-selector-manual-row);
   padding-inline: 12px;
   color: var(--model-hub-ink-73);
   font-size: 11.5px;

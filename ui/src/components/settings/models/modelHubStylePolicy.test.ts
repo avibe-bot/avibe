@@ -284,17 +284,30 @@ describe('Model Hub visual token policy', () => {
     const summed = [...(selector.match(/--model-hub-route-selector-bands:([^;]*);/)?.[1] ?? '')
       .matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1]);
     expect(summed).toEqual(bands);
-    // And the bands plus the full floor fit under the cap, so a panel with room
-    // to spare reaches three rows rather than stopping short of its own floor.
-    expect(bands.reduce((total, band) => total + px(selector, band), 0)
+    // And the bands plus the full floor fit under the cap, so the fullest panel
+    // that is still folded — the disclosure rendered, its fields away — reaches
+    // three rows rather than stopping short of its own floor.
+    expect(bands
+      .map((band) => (band === '--model-hub-route-selector-manual-height'
+        ? '--model-hub-route-selector-manual-row' : band))
+      .reduce((total, band) => total + px(selector, band), 0)
       + px(selector, '--model-hub-route-selector-list-min'))
       .toBeLessThanOrEqual(px(selector, '--model-hub-route-selector-max'));
 
-    // The manual pair is a band only while it is on screen: zero folded, and
-    // opened, every part of what it draws — both fields, the row gap, the
-    // padding under them — rather than a number measured once off a screenshot.
+    // Each half of the disclosure is a band only where it is drawn — an
+    // inventory with nothing to type by hand renders neither, and a folded one
+    // only its toggle. Both default to zero and are turned on by the state the
+    // panel is in, so the lower bound never holds the panel open for a row that
+    // is not on screen. Opened, the fields term is every part of what they draw
+    // rather than a number measured once off a screenshot.
+    const state = (modifier: string) =>
+      surfaceCssBody.match(new RegExp(`\\.model-hub-route-selector--${modifier}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    expect(px(selector, '--model-hub-route-selector-manual-height')).toBe(0);
+    expect(state('manual\\b')).toMatch(
+      /--model-hub-route-selector-manual-height:\s*var\(--model-hub-route-selector-manual-row\)/,
+    );
     expect(px(selector, '--model-hub-route-selector-manual-fields-height')).toBe(0);
-    const opened = surfaceCssBody.match(/\.model-hub-route-selector--manual\s*\{([^}]*)\}/)?.[1] ?? '';
+    const opened = state('manual-open');
     expect([...opened.matchAll(/var\((--[\w-]+)\)/g)].map((match) => match[1])).toEqual([
       '--model-hub-route-custom-source-height',
       '--model-hub-route-custom-model-height',
@@ -302,6 +315,11 @@ describe('Model Hub visual token policy', () => {
       '--model-hub-route-custom-pad-block-end',
     ]);
     expect(opened).toMatch(/--model-hub-route-selector-manual-fields-height:\s*calc\(/);
+
+    // The toggle draws the height its own term names, not the budgeted one:
+    // that one is zero unless the panel says the row is there.
+    const toggle = surfaceCssBody.match(/\.model-hub-route-selector-manual-toggle\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(toggle).toContain('height: var(--model-hub-route-selector-manual-row)');
   });
 
   // The surface draws the same 10.5px status pill in six places (upstream count,

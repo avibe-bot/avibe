@@ -147,10 +147,12 @@ export const RouteCandidatePopover: React.FC<{
         collisionPadding={16}
         className={cn(
           "model-hub-route-selector flex max-w-[calc(100vw-64px)] flex-col p-0",
-          // Opening the disclosure puts two more fields into the bands the
-          // panel cannot shrink; the budget has a term for them, and this is
-          // what turns it on.
-          manualOpen && "model-hub-route-selector--manual",
+          // The disclosure and its fields are bands only where they are drawn:
+          // an inventory with nothing to type by hand has neither, and an
+          // unopened one has only its toggle. The budget has a term for each,
+          // and these are what turn them on.
+          typedSources.length > 0 && "model-hub-route-selector--manual",
+          manualOpen && "model-hub-route-selector--manual-open",
           width === "trigger"
             ? "w-[var(--radix-popover-trigger-width)]"
             : "w-[420px]",
@@ -227,6 +229,12 @@ export const RouteCandidatePopover: React.FC<{
               type="button"
               aria-expanded={manualOpen}
               className="model-hub-route-selector-manual-toggle flex w-full items-center gap-1.5"
+              onKeyDown={(event) => {
+                // cmdk answers Enter on the command root by selecting the
+                // highlighted candidate and preventing the default — which,
+                // for the button the user is focused on, is its own click.
+                if (event.key === 'Enter') event.stopPropagation();
+              }}
               onClick={() => {
                 const next = !manualOpen;
                 setManualOpen(next);

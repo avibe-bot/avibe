@@ -159,3 +159,26 @@ for (const lang of ['en', 'zh'] as const) {
     expect(opened.confirm.y + opened.confirm.height).toBeLessThanOrEqual(viewport.height);
   });
 }
+
+// The disclosure is one of those bands, and a subscription-only inventory does
+// not draw it. Budgeting it anyway is 30px the panel will not give back, taken
+// off the bottom of the screen — which is where the confirm button is.
+test('MH-ROUTING-007: a panel with nothing to type by hand is a band shorter', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=en&stocked=1&subscription=1&long=1');
+  await page.getByRole('button', { name: 'Open route', exact: true }).click();
+  const dialog = page.locator('.model-hub-route-dialog');
+  await expect(dialog.locator('.model-hub-route-hop')).toHaveCount(2);
+  await dialog.getByRole('button', { name: hub('routeDialog.addHop', {}, 'en'), exact: true }).click();
+  const selector = page.locator('.model-hub-route-selector');
+  await expect(selector).toBeVisible();
+  await expect(selector.locator('.model-hub-route-selector-manual')).toHaveCount(0);
+
+  // A long chain leaves less room than the panel's own bands, so the panel is
+  // held at exactly those bands: search, column head and confirm foot, and not
+  // a toggle that is not there.
+  const panel = (await selector.boundingBox())!;
+  const bands = ['[cmdk-input-wrapper]', '.model-hub-route-selector-head', '.model-hub-route-selector-foot'];
+  const drawn = await Promise.all(bands.map(async (band) => (await selector.locator(band).boundingBox())!.height));
+  expect(panel.height).toBeLessThanOrEqual(drawn.reduce((total, height) => total + height, 0) + 1);
+});

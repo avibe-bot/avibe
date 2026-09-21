@@ -134,8 +134,13 @@ const deferred = <T,>() => {
   });
   return { promise, reject, resolve };
 };
-const renderStockedDialog = () => {
+const renderStockedDialog = (
+  // The inventory the picker draws from. Its kinds decide whether the manual
+  // pair is rendered at all, which is why one test supplies its own.
+  supplied: (stockedSources: Source[]) => Source[] = (stockedSources) => stockedSources,
+) => {
   const fixture = stocked();
+  const fixtureSources = supplied(fixture.sources);
   vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
   render(
     <I18nextProvider i18n={i18n}>
@@ -145,11 +150,11 @@ const renderStockedDialog = () => {
           modelId: "opus-5",
           read: readyRegion(chain),
         }}
-        sources={fixture.sources}
+        sources={fixtureSources}
         onClose={vi.fn()}
         onCommitted={vi.fn()}
         readAgents={vi.fn().mockResolvedValue(observation([fixture.agent]))}
-        readSources={vi.fn().mockResolvedValue(observation(fixture.sources))}
+        readSources={vi.fn().mockResolvedValue(observation(fixtureSources))}
       />
     </I18nextProvider>,
   );
@@ -1291,6 +1296,46 @@ describe("RouteChainDialog", () => {
     for (const [selector, term] of [...budgeted, ["", "--model-hub-route-selector-manual-fields-height"] as const]) {
       expect(selector === ".model-hub-route-selector-list" ? css : budget).toContain(`var(${term})`);
     }
+  });
+
+  // A subscription-only inventory has no model ID to type by hand, so the
+  // disclosure is not rendered — and must not be budgeted either. A term held
+  // for a row that is not on screen is 30px the panel refuses to give back, and
+  // it comes out of the bottom of the screen where the confirm button is.
+  it("drops the manual band from the budget where nothing can be typed", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog((stockedSources) =>
+      stockedSources.map((source) => ({ ...source, kind: "subscription" as const })));
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    const panel = document.querySelector<HTMLElement>(".model-hub-route-selector");
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector(".model-hub-route-selector-manual")).toBeNull();
+    expect(panel!.className).not.toContain("model-hub-route-selector--manual");
+    // ...and the candidates are still there: this is a shorter panel, not an
+    // empty one.
+    expect(document.querySelectorAll(".model-hub-route-candidate").length).toBeGreaterThan(0);
+  });
+
+  // cmdk answers Enter on its own root: it selects the highlighted candidate and
+  // prevents the default, which for a focused button is that button's own
+  // activation. A disclosure inside the command column has to keep the key it is
+  // focused for, or the rare path is reachable by pointer only.
+  it("opens the manual pair from the keyboard, where cmdk owns Enter", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    const toggle = screen.getByRole("button", { name: "Enter a model ID manually" });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByLabelText("Exact model ID")).not.toBeNull();
+
+    // And the same key folds it again, rather than reaching the list below.
+    await user.keyboard("{Enter}");
+    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
   });
 
   it("announces the one-based position of the hop focused after removal", async () => {
