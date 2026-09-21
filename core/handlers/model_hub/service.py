@@ -875,6 +875,9 @@ class ModelHubService:
         backend_catalog_changed: Optional[
             Callable[[BackendName], Awaitable[None]]
         ] = None,
+        repair_model_selections: Optional[
+            Callable[[frozenset[str]], Awaitable[int]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
     ):
@@ -916,6 +919,7 @@ class ModelHubService:
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
+        self.repair_model_selections = repair_model_selections
         self.now = now
         self.recovery = recovery or RecoveryPolicy(now=lambda: self.now())
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
@@ -1220,6 +1224,13 @@ class ModelHubService:
         something gone. Persisting goes through the same projection owner as
         any other mutation, so the engine is reconciled with what was written.
 
+        A stored id reaches past this config, too. A Vibe Agent's model, a
+        channel's routing override, and a session's pin are each a copy of an
+        id the menu once offered, and each is read back to decide what a turn
+        asks for — repairing only the catalog would leave them naming a model
+        that no longer exists under that name. The owner of those rows repairs
+        them through ``repair_model_selections``, against this same proof.
+
         Best effort by design: an id left alone is exactly the state the
         previous release was already in, which is not worth failing a demand
         over. The next demand tries again.
@@ -1251,6 +1262,15 @@ class ModelHubService:
                 repair = repair_credential_addresses(payload, addresses)
                 if not repair.changed:
                     return
+                # Selections move before the config is committed, because the
+                # config is the witness that anything needs repairing at all.
+                # Committing it first would clear that witness while a copy of
+                # one of its ids is still stored as somebody's selection; this
+                # order retries the whole pass instead, and both halves are
+                # idempotent.
+                selections = await self._repair_selections(
+                    frozenset(addresses.values())
+                )
                 await self._commit_synced(
                     config,
                     ModelHubConfig.from_payload(repair.payload),
@@ -1263,12 +1283,33 @@ class ModelHubService:
                 return
         logger.info(
             "model hub: removed credential addresses from stored ids "
-            "(%d source models, %d route hops, %d routes, %d agent menu entries)",
+            "(%d source models, %d route hops, %d routes, %d agent menu "
+            "entries, %d model selections)",
             repair.models,
             repair.hops,
             repair.routes,
             repair.menu_entries,
+            selections,
         )
+        # A running backend answers from the catalog it was started with, so
+        # reconciling the engine leaves it offering the ids that were just
+        # renamed. Same follow-up any other catalog mutation makes.
+        for backend in repair.backends:
+            try:
+                await self._refresh_backend_catalog(cast(BackendName, backend))
+            except Exception:
+                logger.warning(
+                    "model hub: could not refresh %s after an address repair",
+                    backend,
+                    exc_info=True,
+                )
+
+    async def _repair_selections(self, addresses: frozenset[str]) -> int:
+        """Hand the proven addresses to the owner of persisted selections."""
+
+        if self.repair_model_selections is None or not addresses:
+            return 0
+        return await self.repair_model_selections(addresses)
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -7816,6 +7857,9 @@ def create_default_service(
     backend_catalog_changed: Optional[
         Callable[[BackendName], Awaitable[None]]
     ] = None,
+    repair_model_selections: Optional[
+        Callable[[frozenset[str]], Awaitable[int]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -7869,4 +7913,5 @@ def create_default_service(
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
+        repair_model_selections=repair_model_selections,
     )

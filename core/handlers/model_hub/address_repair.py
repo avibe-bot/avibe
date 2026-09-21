@@ -92,6 +92,10 @@ class AddressRepair:
     hops: int = 0
     routes: int = 0
     menu_entries: int = 0
+    # The backends whose menu, routes, or hops moved. A running backend holds
+    # the catalog it was started with, so the caller has to know which ones now
+    # disagree with disk — reconciling the engine says nothing about them.
+    backends: tuple[str, ...] = ()
 
     @property
     def changed(self) -> bool:
@@ -144,10 +148,12 @@ def repair_credential_addresses(
             models=models_moved,
         )
     healed_agents: dict[str, Any] = {}
+    moved_backends: list[str] = []
     for backend, agent in payload["agents"].items():
         if not isinstance(agent, dict):
             healed_agents[backend] = agent
             continue
+        before = hops_moved + routes_moved + menu_entries_moved
         healed_agent = dict(agent)
 
         # A menu id, a route key, a hidden-model entry and a checked entry each
@@ -214,6 +220,10 @@ def repair_credential_addresses(
             healed_agent["routes"] = healed_routes
 
         healed_agents[backend] = healed_agent
+        if hops_moved + routes_moved + menu_entries_moved > before and isinstance(
+            backend, str
+        ):
+            moved_backends.append(backend)
     healed["agents"] = healed_agents
 
     return AddressRepair(
@@ -222,6 +232,7 @@ def repair_credential_addresses(
         hops=hops_moved,
         routes=routes_moved,
         menu_entries=menu_entries_moved,
+        backends=tuple(moved_backends),
     )
 
 

@@ -916,3 +916,104 @@ def test_the_runtime_leaves_an_id_alone_when_the_address_is_unprovable(tmp_path)
         "x-ai/grok-4.6-latest",
     ]
     assert list(store.config.agents["claude"].routes) == [f"{ADDRESS}/gpt-5.5"]
+
+
+def test_the_repair_hands_its_proof_to_the_owner_of_persisted_selections(
+    tmp_path,
+) -> None:
+    """A Vibe Agent's model is a copy of a menu id, and it is read back as one.
+
+    The hub can prove which addresses are addresses; it does not own the rows
+    that copied them. It passes the proof to whoever does, and it does so
+    before committing the config, because the config is the witness that
+    anything needed repairing at all — clearing it first would end the retry
+    that a failed selection repair depends on.
+    """
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+    proven: list[frozenset[str]] = []
+    committed_when_called: list[list[str]] = []
+
+    async def repair_selections(addresses):
+        proven.append(addresses)
+        committed_when_called.append(
+            [model.id for model in store.config.sources[0].models]
+        )
+        return 3
+
+    service.repair_model_selections = repair_selections
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert proven == [frozenset({ADDRESS})]
+    # Still the addressed spelling: selections move first.
+    assert committed_when_called == [[f"{ADDRESS}/gpt-5.5", "x-ai/grok-4.6-latest"]]
+    assert [model.id for model in store.config.sources[0].models] == [
+        "gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+
+
+def test_a_failed_selection_repair_leaves_the_witness_standing(tmp_path) -> None:
+    """Nothing is committed, so the next demand repairs both halves again."""
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+
+    async def repair_selections(addresses):
+        raise RuntimeError("selection store unavailable")
+
+    service.repair_model_selections = repair_selections
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        f"{ADDRESS}/gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+
+    service.repair_model_selections = None
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        "gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+
+
+def test_a_backend_whose_catalog_moved_is_refreshed(tmp_path) -> None:
+    """A running backend answers from the catalog it started with.
+
+    Reconciling the engine projection says nothing about a backend already up:
+    it keeps offering the ids that were just renamed until something reloads
+    it. This is the same follow-up every other catalog mutation makes.
+    """
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+    refreshed: list[str] = []
+
+    async def backend_catalog_changed(backend):
+        refreshed.append(backend)
+
+    service.backend_catalog_changed = backend_catalog_changed
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert refreshed == ["claude"]
+
+
+def test_a_refresh_that_fails_does_not_fail_the_demand(tmp_path) -> None:
+    """The repair already landed; a stale in-memory catalog is not worth a 503."""
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+
+    async def backend_catalog_changed(backend):
+        raise RuntimeError("coordinator unavailable")
+
+    service.backend_catalog_changed = backend_catalog_changed
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        "gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]

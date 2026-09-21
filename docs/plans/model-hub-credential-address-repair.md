@@ -107,6 +107,50 @@ write:
 Everything is computed first and written once, so a partial rename cannot be
 persisted.
 
+### The same id outside this config
+
+An id also leaves the Model Hub. A user picks one from the menu, and the value
+is copied into whichever row records that choice. A turn then reads those rows
+back, in this precedence, to decide what it asks for
+(`message_handler.py:505`):
+
+| Position | Read as | Rule |
+| --- | --- | --- |
+| `agent_sessions.model` | The session's pin, highest precedence | Renamed |
+| `scope_settings.settings_json` → `routing.{model,model_override,opencode_model,claude_model,codex_model}` | A channel's routing override; read **before** the column | Renamed |
+| `scope_settings.model` | The same override, column form | Renamed |
+| `agents.model` | The Vibe Agent's own model | Renamed |
+| `agent_runs.model` | A record of a call that was made | **Not** renamed |
+| `skill_usage_daily.model` | A metering key | **Not** renamed |
+
+The split is selection versus record. The first four decide a future request;
+leaving one addressed keeps the Agent broken after the catalog is repaired —
+the failure only changes from a double-addressed `model_not_found` to a
+`mapping_target_unavailable`. The last two describe calls already made, and
+rewriting them would restate history.
+
+`run_definitions` has no model column at all: a scheduled run resolves its
+model live through its Agent, so it inherits the repair for free.
+
+The hub proves which addresses are addresses; it does not own these rows. It
+hands the proven set to `repair_model_selections`, which the controller wires
+to `storage/model_selection_addresses.py`. Selections move **before** the
+config is committed, because the config is the witness that anything needed
+repairing at all — committing it first would clear that witness while a copy of
+one of its ids was still stored as somebody's selection, and the retry the next
+demand schedules would never fire. Both halves are idempotent, so the retry
+costs nothing.
+
+### A backend already running
+
+Reconciling the engine projection says nothing about a backend process that is
+already up: it answers from the catalog it was started with and keeps offering
+the ids that were just renamed. Every backend whose menu, routes, or hops moved
+is therefore handed to `_refresh_backend_catalog` after the commit — the same
+follow-up `set_agent_models` makes. A refresh that fails is logged, not raised:
+the repair has already landed on disk, and a stale in-memory catalog is not
+worth failing the demand that triggered it.
+
 Every one of these collections is uniqueness-checked on load, so a rename that
 creates a collision it does not absorb would turn a loadable file into one that
 fails config load — strictly worse than the addressed id it set out to fix. Two
@@ -148,7 +192,8 @@ at the config layer.
 ### Reporting
 
 One log line with the counts moved — source models, route hops, routes, agent
-menu entries. A Source whose credential cannot be resolved is logged at debug
+menu entries, and persisted model selections. A Source whose credential cannot
+be resolved is logged at debug
 and skipped whole; its unreachable credential is already surfaced through the
 Source's own state, and the repair declining to touch it leaves exactly the
 state the previous release was in.
@@ -177,7 +222,20 @@ tries again.
   prefix for a bound credential and `None` for one it has no record of;
 - end to end through `_prepare_engine_for_demand`: the stored file is repaired
   and the engine is sent the bare names, and with no provable address the file
-  is left byte-for-byte as the previous release left it.
+  is left byte-for-byte as the previous release left it;
+- the proof reaches the owner of persisted selections before the config is
+  committed, a selection repair that raises leaves the config unwritten so the
+  next demand repairs both halves, and a backend whose catalog moved is
+  refreshed — while a refresh that fails does not fail the demand.
+
+`tests/test_model_selection_addresses.py`:
+
+- all three selections a turn resolves lose the address, including every key a
+  scope's routing payload can spell one under;
+- an identity no address proves is left alone, including a foreign minted
+  address and the upstream slashes;
+- a second pass finds nothing left to move, an empty proof set touches nothing,
+  and one unreadable routing payload does not stop the rest.
 
 Still to do before close-out: a local Incus regression on a snapshot of an
 affected `config.json` + `sources.json`, confirming the subscription models
