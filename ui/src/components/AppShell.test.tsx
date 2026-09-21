@@ -811,6 +811,39 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(await screen.findByTestId('backends')).toBeTruthy();
   });
 
+  it('follows the section another tab moved to', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/backends');
+
+    // A second tab of the same origin selecting a different row reaches this
+    // one as a storage event. Without a subscriber the link keeps offering the
+    // section the rail has left, for as long as nothing else rerenders here.
+    act(() => {
+      window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/replies');
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: SETTINGS_LAST_SECTION_STORAGE_KEY,
+        newValue: '/settings/replies',
+      }));
+    });
+
+    expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href'))
+      .toBe('/settings/replies');
+  });
+
   it('uses the Settings button to return to the route that opened Settings', async () => {
     viewport.isDesktop = true;
     const user = userEvent.setup();

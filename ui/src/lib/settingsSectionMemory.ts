@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from 'react';
+
 import { isOwnerOnlyPath, SETTINGS_LANDING_PATH } from './adminNavigation';
 import { isApplicationRouteHref } from './applicationRoutes';
 
@@ -16,19 +18,30 @@ import { isApplicationRouteHref } from './applicationRoutes';
  * config, where one member's last visit would move every other member's
  * landing. Storage conventions mirror settingsMenuPlacement: versioned
  * `avibe.*` key, injectable storage for tests, best-effort try/catch so blocked
- * storage degrades to the ordinary landing instead of throwing.
+ * storage degrades to the ordinary landing instead of throwing, and a change
+ * event so a link rendered elsewhere can follow the rail.
  *
- * A remembered section is checked against the routes this release actually
- * declares and against what this visitor may open, so neither a section retired
- * by a later release nor an owner's page an ordinary member inherited can land
- * anyone somewhere the rail would not offer them today.
+ * What may be resumed is checked twice, because the two failures have different
+ * shapes. Here: the value has to name a route this release still declares and a
+ * section this visitor's capabilities allow. In the rail (which is the only
+ * place that knows): a row a feature flag has taken off screen stops being
+ * remembered at all.
  */
 export const SETTINGS_LAST_SECTION_STORAGE_KEY = 'avibe.settings.last-section.v1';
+export const SETTINGS_LAST_SECTION_CHANGED_EVENT = 'avibe:settings-last-section-changed';
 
-type SectionStorage = Pick<Storage, 'getItem' | 'setItem'>;
+type SectionStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 function browserStorage(storage?: SectionStorage): SectionStorage | undefined {
   return storage ?? (typeof window !== 'undefined' ? window.localStorage : undefined);
+}
+
+function announceSectionChange(): void {
+  // `storage` events only reach *other* tabs; this covers the entry controls
+  // rendered beside the rail in this one.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(SETTINGS_LAST_SECTION_CHANGED_EVENT));
+  }
 }
 
 export function readLastSettingsSection(storage?: SectionStorage): string | null {
@@ -41,10 +54,38 @@ export function readLastSettingsSection(storage?: SectionStorage): string | null
 
 export function writeLastSettingsSection(path: string, storage?: SectionStorage): void {
   try {
-    browserStorage(storage)?.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, path);
+    const target = browserStorage(storage);
+    // Selecting the row you are already on is not a change, and announcing one
+    // would re-render every subscriber on each navigation inside a section.
+    if (!target || target.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY) === path) return;
+    target.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, path);
   } catch {
     // View memory is best-effort in private browsing and restricted storage contexts.
+    return;
   }
+  announceSectionChange();
+}
+
+/**
+ * Drop the memory when it names `path` — the rail calling this has just found
+ * that row gone from the section list, so what it remembers is a section the
+ * next entry would open with nothing in the rail to show as current.
+ *
+ * Scoped to one path on purpose: feature visibility is projected from config
+ * the rail is still fetching, so "not on screen yet" and "taken off screen" are
+ * the same state for a moment. Forgetting only the record that names the
+ * section in front of the user keeps that moment from clearing an unrelated
+ * one, and the rail writes it straight back once the projection arrives.
+ */
+export function forgetLastSettingsSection(path: string, storage?: SectionStorage): void {
+  try {
+    const target = browserStorage(storage);
+    if (!target || target.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY) !== path) return;
+    target.removeItem(SETTINGS_LAST_SECTION_STORAGE_KEY);
+  } catch {
+    return;
+  }
+  announceSectionChange();
 }
 
 /**
@@ -57,10 +98,46 @@ export function settingsResumePath(
 ): string {
   const remembered = readLastSettingsSection(storage);
   if (!remembered || !remembered.startsWith('/settings/')) return SETTINGS_LANDING_PATH;
+  // Only a bare section path is ever recorded, so a query or fragment means a
+  // value this surface did not write. Rejecting it keeps both checks below
+  // reading the same string: a suffix that route matching strips but the
+  // capability check does not would otherwise walk an owner-only section past
+  // the guard and hand a member a destination their route guard then bounces.
+  if (/[?#]/.test(remembered)) return SETTINGS_LANDING_PATH;
   // A path an older release wrote, or hand-edited storage: resume only what this
   // release still routes, rather than handing the surface its not-found page.
   if (!isApplicationRouteHref(remembered)) return SETTINGS_LANDING_PATH;
   // A remembered page can outlive the capability that made it readable.
   if (!canManageInstance && isOwnerOnlyPath(remembered)) return SETTINGS_LANDING_PATH;
   return remembered;
+}
+
+function subscribeToLastSettingsSection(listener: () => void): () => void {
+  if (typeof window === 'undefined') return () => undefined;
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === SETTINGS_LAST_SECTION_STORAGE_KEY) listener();
+  };
+  window.addEventListener('storage', onStorage);
+  window.addEventListener(SETTINGS_LAST_SECTION_CHANGED_EVENT, listener);
+  return () => {
+    window.removeEventListener('storage', onStorage);
+    window.removeEventListener(SETTINGS_LAST_SECTION_CHANGED_EVENT, listener);
+  };
+}
+
+/**
+ * The same answer as `settingsResumePath`, kept current for a control that
+ * displays it. An entry link renders long before it is clicked, and the section
+ * can move under it meanwhile: the same person can have this origin open in two
+ * tabs, and the one that is not in Settings has to follow the one that is, or
+ * it keeps offering — and showing in its href — a section the rail left.
+ */
+export function useSettingsResumePath(canManageInstance: boolean): string {
+  // The snapshot is a plain string, so identity comparison is value comparison
+  // and no caching layer is needed between reads.
+  return useSyncExternalStore(
+    subscribeToLastSettingsSection,
+    () => settingsResumePath(canManageInstance),
+    () => SETTINGS_LANDING_PATH,
+  );
 }

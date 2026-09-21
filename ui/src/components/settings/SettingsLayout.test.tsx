@@ -446,6 +446,45 @@ describe('SettingsLayout', () => {
     expect(screen.queryByText('service-body')).toBeNull();
   });
 
+  it('stops remembering a section whose row the rail no longer offers', async () => {
+    // Channels comes and goes with the enabled platforms, and its page stays
+    // routed after the row leaves. A memory of it would keep opening a section
+    // the rail has nothing to show as current.
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['wechat'] },
+    });
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/platforms/groups');
+    renderLayout('/settings/platforms/groups');
+
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBeNull();
+  });
+
+  it("leaves another section's memory alone while a row is still loading", async () => {
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['wechat'] },
+    });
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+    renderLayout('/settings/platforms/groups');
+
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'nav.channels' })).toBeNull());
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY)).toBe('/settings/backends');
+  });
+
+  it('records a section again once its row comes back', async () => {
+    api.getConfig.mockResolvedValue({
+      capabilities: { model_hub: { enabled: true } },
+      platforms: { enabled: ['slack'] },
+    });
+    renderLayout('/settings/platforms/groups');
+
+    await waitFor(() => expect(screen.getByRole('link', { name: 'nav.channels' })).toBeTruthy());
+    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+      .toBe('/settings/platforms/groups');
+  });
+
   it.each([
     ['/settings/backends', 'backends-body'],
     ['/settings/platforms', 'platforms-body'],
