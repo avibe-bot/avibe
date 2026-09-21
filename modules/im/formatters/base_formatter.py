@@ -40,22 +40,32 @@ def hold_markdown_escapes(
     return unescape_markdown(text, replace=hold), held
 
 
-def hold_link_destinations(text: str) -> Tuple[str, Dict[str, str]]:
-    """Hide every inline link's destination from a platform's text scanner.
+def hold_links(
+    text: str,
+    *,
+    render: Callable[[str, str], str],
+) -> Tuple[str, Dict[str, str]]:
+    """Hide every inline link from a platform's text scanner, whole.
 
-    A link destination is data, not prose: it is the address a tap goes to, and
-    an ``*`` or a ``_`` inside it is a character of that address rather than
-    markup. A converter that scans a whole message for formatting does not know
-    that - Slack's third-party mrkdwn converter read
-    ``https://a*b*.example/x`` as emphasis and delivered a link to
-    ``https://a_b_.example/x``, a different site. Holding the destinations
-    keeps that pass on the prose it is meant to format.
+    A link is one unit: a label a reader taps and an address the tap goes to.
+    A platform converter does not see it that way - it scans a line for
+    patterns - and both halves are its to get wrong. Slack's third-party
+    mrkdwn converter read ``https://a*b*.example/x`` as emphasis and delivered
+    a link to ``https://a_b_.example/x``, a different site; holding only the
+    address left the brackets around it in the stream, where the same pass
+    paired them with the wrong text and sent
+    ``[^f]: [p](https://example.com/x)`` out as one link labelled ``^f]: [p``.
 
-    What comes back is the destination a Markdown reader resolves rather than
-    the characters that spelled it - angle-bracket form, backslash escapes and
-    character references already applied - because the platform on the other
-    side speaks none of those. Restore with ``restore_held`` BEFORE restoring
-    an escape pass, whose placeholders a destination may still contain.
+    So the whole unit is held and the platform is asked to spell it again from
+    what a Markdown reader actually resolves: ``render(label, destination)``.
+    The destination is the resolved one - angle-bracket form, backslash escapes
+    and character references already applied, and a title left out, because it
+    is not part of the address and no IM dialect has a place to put it. Restore
+    with ``restore_held`` BEFORE restoring an escape pass, whose placeholders a
+    label or a destination may still contain.
+
+    ``inline_links`` returns non-overlapping spans in source order, so this
+    splices each one exactly once.
     """
     links = inline_links(text)
     if not links:
@@ -64,16 +74,11 @@ def hold_link_destinations(text: str) -> Tuple[str, Dict[str, str]]:
     parts: List[str] = []
     cursor = 0
     for link in links:
-        # Nested links cannot happen in CommonMark, but a capture that mapped
-        # back to an overlapping span would splice the text twice; skipping is
-        # the one behaviour that always leaves the source readable.
-        if link.destination_start < cursor:
-            continue
         token = _placeholder()
-        held[token] = link.destination
-        parts.append(text[cursor : link.destination_start])
+        held[token] = render(text[link.label_start : link.label_end], link.destination)
+        parts.append(text[cursor : link.start])
         parts.append(token)
-        cursor = link.destination_end
+        cursor = link.end
     parts.append(text[cursor:])
     return "".join(parts), held
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import CitationSource, register_citations
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
 from modules.im.formatters.slack_formatter import SlackFormatter
@@ -125,11 +126,22 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         controller = _CitationAwareController()
         agent = _StubAgent(controller)
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
-        sidecar = [{"index": 1, "ref_id": "turn0view0", "url": "https://example.com/x"}]
+        registered, bundle = register_citations(
+            "Cited answer.\ue200cite\ue202turn0view0\ue201",
+            {
+                "turn0view0": CitationSource(
+                    ref_id="turn0view0", title="Example", url="https://example.com/x"
+                )
+            },
+            unresolved_label="(source unavailable)",
+        )
 
-        await agent.emit_result_message(context, "Cited answer.", citations=sidecar)
+        await agent.emit_result_message(context, registered, citations=bundle)
 
-        self.assertEqual(seen, [sidecar])
+        # The bundle is forwarded, not a copy of it: the tokens in the text are
+        # only meaningful against the one that minted them.
+        self.assertEqual(seen, [bundle])
+        self.assertIs(seen[0], bundle)
 
 
 class AgentSessionIdContextTests(unittest.TestCase):

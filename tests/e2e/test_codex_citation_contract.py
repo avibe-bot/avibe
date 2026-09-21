@@ -39,6 +39,8 @@ from urllib.parse import urlsplit
 import pytest
 
 from config.v2_config import ModelHubBackendModelConfig
+from core.citations import _TOKEN_OPEN as TOKEN_OPEN
+from core.citations import body_digest
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from modules.agents.base import BaseAgent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -379,21 +381,24 @@ def test_real_notifications_deliver_and_persist_resolved_citations(
         (2, "turn0view1", PROBE_URL),
     ]
     assert citations[1]["title"] == "引用探针来源 — Café"
-    # Every sidecar entry names a link the stored answer actually carries, and
-    # names it the way a badge is matched: the exact characters the backend
-    # wrote, plus which of that spelling's literal occurrences are its own. The
-    # renderer counts the same characters in the same text (ui/src/lib/
-    # citations.ts), scanning one character on from each hit, so the count
-    # recorded here is the one it has to arrive at independently.
+    # Every sidecar row describes the stored body and nothing else: one digest
+    # of that exact text, and spans that land on the links the backend wrote,
+    # counted in UTF-16 code units because that is what the renderer counts
+    # (ui/src/lib/citations.ts). It verifies the digest before it paints
+    # anything, so both numbers here are ones it has to reach independently.
+    body = row["text"]
+    assert {c["body_sha256"] for c in citations} == {body_digest(body)}
+    units = body.encode("utf-16-le", "surrogatepass")
     for citation in citations:
-        spelling = citation["spelling"]
-        # These labels need no escaping, so the link reads exactly as spelled.
-        assert spelling == f"[{citation['label']}]({citation['url']})"
-        found = []
-        at = row["text"].find(spelling)
-        while at != -1:
-            found.append(at)
-            at = row["text"].find(spelling, at + 1)
-        assert len(found) == citation["occurrence_total"]
-        assert citation["occurrences"]
-        assert all(1 <= ordinal <= len(found) for ordinal in citation["occurrences"])
+        assert citation["spans"]
+        for start, end in citation["spans"]:
+            # These labels need no escaping, so the link reads exactly as spelled.
+            assert units[start * 2 : end * 2].decode("utf-16-le", "surrogatepass") == (
+                f"[{citation['label']}]({citation['url']})"
+            )
+
+    # The identity the message travelled under is internal. A reader may see the
+    # model's own marker characters - quoted in a code example, or cut off
+    # mid-stream, both above - but never a token this delivery minted.
+    assert TOKEN_OPEN not in delivered
+    assert TOKEN_OPEN not in body

@@ -132,7 +132,7 @@ import { useCoalescedWrite } from '../../lib/useCoalescedWrite';
 import { hasInAppBackEntry } from '../../lib/navigationHistory';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
-import type { CitationSource } from '../../lib/citations';
+import { bindCitations, remapCitations } from '../../lib/citations';
 import { QuickReplies } from './QuickReplies';
 import { QueuedAttachmentGroup, QueuedAttachmentSheet } from './QueuedAttachments';
 import { ActivityCard, ActivityChip } from './AgentActivityGroup';
@@ -4665,7 +4665,20 @@ export const MessageRow = memo(function MessageRow({
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
   const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
-  const resultPresentation = resultFooterParts(message);
+  const resultPresentation = useMemo(() => resultFooterParts(message), [message]);
+
+  // A citation names the links the backend wrote, as ranges in the body it
+  // stored — so it is verified against that stored body, `message.text`, and
+  // only then carried onto the body this row actually renders. The footer strip
+  // above is a real edit with real coordinates, which is what makes that
+  // possible without guessing whether the rendered body is "a prefix of" the
+  // stored one. Read here rather than inside the renderer: only the agent's own
+  // reply may draw a badge, and only this row knows who wrote it.
+  const citationBinding = useMemo(() => {
+    if (!agentAuthored) return null;
+    const stored = (message.content as { citations?: unknown[] } | null)?.citations;
+    return remapCitations(bindCitations(stored, message.text), resultPresentation.edits);
+  }, [agentAuthored, message.content, message.text, resultPresentation]);
 
   // User-uploaded attachments ride in ``content.attachments`` (agent-reply media
   // is rewritten inline into the text instead, handled by the Markdown renderer).
@@ -4749,10 +4762,11 @@ export const MessageRow = memo(function MessageRow({
       // card). Keyed to authorship, not to the card family, so the agent's reverse annotation
       // keeps the card it had before that row had its own type.
       secretRequests={agentAuthored}
-      // Same authorship gate: a numbered source badge asserts that the ANSWER
-      // cited that page, so only the agent's own reply may draw one. Without the
-      // sidecar the link still renders — as the plain domain the backend wrote.
-      citations={agentAuthored ? (message.content as { citations?: CitationSource[] } | null)?.citations : undefined}
+      // A numbered source badge asserts that the ANSWER cited that page, so only
+      // the agent's own reply may draw one — and only where the sidecar still
+      // describes this exact text. Otherwise the link still renders, as the plain
+      // domain the backend wrote.
+      citations={citationBinding}
       localFileWorkdir={agentAuthored ? session.workdir : undefined}
       onOpenLocalFile={agentAuthored ? onOpenLocalFile : undefined}
       // …and on an archived transcript the card is locked: archiving EXPIRED the

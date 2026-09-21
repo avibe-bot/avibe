@@ -39,6 +39,7 @@ from core.handlers import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
+from core.citations import CitationBundle
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
@@ -3844,7 +3845,7 @@ class Controller:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: Any = None,
-        citations: Optional[list[dict[str, Any]]] = None,
+        citations: Optional[CitationBundle] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(

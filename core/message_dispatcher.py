@@ -14,7 +14,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -23,6 +23,7 @@ from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.delivery_target import routed_delivery_context
+from core.citations import CitationBundle, materialize_citations
 from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
@@ -37,7 +38,13 @@ from core.message_output import (
     communication_type_for_output,
     output_for_message,
 )
-from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
+from core.reply_enhancer import (
+    FileLink,
+    QuickReplyButton,
+    process_reply,
+    strip_file_links,
+    strip_silent_blocks,
+)
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
@@ -115,6 +122,44 @@ def _neutralize_mentions(text: str) -> str:
         "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
     )
     return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
+
+
+def _written_buttons(
+    buttons: Sequence[QuickReplyButton],
+    citations: Optional[CitationBundle],
+) -> Sequence[QuickReplyButton]:
+    """Quick-reply buttons with their citations written as bare attribution.
+
+    A label is lifted out of the body into a structured field no surface parses
+    as Markdown, so a link written here would show the reader its syntax. The
+    domain on its own still says who is being cited - and an internal token must
+    never survive into a field nothing else will rewrite.
+    """
+    if not citations or not buttons:
+        return buttons
+    return [
+        replace(
+            button,
+            text=materialize_citations(button.text, citations, as_markdown=False) or "",
+        )
+        for button in buttons
+    ]
+
+
+def _written_files(
+    files: Sequence[FileLink],
+    citations: Optional[CitationBundle],
+) -> Sequence[FileLink]:
+    """The same for an extracted file link's label, which is uploaded as text."""
+    if not citations or not files:
+        return files
+    return [
+        replace(
+            link,
+            label=materialize_citations(link.label, citations, as_markdown=False) or "",
+        )
+        for link in files
+    ]
 
 
 class ActivityOutputDeliveryError(RuntimeError):
@@ -2090,7 +2135,7 @@ class ConsolidatedMessageDispatcher:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
-        citations: Optional[list[dict[str, Any]]] = None,
+        citations: Optional[CitationBundle] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2132,10 +2177,15 @@ class ConsolidatedMessageDispatcher:
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
 
-        ``citations`` is the resolved source sidecar for a message whose text
-        already carries the citation links (see ``core.citations``). It is stored
-        with the row, not folded into the text, so the Web transcript can render
-        compact badges while every IM platform keeps the plain Markdown links.
+        ``citations`` is the registered source bundle for a message whose text
+        still carries an opaque token where each cited marker was (see
+        ``core.citations``). Every copy this method produces writes those tokens
+        out for itself, because the copies are not the same text: file links are
+        stripped for IM, media links are rewritten for the workbench, footers are
+        folded, long results are truncated or split. The persisted row is the one
+        that also gets the sidecar, bound to the body it was measured in, so the
+        Web transcript can render compact badges while every other surface keeps
+        the plain Markdown links.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2228,6 +2278,12 @@ class ConsolidatedMessageDispatcher:
         # without guessing from transcript order or requiring a live sink.
         if mutates_turn_lifecycle:
             terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            # A Turn snapshot is text and nothing else - no sidecar rides with it -
+            # so the citations are written into it here. It does not reach
+            # ``persist_agent_message``, which is where every other copy is
+            # finalized, and an internal token must never be what a later steer
+            # reads back as the turn's result.
+            terminal_body = materialize_citations(terminal_body, citations)
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
@@ -2295,7 +2351,7 @@ class ConsolidatedMessageDispatcher:
                     # settle its origin Run without touching the current Turn.
                     self._record_agent_run_terminal_result(
                         context,
-                        text,
+                        materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2426,7 +2482,7 @@ class ConsolidatedMessageDispatcher:
                     )
                     duplicate_result_text = self._accepted_message_result_text(
                         accepted_message,
-                        persist_text,
+                        materialize_citations(persist_text, citations),
                         result_footer if mutates_turn_lifecycle else None,
                     )
                     self._record_agent_run_terminal_result(
@@ -2517,7 +2573,13 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             background_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(
+                                    background_enhanced.buttons, citations
+                                )
+                            ]
+                            or None,
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
@@ -2553,10 +2615,14 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
+                # A run record carries text alone, so its copy is written here.
+                # The persisted row above keeps its tokens: it is finalized with
+                # a sidecar bound to the body the reader is actually shown.
+                written_recorded_text = materialize_citations(recorded_text, citations)
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2565,7 +2631,7 @@ class ConsolidatedMessageDispatcher:
                 elif canonical_type == "result" or suppressed_trigger_kind not in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_run_message(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         terminal_status=terminal_status,
                     )
@@ -2605,8 +2671,14 @@ class ConsolidatedMessageDispatcher:
             # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
             # notice for this message has to be able to tell those apart from a send
             # that genuinely failed, so each stage reports itself.
+            # The outbound copy and the live stream carry text alone; the row
+            # below keeps its tokens so ``persist_agent_message`` can bind the
+            # sidecar to the body it finalizes.
+            notify_text = materialize_citations(text, citations)
             try:
-                message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
+                message_id = await im_client.send_message(
+                    target_context, notify_text, parse_mode=parse_mode
+                )
             except Exception as err:
                 logger.error("Failed to send notify message: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2638,7 +2710,9 @@ class ConsolidatedMessageDispatcher:
             # this point the message is delivered; a failure here is recorded for
             # diagnosis and must not be read as a delivery failure.
             try:
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+                await _stream_chunk(
+                    self.controller, context, text=notify_text, message_id=message_id, kind="notify"
+                )
             except Exception as err:
                 logger.error("notify stream failed after delivery: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2669,6 +2743,15 @@ class ConsolidatedMessageDispatcher:
                 # ``enhanced`` (extracted file links + quick-reply buttons) was
                 # computed above for persistence; reuse it for delivery.
                 display_text = enhanced.text if enhanced.text.strip() else text
+                # Everything downstream of here is a text-only copy - the IM
+                # sends, the split parts, the summary, the .md attachment, the
+                # status footer and the live stream - so the citations are
+                # written in once, before any of them can truncate or reflow the
+                # body. ``persist_text`` below still holds its tokens.
+                display_text = materialize_citations(display_text, citations)
+                delivery_buttons = _written_buttons(
+                    enhanced.buttons if enhanced else [], citations
+                )
 
                 # The concise done-footer (``✅ done · 248k tok``) is attached to the
                 # fresh result message as platform subtext so the turn's final
@@ -2719,7 +2802,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2742,7 +2825,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2815,7 +2898,7 @@ class ConsolidatedMessageDispatcher:
                                 im_client,
                                 target_context,
                                 display_text,
-                                enhanced.buttons if enhanced else [],
+                                delivery_buttons,
                                 parse_mode,
                                 subtext=done_footer,
                             )
@@ -2839,7 +2922,9 @@ class ConsolidatedMessageDispatcher:
 
                 # Upload extracted file attachments
                 if enhanced and enhanced.files:
-                    await self._upload_file_links(im_client, target_context, enhanced.files)
+                    await self._upload_file_links(
+                        im_client, target_context, _written_files(enhanced.files, citations)
+                    )
 
                 if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
@@ -2876,6 +2961,11 @@ class ConsolidatedMessageDispatcher:
                 # platform. The Web message row separately persists a clean body
                 # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                # The agent-run records take text alone, so they take the written
+                # copy; ``persisted_result_text`` itself still carries its tokens
+                # into ``persist_agent_message``, which finalizes the row it
+                # writes and binds the sidecar to it.
+                written_result_text = materialize_citations(persisted_result_text, citations)
                 run_provenance = output_semantics.provenance(context)
                 workbench_run_waits_for_persistence = (
                     target_context.platform == "avibe"
@@ -2895,12 +2985,12 @@ class ConsolidatedMessageDispatcher:
                 durable_output_exists = False
                 activity_was_delivered = False
                 settlement_output_semantics = output_semantics
-                settlement_result_text = persisted_result_text
+                settlement_result_text = written_result_text
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
-                        persisted_result_text,
+                        written_result_text,
                         primary_message_id,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2936,7 +3026,11 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             avibe_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(avibe_enhanced.buttons, citations)
+                            ]
+                            or None,
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
@@ -2969,7 +3063,7 @@ class ConsolidatedMessageDispatcher:
                         )
                         settlement_result_text = self._accepted_message_result_text(
                             accepted_message,
-                            persisted_result_text,
+                            written_result_text,
                             None,
                         )
                     activity_was_delivered = bool(
@@ -3084,6 +3178,12 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+
+        # The row above is the only copy of an intermediate message that carries a
+        # sidecar. Everything left below is what the channel is shown - the concise
+        # status line, the consolidated log, the hidden-type log preview - so write
+        # the citations into ``text`` once here rather than at each of them.
+        text = materialize_citations(text, citations)
 
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target

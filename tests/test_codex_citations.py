@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import body_digest, finalize_citations, materialize_citations
 from core.reply_enhancer import strip_silent_blocks
 from modules.agents.codex import search_history
 from modules.agents.codex.event_handler import (
@@ -47,6 +48,22 @@ PROBE_URL = "https://example.com/citation-probe-source"
 
 def marker(*ref_ids: str) -> str:
     return f"{START}cite{SEP}{SEP.join(ref_ids)}{END}"
+
+
+def written(call, at: int = 1) -> str | None:
+    """The body a delivery boundary writes from one emit call.
+
+    The handler hands the boundary an opaque token per citation plus the bundle
+    that writes it out (see ``core.citations``), because every surface rewrites
+    the text on the way to its reader. What the reader is shown is the
+    boundary's own copy, so that is what these cases assert.
+    """
+    return materialize_citations(call.args[at], call.kwargs.get("citations"))
+
+
+def sidecar(call, at: int = 1) -> list[dict]:
+    """The sidecar rows a persisted copy of one emit call would carry."""
+    return finalize_citations(call.args[at], call.kwargs.get("citations"))[1]
 
 
 def cached_sources(handler, thread_id: str) -> dict:
@@ -234,9 +251,10 @@ class CodexCitationCaptureTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         self.assertEqual(self.sources("thread-a")["turn0view0"].url, GUIDE_URL)
         self.assertEqual(self.sources("thread-b")["turn0view0"].url, PROBE_URL)
 
-        text, citations = await self.handler._resolve_citations(
+        registered, bundle = await self.handler._register_citations(
             f"Cited.{marker('turn0view0')}", {"threadId": "thread-b"}, _request()
         )
+        text, citations = finalize_citations(registered, bundle)
         self.assertEqual(text, f"Cited. [example.com]({PROBE_URL})")
         self.assertEqual([c["url"] for c in citations], [PROBE_URL])
 
@@ -244,12 +262,13 @@ class CodexCitationCaptureTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         params = web_search("thread-a", {"ref_id": "turn0view0", "title": "T", "url": GUIDE_URL})
         self.handler._record_search_sources(params, params["item"])
 
-        text, citations = await self.handler._resolve_citations(
+        registered, bundle = await self.handler._register_citations(
             f"Cited.{marker('turn0view0')}", {"threadId": "thread-zzz"}, _request()
         )
+        text, citations = finalize_citations(registered, bundle)
 
         self.assertEqual(text, f"Cited. {UNRESOLVED}")
-        self.assertIsNone(citations)
+        self.assertEqual(citations, [])
 
     def test_a_later_search_result_supersedes_the_same_ref_id(self):
         for url in (GUIDE_URL, PROBE_URL):
@@ -361,9 +380,10 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertEqual(call.args[1], f"Native search exists. [developers.openai.com]({GUIDE_URL})")
+        body = f"Native search exists. [developers.openai.com]({GUIDE_URL})"
+        self.assertEqual(written(call), body)
         self.assertEqual(
-            call.kwargs["citations"],
+            sidecar(call),
             [
                 {
                     "index": 1,
@@ -371,12 +391,12 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
                     "title": "Web search - OpenAI API",
                     "url": GUIDE_URL,
                     "label": "developers.openai.com",
-                    # The complete link this citation wrote, and the one
-                    # occurrence of that exact spelling in the answer that is
-                    # its own. See test_citations.TestLinkProvenance.
-                    "spelling": f"[developers.openai.com]({GUIDE_URL})",
-                    "occurrences": [1],
-                    "occurrence_total": 1,
+                    # Where this citation's link sits in *this* body, and the
+                    # digest that binds the two: a reader holding any other
+                    # text has no numbered badge to paint.
+                    # See test_citations.TestBodyBinding.
+                    "spans": [[body.index("[developers"), len(body)]],
+                    "body_sha256": body_digest(body),
                 }
             ],
         )
@@ -397,14 +417,14 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         )
         await self.handler._on_turn_completed(turn_completed("thread-a", turn_id="turn-2"), later)
 
-        self.assertEqual(self.result_call().args[1], f"As established. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(self.result_call()), f"As established. [developers.openai.com]({GUIDE_URL})")
 
     async def test_an_answer_without_markers_carries_no_sidecar(self):
         await self.handler._on_item_completed(agent_message("thread-a", "Plain answer."), self.request)
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertEqual(call.args[1], "Plain answer.")
+        self.assertEqual(written(call), "Plain answer.")
         self.assertIsNone(call.kwargs["citations"])
 
     async def test_an_unresolvable_ref_is_labelled_and_carries_no_sidecar(self):
@@ -414,8 +434,8 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertEqual(call.args[1], f"Claimed. {UNRESOLVED}")
-        self.assertIsNone(call.kwargs["citations"])
+        self.assertEqual(written(call), f"Claimed. {UNRESOLVED}")
+        self.assertEqual(sidecar(call), [])
 
     async def test_a_repeated_completion_does_not_duplicate_the_links(self):
         await self.handler._on_item_completed(
@@ -429,7 +449,7 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         self.assertEqual(self.agent.emit_result_message.await_count, 1)
-        self.assertEqual(self.result_call().args[1].count(f"[developers.openai.com]({GUIDE_URL})"), 1)
+        self.assertEqual(written(self.result_call()).count(f"[developers.openai.com]({GUIDE_URL})"), 1)
 
     async def test_an_intermediate_message_is_flushed_with_its_own_sidecar(self):
         await self.handler._on_item_completed(
@@ -443,8 +463,8 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
 
         self.agent.controller.emit_agent_message.assert_awaited_once()
         call = self.agent.controller.emit_agent_message.await_args
-        self.assertEqual(call.args[2], f"Progress. [developers.openai.com]({GUIDE_URL})")
-        self.assertEqual([c["url"] for c in call.kwargs["citations"]], [GUIDE_URL])
+        self.assertEqual(written(call, 2), f"Progress. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual([c["url"] for c in sidecar(call, 2)], [GUIDE_URL])
 
     async def test_an_intermediate_message_without_citations_keeps_its_original_call(self):
         """No empty sidecar kwarg: an uncited flush is the call it always was."""
@@ -469,8 +489,8 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertEqual(call.args[1], f"Cited. [developers.openai.com]({GUIDE_URL})\n\n![img](a.png)")
-        self.assertEqual(len(call.kwargs["citations"]), 1)
+        self.assertEqual(written(call), f"Cited. [developers.openai.com]({GUIDE_URL})\n\n![img](a.png)")
+        self.assertEqual(len(sidecar(call)), 1)
 
     async def test_an_untrusted_source_cannot_inject_a_link(self):
         """Titles and URLs come from the open web; the sidecar must stay clean."""
@@ -488,9 +508,11 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertEqual(call.args[1], f"Two. [example.com]({PROBE_URL}) {UNRESOLVED}")
+        body = f"Two. [example.com]({PROBE_URL}) {UNRESOLVED}"
+        self.assertEqual(written(call), body)
+        link = f"[example.com]({PROBE_URL})"
         self.assertEqual(
-            call.kwargs["citations"],
+            sidecar(call),
             [
                 {
                     "index": 1,
@@ -498,12 +520,11 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
                     "title": "中文標題",
                     "url": PROBE_URL,
                     "label": "example.com",
-                    # The rejected source wrote no link at all, so the one that
-                    # survived is both the first and the only occurrence of the
-                    # link it spells.
-                    "spelling": f"[example.com]({PROBE_URL})",
-                    "occurrences": [1],
-                    "occurrence_total": 1,
+                    # The rejected source wrote no link at all, so the surviving
+                    # citation spans only its own link — the fallback text that
+                    # follows belongs to no source and is never covered.
+                    "spans": [[body.index(link), body.index(link) + len(link)]],
+                    "body_sha256": body_digest(body),
                 }
             ],
         )
@@ -534,10 +555,13 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
 
         call = self.result_call()
         self.assertEqual(
-            [(c["index"], c["url"]) for c in call.kwargs["citations"]], [(1, PROBE_URL)]
+            [(c["index"], c["url"]) for c in sidecar(call)], [(1, PROBE_URL)]
         )
         self.assertEqual(
-            strip_silent_blocks(call.args[1]), f"Visible. [example.com]({PROBE_URL})"
+            materialize_citations(
+                strip_silent_blocks(call.args[1]), call.kwargs["citations"]
+            ),
+            f"Visible. [example.com]({PROBE_URL})",
         )
 
     async def test_the_unresolved_label_is_localized(self):
@@ -548,7 +572,7 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         )
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
-        self.assertEqual(self.result_call().args[1], "Claimed. （来源不可用）")
+        self.assertEqual(written(self.result_call()), "Claimed. （来源不可用）")
 
     async def test_an_empty_answer_still_completes_the_turn(self):
         self.agent.emit_result_message = AsyncMock()
@@ -556,7 +580,7 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
         call = self.result_call()
-        self.assertIsNone(call.args[1])
+        self.assertIsNone(written(call))
         self.assertIsNone(call.kwargs["citations"])
 
 
@@ -582,8 +606,12 @@ class CodexCitationReadinessTests(IsolatedCodexHome, unittest.IsolatedAsyncioTes
         # One list for both surfaces: several cases below are about the order a
         # reader sees, which per-mock await lists cannot express.
         self.delivered: list[str] = []
-        self.emitted.side_effect = lambda *a, **k: self.delivered.append(a[2])
-        self.agent.emit_result_message.side_effect = lambda *a, **k: self.delivered.append(a[1])
+        self.emitted.side_effect = lambda *a, **k: self.delivered.append(
+            materialize_citations(a[2], k.get("citations"))
+        )
+        self.agent.emit_result_message.side_effect = lambda *a, **k: self.delivered.append(
+            materialize_citations(a[1], k.get("citations"))
+        )
 
     async def item(self, params: dict) -> None:
         await self.handler._on_item_completed(params, self.request)
@@ -601,7 +629,9 @@ class CodexCitationReadinessTests(IsolatedCodexHome, unittest.IsolatedAsyncioTes
         await self.item(self.guide_search())
 
         self.assertEqual(self.delivered, [f"Progress. [developers.openai.com]({GUIDE_URL})"])
-        self.assertEqual([c["url"] for c in self.emitted.await_args.kwargs["citations"]], [GUIDE_URL])
+        self.assertEqual(
+            [c["url"] for c in sidecar(self.emitted.await_args, 2)], [GUIDE_URL]
+        )
 
         await self.handler._on_turn_completed(turn_completed("thread-a"), self.request)
 
@@ -792,8 +822,8 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"As established.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"As established. [developers.openai.com]({GUIDE_URL})")
-        self.assertEqual([c["url"] for c in call.kwargs["citations"]], [GUIDE_URL])
+        self.assertEqual(written(call), f"As established. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual([c["url"] for c in sidecar(call)], [GUIDE_URL])
 
     async def test_the_history_shape_the_shipped_binary_writes_is_read(self):
         """The current native rollout names the item ``Extension``/``web.search``.
@@ -815,8 +845,8 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"Probed.{marker('turn0search0')}")
 
-        self.assertEqual(call.args[1], f"Probed. [example.com]({PROBE_URL})")
-        self.assertEqual([c["url"] for c in call.kwargs["citations"]], [PROBE_URL])
+        self.assertEqual(written(call), f"Probed. [example.com]({PROBE_URL})")
+        self.assertEqual([c["url"] for c in sidecar(call)], [PROBE_URL])
 
     async def test_both_recorded_shapes_are_read_from_one_history(self):
         """A conversation spanning the rename keeps every source it recorded."""
@@ -841,7 +871,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         )
 
         self.assertEqual(
-            [c["url"] for c in call.kwargs["citations"]], [GUIDE_URL, PROBE_URL]
+            [c["url"] for c in sidecar(call)], [GUIDE_URL, PROBE_URL]
         )
 
     async def test_a_fork_cites_the_parent_history_it_carries(self):
@@ -868,7 +898,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         )
 
         self.assertEqual(
-            call.args[1],
+            written(call),
             f"Both. [developers.openai.com]({GUIDE_URL}) [example.com]({PROBE_URL})",
         )
 
@@ -882,14 +912,14 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
             )
 
         first = await self.answer("thread-a", f"A.{marker('turn0view0')}")
-        self.assertEqual([c["url"] for c in first.kwargs["citations"]], [GUIDE_URL])
+        self.assertEqual([c["url"] for c in sidecar(first)], [GUIDE_URL])
 
         second_request = _request("session-2")
         self.agent._turn_registry.register_turn("turn-2", second_request)
         second = await self.answer(
             "thread-b", f"B.{marker('turn0view0')}", turn_id="turn-2", request=second_request
         )
-        self.assertEqual([c["url"] for c in second.kwargs["citations"]], [PROBE_URL])
+        self.assertEqual([c["url"] for c in sidecar(second)], [PROBE_URL])
 
     async def test_history_is_read_once_per_thread_not_once_per_message(self):
         """Cross-turn: the read is a memo, so a long conversation pays for it once."""
@@ -912,7 +942,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
             )
 
         self.assertEqual(reader.call_count, 1)
-        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Second. [developers.openai.com]({GUIDE_URL})")
 
     async def test_an_evicted_thread_is_read_back_rather_than_lost(self):
         """The cache is a memo over history, so eviction costs a read, not the link."""
@@ -930,7 +960,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"Still cited.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Still cited. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Still cited. [developers.openai.com]({GUIDE_URL})")
 
     async def test_a_partially_written_last_row_does_not_lose_the_rest(self):
         """Codex may be mid-append; an unparseable tail is not evidence about the head."""
@@ -943,14 +973,14 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"Cited.{marker('turn0view0')}")
 
-        self.assertEqual([c["url"] for c in call.kwargs["citations"]], [GUIDE_URL])
+        self.assertEqual([c["url"] for c in sidecar(call)], [GUIDE_URL])
 
     async def test_a_thread_with_no_recorded_history_degrades_to_the_label(self):
         """Nothing indexed, nothing invented."""
         call = await self.answer("thread-a", f"Claimed.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Claimed. {UNRESOLVED}")
-        self.assertIsNone(call.kwargs["citations"])
+        self.assertEqual(written(call), f"Claimed. {UNRESOLVED}")
+        self.assertEqual(sidecar(call), [])
 
     async def test_a_recorded_result_without_a_url_is_not_given_one(self):
         """A ref_id is a name, never a source: an entry with no URL stays unresolved."""
@@ -967,8 +997,8 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"Claimed.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Claimed. {UNRESOLVED}")
-        self.assertIsNone(call.kwargs["citations"])
+        self.assertEqual(written(call), f"Claimed. {UNRESOLVED}")
+        self.assertEqual(sidecar(call), [])
 
     @unittest.skipIf(
         hasattr(os, "geteuid") and os.geteuid() == 0,
@@ -988,8 +1018,8 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
             call = await self.answer("thread-a", f"Claimed.{marker('turn0view0')}")
 
         self.assertTrue(any(str(path) in line for line in logs.output), logs.output)
-        self.assertEqual(call.args[1], f"Claimed. {UNRESOLVED}")
-        self.assertIsNone(call.kwargs["citations"])
+        self.assertEqual(written(call), f"Claimed. {UNRESOLVED}")
+        self.assertEqual(sidecar(call), [])
 
     async def test_a_live_search_does_not_hide_the_recorded_ones(self):
         """A cache entry says what this process saw, not what the thread contains.
@@ -1009,7 +1039,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         call = await self.answer("thread-a", f"Both.{marker('turn0view0', 'turn1view0')}")
 
         self.assertEqual(
-            call.args[1],
+            written(call),
             f"Both. [developers.openai.com]({GUIDE_URL}) [example.com]({PROBE_URL})",
         )
 
@@ -1028,14 +1058,14 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"The oldest one.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], "The oldest one. [example.com](https://example.com/0)")
+        self.assertEqual(written(call), "The oldest one. [example.com](https://example.com/0)")
 
     async def test_an_empty_history_that_later_records_a_search_is_re_read(self):
         """A history is a growing file, so "not there yet" is not "not there"."""
         path = self.record_history(self.home, "thread-a", [])
 
         first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
-        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+        self.assertEqual(written(first), f"First. {UNRESOLVED}")
 
         with path.open("a", encoding="utf-8") as handle:
             row = self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")
@@ -1043,12 +1073,12 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Second. [developers.openai.com]({GUIDE_URL})")
 
     async def test_a_history_that_appears_later_is_found(self):
         """Codex indexes the thread when it writes it; a lookup miss is not final."""
         first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
-        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+        self.assertEqual(written(first), f"First. {UNRESOLVED}")
 
         self.record_history(
             self.home,
@@ -1058,7 +1088,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Second. [developers.openai.com]({GUIDE_URL})")
 
     @unittest.skipIf(
         hasattr(os, "geteuid") and os.geteuid() == 0,
@@ -1081,13 +1111,13 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         with self.assertLogs(search_history.logger, level="WARNING"):
             first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
-        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+        self.assertEqual(written(first), f"First. {UNRESOLVED}")
 
         path.chmod(0o600)
 
         call = await self.next_answer("thread-a", f"Second.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Second. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Second. [developers.openai.com]({GUIDE_URL})")
 
     async def test_a_missing_ref_does_not_rescan_an_unchanged_history(self):
         """The cost of a ref that is genuinely absent is paid once per history."""
@@ -1109,7 +1139,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
             call = await self.next_answer("thread-a", f"Second.{marker('turn9view9')}")
 
         self.assertEqual(scans, [True, False])
-        self.assertEqual(call.args[1], f"Second. {UNRESOLVED}")
+        self.assertEqual(written(call), f"Second. {UNRESOLVED}")
 
     async def test_an_absence_does_not_outlive_the_history_that_proved_it(self):
         """A scan directed at one ref may not vindicate another ref's absence.
@@ -1125,18 +1155,18 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
         path = self.record_history(self.home, "thread-a", [])
 
         first = await self.answer("thread-a", f"First.{marker('turn0view0')}")
-        self.assertEqual(first.args[1], f"First. {UNRESOLVED}")
+        self.assertEqual(written(first), f"First. {UNRESOLVED}")
 
         with path.open("a", encoding="utf-8") as handle:
             row = self.recorded_search(self.web_result("turn0view0", GUIDE_URL), owner="thread-a")
             handle.write(f"{json.dumps(row)}\n")
 
         second = await self.next_answer("thread-a", f"Second.{marker('turn9view9')}")
-        self.assertEqual(second.args[1], f"Second. {UNRESOLVED}")
+        self.assertEqual(written(second), f"Second. {UNRESOLVED}")
 
         call = await self.next_answer("thread-a", f"Third.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Third. [developers.openai.com]({GUIDE_URL})")
+        self.assertEqual(written(call), f"Third. [developers.openai.com]({GUIDE_URL})")
 
     async def test_the_latest_recorded_definition_of_a_ref_wins(self):
         """A rollout file may redefine a ref; the newest row is the trustworthy one."""
@@ -1153,7 +1183,7 @@ class CodexCitationHistoryTests(IsolatedCodexHome, unittest.IsolatedAsyncioTestC
 
         call = await self.answer("thread-a", f"Cited.{marker('turn0view0')}")
 
-        self.assertEqual(call.args[1], f"Cited. [example.com]({PROBE_URL})")
+        self.assertEqual(written(call), f"Cited. [example.com]({PROBE_URL})")
 
     def test_a_read_carries_only_the_refs_it_was_asked_for(self):
         """The read is directed by the message, which is what bounds it."""

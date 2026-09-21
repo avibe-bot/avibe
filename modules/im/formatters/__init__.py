@@ -1,6 +1,6 @@
 from .base_formatter import (
     BaseMarkdownFormatter,
-    hold_link_destinations,
+    hold_links,
     hold_markdown_escapes,
     restore_held,
 )
@@ -13,7 +13,7 @@ from .avibe_formatter import AvibeFormatter
 
 __all__ = [
     "BaseMarkdownFormatter",
-    "hold_link_destinations",
+    "hold_links",
     "hold_markdown_escapes",
     "restore_held",
     "SlackFormatter",

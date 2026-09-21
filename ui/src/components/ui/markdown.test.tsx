@@ -9,7 +9,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import en from '@/i18n/en.json';
-import type { CitationSource } from '@/lib/citations';
+import { bindCitations, bodyDigest, type CitationSource } from '@/lib/citations';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { Markdown } from './markdown';
 
@@ -110,22 +110,41 @@ describe('Markdown source citations', () => {
   const escapeLabel = (label: string) => label.replace(/([\\[\]`<*_~&|])/g, '\\$1');
   const link = (citation: { label: string; url: string }) =>
     `[${escapeLabel(citation.label)}](${citation.url})`;
-  // A row the backend writes today: the complete link it wrote, and the one
-  // occurrence of that exact spelling in the message that is its own. A test
-  // that renders the same link twice says so by overriding both numbers, the
-  // same way the backend would.
-  const guide = (over: Partial<CitationSource> = {}): CitationSource => {
-    const row: CitationSource = {
-      index: 1,
-      ref_id: 'turn0view0',
-      title: 'Web search — OpenAI API',
-      url: GUIDE,
-      label: 'developers.openai.com',
-      occurrences: [1],
-      occurrence_total: 1,
-      ...over,
-    };
-    return { ...row, spelling: over.spelling ?? link(row) };
+  const guide = (over: Partial<CitationSource> = {}): CitationSource => ({
+    index: 1,
+    ref_id: 'turn0view0',
+    title: 'Web search — OpenAI API',
+    url: GUIDE,
+    label: 'developers.openai.com',
+    ...over,
+  });
+
+  /**
+   * One reply, assembled the way the backend assembles one.
+   *
+   * The backend writes each citation's link itself, so it knows the exact range
+   * it wrote it at and the exact body it ended up in. A test says the same
+   * thing by building the body out of its parts: a `string` is prose the answer
+   * wrote (including a link the answer worded itself), and a source is a link
+   * the backend wrote, which contributes both its spelling and its range. Every
+   * row then carries the digest of the finished body, because the ranges are
+   * only meaningful in it.
+   */
+  const body = (...parts: Array<string | CitationSource>) => {
+    let text = '';
+    const measured = new Map<CitationSource, number[][]>();
+    for (const part of parts) {
+      if (typeof part === 'string') {
+        text += part;
+        continue;
+      }
+      const start = text.length;
+      text += link(part);
+      measured.set(part, [...(measured.get(part) ?? []), [start, text.length]]);
+    }
+    const body_sha256 = bodyDigest(text);
+    const citations = [...measured].map(([source, spans]) => ({ ...source, spans, body_sha256 }));
+    return { text, citations };
   };
 
   const renderMarkdown = (content: string, citations?: unknown[], interactive = true) => render(
@@ -133,7 +152,7 @@ describe('Markdown source citations', () => {
       <RouteSurfaceActiveContext.Provider value>
         <Markdown
           content={content}
-          citations={citations as CitationSource[] | undefined}
+          citations={bindCitations(citations, content)}
           interactive={interactive}
         />
       </RouteSurfaceActiveContext.Provider>
@@ -156,9 +175,8 @@ describe('Markdown source citations', () => {
       Boolean(entry.url));
 
   it.each(urlIdentity)('keeps a canonical citation URL identical through the renderer ($why)', ({ url, label }) => {
-    const citation = guide({ url, label });
-    const { container } = renderMarkdown(`Cited. ${link(citation)}`, [citation]);
-    const [badge] = badges(container);
+    const { text, citations } = body('Cited. ', guide({ url, label }));
+    const [badge] = badges(renderMarkdown(text, citations).container);
 
     expect(badge).toBeDefined();
     expect(badge.getAttribute('href')).toBe(url);
@@ -215,8 +233,8 @@ describe('Markdown source citations', () => {
   });
 
   it('renders a cited link as a numbered badge that is itself the link', () => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations);
     const [badge] = badges(container);
 
     expect(badge.textContent).toBe('1');
@@ -230,27 +248,20 @@ describe('Markdown source citations', () => {
   });
 
   it('keeps several citations compact and in the order the backend numbered them', () => {
-    const citations = [
-      guide(),
-      guide({ index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com' }),
-    ];
-    const { container } = renderMarkdown(
-      `Two sources. ${link(citations[0])} ${link(citations[1])}`,
-      citations,
-    );
+    const second = guide({
+      index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com',
+    });
+    const { text, citations } = body('Two sources. ', guide(), ' ', second);
+    const { container } = renderMarkdown(text, citations);
 
     expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '2']);
     expect(container.querySelectorAll('a')).toHaveLength(2);
   });
 
   it('leaves a link the agent worded itself as an ordinary anchor', () => {
-    // Same page, different characters, so it is not an occurrence of this
-    // citation's link at all - the backend numbers the citation 1 of 1.
-    const citation = guide();
-    const { container } = renderMarkdown(
-      `See [the web search guide](${GUIDE}) and ${link(citation)}.`,
-      [citation],
-    );
+    // Same page, different characters, and in a range the backend never claimed.
+    const { text, citations } = body(`See [the web search guide](${GUIDE}) and `, guide(), '.');
+    const { container } = renderMarkdown(text, citations);
     const anchors = Array.from(container.querySelectorAll('a'));
 
     expect(anchors.map((anchor) => anchor.textContent)).toEqual(['the web search guide', '1']);
@@ -258,8 +269,8 @@ describe('Markdown source citations', () => {
   });
 
   it('collapses to plain text on a non-interactive surface', () => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation], false);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations, false);
 
     // A badge is an anchor; nested inside a clickable preview row it would be
     // invalid interactive content, so the link text stands in as prose.
@@ -272,8 +283,8 @@ describe('Markdown source citations', () => {
     ['a missing label', { label: undefined }],
     ['an unusable index', { index: Number.NaN }],
   ])('degrades a stored row with %s to the link the text already carries', (_case, over) => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [{ ...citation, ...over }]);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations.map((row) => ({ ...row, ...over })));
     const anchor = container.querySelector('a');
 
     expect(badges(container)).toHaveLength(0);
@@ -282,8 +293,8 @@ describe('Markdown source citations', () => {
   });
 
   it('previews the source title and domain on hover, and offers the page explicitly', () => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations);
 
     fireEvent.pointerOver(badges(container)[0], { pointerType: 'mouse' });
 
@@ -293,8 +304,8 @@ describe('Markdown source citations', () => {
   });
 
   it('reveals the same preview on keyboard focus without moving focus off the link', () => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations);
     const [badge] = badges(container);
 
     // A real focus() rather than a synthetic event: the point of this test is
@@ -308,8 +319,8 @@ describe('Markdown source citations', () => {
   });
 
   it('lets the first tap reveal the preview and the next one follow the link', () => {
-    const citation = guide();
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    const { text, citations } = body('Documented. ', guide());
+    const { container } = renderMarkdown(text, citations);
     const [badge] = badges(container);
 
     fireEvent.pointerDown(badge, { pointerType: 'touch' });
@@ -326,17 +337,17 @@ describe('Markdown source citations', () => {
   // Recognizing one used to mean matching the rendered label back to a sidecar
   // row, which cannot tell that link apart from one the answer's own prose
   // wrote to the same page - and got it wrong in the direction that matters,
-  // since the prose link is the one nobody vouched for. So the row carries
-  // the complete link it wrote plus which of that spelling's literal
-  // occurrences are its own, and the renderer counts the same characters in the
-  // same delivered text.
+  // since the prose link is the one nobody vouched for.
+  //
+  // So the row carries the ranges the backend wrote its links at, in the body
+  // it wrote them into - named by its digest, because a range means nothing
+  // without the version of the text it was counted in. A badge is drawn only on
+  // a link whose parsed position IS one of those ranges, exactly.
   describe('provenance', () => {
     it('leaves a prose link alone even when it is word-for-word the citation', () => {
-      const citation = guide({ occurrences: [2], occurrence_total: 2 });
-      const { container } = renderMarkdown(
-        `See ${link(citation)} first. ${link(citation)}`,
-        [citation],
-      );
+      const citation = guide();
+      const { text, citations } = body('See ', link(citation), ' first. ', citation);
+      const { container } = renderMarkdown(text, citations);
       const anchors = Array.from(container.querySelectorAll('a'));
 
       expect(anchors).toHaveLength(2);
@@ -346,34 +357,47 @@ describe('Markdown source citations', () => {
     });
 
     it('draws a badge on each link one source wrote', () => {
-      const citation = guide({ occurrences: [1, 2], occurrence_total: 2 });
-      const { container } = renderMarkdown(
-        `One. ${link(citation)} Two. ${link(citation)}`,
-        [citation],
-      );
+      const citation = guide();
+      const { text, citations } = body('One. ', citation, ' Two. ', citation);
+      const { container } = renderMarkdown(text, citations);
 
+      expect(citations[0].spans).toHaveLength(2);
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '1']);
     });
 
-    it('counts ordinals per spelling, so another citation between shifts neither', () => {
-      const citations = [
-        guide({ occurrences: [1, 2], occurrence_total: 2 }),
-        guide({ index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com' }),
-      ];
-      const { container } = renderMarkdown(
-        `A. ${link(citations[0])} B. ${link(citations[1])} C. ${link(citations[0])}`,
-        citations,
-      );
+    it('locates each source independently, so one between two others shifts none', () => {
+      const first = guide();
+      const second = guide({
+        index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com',
+      });
+      const { text, citations } = body('A. ', first, ' B. ', second, ' C. ', first);
+      const { container } = renderMarkdown(text, citations);
 
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '2', '1']);
     });
 
-    it('degrades to the plain link when the two sides counted different text', () => {
-      // A total this render disagrees with means the row describes text that is
-      // not what is on screen. The honest answer is the link the reader already
-      // has, not a badge on whichever link landed in that position.
-      const citation = guide({ occurrences: [1], occurrence_total: 3 });
-      const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    it('degrades to the plain link when the body is not the one that was measured', () => {
+      // The ranges still land on real links here - the edit is at the end. What
+      // says they are no longer this body's ranges is the digest, and the honest
+      // answer is the link the reader already has rather than a badge on
+      // whichever link happens to sit in that position now.
+      const { text, citations } = body('Documented. ', guide());
+      const { container } = renderMarkdown(`${text} Edited.`, citations);
+
+      expect(badges(container)).toHaveLength(0);
+      expect(container.querySelector('a')?.getAttribute('href')).toBe(GUIDE);
+    });
+
+    it('draws nothing on a link a range covers only part of', () => {
+      // A range is the WHOLE `[label](url)` the backend wrote. One that starts a
+      // character early describes something that is not a link at all, so it
+      // matches no link - a near miss is not a match.
+      const { text, citations } = body('Documented. ', guide());
+      const [[start, end]] = citations[0].spans;
+      const { container } = renderMarkdown(
+        text,
+        [{ ...citations[0], spans: [[start - 1, end]] }],
+      );
 
       expect(badges(container)).toHaveLength(0);
       expect(container.querySelector('a')?.getAttribute('href')).toBe(GUIDE);
@@ -383,15 +407,13 @@ describe('Markdown source citations', () => {
       ['an image', `![alt](${'https://developers.openai.com/api/docs/guides/tools-web-search'})`],
       ['an autolink', `<${'https://developers.openai.com/api/docs/guides/tools-web-search'}>`],
       ['a reference link', '[dup][k]'],
-    ])('does not count %s, which spells the destination some other way', (_why, decoy) => {
-      // Same page, different characters. Only the exact spelling is counted,
-      // so none of these moves the citation's position - and the backend,
-      // scanning the same text, reaches the same number.
-      const citation = guide();
-      const { container } = renderMarkdown(
-        `${decoy} Shown. ${link(citation)}\n\n[k]: ${GUIDE}`,
-        [citation],
-      );
+    ])('does not badge %s, which spells the destination some other way', (_why, decoy) => {
+      // Same page, different characters, and none of them written by the
+      // backend. An image is not a link, and an autolink and a reference link
+      // are links whose position is their own - never a range the backend
+      // measured, because the backend wrote an inline link.
+      const { text, citations } = body(`${decoy} Shown. `, guide(), `\n\n[k]: ${GUIDE}`);
+      const { container } = renderMarkdown(text, citations);
 
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
     });
@@ -402,17 +424,15 @@ describe('Markdown source citations', () => {
       ['a footnote definition', (l: string) => `[^f]: ${l}`],
       ['a table cell', (l: string) => `| a |\n| - |\n| ${l} |`],
       ['an image alt', (l: string) => `!${l}`],
-    ])('counts the same exact link inside %s, because the backend does too', (_why, wrap) => {
+    ])('is unmoved by the same exact spelling inside %s', (_why, wrap) => {
       // This is the case that used to break: the two sides disagreed about
-      // whether a footnote definition holds a link, the totals diverged, and
-      // the real citation silently lost its badge. Neither side has an opinion
-      // now - both count characters.
-      const citation = guide({ occurrences: [2], occurrence_total: 2 });
-      const { container } = renderMarkdown(
-        `${wrap(link(citation))}\n\nShown. ${link(citation)}`,
-        [citation],
-      );
-      const badged = badges(container);
+      // whether a footnote definition holds a link, their counts diverged, and
+      // the real citation silently lost its badge. Neither side counts anything
+      // now - the backend says where it wrote, and the parser says where this
+      // link is.
+      const citation = guide();
+      const { text, citations } = body(`${wrap(link(citation))}\n\nShown. `, citation);
+      const badged = badges(renderMarkdown(text, citations).container);
 
       expect(badged.map((badge) => badge.textContent)).toEqual(['1']);
       expect(badged[0].getAttribute('href')).toBe(GUIDE);
@@ -420,12 +440,9 @@ describe('Markdown source citations', () => {
 
     it('still recognizes a row persisted before provenance existed', () => {
       // History is a shipped surface: a message stored by an earlier release
-      // has no occurrences to compare, so it keeps the match it was written
-      // for - the exact destination and link text.
-      const { occurrences, occurrence_total, spelling, ...legacy } = guide();
-      void occurrences;
-      void occurrence_total;
-      void spelling;
+      // carries no ranges at all, so it keeps the match it was written for -
+      // the exact destination and link text.
+      const legacy = guide();
       const { container } = renderMarkdown(`Documented. ${link(legacy)}`, [legacy]);
 
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
@@ -442,9 +459,9 @@ describe('Markdown source citations', () => {
       // upgrade, so the ORDINARY link has to reach the page on its own and the
       // badge has to agree with it - same address, whether or not a sidecar
       // ever arrives.
-      const citation = guide({ url, label });
-      const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
-      const plain = renderMarkdown(`Documented. ${link(citation)}`);
+      const { text, citations } = body('Documented. ', guide({ url, label }));
+      const { container } = renderMarkdown(text, citations);
+      const plain = renderMarkdown(text);
       const badged = badges(container)[0].getAttribute('href') as string;
       const ordinary = plain.container.querySelector('a')?.getAttribute('href') as string;
 
@@ -457,11 +474,10 @@ describe('Markdown source citations', () => {
     it('recognizes a citation whose label had to be escaped, and keeps the code after it', () => {
       // The escape is what stops the backtick opening a code span that runs
       // past `](url)` to the next one and takes the link with it.
-      const citation = guide({ label: 'ex`ample.com' });
-      const { container } = renderMarkdown(
-        `Documented. ${link(citation)} and \`code\` prose.`,
-        [citation],
+      const { text, citations } = body(
+        'Documented. ', guide({ label: 'ex`ample.com' }), ' and `code` prose.',
       );
+      const { container } = renderMarkdown(text, citations);
 
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
       expect(container.querySelector('code')?.textContent).toBe('code');
@@ -469,8 +485,8 @@ describe('Markdown source citations', () => {
   });
 
   it('attributes a source whose search returned no title by its domain', () => {
-    const citation = guide({ title: '' });
-    const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
+    const { text, citations } = body('Documented. ', guide({ title: '' }));
+    const { container } = renderMarkdown(text, citations);
 
     fireEvent.pointerOver(badges(container)[0], { pointerType: 'mouse' });
 

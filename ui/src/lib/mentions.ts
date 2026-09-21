@@ -10,6 +10,10 @@
 // the text BEFORE react-markdown sees it (we rewrite markers to mention links),
 // so it never collides with markdown's `<tag>` HTML handling.
 
+// Rewriting a marker moves the text after it, so this pass reports what it
+// changed in the form the citation binding carries its measurements across.
+import type { EditedText, TextEdit } from './citations';
+
 export type AgentReference = {
   kind: 'agent';
   /** Display name — the `vibe agent run --agent <name>` handle and the chip label. */
@@ -65,31 +69,47 @@ function escapeMarkdownLabel(value: string): string {
  * `avibe-mention:` scheme, so the shared `Markdown` renderer can show them as
  * chips via its `a` component map. Session labels use the title from
  * `references` when available, else the raw id.
+ *
+ * A marker becomes a link of a different length, which moves everything after
+ * it — including any source citation the backend measured in this same text.
+ * So each rewrite is reported as a `TextEdit` in the coordinates of `text`,
+ * letting the caller carry those measurements across this pass (see
+ * lib/citations). The rewritten text itself is unchanged by that bookkeeping.
  */
 // Inline code spans and fenced code blocks — markers inside these must render
 // literally (e.g. `` `@<T>` ``), so linkify skips them.
 const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`]*`)/g;
 
-export function linkifyMentions(text: string, references?: MentionReference[]): string {
+export function linkifyMentions(text: string, references?: MentionReference[]): EditedText {
   const sessionTitles = new Map<string, string>();
   for (const ref of references ?? []) {
     if (ref.kind === 'session' && ref.title) sessionTitles.set(ref.session_id, ref.title);
   }
-  const rewrite = (segment: string): string =>
-    segment.replace(MENTION_MARKER_RE, (_full, trigger: string, inner: string) => {
-      if (trigger === '@') {
-        const label = escapeMarkdownLabel(`@${inner}`);
-        return `[${label}](${MENTION_LINK_SCHEME}:agent:${encodeURIComponent(inner)})`;
-      }
-      const label = escapeMarkdownLabel(`#${sessionTitles.get(inner) || inner}`);
-      return `[${label}](${MENTION_LINK_SCHEME}:session:${encodeURIComponent(inner)})`;
+  const edits: TextEdit[] = [];
+  const rewrite = (segment: string, base: number): string =>
+    segment.replace(MENTION_MARKER_RE, (full: string, trigger: string, inner: string, at: number) => {
+      const label = trigger === '@'
+        ? escapeMarkdownLabel(`@${inner}`)
+        : escapeMarkdownLabel(`#${sessionTitles.get(inner) || inner}`);
+      const kind = trigger === '@' ? 'agent' : 'session';
+      const link = `[${label}](${MENTION_LINK_SCHEME}:${kind}:${encodeURIComponent(inner)})`;
+      edits.push({ start: base + at, end: base + at + full.length, inserted: link.length });
+      return link;
     });
   // Split out code spans/blocks (the odd capture-group chunks) and rewrite markers
   // only in the surrounding prose, so marker-shaped text inside code stays literal.
-  return text
+  // The chunks concatenate back to `text`, so a running cursor over them is each
+  // chunk's own offset in the input.
+  let cursor = 0;
+  const rewritten = text
     .split(CODE_SEGMENT_RE)
-    .map((chunk) => (chunk.startsWith('`') ? chunk : rewrite(chunk)))
+    .map((chunk) => {
+      const base = cursor;
+      cursor += chunk.length;
+      return chunk.startsWith('`') ? chunk : rewrite(chunk, base);
+    })
     .join('');
+  return { text: rewritten, edits };
 }
 
 /** Parse an `avibe-mention:<kind>:<value>` href back into its parts. */

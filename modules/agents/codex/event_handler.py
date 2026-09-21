@@ -17,10 +17,11 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
 from core.citations import (
+    CitationBundle,
     CitationSource,
     citation_ref_ids,
     has_citation_markers,
-    resolve_citations,
+    register_citations,
     unresolved_refs,
 )
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -260,7 +261,7 @@ class CodexEventHandler:
         await asyncio.to_thread(self._persist_turn_generated_images, params)
         pending = turn_state.pending_assistant if turn_state else None
         pending_text = pending[0] if pending else None
-        pending_text, citations = await self._resolve_citations(
+        pending_text, citations = await self._register_citations(
             pending_text, params, tracked_request
         )
         result_text = self._append_generated_images(pending_text, params, tracked_request)
@@ -487,41 +488,47 @@ class CodexEventHandler:
         text: str | None,
         thread_id: str,
         request: AgentRequest,
-    ) -> tuple[str | None, list[dict[str, Any]] | None, list[str]]:
-        """Resolve one message's markers and say which refs are still undefined.
+    ) -> tuple[str | None, CitationBundle | None, list[str]]:
+        """Register one message's markers and say which refs are still undefined.
 
         The third value is what a delivery boundary needs: a ref no source has
         been recorded for yet may still be on its way, so the message that cites
         it is not finished. A ref whose source is present but unlinkable is not
         in it - that citation has already reached its final form.
+
+        What comes back is the text with each attributable marker replaced by an
+        opaque token, plus the bundle that writes those tokens out at the end of
+        delivery. This is the last point where the markers mean what they say:
+        every stage after it rewrites the text, and two of those rewrites can
+        splice a marker into existence (see ``core.citations``).
         """
         if not has_citation_markers(text):
             return text, None, []
         refs = citation_ref_ids(text)
         sources = await self._sources_for_thread(thread_id, refs)
-        resolved, citations = resolve_citations(
+        registered, bundle = register_citations(
             text,
             sources,
             unresolved_label=self._t("message.citationUnresolved", request),
         )
-        return resolved, citations or None, unresolved_refs(refs, sources)
+        return registered, bundle, unresolved_refs(refs, sources)
 
-    async def _resolve_citations(
+    async def _register_citations(
         self,
         text: str | None,
         params: dict[str, Any],
         request: AgentRequest,
-    ) -> tuple[str | None, list[dict[str, Any]] | None]:
-        """Rewrite an outgoing message's citation markers into links + sidecar.
+    ) -> tuple[str | None, CitationBundle | None]:
+        """Register an outgoing message's citation markers for delivery.
 
-        Resolution happens at emit time, not when the text arrives, so a search
+        Registration happens at emit time, not when the text arrives, so a search
         result that lands between the message item and the turn completing is
         still available to the message that cites it.
         """
-        resolved, citations, _ = await self._prepare_citations(
+        registered, bundle, _ = await self._prepare_citations(
             text, self._extract_thread_id(params), request
         )
-        return resolved, citations
+        return registered, bundle
 
     async def _narrate(
         self,
@@ -556,7 +563,7 @@ class CodexEventHandler:
         role: str,
         text: str | None,
         parse_mode: str | None,
-        citations: list[dict[str, Any]] | None,
+        citations: CitationBundle | None,
     ) -> None:
         await self._agent.controller.emit_agent_message(
             request.context,

@@ -4,20 +4,43 @@
     {
       "key": "star_host",
       "why": "A host holding Markdown emphasis: the label must read as the host it names, and the address must arrive character for character.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://a*b*.example/x",
+          "title": "Star Host"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [a\\*b\\*.example](https://a*b*.example/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Star Host",
           "url": "https://a*b*.example/x",
           "label": "a*b*.example",
-          "spelling": "[a\\*b\\*.example](https://a*b*.example/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              47
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "eb9ddd8a0ef42c6e11907a0236f56ba62035d47bcdece9c2ccb1c6f4a0869115"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Star Host",
+          "url": "https://a*b*.example/x",
+          "label": "a*b*.example",
+          "spans": [
+            [
+              7,
+              47
+            ]
+          ],
+          "body_sha256": "eb9ddd8a0ef42c6e11907a0236f56ba62035d47bcdece9c2ccb1c6f4a0869115"
         }
       ],
       "web_text": "Cited. [a\\*b\\*.example](https://a*b*.example/x)",
@@ -43,20 +66,43 @@
     {
       "key": "entity_host",
       "why": "A host that spells a character reference once decoded; the reader must see the reference, not whatever it would expand to.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://a%26copy%3B.example/x",
+          "title": "Entity Host"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [a\\&copy;.example](https://a%26copy%3B.example/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Entity Host",
           "url": "https://a%26copy%3B.example/x",
           "label": "a&copy;.example",
-          "spelling": "[a\\&copy;.example](https://a%26copy%3B.example/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              56
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "70d0ad0977951744eecc54b7c52f7b63f7ffd25c80506afab29da20ddc76248e"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Entity Host",
+          "url": "https://a%26copy%3B.example/x",
+          "label": "a&copy;.example",
+          "spans": [
+            [
+              7,
+              56
+            ]
+          ],
+          "body_sha256": "70d0ad0977951744eecc54b7c52f7b63f7ffd25c80506afab29da20ddc76248e"
         }
       ],
       "web_text": "Cited. [a\\&copy;.example](https://a%26copy%3B.example/x)",
@@ -82,20 +128,43 @@
     {
       "key": "underscore_path",
       "why": "Underscores in the path and the query - not CommonMark emphasis, but Slack mrkdwn and Telegram both read them as italics.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/a_b_c?q=_u_&r=1",
+          "title": "Underscores"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [example.com](https://example.com/a_b_c?q=_u_&r=1)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Underscores",
           "url": "https://example.com/a_b_c?q=_u_&r=1",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/a_b_c?q=_u_&r=1)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              57
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "d60ba5fe9949c542b856924a537416a64ba949f88fedbc5da02f54e05e8bd1cc"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Underscores",
+          "url": "https://example.com/a_b_c?q=_u_&r=1",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              57
+            ]
+          ],
+          "body_sha256": "d60ba5fe9949c542b856924a537416a64ba949f88fedbc5da02f54e05e8bd1cc"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/a_b_c?q=_u_&r=1)",
@@ -121,20 +190,43 @@
     {
       "key": "backtick_query",
       "why": "A backtick and an asterisk inside the query string, where a converter that scans destinations rewrites the address itself.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/p?q=%60code%60&r=a*b*",
+          "title": "Query"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [example.com](https://example.com/p?q=%60code%60&r=a*b*)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Query",
           "url": "https://example.com/p?q=%60code%60&r=a*b*",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/p?q=%60code%60&r=a*b*)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              63
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "7e8a6d3c876e54aceccd94efc38b593356a4dca9f42a3b9832f42b33946da0e5"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Query",
+          "url": "https://example.com/p?q=%60code%60&r=a*b*",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              63
+            ]
+          ],
+          "body_sha256": "7e8a6d3c876e54aceccd94efc38b593356a4dca9f42a3b9832f42b33946da0e5"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/p?q=%60code%60&r=a*b*)",
@@ -160,20 +252,43 @@
     {
       "key": "format_chars",
       "why": "A zero-width space in the query, percent-encoded: invisible characters must not silently drop out of an address.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/p?q=a%E2%80%8Bb",
+          "title": "Invisible"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [example.com](https://example.com/p?q=a%E2%80%8Bb)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Invisible",
           "url": "https://example.com/p?q=a%E2%80%8Bb",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/p?q=a%E2%80%8Bb)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              57
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "f10a639c01574e9f9008ec6d8f5f883433c1c1410aea56764e0a1317c4a25bb8"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Invisible",
+          "url": "https://example.com/p?q=a%E2%80%8Bb",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              57
+            ]
+          ],
+          "body_sha256": "f10a639c01574e9f9008ec6d8f5f883433c1c1410aea56764e0a1317c4a25bb8"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/p?q=a%E2%80%8Bb)",
@@ -199,20 +314,43 @@
     {
       "key": "ipv6_port",
       "why": "A literal IPv6 authority with a port. The brackets are reserved authority syntax, and a link nobody can open is not attribution.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://[::1]:8443/x?q=1",
+          "title": "Loopback"
+        }
+      },
       "agent_text": "Cited. citeturn0view0",
-      "delivered": "Cited. [\\[::1\\]](https://[::1]:8443/x?q=1)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Loopback",
           "url": "https://[::1]:8443/x?q=1",
           "label": "[::1]",
-          "spelling": "[\\[::1\\]](https://[::1]:8443/x?q=1)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              42
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "0b2ea3f074161b055c45398217c9c36b6be3340d24a47754b62fbe6062093e99"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Loopback",
+          "url": "https://[::1]:8443/x?q=1",
+          "label": "[::1]",
+          "spans": [
+            [
+              7,
+              42
+            ]
+          ],
+          "body_sha256": "0b2ea3f074161b055c45398217c9c36b6be3340d24a47754b62fbe6062093e99"
         }
       ],
       "web_text": "Cited. [\\[::1\\]](https://[::1]:8443/x?q=1)",
@@ -238,20 +376,43 @@
     {
       "key": "footnote",
       "why": "A GFM footnote definition holding a link to the same page. One renderer reads a link there and the other reads a definition, which is exactly the disagreement that cost the real citation its badge.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Footnoted"
+        }
+      },
       "agent_text": "[^f]: [p](https://example.com/x)\n\nCited. citeturn0view0 [^f]",
-      "delivered": "[^f]: [p](https://example.com/x)\n\nCited. [example.com](https://example.com/x) [^f]",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Footnoted",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              41,
+              77
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "1d358a30bdb3319d4ab2c3ba1c1b9a83765b072976de5a780d01c945912f8532"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Footnoted",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              41,
+              77
+            ]
+          ],
+          "body_sha256": "1d358a30bdb3319d4ab2c3ba1c1b9a83765b072976de5a780d01c945912f8532"
         }
       ],
       "web_text": "[^f]: [p](https://example.com/x)\n\nCited. [example.com](https://example.com/x) [^f]",
@@ -260,12 +421,22 @@
       "files": [],
       "web_anchors": [
         {
+          "label": "p",
+          "url": "https://example.com/x",
+          "cited": false
+        },
+        {
           "label": "example.com",
           "url": "https://example.com/x",
           "cited": true
         }
       ],
       "im_anchors": [
+        {
+          "label": "p",
+          "url": "https://example.com/x",
+          "cited": false
+        },
         {
           "label": "example.com",
           "url": "https://example.com/x",
@@ -277,20 +448,43 @@
     {
       "key": "code_fence",
       "why": "The citation's own exact spelling shown as a code example. It is not a link to any reader, but it is the same characters, and both ends have to count it the same way.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Fenced"
+        }
+      },
       "agent_text": "```\n[example.com](https://example.com/x)\n```\n\nCited. citeturn0view0",
-      "delivered": "```\n[example.com](https://example.com/x)\n```\n\nCited. [example.com](https://example.com/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Fenced",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            2
+          "spans": [
+            [
+              53,
+              89
+            ]
           ],
-          "occurrence_total": 2
+          "body_sha256": "196f4c941cdff7392175738fca699d1fcae22b399f6c2bcebf7dbf96cdf15b25"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Fenced",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              53,
+              89
+            ]
+          ],
+          "body_sha256": "196f4c941cdff7392175738fca699d1fcae22b399f6c2bcebf7dbf96cdf15b25"
         }
       ],
       "web_text": "```\n[example.com](https://example.com/x)\n```\n\nCited. [example.com](https://example.com/x)",
@@ -316,20 +510,43 @@
     {
       "key": "table",
       "why": "The same spelling inside a GFM table cell, where `|` ends a cell and a label that spells one would split the row.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Tabled"
+        }
+      },
       "agent_text": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. citeturn0view0",
-      "delivered": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. [example.com](https://example.com/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Tabled",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            2
+          "spans": [
+            [
+              68,
+              104
+            ]
           ],
-          "occurrence_total": 2
+          "body_sha256": "c8084f3b9db805f5e8185a9e80378e01014d6faf9d298bec207f0e1fa57da81a"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Tabled",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              68,
+              104
+            ]
+          ],
+          "body_sha256": "c8084f3b9db805f5e8185a9e80378e01014d6faf9d298bec207f0e1fa57da81a"
         }
       ],
       "web_text": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. [example.com](https://example.com/x)",
@@ -365,20 +582,43 @@
     {
       "key": "near_html",
       "why": "The same spelling next to inline HTML, which each renderer is free to keep, escape or drop.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Inline HTML"
+        }
+      },
       "agent_text": "Cited. citeturn0view0 <span>[example.com](https://example.com/x)</span>",
-      "delivered": "Cited. [example.com](https://example.com/x) <span>[example.com](https://example.com/x)</span>",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Inline HTML",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              43
+            ]
           ],
-          "occurrence_total": 2
+          "body_sha256": "88379004dd3ee944926328fda72ebabcc25fd1992e0ba5a82f652af6d2d62449"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Inline HTML",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "88379004dd3ee944926328fda72ebabcc25fd1992e0ba5a82f652af6d2d62449"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/x) <span>[example.com](https://example.com/x)</span>",
@@ -414,20 +654,43 @@
     {
       "key": "prose_repeat",
       "why": "The agent points at the cited page in its own prose, before and after, spelled identically. Only the middle one is a citation, and an ordinary link must never be impersonated.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Repeated"
+        }
+      },
       "agent_text": "Background: [example.com](https://example.com/x)\n\nCited. citeturn0view0\n\nAlso [example.com](https://example.com/x)",
-      "delivered": "Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\nAlso [example.com](https://example.com/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Repeated",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            2
+          "spans": [
+            [
+              57,
+              93
+            ]
           ],
-          "occurrence_total": 3
+          "body_sha256": "9a299f42bc345b737f2bfbf872b5138de742155daee254895c7763362f298c95"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Repeated",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              57,
+              93
+            ]
+          ],
+          "body_sha256": "9a299f42bc345b737f2bfbf872b5138de742155daee254895c7763362f298c95"
         }
       ],
       "web_text": "Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\nAlso [example.com](https://example.com/x)",
@@ -473,20 +736,43 @@
     {
       "key": "emoji_prefix",
       "why": "Non-ASCII text before the marker: offsets counted in characters on one side and in UTF-16 units on the other stop agreeing here.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Emoji"
+        }
+      },
       "agent_text": "🔎 出处 citeturn0view0",
-      "delivered": "🔎 出处 [example.com](https://example.com/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Emoji",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              6,
+              42
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "ba197e0279ad263511d1e508d3eb689079a1304d48d722d3ecf245f897c59b19"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Emoji",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              6,
+              42
+            ]
+          ],
+          "body_sha256": "ba197e0279ad263511d1e508d3eb689079a1304d48d722d3ecf245f897c59b19"
         }
       ],
       "web_text": "🔎 出处 [example.com](https://example.com/x)",
@@ -512,20 +798,43 @@
     {
       "key": "silent_strip",
       "why": "A silent control block holding the same spelling. Delivery removes it, so the consumer never counts it - and neither may the producer.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Silent"
+        }
+      },
       "agent_text": "<silent>note to self: [example.com](https://example.com/x)</silent>\nCited. citeturn0view0",
-      "delivered": "<silent>note to self: [example.com](https://example.com/x)</silent>\nCited. [example.com](https://example.com/x)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Silent",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              43
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "c72f94d17bbddfd9039b915493398ecd3903cf39e2cb39cbdd92be4c3d71bf6b"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Silent",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "c72f94d17bbddfd9039b915493398ecd3903cf39e2cb39cbdd92be4c3d71bf6b"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/x)",
@@ -551,20 +860,43 @@
     {
       "key": "file_link",
       "why": "A file:// attachment link in the same reply: IM strips it to a plain label and the workbench keeps it, so the two surfaces get different text and the citation has to survive both.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "With attachment"
+        }
+      },
       "agent_text": "Cited. citeturn0view0\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
-      "delivered": "Cited. [example.com](https://example.com/x)\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "With attachment",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              43
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "3f9c32506f24ea62a4396ba0fc4cbfc5272ee30ef04d00c740eb757321e0d02d"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "With attachment",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "f68ec6e8a1d71f8934f8fd3569c471916996ff250c7a695ae718849d29bd1095"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/x)\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
@@ -595,20 +927,43 @@
     {
       "key": "quick_replies",
       "why": "A trailing quick-reply block, which delivery strips from the body on both surfaces.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "With buttons"
+        }
+      },
       "agent_text": "Cited. citeturn0view0\n\n---\n[👌 继续] | [✅ 完成]",
-      "delivered": "Cited. [example.com](https://example.com/x)\n\n---\n[👌 继续] | [✅ 完成]",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "With buttons",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              7,
+              43
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "c72f94d17bbddfd9039b915493398ecd3903cf39e2cb39cbdd92be4c3d71bf6b"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "With buttons",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "c72f94d17bbddfd9039b915493398ecd3903cf39e2cb39cbdd92be4c3d71bf6b"
         }
       ],
       "web_text": "Cited. [example.com](https://example.com/x)",
@@ -637,20 +992,43 @@
     {
       "key": "marker_shaped",
       "why": "The workbench rewrites `$<NAME>` into a secure-input card and `@<…>`/`#<…>` into chips by editing the source text before Markdown parses it - so a reply carrying those markers, and a source address spelled like one, is where an inserted card could move or swallow the link the producer counted.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/p?q=$<openAiKey>&a=@<claude>",
+          "title": "Marker Shaped"
+        }
+      },
       "agent_text": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. citeturn0view0",
-      "delivered": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. [example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "Marker Shaped",
           "url": "https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              71,
+              142
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "6513e2bd02eb906da3150bbe37b8314b6ccc000a25c128d78abc37660b82017e"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Marker Shaped",
+          "url": "https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E",
+          "label": "example.com",
+          "spans": [
+            [
+              71,
+              142
+            ]
+          ],
+          "body_sha256": "6513e2bd02eb906da3150bbe37b8314b6ccc000a25c128d78abc37660b82017e"
         }
       ],
       "web_text": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. [example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
@@ -676,20 +1054,31 @@
     {
       "key": "multi_source",
       "why": "Two sources in one reply, each with its own index and its own spelling.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "First"
+        },
+        "turn0view1": {
+          "url": "https://a*b*.example/y",
+          "title": "Second"
+        }
+      },
       "agent_text": "First citeturn0view0, second citeturn0view1.",
-      "delivered": "First [example.com](https://example.com/x), second [a\\*b\\*.example](https://a*b*.example/y).",
-      "citations": [
+      "web_citations": [
         {
           "index": 1,
           "ref_id": "turn0view0",
           "title": "First",
           "url": "https://example.com/x",
           "label": "example.com",
-          "spelling": "[example.com](https://example.com/x)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              6,
+              42
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "692dd53dbdc2ece7fa2bde05c6b8b321828f02f51586299c27df55c1b75e1b02"
         },
         {
           "index": 2,
@@ -697,11 +1086,43 @@
           "title": "Second",
           "url": "https://a*b*.example/y",
           "label": "a*b*.example",
-          "spelling": "[a\\*b\\*.example](https://a*b*.example/y)",
-          "occurrences": [
-            1
+          "spans": [
+            [
+              51,
+              91
+            ]
           ],
-          "occurrence_total": 1
+          "body_sha256": "692dd53dbdc2ece7fa2bde05c6b8b321828f02f51586299c27df55c1b75e1b02"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "First",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              6,
+              42
+            ]
+          ],
+          "body_sha256": "692dd53dbdc2ece7fa2bde05c6b8b321828f02f51586299c27df55c1b75e1b02"
+        },
+        {
+          "index": 2,
+          "ref_id": "turn0view1",
+          "title": "Second",
+          "url": "https://a*b*.example/y",
+          "label": "a*b*.example",
+          "spans": [
+            [
+              51,
+              91
+            ]
+          ],
+          "body_sha256": "692dd53dbdc2ece7fa2bde05c6b8b321828f02f51586299c27df55c1b75e1b02"
         }
       ],
       "web_text": "First [example.com](https://example.com/x), second [a\\*b\\*.example](https://a*b*.example/y).",
@@ -735,11 +1156,208 @@
       "anchors_exhaustive": true
     },
     {
+      "key": "splice",
+      "why": "Stripping a silent block splices two ordinary halves into characters that read as a citation marker. Only the first marker here was ever one, and the delivered text has to say so.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Spliced"
+        }
+      },
+      "agent_text": "Actual. citeturn0view0\n\nSynthetic. ci<silent>private</silent>teturn0view0",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Spliced",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              8,
+              44
+            ]
+          ],
+          "body_sha256": "9bcdee138d4e0ae2e733ea5a2a7607cfcc01a34530a64595bd20d8bc11cc8a07"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Spliced",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              8,
+              44
+            ]
+          ],
+          "body_sha256": "9bcdee138d4e0ae2e733ea5a2a7607cfcc01a34530a64595bd20d8bc11cc8a07"
+        }
+      ],
+      "web_text": "Actual. [example.com](https://example.com/x)\n\nSynthetic. citeturn0view0",
+      "im_text": "Actual. [example.com](https://example.com/x)\n\nSynthetic. citeturn0view0",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "file_delete_splice",
+      "why": "Two deletions that cancel out. Removing the attachment link to its label and removing the silent block leave characters that read as a marker on IM and do not on the workbench - one reply, two bodies, and a marker shape that was never in the input either was.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Cancelled out"
+        }
+      },
+      "agent_text": "Actual. citeturn0view0\n\nSynthetic. ci[te](file:///tmp/avibe-citation-bridge/report.txt)turn0view0<silent>note</silent>",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Cancelled out",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              8,
+              44
+            ]
+          ],
+          "body_sha256": "a7de4b71ffbc3a7224deb9ec92a71756eb37e011afa62a2469d98c9d1d0c66a3"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Cancelled out",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              8,
+              44
+            ]
+          ],
+          "body_sha256": "9bcdee138d4e0ae2e733ea5a2a7607cfcc01a34530a64595bd20d8bc11cc8a07"
+        }
+      ],
+      "web_text": "Actual. [example.com](https://example.com/x)\n\nSynthetic. ci[te](file:///tmp/avibe-citation-bridge/report.txt)turn0view0",
+      "im_text": "Actual. [example.com](https://example.com/x)\n\nSynthetic. citeturn0view0",
+      "quick_replies": [],
+      "files": [
+        {
+          "label": "te",
+          "path": "/tmp/avibe-citation-bridge/report.txt"
+        }
+      ],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "file_link_above",
+      "why": "A file:// attachment above the citation: IM flattens it to a label and the workbench keeps it, so one reply puts the same citation at two different offsets and each body needs its own measurement.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/x",
+          "title": "Shifted"
+        }
+      },
+      "agent_text": "[report](file:///tmp/avibe-citation-bridge/report.txt)\n\nCited. citeturn0view0",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Shifted",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              63,
+              99
+            ]
+          ],
+          "body_sha256": "630a79407e8e7ea5926302abc0ebb12a6791dc904d3d8fba51a97cf9ee209225"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Shifted",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spans": [
+            [
+              15,
+              51
+            ]
+          ],
+          "body_sha256": "97bace9967a0f0f9bada602b695161fa12d57fa0696453b7323220e2a68e7b3b"
+        }
+      ],
+      "web_text": "[report](file:///tmp/avibe-citation-bridge/report.txt)\n\nCited. [example.com](https://example.com/x)",
+      "im_text": "report\n\nCited. [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [
+        {
+          "label": "report",
+          "path": "/tmp/avibe-citation-bridge/report.txt"
+        }
+      ],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
       "key": "unresolved",
       "why": "A marker naming a source the backend never captured. It degrades to a visible label rather than vanishing, and writes no sidecar row.",
+      "sources": {},
       "agent_text": "Claimed. citeturn0view0",
-      "delivered": "Claimed. (source unavailable)",
-      "citations": [],
+      "web_citations": [],
+      "im_citations": [],
       "web_text": "Claimed. (source unavailable)",
       "im_text": "Claimed. (source unavailable)",
       "quick_replies": [],
@@ -747,6 +1365,192 @@
       "web_anchors": [],
       "im_anchors": [],
       "anchors_exhaustive": true
+    }
+  ],
+  "rows": [
+    {
+      "key": "im_row_with_footer",
+      "why": "An ordinary IM transcript row. The dispatcher folds the footer into the stored body and stores it structured as well, so the Web reader removes a trailing range before rendering - the case where adding a body digest could have cost every IM row its badge.",
+      "platform": "slack",
+      "type": "result",
+      "row": {
+        "type": "result",
+        "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\n✅ ⏱️ 5s · 🪙 1.2k tok",
+        "content": {
+          "kind": "result",
+          "result_footer": "✅ ⏱️ 5s · 🪙 1.2k tok",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  60,
+                  96
+                ]
+              ],
+              "body_sha256": "667f719a1b5f9adc6002fb8b5f12b73441a6c0256bf2065accffbbfcfe7f3c2c"
+            }
+          ],
+          "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\n✅ ⏱️ 5s · 🪙 1.2k tok"
+        }
+      }
+    },
+    {
+      "key": "im_row_without_footer",
+      "why": "The same row with nothing to strip: the body the ranges were measured in is the body the renderer is handed.",
+      "platform": "slack",
+      "type": "result",
+      "row": {
+        "type": "result",
+        "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
+        "content": {
+          "kind": "result",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  60,
+                  96
+                ]
+              ],
+              "body_sha256": "222df127c10b93d7f38a3bf37a27695e91c6c8add0d8b1617fb90f69ed56143a"
+            }
+          ],
+          "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
+        }
+      }
+    },
+    {
+      "key": "workbench_row_with_footer",
+      "why": "The workbench stores a clean body and its footer apart, so the same reply reaches the same reader through a different split.",
+      "platform": "avibe",
+      "type": "result",
+      "row": {
+        "type": "result",
+        "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
+        "content": {
+          "kind": "result",
+          "result_footer": "✅ ⏱️ 2m 24s",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  60,
+                  96
+                ]
+              ],
+              "body_sha256": "222df127c10b93d7f38a3bf37a27695e91c6c8add0d8b1617fb90f69ed56143a"
+            }
+          ],
+          "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
+        }
+      }
+    },
+    {
+      "key": "activity_row",
+      "why": "An interim narration row, which the activity card renders verbatim - no footer, no split, and its own consumer.",
+      "platform": "avibe",
+      "type": "assistant",
+      "row": {
+        "type": "assistant",
+        "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
+        "content": {
+          "kind": "assistant",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  60,
+                  96
+                ]
+              ],
+              "body_sha256": "222df127c10b93d7f38a3bf37a27695e91c6c8add0d8b1617fb90f69ed56143a"
+            }
+          ],
+          "text": "🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
+        }
+      }
+    },
+    {
+      "key": "workbench_row_rewritten_and_carded",
+      "why": "Every transform a stored row can stack, in the order they happen and all of them above the citation: an attachment link is rewritten to the media proxy before the sidecar is measured, a footer is folded in and stripped back out by the reader, and a `$<NAME>` marker becomes a secure-input card as the reader renders it. Each one moves the citation, and only one of them was measured by the backend.",
+      "platform": "avibe",
+      "type": "result",
+      "row": {
+        "type": "result",
+        "text": "[report](/api/media/MKWtZiWqmgcUMlkmBsaNXQ)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
+        "content": {
+          "kind": "result",
+          "result_footer": "✅ ⏱️ 2m 24s",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  134,
+                  170
+                ]
+              ],
+              "body_sha256": "994ecb9c0616b67ad8fdf308f7fd9170ed745e904f6e80d82387a2bb4299d172"
+            }
+          ],
+          "text": "[report](/api/media/MKWtZiWqmgcUMlkmBsaNXQ)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
+        }
+      }
+    },
+    {
+      "key": "im_row_flattened_carded_and_folded",
+      "why": "The same reply down the IM path, where the transforms stack differently: the attachment is flattened to a bare label instead of a proxy link, and the footer is folded into the stored body. So the reader runs two edits over one body - a trailing strip and an inserted secure-input card above the citation - and the badge has to survive their composition.",
+      "platform": "slack",
+      "type": "result",
+      "row": {
+        "type": "result",
+        "text": "report\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\n✅ ⏱️ 5s",
+        "content": {
+          "kind": "result",
+          "result_footer": "✅ ⏱️ 5s",
+          "citations": [
+            {
+              "index": 1,
+              "ref_id": "turn0view0",
+              "title": "Cited page",
+              "url": "https://example.com/x",
+              "label": "example.com",
+              "spans": [
+                [
+                  97,
+                  133
+                ]
+              ],
+              "body_sha256": "257292188fb8f7f9721c283a12b2b9f6c56c41cde67b8e1159303fcfa94bd5df"
+            }
+          ],
+          "text": "report\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\n✅ ⏱️ 5s"
+        }
+      }
     }
   ]
 }

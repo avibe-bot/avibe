@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from sqlalchemy.exc import IntegrityError
 
+from core.citations import CitationBundle, finalize_citations, materialize_citations
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
@@ -290,7 +291,7 @@ def persist_agent_message(
     *,
     quick_replies: Optional[list[str]] = None,
     result_footer: Optional[str] = None,
-    citations: Optional[list[dict[str, Any]]] = None,
+    citations: Optional[CitationBundle] = None,
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
     error_sink: Optional[list] = None,
@@ -367,7 +368,9 @@ def persist_agent_message(
                     platform=context.platform,
                     event_type="tool_call",
                     visibility="trace",
-                    text=text,
+                    # A trace row carries text and no sidecar, so its copy is
+                    # written here rather than finalized with spans.
+                    text=materialize_citations(text, citations) or text,
                     content={"kind": canonical_type or "tool_call"},
                     metadata={"canonical_type": canonical_type or "tool_call"},
                     agent_name=agent_name,
@@ -396,6 +399,13 @@ def persist_agent_message(
                         )
                     except Exception:
                         logger.exception("persist_agent_message: media rewrite failed")
+                # The last transform this body will see has now run, so this is
+                # where the registered citations become links and the sidecar is
+                # measured. Doing it any earlier would bind spans to a body the
+                # reader never gets: the media rewrite above changes the text
+                # around them, and on IM the delivered copy was truncated or
+                # split from a different string altogether.
+                text, citation_rows = finalize_citations(text, citations)
                 content: Optional[dict] = {"kind": canonical_type} if canonical_type else None
                 # Quick-reply buttons (avibe result): the trailing ``---\n[label]…``
                 # block was already parsed + stripped upstream; carry the labels in
@@ -412,8 +422,8 @@ def persist_agent_message(
                 # every surface reads correctly without this; the structured copy is
                 # what lets the Web transcript render compact source badges, and it
                 # survives reload because it lives on the row, not in the delivery.
-                if citations:
-                    content = {**(content or {}), "citations": list(citations)}
+                if citation_rows:
+                    content = {**(content or {}), "citations": citation_rows}
                 appended_row = _append_quietly(
                     conn,
                     scope_id=scope_id,

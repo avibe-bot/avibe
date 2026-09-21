@@ -17,7 +17,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core.citations import CitationSource, resolve_citations
+from core.citations import (
+    CitationSource,
+    finalize_citations,
+    materialize_citations,
+    register_citations,
+    resolve_citations,
+)
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from modules.im import MessageContext
 from modules.im.formatters.avibe_formatter import AvibeFormatter
@@ -30,16 +36,22 @@ from tests.test_message_dispatcher_platform_limits import _StubController
 
 URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
 LINK = f"[developers.openai.com]({URL})"
-CITED = f"Native web search is documented. {LINK}"
-CITATIONS = [
-    {
-        "index": 1,
-        "ref_id": "turn0view0",
-        "title": "Web search - OpenAI API",
-        "url": URL,
-        "label": "developers.openai.com",
-    }
-]
+ANSWER = "Native web search is documented."
+CITED = f"{ANSWER} {LINK}"
+MARKER = "\ue200cite\ue202turn0view0\ue201"
+SOURCE = CitationSource(ref_id="turn0view0", title="Web search - OpenAI API", url=URL)
+
+
+def cited(text: str = f"{ANSWER}{MARKER}"):
+    """A registered answer and its bundle, exactly as the backend hands them on.
+
+    What travels through delivery is an opaque token, not the link: every
+    surface below is measured on what it makes of that, which is the only way
+    a test can see a surface leak one or write the wrong body.
+    """
+    return register_citations(
+        text, {SOURCE.ref_id: SOURCE}, unresolved_label="(source unavailable)"
+    )
 
 
 class CitationDeliveryTests(unittest.IsolatedAsyncioTestCase):
@@ -52,9 +64,10 @@ class CitationDeliveryTests(unittest.IsolatedAsyncioTestCase):
         return controller.im_client.sent, persist
 
     async def test_every_platform_receives_the_links_and_never_the_sidecar(self):
+        registered, bundle = cited()
         for platform in ("slack", "telegram", "discord", "lark", "wechat"):
             with self.subTest(platform=platform):
-                sent, _ = await self.deliver(platform, CITED, citations=CITATIONS)
+                sent, _ = await self.deliver(platform, registered, citations=bundle)
 
                 delivered = "".join(text for _, _, text, _ in sent)
                 self.assertEqual(delivered, CITED)
@@ -62,10 +75,16 @@ class CitationDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("turn0view0", delivered)
 
     async def test_the_sidecar_reaches_persistence(self):
-        _, persist = await self.deliver("slack", CITED, citations=CITATIONS)
+        registered, bundle = cited()
+        _, persist = await self.deliver("slack", registered, citations=bundle)
 
         persist.assert_called_once()
-        self.assertEqual(persist.call_args.kwargs["citations"], CITATIONS)
+        # The body is persisted still holding its tokens: the mirror writes the
+        # links and measures the spans after the last transform it will see.
+        self.assertIs(persist.call_args.kwargs["citations"], bundle)
+        body, citations = finalize_citations(persist.call_args.args[2], bundle)
+        self.assertEqual(body, CITED)
+        self.assertEqual([c["url"] for c in citations], [URL])
 
     async def test_an_uncited_answer_still_persists_without_a_sidecar(self):
         _, persist = await self.deliver("slack", "Plain answer.")
@@ -77,21 +96,30 @@ class CitationDeliveryTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController("wechat", max_bytes=1900)
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(user_id="wechat-user", channel_id="wechat-user", platform="wechat")
-        long_text = f"{'详' * 1200}\n\n{CITED}\n\n{'细' * 1200}"
+        registered, bundle = cited(f"{'详' * 1200}\n\n{ANSWER}{MARKER}\n\n{'细' * 1200}")
+        long_text = materialize_citations(registered, bundle)
 
         with mock.patch("core.message_dispatcher.persist_agent_message"):
-            await dispatcher.emit_agent_message(context, "result", long_text, citations=CITATIONS)
+            await dispatcher.emit_agent_message(
+                context, "result", registered, citations=bundle
+            )
             with_sidecar = [text for _, _, text, _ in controller.im_client.sent]
             controller.im_client.sent.clear()
             await dispatcher.emit_agent_message(context, "result", long_text)
             without_sidecar = [text for _, _, text, _ in controller.im_client.sent]
 
+        # A token is shorter than the link it stands for, so chunking it would
+        # split the answer somewhere else: the links are written before the
+        # body is measured, and the two runs come out identical.
         self.assertGreater(len(with_sidecar), 1)
         self.assertEqual(with_sidecar, without_sidecar)
         self.assertEqual("".join(with_sidecar), long_text)
 
     async def test_the_declared_parse_mode_is_untouched(self):
-        sent, _ = await self.deliver("slack", CITED, parse_mode="markdown", citations=CITATIONS)
+        registered, bundle = cited()
+        sent, _ = await self.deliver(
+            "slack", registered, parse_mode="markdown", citations=bundle
+        )
 
         self.assertEqual([parse_mode for _, _, _, parse_mode in sent], ["markdown"])
 

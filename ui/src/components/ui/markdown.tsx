@@ -14,8 +14,11 @@ import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { CitationBadge } from '@/components/ui/citation-badge';
 import {
   findCitation,
-  remarkCitationOccurrences,
-  type CitationSource,
+  remapCitations,
+  remarkCitationSpans,
+  type CitationBinding,
+  type EditedText,
+  type TextEdit,
 } from '@/lib/citations';
 import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
@@ -56,27 +59,38 @@ const SECRET_REQUEST_RE = /\$<([A-Za-z_][A-Za-z0-9_]*)>/g;
 const CODE_SPAN_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
 const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 
-function linkifySecretRequests(text: string): string {
-  if (!text.includes('$<')) return text;
+// Like ``linkifyMentions``, this replaces marker text with a link of a different
+// length, so it reports each replacement in the coordinates of its input — that
+// is what lets a citation measured against this text survive the pass.
+function linkifySecretRequests(text: string): EditedText {
+  const edits: TextEdit[] = [];
+  if (!text.includes('$<')) return { text, edits };
   // Within a non-fenced/non-inline-code segment, still skip indented code lines.
-  const rewrite = (segment: string) =>
-    segment
+  const rewrite = (segment: string, base: number) => {
+    let at = base;
+    return segment
       .split('\n')
-      .map((line) =>
-        INDENTED_CODE_LINE_RE.test(line)
-          ? line
-          : line.replace(SECRET_REQUEST_RE, (_m, name) => `[${name}](${SECRET_LINK_SCHEME}:${name})`),
-      )
+      .map((line) => {
+        const lineAt = at;
+        at += line.length + 1; // the newline ``split`` consumed
+        if (INDENTED_CODE_LINE_RE.test(line)) return line;
+        return line.replace(SECRET_REQUEST_RE, (marker: string, name: string, offset: number) => {
+          const card = `[${name}](${SECRET_LINK_SCHEME}:${name})`;
+          edits.push({ start: lineAt + offset, end: lineAt + offset + marker.length, inserted: card.length });
+          return card;
+        });
+      })
       .join('\n');
+  };
   // Partition on code spans; rewrite only the non-code segments (code stays verbatim).
   let result = '';
   let last = 0;
   CODE_SPAN_RE.lastIndex = 0;
   for (let m = CODE_SPAN_RE.exec(text); m; m = CODE_SPAN_RE.exec(text)) {
-    result += rewrite(text.slice(last, m.index)) + m[0];
+    result += rewrite(text.slice(last, m.index), last) + m[0];
     last = m.index + m[0].length;
   }
-  return result + rewrite(text.slice(last));
+  return { text: result + rewrite(text.slice(last), last), edits };
 }
 
 // The visible text of a rendered link, flattened back to a string. Only a
@@ -223,12 +237,14 @@ export const Markdown: React.FC<{
    *  or quoted text could mint an "agent asked for this secret" card that creates a vault
    *  secret on click. */
   secretRequests?: boolean;
-  /** Citation sidecar — when present, a link this renderer can match against it
-   *  renders as a compact numbered source badge instead of a bare domain link
-   *  (see lib/citations). ONLY the agent-reply surface sets this: the badge is an
+  /** Citation binding — the sidecar already read against the exact text this
+   *  renderer is handed (`bindCitations`, then `remapCitations` through whatever
+   *  the caller cut out of the stored row). The links it names render as compact
+   *  numbered source badges instead of bare domain links; everything else stays
+   *  an ordinary link. ONLY the agent-reply surface passes one: the badge is an
    *  attribution claim, so a user bubble or a quoted preview must not be able to
    *  mint one. The text already reads correctly without it. */
-  citations?: CitationSource[];
+  citations?: CitationBinding | null;
   /** Agent-reply opt-in: `/abs/path` and `./relative/path` Markdown links open
    *  in Avibe's Editor. Relative paths resolve from the owning Session workdir. */
   localFileWorkdir?: string | null;
@@ -251,10 +267,39 @@ export const Markdown: React.FC<{
   onOpenLocalFile,
   readOnly = false,
 }) => {
+  // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees
+  // them, and only when a sidecar is present — agent replies (no references) skip
+  // this so their code spans are never touched. The links render as chips via the
+  // `a` map. Secret `$<NAME>` markers are rewritten too, but only on the agent-reply
+  // surface (secretRequests) — user bubbles / previews / docs keep them as plain text.
+  //
+  // Both are replacements, so both move the text after them. The caller measured
+  // its citations against `content`; each pass hands back what it changed, and the
+  // binding is carried through in the same order the passes ran, so what finally
+  // reaches ReactMarkdown is a binding stated in the coordinates of the text
+  // ReactMarkdown is parsing. A pass that edited into a citation's own link drops
+  // that citation rather than letting the badge land on rewritten characters.
+  const prepared = React.useMemo(() => {
+    let text = content;
+    let binding = citations ?? null;
+    if (references && references.length) {
+      const pass = linkifyMentions(text, references);
+      text = pass.text;
+      binding = remapCitations(binding, pass.edits);
+    }
+    if (secretRequests) {
+      const pass = linkifySecretRequests(text);
+      text = pass.text;
+      binding = remapCitations(binding, pass.edits);
+    }
+    return { text, binding };
+  }, [content, references, secretRequests, citations]);
+
   // The citation annotation is only ever read back on the surface that renders
   // badges, so the walk that writes it is attached only there — every other
-  // markdown surface parses exactly what it parsed before.
-  const annotateCitations = interactive && !!citations?.length;
+  // markdown surface parses exactly what it parsed before. A legacy row needs no
+  // annotation: it is matched on the link's own spelling, not on where it sits.
+  const annotateCitations = interactive && !!prepared.binding?.bound.length;
 
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
   // ReactMarkdown keys its rendered tree on the component functions it is handed;
@@ -273,7 +318,7 @@ export const Markdown: React.FC<{
       remarkGfm,
       remarkCjkFriendly,
       ...(softBreaks ? [remarkBreaks] : []),
-      ...(annotateCitations ? [remarkCitationOccurrences] : []),
+      ...(annotateCitations ? [remarkCitationSpans] : []),
     ],
     [softBreaks, annotateCitations],
   );
@@ -331,7 +376,7 @@ export const Markdown: React.FC<{
         // row — the ``!interactive`` branch below already renders the plain
         // domain text, which still attributes the source.
         const citation = interactive
-          ? findCitation(citations, node, url, linkText(children))
+          ? findCitation(prepared.binding, node, url, linkText(children))
           : null;
         if (citation) return <CitationBadge citation={citation} />;
         if (interactive && url && isProxyMediaUrl(url)) {
@@ -399,16 +444,9 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive, secretRequests, citations, readOnly, localFileWorkdir, onOpenLocalFile],
+    [interactive, secretRequests, prepared.binding, readOnly, localFileWorkdir, onOpenLocalFile],
   );
 
-  // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees
-  // them, and only when a sidecar is present — agent replies (no references) skip
-  // this so their code spans are never touched. The links render as chips via the
-  // `a` map. Secret `$<NAME>` markers are rewritten too, but only on the agent-reply surface
-  // (secretRequests) — user bubbles / previews / docs keep them as plain text.
-  let rendered = references && references.length ? linkifyMentions(content, references) : content;
-  if (secretRequests) rendered = linkifySecretRequests(rendered);
   const urlTransform = (url: string) => mentionUrlTransform(url, Boolean(onOpenLocalFile));
   return (
     <div className={cn('vr-markdown', className)}>
@@ -417,7 +455,7 @@ export const Markdown: React.FC<{
         components={components}
         urlTransform={urlTransform}
       >
-        {rendered}
+        {prepared.text}
       </ReactMarkdown>
     </div>
   );

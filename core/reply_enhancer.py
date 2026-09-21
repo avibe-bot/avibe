@@ -155,13 +155,20 @@ def _capture_file_link_rule(rule, *, is_image: bool):
 
 
 def _capture_inline_link(rule):
-    """Wrap the CommonMark link rule and record the destination it accepted."""
+    """Wrap the CommonMark link rule and record the whole unit it accepted.
+
+    A link is one thing to a reader: a label to tap and an address the tap
+    goes to. Recording only the address leaves the brackets around it for
+    someone else's parser to pair up, so the label and the offset just past
+    the closing ``)`` are recorded with it.
+    """
 
     def capture(state: StateInline, silent: bool) -> bool:
         start = state.pos
         matched = rule(state, silent)
         if not matched or silent:
             return matched
+        end = state.pos
         label_end = state.md.helpers.parseLinkLabel(state, start, True)
         pos = label_end + 1
         if label_end < 0 or pos >= state.posMax or state.src[pos] != "(":
@@ -180,7 +187,15 @@ def _capture_inline_link(rule):
         )
         if destination.ok:
             state.env.setdefault(_LINK_CAPTURES_KEY, []).append(
-                (start, pos, destination.pos, destination.str)
+                (
+                    start,
+                    end,
+                    start + 1,
+                    label_end,
+                    pos,
+                    destination.pos,
+                    destination.str,
+                )
             )
         return matched
 
@@ -970,25 +985,78 @@ class InlineLink:
     """One CommonMark inline link, located in the source that spells it."""
 
     start: int  # source offset of the opening ``[``
+    end: int  # source offset just past the closing ``)``
+    label_start: int  # source offset the label text begins at
+    label_end: int  # source offset just past the label text
     destination_start: int  # source offset the destination begins at
     destination_end: int  # source offset just past the destination
     destination: str  # the destination a Markdown reader resolves
 
 
+def _unclaimed_line_ranges(
+    text: str,
+    inline_ranges: List[Tuple[int, int, str]],
+    code_ranges: List[Tuple[int, int]],
+) -> List[Tuple[int, int, str]]:
+    """Lines no inline-capable block claimed, offered one at a time.
+
+    CommonMark hands some lines to no inline parser at all: a link reference
+    definition is swallowed whole by the block parser, and an HTML block is
+    passed through as raw source. The Web renderer shows what its own parser
+    makes of those, but the IM converters downstream are line scanners that
+    read a link wherever the characters appear -- Slack's turned a footnote
+    definition's address into a link to a different site -- so a consumer that
+    has to protect a link has to be able to see one there.
+
+    Reading those lines individually is exactly the resolution the consumer
+    reads them at. Lines a code block owns stay out: a fenced example is not a
+    link on any surface, and that is the behaviour it already has. Lines a
+    block already claimed stay out too, so a code span written across two of
+    them is still one code span -- reading each line alone would find a link
+    inside it that no reader is shown.
+    """
+    claimed = [(start, end) for start, end, _content in inline_ranges]
+    claimed.extend(code_ranges)
+    unclaimed: List[Tuple[int, int, str]] = []
+    line_start = 0
+    bounds = [
+        (match.start(), match.end()) for match in re.finditer(r"\r\n|\r|\n", text)
+    ]
+    bounds.append((len(text), len(text)))
+    for line_end, next_start in bounds:
+        line = text[line_start:line_end]
+        if "](" in line and not any(
+            start <= line_start and line_end <= end for start, end in claimed
+        ):
+            unclaimed.append((line_start, line_end, line))
+        line_start = next_start
+    return unclaimed
+
+
 def inline_links(text: str) -> List[InlineLink]:
-    """Locate every CommonMark inline link, destination span included.
+    """Locate every CommonMark inline link, whole unit included.
 
     The destination is the one a Markdown reader resolves, so a backslash
     escape or a character reference spelled inside it reads the same here as it
-    does in the browser; the span is where that destination was written, which
-    is what a platform pass needs in order to leave it alone. Reference links
-    are left out on purpose: they spell no destination of their own.
+    does in the browser, and a title is left out of it because it is not part
+    of the address. The spans are where that link was written, which is what a
+    platform pass needs in order to re-spell it in its own dialect. Reference
+    links are left out on purpose: they spell no destination of their own.
+
+    The scan covers the blocks CommonMark parses inline plus the lines it hands
+    to nobody, so a link written in a footnote definition or an HTML block is
+    found -- see ``_unclaimed_line_ranges``. The two overlap nowhere, and what
+    comes back is sorted and non-overlapping, so a caller may splice on these
+    offsets in one pass.
     """
     if not text or "](" not in text:
         return []
-    _, inline_ranges, _ = _markdown_block_ranges(text)
+    code_ranges, inline_ranges, _ = _markdown_block_ranges(text)
     links: List[InlineLink] = []
-    for source_start, source_end, content in inline_ranges:
+    for source_start, source_end, content in (
+        *inline_ranges,
+        *_unclaimed_line_ranges(text, inline_ranges, code_ranges),
+    ):
         env: dict = {}
         _LINK_MARKDOWN.inline.parse(content, _LINK_MARKDOWN, env, [])
         captures = env.get(_LINK_CAPTURES_KEY)
@@ -1000,15 +1068,23 @@ def inline_links(text: str) -> List[InlineLink]:
             source_end,
             content,
         )
-        for relative_start, relative_open, relative_close, destination in captures:
-            start = offsets.get(relative_start)
-            open_at = offsets.get(relative_open)
-            close_at = offsets.get(relative_close)
-            if start is None or open_at is None or close_at is None:
+        for capture in captures:
+            located = [offsets.get(relative) for relative in capture[:-1]]
+            if any(offset is None for offset in located):
                 continue
-            links.append(InlineLink(start, open_at, close_at, destination))
+            links.append(InlineLink(*located, capture[-1]))
     links.sort(key=lambda link: link.start)
-    return links
+    spliceable: List[InlineLink] = []
+    cursor = 0
+    for link in links:
+        # Nested links cannot happen in CommonMark, but a capture that mapped
+        # back to an overlapping span would splice the text twice; skipping is
+        # the one behaviour that always leaves the source readable.
+        if link.start < cursor:
+            continue
+        spliceable.append(link)
+        cursor = link.end
+    return spliceable
 
 
 def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:

@@ -56,27 +56,86 @@ blob with no way to reach the page the answer is based on.
   claim, so recognizing one is a provenance question rather than a text
   question: an answer may word its own sentence around the same page, and that
   link is the one nobody vouched for. Matching a rendered label back to a
-  sidecar row cannot tell the two apart, so the row carries the answer instead
-  — `spelling` is the complete Markdown link the rewrite wrote, character for
-  character, `occurrences` is which of that spelling's literal occurrences in
-  the delivered text are its own, and `occurrence_total` is how many the backend
-  counted. The renderer counts the same characters in the same text and upgrades
-  only a link whose source span IS one of them. Counting a literal substring is
-  the one measurement two Markdown implementations cannot disagree about, and
-  counting parsed links did disagree: a GFM footnote definition holding
-  `[p](url)` is a link to this renderer and part of a definition to the backend,
-  so the real citation silently lost its badge over the difference. Nothing here
-  needs either parser's vocabulary, then — a code example, a footnote and a
-  table cell all count as the characters they are, on both sides — and the only
-  text the producer leaves out is the text no reader is handed (`<silent>`
-  blocks, which delivery removes before the consumer sees them). A total the two
-  sides disagree on degrades to the plain link the reader already has rather
-  than a badge on whichever link landed in that position, which is also what
-  makes an edit or a partial quotation cost the preview instead of crediting a
-  surviving copy of the same link. A row persisted before provenance existed
-  carries no `spelling`, and that absence is what selects the exact
-  `(destination, link text)` match it was written for, because history is a
-  shipped surface.
+  sidecar row cannot tell the two apart — and neither can the marker grammar,
+  once delivery has run. Every stage between the model's text and the reader's
+  rewrites that text, and a rewrite can splice two ordinary halves into
+  something that reads as a marker. Removing a `<silent>` block turns
+  `\ue200ci<silent>x</silent>te\ue202turn0view0\ue201` into a complete marker;
+  flattening a `file://` attachment to its label does it too, and two such
+  deletions in one reply form a marker in the IM body that the workbench body,
+  which keeps the attachment, never forms. A stage that asked the delivered
+  text which markers to attribute would answer with both, and would hand the
+  one the model never wrote the other one's link.
+- **So identity is registered once, where the grammar still means what it
+  says.** `register_citations` runs at the native input boundary, over the text
+  exactly as the backend produced it. It uses the same offset-preserving
+  code/hidden mask the rewrite always used
+  (`core/reply_enhancer.mask_hidden_and_code`), resolves every complete marker
+  it may attribute — including the ones that end in the unresolved label — and
+  replaces each with an opaque per-occurrence token: a 128-bit nonce, never
+  derived from the ref or from its order, and checked against the arriving text
+  so a token can only ever be one this call minted. The bundle it returns
+  carries those registrations and a snapshot of the sources they consulted.
+  Delivery then transforms text that contains tokens, and every text-only exit
+  **materializes** them — the IM copy (before length limits, truncation and
+  splitting), the Turn snapshot, the agent-run record a Harness caller reads
+  back, the tool trace, the notify/intermediate/suppressed paths, the SSE
+  chunk, and the quick-reply and file labels extracted out of the body, which
+  are not Markdown anywhere and get the bare domain instead. A token that never
+  reaches an exit is simply not a citation; a token copied within the text still
+  stands for the citation it named; text spliced together out of the leftovers
+  cannot become one. A token that has landed inside code or a hidden block by
+  the time delivery settles gets its original marker text back, rather than a
+  link or an exposed internal token. Markers that were already in code or
+  hidden blocks are never registered, and a native code literal, a truncated
+  marker, and a visible unresolved fallback all keep the behaviour they had.
+- **A span is an identity only together with the body it was measured in.** The
+  persisted body is finalized the same way, and each sidecar row carries
+  `spans` — the exact ranges its links occupy — and `body_sha256`, one digest
+  of that exact body, the same value on every row of the sidecar. Ranges alone
+  can be impersonated: with `L = [example.com](https://example.com/x)`,
+  `L + "\n\n" + L` measures `[0,36]` and `[38,74]`, and deleting the first
+  paragraph leaves an ordinary link occupying `[0,36]` exactly. So the consumer
+  verifies the digest against the full stored body first and reads the ranges
+  only after it matches. Coordinates are UTF-16 code units, half-open. The
+  digest is SHA-256 over the body's UTF-16LE code units, hex lowercase —
+  `hashlib` on the backend, `@noble/hashes` in the browser (promoted to a direct
+  dependency at the version the lockfile already pinned) — and the two agree on
+  CJK, non-BMP emoji, CRLF and an unpaired surrogate. It says which version of
+  a body a measurement belongs to; it is not a signature and claims nothing
+  about where the body came from.
+- **The reader verifies the stored body, then maps through the edits it made.**
+  The Web transcript is not handed the row: `resultFooterParts` splits off a
+  folded or structured result footer, and the Markdown renderer rewrites
+  `@<…>` / `#<…>` mentions and `$<NAME>` secret requests into links before
+  parsing. Each of those is a replacement with a measured length change, not an
+  insertion, so each reports what it changed as a `TextEdit` in its own input
+  coordinates and the binding is carried through in the order the passes ran —
+  no pass is inferred from the text looking like a prefix of another. An edit
+  that reaches into a citation's own link invalidates that citation rather than
+  guessing where it moved. A badge is then drawn only where a span equals a
+  parsed link node exactly. A missing, malformed or mismatched provenance
+  field, an out-of-range or overlapping span, or a span that is not one whole
+  link drops the entire new-contract set to plain links; it never falls back to
+  matching text. Only a row carrying no provenance fields at all — persisted
+  before this existed, and a shipped surface — is still recognized by its
+  `(destination, label)` pair.
+- **A link is held whole, and the platform spells it again.** A destination is
+  data, not prose, and holding only the destination was not enough: the
+  brackets left standing in the stream are still something a line scanner pairs
+  up, and Slack's converter read `[^f]: [p](https://example.com/x)` as one link
+  labelled `^f]: [p`. So the formatter layer holds each whole link and asks the
+  platform to re-spell it from `render(label, destination)` — for Slack,
+  `<url|label>`. That also repairs `[docs](url "T")`, whose title used to be
+  concatenated into the destination and produced a link nobody could open. What
+  a consumer scans is what the scan has to cover, so `inline_links` also reads
+  the lines CommonMark hands to no inline parser — a link reference or footnote
+  definition, an HTML block — one line at a time, which is the resolution those
+  consumers read them at; lines a code block or another block already claimed
+  stay out, so a code span written across two lines is still one code span and
+  not a link found inside it. The spans come back sorted and non-overlapping,
+  so a caller splices each exactly once. Code, images, and ordinary
+  non-citation formatting keep the behaviour they had.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -101,8 +160,8 @@ blob with no way to reach the page the answer is based on.
   click, and a bracket or backslash ends the label early), and the ones that
   merely re-read it as markup — `*`, `_`, `~`, `&`, `|`. The second group used
   to be left alone because the citation's identity was read back off its
-  rendered text, so escaping it cost the badge; identity is the spelling the
-  backend wrote now, so the label can be protected at no such price. It has to
+  rendered text, so escaping it cost the badge; identity is registered before
+  any of this runs now, so the label can be protected at no such price. It has to
   be: a host is the attribution, and `a*b*.example` shown as `ab.example` in
   italics names a site the link does not open.
 - **Never invent, never silently drop.** A URL is never derived from a `ref_id`
@@ -254,22 +313,62 @@ blob with no way to reach the page the answer is based on.
   Telegram, Slack and WeChat: the reader sees the character and no backslash,
   an escape inside a code span stays a backslash, and an escaped backtick in a
   label no longer takes the link and the code span after it.
-- `ui/src/components/ui/markdown.test.tsx` — renderer matching, provenance
-  (a word-for-word prose link left alone, occurrences counted by spelling, a
-  total mismatch degrading to a plain link, a legacy row still recognized),
-  degradation to a plain link, hover/focus/touch behavior, and accessible
-  naming.
+- `ui/src/components/ui/markdown.test.tsx` — renderer matching and provenance:
+  a word-for-word prose link left alone, a badge on each link one source wrote,
+  a body that is not the one the ranges were measured in degrading to plain
+  links, a range covering only part of a link matching nothing, the same exact
+  spelling inside a code span, a fenced block, a footnote definition, a table
+  cell or an image alt moving nothing, an image / autolink / reference link
+  spelling the same page never badged, a legacy row still recognized, plus
+  hover/focus/touch behavior and accessible naming.
+- `ui/src/lib/citations.test.ts` — the digest and the remap in isolation: the
+  UTF-16LE digest against CJK, a non-BMP emoji, CRLF and an unpaired surrogate;
+  and `remapCitations` over deletions, insertions and length changes before,
+  after and across a span, where crossing one invalidates that citation.
+  `ui/src/lib/mentions.test.ts` does the same for the edits the mention pass
+  reports. `tests/fixtures/citation_body_digest.json` is the one table both
+  ends of the digest are asserted against.
+- `tests/test_citation_exits.py` — the exit census. One real producer run is
+  driven through the real `ConsolidatedMessageDispatcher` against a temporary
+  SQLite home, per surface and per level (delivered result, silent result,
+  intermediate, notify, suppressed delivery, Harness terminal, tool trace,
+  SSE), and every copy that leaves is checked: no internal token at any exit,
+  the attribution present in each, and three private-use literals the product
+  must NOT touch — a code-fenced marker, a truncated marker, and an unrelated
+  loose `U+F8FF` — surviving verbatim.
+- `tests/test_link_unit_delivery.py` — the whole-link hold, on the consumers
+  that would swallow it: a footnote definition, a table row, an HTML block,
+  ordinary prose and prose wrapped across lines, plus a code span written
+  across two lines that must stay one code span.
+- `ui/src/components/workbench/CitationStoredRows.test.tsx` — the rows
+  `tests/citation_bridge.py` wrote through the real dispatcher, read by the
+  real `MessageRow` and the real activity card: an IM row whose footer is
+  folded into the stored body, the same row without one, a workbench row that
+  stores its footer apart, a narration row, and the combination row where the
+  backend rewrote an attachment before measuring and the reader then edits the
+  body twice more (footer strip, secure-input card) above the citation.
 - `tests/citation_bridge.py` → `tests/fixtures/citation_consumer_bridge.json` —
   one recording of what the real producer and the real delivery pass emit for
   each case, so the two ends of the contract are measured against one run
   instead of against each other's assumptions. Nothing in it is hand-authored:
   the body, the sidecar and the links a reader must end up with are derived from
   the run, and regenerating it (`python -m tests.citation_bridge`) is how a
-  deliberate change is recorded. `tests/test_citation_consumers.py` asks the
+  deliberate change is recorded — including the counterexamples that decide
+  where identity comes from: a `<silent>` strip splicing two halves into a
+  marker, and a `file://` flattening plus a `<silent>` strip cancelling out so
+  that the IM body gains a complete marker the workbench body never forms. Both
+  stay literal text, and the sidecar claims the one occurrence the model wrote;
+  the test runs a resolve over the delivered body to show what a stage placed
+  after delivery would have produced instead. The recording also carries the
+  rows the dispatcher stored, read back out of SQLite, which is what the Web
+  consumers are handed. `tests/test_citation_consumers.py` asks the
   real Slack, Telegram and WeChat renderers what they show of that recording —
   and Discord and Feishu that they still pass it through — asserting the label
   read and the address reached rather than that a URL appears somewhere; no
-  message is sent to any platform. `ui/src/components/ui/citation-bridge.test.tsx`
+  message is sent to any platform. It also drives the real dispatcher with real
+  persistence, so the stored row it checks is the one SQLite returns, including
+  the `file://` rewrite that runs after delivery and before the sidecar is
+  measured. `ui/src/components/ui/citation-bridge.test.tsx`
   asks the real `Markdown` component the same questions, with the sidecar,
   without it, with a stale one and with a pre-provenance one, and again with the
   mention and secret-request rewrites running beside it — those edit the source
@@ -299,3 +398,31 @@ blob with no way to reach the page the answer is based on.
 - **A final result message is not queued.** `turn/completed` is already the
   boundary the queue would wait for, so the turn's result is resolved and
   delivered there with whatever attribution exists at that moment.
+- **A badge is a Web affordance; IM gets the link.** Every IM surface delivers
+  the ordinary Markdown link the rewrite wrote, and the sidecar never travels
+  with it. The attribution a reader on IM has is the label and the address, and
+  that is the whole contract there.
+- **The whole-link hold does not re-open Slack's other seams.** Held units are
+  inline links; a link written inside a cross-line inline code span, and an
+  image, keep exactly the behaviour they had before — including Slack's
+  pre-existing mangling of the former. Reading those lines individually would
+  find a "link" no reader is shown, which is the worse failure, and fixing
+  Slack's inline-code converter is not this change.
+- **The stored row's re-measurement is asserted on the backend side.** A
+  `file://` attachment is rewritten to a media-proxy URL inside the same
+  transaction that writes the row, so the stored body is not the delivered one
+  and its spans and digest are measured after that rewrite. The proxy id is
+  minted per registration, so the recorded fixture cannot pin it: the recording
+  blanks that one id (and the digest that covers it) and the rebinding itself is
+  asserted in Python, where the same run can compare the delivered measurement
+  against the stored one.
+- **Two product calls are covered by argument rather than by a test.** The
+  dispatcher materializes once more inside the duplicate-result short-circuit,
+  where `_accepted_message_result_text` only reads the fallback text when the
+  accepted message is not a mapping — reachable with no token in it. It is kept
+  because removing it would leave a shape that leaks a token the moment that
+  branch changes. On the Web side, `resultFooterParts` emits only trailing cuts
+  for every input a stored row can have, so the remap through its edits is
+  either a no-op or a whole-body invalidation there; the remap itself is
+  asserted directly in `ui/src/lib/citations.test.ts`. Neither is claimed as
+  census coverage.

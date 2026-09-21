@@ -16,6 +16,7 @@ left implicit in the happy path:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -25,10 +26,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.citations import (
+    _TOKEN_CLOSE as TOKEN_CLOSE,
+)
+from core.citations import (
+    _TOKEN_OPEN as TOKEN_OPEN,
+)
+from core.citations import (
     CitationSource,
+    body_digest,
     citation_ref_ids,
     clean_title,
+    finalize_citations,
     has_citation_markers,
+    register_citations,
     resolve_citations,
     safe_url,
     source_label,
@@ -48,6 +58,36 @@ UNRESOLVED = "(source unavailable)"
 def marker(*ref_ids: str) -> str:
     """The exact wire shape: U+E200 cite U+E202 ref [U+E202 ref ...] U+E201."""
     return f"{START}cite{SEP}{SEP.join(ref_ids)}{END}"
+
+
+def utf16_slice(text: str, start: int, end: int) -> str:
+    """The substring a span names - sliced the way the consumer slices it.
+
+    Spans are UTF-16 code units because that is what a browser counts;
+    ``text[start:end]`` would silently disagree the moment an astral character
+    appears above the span.
+    """
+    units = text.encode("utf-16-le", "surrogatepass")
+    return units[start * 2 : end * 2].decode("utf-16-le", "surrogatepass")
+
+
+def charcodeat_bytes(text: str) -> bytes:
+    """The bytes a ``charCodeAt`` loop in the browser would hash.
+
+    Written out unit by unit rather than handed to a codec, so the fixture is
+    checked against what JavaScript does and not against the same Python call
+    the implementation makes.
+    """
+    units: list[int] = []
+    for char in text:
+        code = ord(char)
+        if code > 0xFFFF:
+            code -= 0x10000
+            units.append(0xD800 + (code >> 10))
+            units.append(0xDC00 + (code & 0x3FF))
+        else:
+            units.append(code)
+    return b"".join(unit.to_bytes(2, "little") for unit in units)
 
 
 # The two sources a real logged turn produced, plus the loopback probe's.
@@ -88,15 +128,10 @@ class TestResolution:
                 "title": "Web search - OpenAI API",
                 "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
                 "label": "developers.openai.com",
-                # The complete link this citation wrote, and the one occurrence
-                # of that exact spelling in the message that is its own. See
-                # TestLinkProvenance.
-                "spelling": (
-                    "[developers.openai.com]"
-                    "(https://developers.openai.com/api/docs/guides/tools-web-search)"
-                ),
-                "occurrences": [1],
-                "occurrence_total": 1,
+                # Where the link sits in THIS body, and the digest that binds
+                # the two together. See TestBodyBinding.
+                "spans": [[29, len(text)]],
+                "body_sha256": body_digest(text),
             }
         ]
 
@@ -824,166 +859,256 @@ class TestUnresolvedRefs:
         assert unresolved_refs([], SOURCES) == []
 
 
-class TestLinkProvenance:
-    """Which links in the delivered text each citation actually wrote.
+class TestRegisteredIdentity:
+    """Which text in a delivered message is allowed to be a citation at all.
 
-    A badge is an attribution claim, so it belongs to a link this module wrote
-    and not to any link the answer's own prose happens to point at the same
-    page. Recognizing one used to mean matching a rendered label back to a
-    sidecar entry, which cannot tell those two apart - and got the claim wrong
-    in the direction that matters, since the prose link is the one nobody
-    vouched for.
-
-    So the sidecar carries the answer instead, as one exact string: the
-    complete link this module wrote, character for character, plus which of
-    that spelling's literal occurrences in the delivered text are its own.
-
-    Counting a literal substring is the one measurement two Markdown
-    implementations cannot disagree about. Counting parsed links by destination
-    did disagree - a GFM footnote definition holding ``[p](url)`` is a link to
-    one and part of a definition to the other - and the real citation lost its
-    badge over the difference. So everything in the delivered text counts here,
-    code examples and footnotes included, and the consumer counts the same
-    characters in the same text.
+    A marker means what it says exactly once: in the text the backend produced.
+    Everything downstream rewrites that text - a ``<silent>`` block leaves, a
+    ``file://`` link is stripped to its label, images are appended - and a
+    rewrite can splice two ordinary halves into characters that read as a
+    marker. So the markers are registered against the native text and travel as
+    opaque per-occurrence tokens; the stage that finally writes the links reads
+    only those tokens and never the grammar again.
     """
 
     GUIDE_URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
     GUIDE_LINK = f"[developers.openai.com]({GUIDE_URL})"
 
-    def test_a_citation_records_the_link_it_wrote(self):
-        _, citations = resolve(f"Documented.{marker('turn0view0')}")
+    def test_a_marker_a_later_transform_splices_together_is_not_a_citation(self):
+        """The counterexample that decides where registration has to happen.
 
-        assert citations[0]["spelling"] == self.GUIDE_LINK
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 1
-
-    def test_prose_worded_its_own_way_is_a_different_string_entirely(self):
-        """Same page, different characters - so it is not this citation's link.
-
-        The old contract counted by destination and had to number this one to
-        stay in step with the consumer. Counting the exact spelling makes it
-        simply absent: nothing in the answer's own wording can shift a
-        citation's position, and the consumer reaches the same conclusion from
-        the same text.
+        Only the first of these is a citation. Strip the hidden block - which
+        every delivered copy does - and the second half is character for
+        character a legal marker too. A stage that read the grammar here would
+        attribute a page to text the model never cited.
         """
-        _, citations = resolve(
-            f"See [the guide]({self.GUIDE_URL}) first.{marker('turn0view0')}"
+        native = (
+            f"Actual.{marker('turn0view0')}\n\n"
+            f"Synthetic. {START}ci<silent>private</silent>te{SEP}turn0view0{END}"
+        )
+        registered, bundle = register_citations(
+            native, SOURCES, unresolved_label=UNRESOLVED
+        )
+        delivered = strip_silent_blocks(registered)
+        body, citations = finalize_citations(delivered, bundle)
+
+        assert body.count(self.GUIDE_LINK) == 1
+        assert body.endswith(f"Synthetic. {marker('turn0view0')}")
+        assert len(citations) == 1
+        assert citations[0]["spans"] == [
+            [body.index(self.GUIDE_LINK), body.index(self.GUIDE_LINK) + len(self.GUIDE_LINK)]
+        ]
+
+    def test_a_copy_of_a_registered_token_still_speaks_for_its_citation(self):
+        """A transform that duplicates text duplicates the citation with it -
+        the copy is the same registered occurrence, not a new claim."""
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        body, citations = finalize_citations(f"{registered}\n\n{registered}", bundle)
+
+        assert body.count(self.GUIDE_LINK) == 2
+        assert len(citations) == 1
+        assert [utf16_slice(body, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK,
+            self.GUIDE_LINK,
+        ]
+
+    def test_token_shaped_text_this_bundle_never_minted_is_left_alone(self):
+        """An identity is a nonce this call handed out, not a shape."""
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        forged = f"{TOKEN_OPEN}{'0' * 32}{TOKEN_CLOSE}"
+        body, citations = finalize_citations(f"{forged} {registered}", bundle)
+
+        assert body.startswith(forged)
+        assert len(citations) == 1
+        assert [utf16_slice(body, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK
+        ]
+
+    def test_a_token_a_transform_deleted_describes_nothing(self):
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        body, citations = finalize_citations("Nothing left.", bundle)
+
+        assert TOKEN_OPEN in registered
+        assert body == "Nothing left."
+        assert citations == []
+
+    @pytest.mark.parametrize(
+        "template",
+        ["`{token}`", "```\n{token}\n```", "<silent>{token}</silent>"],
+        ids=["code-span", "code-fence", "hidden"],
+    )
+    def test_a_token_a_transform_moved_into_code_shows_the_model_s_own_text(
+        self, template
+    ):
+        """An internal token is the one thing a reader may never be shown, and
+        a code example is not an attribution either - so the marker the model
+        wrote comes back verbatim and no badge is claimed for it."""
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        token = registered[len("Cited.") :]
+        body, citations = finalize_citations(
+            template.format(token=token), bundle
         )
 
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 1
+        assert body == template.format(token=marker("turn0view0"))
+        assert citations == []
 
-    def test_prose_that_spells_the_link_identically_is_counted_but_not_claimed(self):
-        """Character for character the same link - so the reader cannot tell
-        them apart either, and neither side pretends to. It is counted, which
-        keeps both totals equal, and left unclaimed, which keeps the badge on
+
+class TestBodyBinding:
+    """Which body the sidecar describes, and where in it each citation sits.
+
+    A badge is an attribution claim, so it belongs to a link this module wrote
+    and not to any link the answer's own prose happens to point at the same
+    page. The rows therefore carry the exact ``spans`` their links occupy -
+    UTF-16 code units, half-open, the coordinates the browser counts in.
+
+    A span alone is not an identity. Two ordinary links can be spelled the
+    same, and deleting a paragraph above one moves another into the
+    coordinates it vacated: measured with react-markdown, ``L + "\\n\\n" + L``
+    puts links at ``[0, 36]`` and ``[38, 74]``, so dropping the first
+    paragraph leaves an ordinary link sitting exactly where a citation was
+    measured. So every row also carries the digest of the body it was measured
+    in, and a consumer that cannot reproduce that digest paints no badge.
+    """
+
+    GUIDE_URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
+    GUIDE_LINK = f"[developers.openai.com]({GUIDE_URL})"
+
+    def test_a_citation_spans_the_link_it_wrote(self):
+        text, citations = resolve(f"Documented.{marker('turn0view0')}")
+
+        assert [utf16_slice(text, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK
+        ]
+        assert citations[0]["body_sha256"] == body_digest(text)
+
+    def test_the_lead_space_and_the_fallback_label_belong_to_no_citation(self):
+        """The span is the link, not the punctuation around it, and text that
+        stands in for a source nobody could resolve is nobody's link."""
+        text, citations = resolve(
+            f"Both.{marker('turn0view0', 'turn9view9')}"
+        )
+
+        assert text == f"Both. {self.GUIDE_LINK} {UNRESOLVED}"
+        assert [utf16_slice(text, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK
+        ]
+
+    def test_prose_that_spells_the_same_link_is_not_the_one_described(self):
+        """Character for character the same link, so the reader cannot tell
+        them apart either - and neither side pretends to. The badge stays on
         the one this module wrote."""
-        _, citations = resolve(
-            f"See {self.GUIDE_LINK} first.{marker('turn0view0')}"
-        )
+        text, citations = resolve(f"See {self.GUIDE_LINK} first.{marker('turn0view0')}")
 
-        assert citations[0]["occurrences"] == [2]
-        assert citations[0]["occurrence_total"] == 2
+        assert text.count(self.GUIDE_LINK) == 2
+        assert citations[0]["spans"] == [
+            [text.rindex(self.GUIDE_LINK), len(text)]
+        ]
 
-    def test_an_identical_prose_link_after_the_marker_shifts_nothing_before_it(self):
-        _, citations = resolve(
-            f"Documented.{marker('turn0view0')} Also {self.GUIDE_LINK}."
-        )
+    def test_one_source_cited_twice_spans_both_of_its_links(self):
+        text, citations = resolve(f"One.{marker('turn0view0')} Two.{marker('turn1view0')}")
 
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 2
+        assert len(citations) == 1
+        assert [utf16_slice(text, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK,
+            self.GUIDE_LINK,
+        ]
 
-    def test_one_source_cited_twice_claims_both_of_its_links(self):
-        _, citations = resolve(f"One.{marker('turn0view0')} Two.{marker('turn1view0')}")
-
-        assert citations[0]["occurrences"] == [1, 2]
-        assert citations[0]["occurrence_total"] == 2
-
-    def test_ordinals_are_counted_per_spelling(self):
-        """A citation to another page sits between these two and moves neither."""
-        _, citations = resolve(
+    def test_a_citation_to_another_page_moves_neither_of_its_neighbours(self):
+        text, citations = resolve(
             f"A.{marker('turn0view0')} B.{marker('turn0view1')} C.{marker('turn1view0')}"
         )
 
-        assert [c["occurrences"] for c in citations] == [[1, 2], [1]]
-        assert [c["occurrence_total"] for c in citations] == [2, 1]
+        assert [
+            [utf16_slice(text, *span) for span in c["spans"]] for c in citations
+        ] == [
+            [self.GUIDE_LINK, self.GUIDE_LINK],
+            [f"[example.com]({PROBE.url})"],
+        ]
 
-    @pytest.mark.parametrize(
-        "decoy",
-        [
-            "`{link}`",
-            "```\n{link}\n```",
-            "[^f]: {link}",
-            "| {link} |",
-            "![alt]({url})\n\n{link}",
-            "<div>{link}</div>",
-        ],
-        ids=["code-span", "code-fence", "footnote", "table-cell", "after-image", "html"],
-    )
-    def test_every_literal_occurrence_counts_wherever_it_sits(self, decoy):
-        """The total has to mean the same thing on both sides of the boundary.
+    def test_spans_are_counted_in_utf16_code_units(self):
+        """What the browser counts, not what Python iterates: an astral emoji
+        is one character here and two code units there, and the consumer reads
+        the second number."""
+        text, citations = resolve(f"🙂🙂 Documented.{marker('turn0view0')}")
+        start, end = citations[0]["spans"][0]
 
-        A parser decides whether each of these is a link; a literal scan does
-        not have to, and that is the point - the consumer scans the same
-        characters and reaches the same numbers without either side agreeing
-        about footnotes, tables or HTML blocks. The citation still takes the
-        occurrence it wrote, which is the last one here.
+        assert start == text.index(self.GUIDE_LINK) + 2
+        assert utf16_slice(text, start, end) == self.GUIDE_LINK
+
+    def test_every_row_of_one_body_carries_that_body_s_digest(self):
+        text, citations = resolve(
+            f"A.{marker('turn0view0')} B.{marker('turn0view1')}"
+        )
+
+        assert len(citations) == 2
+        assert {c["body_sha256"] for c in citations} == {body_digest(text)}
+
+    def test_a_transform_between_registration_and_delivery_moves_the_spans(self):
+        """The reason the two halves exist. The hidden block leaves before the
+        links are written, so the spans are measured in the body that ships."""
+        registered, bundle = register_citations(
+            f"<silent>Private.</silent>Shown.{marker('turn0view0')}",
+            SOURCES,
+            unresolved_label=UNRESOLVED,
+        )
+        body, citations = finalize_citations(strip_silent_blocks(registered), bundle)
+
+        assert body == f"Shown. {self.GUIDE_LINK}"
+        assert [utf16_slice(body, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK
+        ]
+        assert citations[0]["body_sha256"] == body_digest(body)
+
+    def test_a_link_that_outlives_the_citation_beside_it_is_described_by_nobody(self):
+        """The impersonation counterexample, in the one place it can be stopped.
+
+        Delete the paragraph a citation was written into and the answer's own
+        prose link slides into the coordinates it held. Nothing downstream can
+        tell the difference by looking; the sidecar simply never describes it,
+        because the token that spoke for the citation left with the paragraph.
         """
-        _, citations = resolve(
-            decoy.format(link=self.GUIDE_LINK, url=self.GUIDE_URL)
-            + f"\n\nShown.{marker('turn0view0')}"
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}\n\nSee {self.GUIDE_LINK} too.",
+            SOURCES,
+            unresolved_label=UNRESOLVED,
         )
+        body, citations = finalize_citations(registered.split("\n\n", 1)[1], bundle)
 
-        assert citations[0]["occurrence_total"] == 2
-        assert citations[0]["occurrences"] == [2]
+        assert body == f"See {self.GUIDE_LINK} too."
+        assert citations == []
 
-    @pytest.mark.parametrize(
-        "decoy",
-        [
-            "![developers.openai.com]({url})",
-            "<{url}>",
-            "[dup][k]",
-            "[developers.openai.com]({url} \"t\")",
-        ],
-        ids=["image", "autolink", "reference-link", "titled-link"],
+
+class TestBodyDigest:
+    """One digest definition, asserted on both sides of the boundary.
+
+    SHA-256 over the body's UTF-16 code units, little-endian, no BOM - the
+    bytes ``charCodeAt`` yields in the browser and ``surrogatepass`` yields
+    here. The vectors live in a fixture the renderer's test reads too, so the
+    two implementations are held to the same table rather than to each other's
+    reputation.
+    """
+
+    CASES = json.loads(
+        (Path(__file__).parent / "fixtures" / "citation_body_digest.json").read_text(
+            encoding="utf-8"
+        )
     )
-    def test_a_link_spelled_any_other_way_is_not_this_citation(self, decoy):
-        """Same destination, different characters. An image is the one to watch:
-        ``![label](url)`` does contain ``[label](url)``, so it IS one literal
-        occurrence - and the consumer, scanning the same text, counts it too."""
-        # An image spells the citation's own link with one `!` in front of it.
-        total = 2 if decoy.startswith("!") else 1
-        _, citations = resolve(
-            f"{decoy.format(url=self.GUIDE_URL)} Shown.{marker('turn0view0')}"
-            f"\n\n[k]: {self.GUIDE_URL}"
-        )
 
-        assert citations[0]["occurrence_total"] == total
-        assert citations[0]["occurrences"] == [total]
+    @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+    def test_the_backend_computes_the_digest_the_renderer_will_check(self, case):
+        assert body_digest(case["text"]) == case["sha256"]
 
-    def test_a_hidden_citation_is_not_counted_against_the_visible_one(self):
-        """Stripping the block must not leave the sidecar describing text that left with it."""
-        text, citations = resolve(
-            f"<silent>Hidden.{marker('turn0view0')}</silent>Shown.{marker('turn1view0')}"
-        )
-        delivered = strip_silent_blocks(text)
-
-        assert delivered.count(self.GUIDE_LINK) == 1
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 1
-
-    def test_a_hidden_copy_of_the_link_is_not_counted_either(self):
-        """The one delivery transform measured to move an occurrence: the block
-        is removed, so counting its copy would put every later ordinal one
-        ahead of what the consumer can see."""
-        text, citations = resolve(
-            f"<silent>{self.GUIDE_LINK}</silent>Shown.{marker('turn0view0')}"
-        )
-        delivered = strip_silent_blocks(text)
-
-        assert delivered.count(self.GUIDE_LINK) == 1
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 1
+    @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+    def test_the_recorded_digest_is_sha256_of_the_bytes_charcodeat_yields(self, case):
+        assert case["sha256"] == hashlib.sha256(charcodeat_bytes(case["text"])).hexdigest()
 
 
 class TestUrlIdentityAcrossTheBoundary:

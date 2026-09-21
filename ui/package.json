@@ -44,6 +44,7 @@
     "@lexical/react": "^0.45.0",
     "@monaco-editor/react": "^4.7.0",
     "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-popover": "^1.1.15",

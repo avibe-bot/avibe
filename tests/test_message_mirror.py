@@ -26,6 +26,12 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import (
+    CitationSource,
+    body_digest,
+    finalize_citations,
+    register_citations,
+)
 from core.message_mirror import (
     agent_message_exists,
     mirror_harness_inbound,
@@ -176,24 +182,30 @@ def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state)
     assert content["result_footer"] == "✅ ⏱️ 5s · 🪙 1.2k tok"
 
 
+# The wire shape the backend produces, and the source it resolves against —
+# a registered answer rather than a hand-written sidecar, because the rows this
+# test reads back are only ever written from one.
+CITED_MARKER = "\ue200cite\ue202turn0view0\ue201"
+CITED_LINK = "[developers.openai.com](https://developers.openai.com/x)"
+
+
+def _registered(text: str, title: str = "Web search — OpenAI API"):
+    source = CitationSource(
+        ref_id="turn0view0", title=title, url="https://developers.openai.com/x"
+    )
+    return register_citations(
+        text, {source.ref_id: source}, unresolved_label="(source unavailable)"
+    )
+
+
 def test_persist_agent_keeps_citations_as_structured_content(isolated_state):
     """The sidecar rides the row, so it is not lost when the delivery is."""
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")
-    persist_agent_message(
-        ctx,
-        "result",
-        "Native search exists. [developers.openai.com](https://developers.openai.com/x)",
-        citations=[
-            {
-                "index": 1,
-                "ref_id": "turn0view0",
-                "title": "Web search — OpenAI API 中文",
-                "url": "https://developers.openai.com/x",
-                "label": "developers.openai.com",
-            }
-        ],
+    registered, bundle = _registered(
+        f"Native search exists.{CITED_MARKER}", title="Web search — OpenAI API 中文"
     )
+    persist_agent_message(ctx, "result", registered, citations=bundle)
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -202,6 +214,11 @@ def test_persist_agent_keeps_citations_as_structured_content(isolated_state):
         ).mappings().one()
 
     content = json.loads(row["content_json"])
+    # The row is written from the finalized body: the text keeps the plain
+    # Markdown links every surface already renders, and the sidecar describes
+    # THAT text - never a version of it the reader cannot see.
+    body = row["content_text"]
+    assert body == f"Native search exists. {CITED_LINK}"
     assert content["citations"] == [
         {
             "index": 1,
@@ -209,17 +226,16 @@ def test_persist_agent_keeps_citations_as_structured_content(isolated_state):
             "title": "Web search — OpenAI API 中文",
             "url": "https://developers.openai.com/x",
             "label": "developers.openai.com",
+            "spans": [[body.index(CITED_LINK), len(body)]],
+            "body_sha256": body_digest(body),
         }
     ]
-    # The text keeps the plain Markdown links every surface already renders; the
-    # sidecar is an upgrade for the Web transcript, never the only attribution.
-    assert "[developers.openai.com](https://developers.openai.com/x)" in row["content_text"]
 
 
 def test_persist_agent_without_citations_writes_no_sidecar_key(isolated_state):
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")
-    persist_agent_message(ctx, "result", "pong", citations=[])
+    persist_agent_message(ctx, "result", "pong", citations=None)
 
     engine = create_sqlite_engine()
     with engine.connect() as conn:
@@ -235,15 +251,8 @@ def test_citations_survive_reload_on_the_answer_they_belong_to(isolated_state):
     from core import inbox_events
     from storage import messages_service
 
-    citations = [
-        {
-            "index": 1,
-            "ref_id": "turn0view0",
-            "title": "Web search — OpenAI API",
-            "url": "https://developers.openai.com/x",
-            "label": "developers.openai.com",
-        }
-    ]
+    registered, bundle = _registered(f"Cited answer.{CITED_MARKER}")
+    cited_body, citations = finalize_citations(registered, bundle)
     engine = create_sqlite_engine()
     now = "2026-05-30T12:00:00Z"
     with engine.begin() as conn:
@@ -268,12 +277,7 @@ def test_citations_survive_reload_on_the_answer_they_belong_to(isolated_state):
         try:
             persist_agent_message(ctx, "output", "Uncited answer.")
             first = await _drain_published(queue)
-            persist_agent_message(
-                ctx,
-                "result",
-                "Cited answer. [developers.openai.com](https://developers.openai.com/x)",
-                citations=citations,
-            )
+            persist_agent_message(ctx, "result", registered, citations=bundle)
             return first, await _drain_published(queue)
         finally:
             inbox_events.bus.unsubscribe(sub_id)
@@ -291,7 +295,7 @@ def test_citations_survive_reload_on_the_answer_they_belong_to(isolated_state):
         (row["text"], (row["content"] or {}).get("citations")) for row in transcript["messages"]
     ] == [
         ("Uncited answer.", None),
-        ("Cited answer. [developers.openai.com](https://developers.openai.com/x)", citations),
+        (cited_body, citations),
     ]
 
 

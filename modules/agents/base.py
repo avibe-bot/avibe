@@ -13,6 +13,7 @@ from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from core.agent_input import AgentInputMetadata
 from core.agent_session_context import resolve_context_agent_session_target
+from core.citations import CitationBundle
 from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
 from core.runtime_activation import RuntimeActivationIdentity
@@ -592,14 +593,16 @@ class BaseAgent(ABC):
         suffix: Optional[str] = None,
         request: Optional[AgentRequest] = None,
         output: MessageOutput | None = None,
-        citations: Optional[List[Dict[str, Any]]] = None,
+        citations: Optional[CitationBundle] = None,
     ) -> Optional[str]:
         """Emit a terminal result.
 
-        ``citations`` is the resolved source sidecar for the answer body (see
-        ``core.citations``). The body already carries ordinary Markdown links, so
-        every surface stays readable without it; the sidecar is what lets the Web
-        transcript render them as compact citation badges.
+        ``citations`` is the registered source bundle for the answer body (see
+        ``core.citations``): the body carries an opaque token where each cited
+        marker was, and the bundle is what writes them out at the end of
+        delivery. Each surface writes its own copy, because each rewrites the
+        text differently on the way there - so the badge sidecar the Web
+        transcript renders describes the body that reader actually has.
         """
         if output is None and request is not None:
             output = request.output

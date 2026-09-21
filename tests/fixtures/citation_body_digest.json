@@ -1,0 +1,42 @@
+[
+  {
+    "name": "empty",
+    "text": "",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "name": "ascii-answer",
+    "text": "Documented. [developers.openai.com](https://developers.openai.com/api/docs/guides/tools-web-search)",
+    "sha256": "37df97b8515651bb4def4d91ac931dffc965ba5bcc8f611b4aa49a03a6c94a68"
+  },
+  {
+    "name": "chinese",
+    "text": "\u4e2d\u6587\u6a19\u984c\uff1a\u5df2\u5f15\u7528\u3002",
+    "sha256": "227381de452d1e18dffce25aec8fc09cd182a1b10a297549e5e29f77ed803b5a"
+  },
+  {
+    "name": "astral-emoji",
+    "text": "\ud83d\ude42 done \u2705",
+    "sha256": "d0bbed34afdad402430a900852380a2bb1d443c206bc50ea431e5b8cdda8af79"
+  },
+  {
+    "name": "crlf",
+    "text": "line one\r\nline two\r\n",
+    "sha256": "aef727977006d394bfdaa5b3e2452614b26b447d6e1e2a43948e99588ba9c8d8"
+  },
+  {
+    "name": "lone-high-surrogate",
+    "text": "before \ud83d after",
+    "sha256": "ca78c781d7c80e9927bed69e82f8bc93a87bd0d9dcd9d2497ee8553ea2af1f7f"
+  },
+  {
+    "name": "lone-low-surrogate",
+    "text": "before \ude42 after",
+    "sha256": "8c846b9c049b19c34cb9a373e04fce8eb8b4a64826c7e99a6b714aa2f7f28ea7"
+  },
+  {
+    "name": "mixed",
+    "text": "\u4e2d\u6587\ud83d\ude42\r\n\ud800\uff5eend",
+    "sha256": "75947d497b2bf2b406f8c2724be32e54d0c0af6d1011e8fb1c159daf16add50d"
+  }
+]

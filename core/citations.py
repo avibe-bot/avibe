@@ -23,20 +23,32 @@ ref_id or from search order.
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass, replace as replace_dataclass
+import secrets
+from dataclasses import dataclass
 from html.entities import html5 as HTML5_ENTITIES
 from typing import Any, Callable, Iterable, Mapping, Optional
 from urllib.parse import unquote
 
 import idna
 
-from core.reply_enhancer import hidden_block_ranges, mask_hidden_and_code
+from core.reply_enhancer import mask_hidden_and_code
 
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
 _SEP = "\ue202"
 _END = "\ue201"
+
+# The private-use delimiters an internal registration token is wrapped in.
+# Deliberately not the marker's own: a token is this module's private handle on
+# one registered marker, and nothing downstream may read it as citation grammar.
+_TOKEN_OPEN = "\ue010"
+_TOKEN_CLOSE = "\ue011"
+_TOKEN_NONCE_BYTES = 16
+_TOKEN_RE = re.compile(
+    f"{_TOKEN_OPEN}[0-9a-f]{{{_TOKEN_NONCE_BYTES * 2}}}{_TOKEN_CLOSE}"
+)
 
 # One complete marker. The payload may not contain a start/end delimiter, so an
 # unterminated marker never matches: a stream that split a marker across chunks
@@ -137,25 +149,66 @@ class Citation:
     title: str
     url: str
     label: str
-    # The exact Markdown link this citation writes, character for character,
-    # and which of that spelling's occurrences in the delivered text are its
-    # own. See ``_link_provenance``.
-    spelling: str = ""
-    occurrences: tuple[int, ...] = ()
-    occurrence_total: int = 0
 
-    def to_payload(self) -> dict[str, Any]:
-        """The persisted sidecar shape (``message.content.citations`` entries)."""
+    def to_payload(
+        self, *, spans: list[list[int]], body_sha256: str
+    ) -> dict[str, Any]:
+        """The persisted sidecar shape (``message.content.citations`` entries).
+
+        ``spans`` are half-open ``[start, end)`` ranges in UTF-16 code units,
+        and ``body_sha256`` is the digest of the exact body they were measured
+        in. Neither means anything without the other, so neither is optional.
+        """
         return {
             "index": self.index,
             "ref_id": self.ref_id,
             "title": self.title,
             "url": self.url,
             "label": self.label,
-            "spelling": self.spelling,
-            "occurrences": list(self.occurrences),
-            "occurrence_total": self.occurrence_total,
+            "spans": [list(span) for span in spans],
+            "body_sha256": body_sha256,
         }
+
+
+@dataclass(frozen=True)
+class WrittenLink:
+    """One link a registered marker writes: a citation, or the fallback label.
+
+    ``plain`` is the same attribution outside Markdown. Quick-reply labels and
+    file labels are lifted out of the body into structured fields that no
+    surface parses as Markdown, so writing a link there would show the reader
+    its syntax; the domain on its own still says who is being cited.
+    """
+
+    index: Optional[int]
+    text: str
+    plain: str
+
+
+@dataclass(frozen=True)
+class RegisteredMarker:
+    """One marker registered at the native boundary, under an opaque token."""
+
+    token: str
+    # The marker exactly as it arrived, restored when the token has ended up
+    # somewhere a link must not be written.
+    literal: str
+    lead: str
+    parts: tuple[WrittenLink, ...]
+
+
+@dataclass(frozen=True)
+class CitationBundle:
+    """Everything one message's delivery needs to write its citations.
+
+    Immutable all the way down, and the ``sources`` are a snapshot: the map a
+    backend hands to registration is live thread state that keeps being written
+    to, and a bundle that read it later would describe a different message.
+    """
+
+    citations: tuple[Citation, ...]
+    markers: tuple[RegisteredMarker, ...]
+    sources: tuple[CitationSource, ...]
 
 
 def clean_title(value: Any) -> str:
@@ -749,34 +802,56 @@ def unresolved_refs(
     return [ref for ref in ref_ids if _REF_ID_RE.fullmatch(ref) and ref not in sources]
 
 
-def resolve_citations(
+def register_citations(
     text: Optional[str],
     sources: Mapping[str, CitationSource],
     *,
     unresolved_label: str,
-) -> tuple[Optional[str], list[dict[str, Any]]]:
-    """Rewrite citation markers into Markdown links plus a structured sidecar.
+) -> tuple[Optional[str], Optional[CitationBundle]]:
+    """Give every marker this message will attribute a private identity, now.
 
     ``sources`` maps ref_id to the search result the backend captured for it,
     scoped to the native thread the message belongs to. Returns the text to
-    deliver and the sidecar payload in first-appearance order; sources repeated
+    carry through delivery and the bundle that finalizes it; sources repeated
     across markers share one entry (and one index) keyed by their URL.
 
-    A marker whose sources are all unknown or unlinkable becomes
-    ``unresolved_label``; a marker where only some refs resolve keeps the links
-    it has and adds the label once. When there is no label to fall back to, the
-    raw marker is left in place - the answer text is never quietly de-attributed.
+    Registration happens against the text exactly as the backend produced it,
+    because that is the only version of it whose citation grammar means what it
+    says. Every later stage rewrites the text - a ``<silent>`` block leaves, a
+    ``file://`` link is stripped to its label, images are appended - and a
+    rewrite can splice two ordinary halves into something that reads as a
+    marker. ``\\ue200ci<silent>x</silent>te\\ue202turn0view0\\ue201`` is one
+    marker and one accidental one to a reader of the delivered text, and a
+    stage that asked the delivered text which markers to attribute would put a
+    citation on text the model never cited. So the question is asked once, here,
+    and what travels from here on is an opaque token per registered marker:
+    unguessable, never derived from the ref or from its order, and checked
+    against the arriving text so a token can only be a token this call minted.
 
-    Each sidecar entry also records which links in the delivered text it wrote,
-    so a consumer can tell a citation apart from an ordinary link the answer
-    happened to point at the same page.
+    A marker inside a code example or a ``<silent>`` block is not registered
+    (the existing mask decides both); one whose refs all fail to resolve with no
+    label to fall back to keeps its literal text, exactly as before.
     """
     if not text or _START not in text:
-        return text, []
+        return text, None
 
     fallback = (unresolved_label or "").strip()
     citations: list[Citation] = []
     by_url: dict[str, Citation] = {}
+    consulted: dict[str, CitationSource] = {}
+    markers: list[RegisteredMarker] = []
+    minted: set[str] = set()
+
+    def mint_token() -> str:
+        # A nonce, not a name: the token is the citation's identity for the rest
+        # of delivery, so nothing about it may be reconstructible from the
+        # message. Colliding with text that already arrived would hand that text
+        # the identity, so the arriving text is checked too.
+        while True:
+            token = f"{_TOKEN_OPEN}{secrets.token_hex(_TOKEN_NONCE_BYTES)}{_TOKEN_CLOSE}"
+            if token not in minted and token not in text:
+                minted.add(token)
+                return token
 
     def resolve_ref(ref: str) -> Optional[Citation]:
         if not _REF_ID_RE.fullmatch(ref):
@@ -784,6 +859,7 @@ def resolve_citations(
         source = sources.get(ref)
         if source is None:
             return None
+        consulted.setdefault(ref, source)
         url = safe_url(source.url)
         if not url:
             return None
@@ -800,134 +876,224 @@ def resolve_citations(
             title=title,
             url=url,
             label=label,
-            spelling=f"[{_escape_label(label)}]({url})",
         )
         citations.append(citation)
         by_url[url] = citation
         return citation
 
-    # Where each link this rewrite writes lands in the delivered text, keyed by
-    # the offset of the marker it replaced so the caller can add the offset the
-    # replacement itself was spliced to.
-    written: dict[int, list[tuple[int, Citation]]] = {}
-
     def replace(match: re.Match[str]) -> str:
         refs = [ref for ref in match.group(1).split(_SEP) if ref]
-        links: list[str] = []
-        placed: list[tuple[int, Citation]] = []
+        parts: list[WrittenLink] = []
         unresolved = not refs
         # Markers usually sit flush against the preceding word or full stop;
         # a separating space keeps the link from reading as part of the sentence.
         lead = "" if match.start() == 0 or text[match.start() - 1].isspace() else " "
-        cursor = len(lead)
         for ref in refs:
             citation = resolve_ref(ref)
             if citation is None:
                 unresolved = True
                 continue
-            link = citation.spelling
-            placed.append((cursor, citation))
-            # One space joins the links below, so the next one starts past it.
-            cursor += len(link) + 1
-            links.append(link)
-        if unresolved and fallback:
-            links.append(fallback)
-        if not links:
-            return match.group(0)
-        written[match.start()] = placed
-        return lead + " ".join(links)
-
-    rewritten, offsets = _rewrite_outside_code(text, replace)
-    provenance = _link_provenance(
-        rewritten,
-        {
-            offsets[marker_start] + relative: citation
-            for marker_start, placed in written.items()
-            for relative, citation in placed
-        },
-    )
-    return rewritten, [
-        c.to_payload()
-        for c in (
-            replace_dataclass(
-                citation,
-                occurrences=provenance[0].get(citation.spelling, ()),
-                occurrence_total=provenance[1].get(citation.spelling, 0),
+            parts.append(
+                WrittenLink(
+                    index=citation.index,
+                    text=_link_spelling(citation),
+                    plain=citation.label,
+                )
             )
-            for citation in citations
+        if unresolved and fallback:
+            parts.append(WrittenLink(index=None, text=fallback, plain=fallback))
+        if not parts:
+            return match.group(0)
+        token = mint_token()
+        markers.append(
+            RegisteredMarker(
+                token=token,
+                literal=match.group(0),
+                lead=lead,
+                parts=tuple(parts),
+            )
         )
+        return token
+
+    registered = _rewrite_outside_code(text, replace)
+    if not markers:
+        return registered, None
+    return registered, CitationBundle(
+        citations=tuple(citations),
+        markers=tuple(markers),
+        sources=tuple(consulted.values()),
+    )
+
+
+def materialize_citations(
+    text: Optional[str],
+    bundle: Optional[CitationBundle],
+    *,
+    as_markdown: bool = True,
+) -> Optional[str]:
+    """Write the registered citations into *text*, with no sidecar.
+
+    This is the form every surface that carries only text needs - an IM copy, a
+    Turn snapshot, an agent-run record, a live stream chunk. ``as_markdown``
+    off writes each citation as its bare domain instead of a Markdown link, for
+    the structured fields (quick-reply labels, file labels) that are extracted
+    out of the body and are not Markdown anywhere.
+    """
+    if not text or bundle is None or _TOKEN_OPEN not in text:
+        return text
+    written, _ = _write_citations(text, bundle, as_markdown=as_markdown)
+    return written
+
+
+def finalize_citations(
+    text: Optional[str],
+    bundle: Optional[CitationBundle],
+) -> tuple[Optional[str], list[dict[str, Any]]]:
+    """Write the registered citations into *text* and bind the sidecar to it.
+
+    The returned rows describe THIS body and no other. Each carries the exact
+    ``spans`` its links occupy in it and the digest of the body itself, because
+    a span alone is not an identity: two ordinary links can be spelled the same,
+    and a paragraph removed above one moves another into its place. Rendering a
+    badge from a span the producer measured in a different version of the text
+    is how an ordinary link gets to impersonate a cited one, so a consumer
+    checks the digest first and the spans only after it matches.
+
+    Only tokens this bundle minted are written; anything else in the text is
+    left exactly as it arrived. A token that has landed inside code or a hidden
+    block by the time delivery settles gets its original marker text back rather
+    than a link or an exposed internal token - the reader is shown what the
+    model wrote, and nothing claims it was cited.
+    """
+    if not text or bundle is None or _TOKEN_OPEN not in text:
+        return text, []
+    body, placed = _write_citations(text, bundle, as_markdown=True)
+    if not placed:
+        return body, []
+    offsets = _utf16_offsets(
+        body, (offset for _, start, end in placed for offset in (start, end))
+    )
+    spans: dict[int, list[list[int]]] = {}
+    for index, start, end in placed:
+        spans.setdefault(index, []).append([offsets[start], offsets[end]])
+    digest = body_digest(body)
+    return body, [
+        citation.to_payload(spans=spans[citation.index], body_sha256=digest)
+        for citation in bundle.citations
+        if citation.index in spans
     ]
 
 
-def _link_provenance(
-    text: str,
-    written: Mapping[int, Citation],
-) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
-    """Which occurrences of its own link spelling each citation wrote.
+def resolve_citations(
+    text: Optional[str],
+    sources: Mapping[str, CitationSource],
+    *,
+    unresolved_label: str,
+) -> tuple[Optional[str], list[dict[str, Any]]]:
+    """Register and finalize in one step, for a surface that transforms nothing.
 
-    A badge is an attribution claim, so it has to belong to a link this module
-    wrote - not to any link the answer's prose happens to point at the same
-    page with. The delivered text is the only thing the producer and a consumer
-    both hold, so provenance travels as a position in it.
-
-    The position is counted over one exact string: the complete link this
-    module wrote, ``[escaped label](url)``, character for character. Counting a
-    literal substring is the one measurement two different Markdown
-    implementations cannot disagree about - it asks nothing of either
-    vocabulary. Counting by parsed destination did ask: a GFM footnote
-    definition holding ``[p](url)`` is a link to one parser and part of a
-    definition to another, and the citation lost its badge over the
-    disagreement. So every occurrence of the spelling counts here, whether it
-    is a link, a code example, or a footnote, and the consumer counts the same
-    way over the same characters.
-
-    What the reader is never handed is not counted, because the consumer never
-    sees it either: a silent block is removed before delivery, so an occurrence
-    inside one would put the producer one ahead for the rest of the message.
-    Every other delivery transform was measured to leave the relative order of
-    an exact spelling alone (see ``tests/test_citation_consumers.py``).
-
-    The total is recorded alongside so a disagreement is still detectable. A
-    consumer that counts a different number is looking at different text, and
-    the honest answer there is the ordinary link the reader already has, not a
-    badge on whichever link landed in that position.
+    The two halves exist because delivery rewrites the text between them. When
+    nothing happens in between - a probe, a test, a caller that hands its own
+    output straight out - this is the same call it always was.
     """
-    hidden = hidden_block_ranges(text)
-
-    def shown(offset: int) -> bool:
-        return not any(start <= offset < end for start, end in hidden)
-
-    ordinals: dict[str, dict[int, int]] = {}
-    totals: dict[str, int] = {}
-    for spelling in {citation.spelling for citation in written.values()}:
-        seen: dict[int, int] = {}
-        # Overlapping matches are searched for from one character in, not one
-        # spelling on, so the two sides scan identically whatever the label
-        # holds. A link spelling cannot actually overlap itself - it opens with
-        # ``[`` and closes with ``)`` - but neither side has to prove that.
-        at = text.find(spelling)
-        while at != -1:
-            if shown(at):
-                seen[at] = len(seen) + 1
-            at = text.find(spelling, at + 1)
-        ordinals[spelling] = seen
-        totals[spelling] = len(seen)
-
-    occurrences: dict[str, list[int]] = {}
-    for offset, citation in written.items():
-        ordinal = ordinals[citation.spelling].get(offset)
-        if ordinal is not None:
-            occurrences.setdefault(citation.spelling, []).append(ordinal)
-    return (
-        {spelling: tuple(sorted(found)) for spelling, found in occurrences.items()},
-        totals,
+    registered, bundle = register_citations(
+        text, sources, unresolved_label=unresolved_label
     )
+    return finalize_citations(registered, bundle)
+
+
+def body_digest(text: str) -> str:
+    """The digest a sidecar binds its spans to: SHA-256 over UTF-16 code units.
+
+    UTF-16 because that is the unit the spans are counted in, and a digest over
+    a different encoding of the same text would let the two disagree about which
+    text they mean. Little-endian, no BOM, unpaired surrogates passed through:
+    exactly the bytes a consumer reading the string a code unit at a time hashes.
+
+    This says which VERSION of the body a span was measured in. It is not a
+    signature: both sides compute it locally from text they already hold, and it
+    claims nothing about where that text came from.
+    """
+    return hashlib.sha256(text.encode("utf-16-le", "surrogatepass")).hexdigest()
+
+
+def _link_spelling(citation: Citation) -> str:
+    """The exact Markdown link a citation is written as."""
+    return f"[{_escape_label(citation.label)}]({citation.url})"
+
+
+def _utf16_offsets(text: str, offsets: Iterable[int]) -> dict[int, int]:
+    """Convert code-point offsets into UTF-16 code-unit offsets, in one pass.
+
+    Python counts code points and every consumer of the sidecar counts UTF-16
+    code units, so one emoji outside the BMP puts the two a unit apart for the
+    rest of the message.
+    """
+    converted: dict[int, int] = {}
+    cursor = 0
+    units = 0
+    for offset in sorted(set(offsets)):
+        units += len(text[cursor:offset].encode("utf-16-le", "surrogatepass")) // 2
+        cursor = offset
+        converted[offset] = units
+    return converted
+
+
+def _write_citations(
+    text: str,
+    bundle: CitationBundle,
+    *,
+    as_markdown: bool,
+) -> tuple[str, list[tuple[int, int, int]]]:
+    """Replace this bundle's tokens, reporting where each citation landed.
+
+    The placements are ``(citation index, start, end)`` in code points over the
+    returned text, one per link actually written.
+    """
+    registered = {marker.token: marker for marker in bundle.markers}
+    # Whether a token ended up inside code or a hidden block is a question about
+    # the text as it stands now, so it is asked of the final text rather than
+    # remembered from registration: a transform may have wrapped it in an
+    # example, and an internal token is the one thing that may never be shown.
+    mask = mask_hidden_and_code(text)
+    out: list[str] = []
+    placed: list[tuple[int, int, int]] = []
+    cursor = 0
+    written = 0
+    for match in _TOKEN_RE.finditer(text):
+        marker = registered.get(match.group(0))
+        if marker is None:
+            # Token-shaped text this bundle did not mint. It arrived as ordinary
+            # characters and leaves as ordinary characters.
+            continue
+        prefix = text[cursor : match.start()]
+        out.append(prefix)
+        written += len(prefix)
+        if mask[match.start() : match.end()] == match.group(0):
+            at = written + len(marker.lead)
+            body = marker.lead
+            for offset, part in enumerate(marker.parts):
+                if offset:
+                    body += " "
+                    at += 1
+                spelling = part.text if as_markdown else part.plain
+                if part.index is not None:
+                    placed.append((part.index, at, at + len(spelling)))
+                body += spelling
+                at += len(spelling)
+        else:
+            body = marker.literal
+        out.append(body)
+        written += len(body)
+        cursor = match.end()
+    out.append(text[cursor:])
+    return "".join(out), placed
 
 
 def _rewrite_outside_code(
     text: str,
     replace: Callable[[re.Match[str]], str],
-) -> tuple[str, dict[int, int]]:
+) -> str:
     """Apply ``replace`` to every marker the reader will actually be shown.
 
     A marker shown inside a code example must stay literal - an agent
@@ -943,27 +1109,16 @@ def _rewrite_outside_code(
     markers are matched against the mask and spliced back into the original
     source, which leaves every byte this function does not replace exactly as
     it arrived.
-
-    Also returns where each replacement was written, keyed by the offset of the
-    marker it replaced, so a caller that cares which text it produced can find
-    it without reparsing for its own output.
     """
     mask = mask_hidden_and_code(text)
     out: list[str] = []
-    offsets: dict[int, int] = {}
-    written = 0
     cursor = 0
     # A match in the mask cannot overlap a blanked region, so the marker text
     # under it is the original text - only its surroundings may have been
     # blanked, and those are copied from ``text``, never from the mask.
     for match in CITATION_MARKER_RE.finditer(mask):
-        prefix = text[cursor : match.start()]
-        replacement = replace(match)
-        out.append(prefix)
-        out.append(replacement)
-        written += len(prefix)
-        offsets[match.start()] = written
-        written += len(replacement)
+        out.append(text[cursor : match.start()])
+        out.append(replace(match))
         cursor = match.end()
     out.append(text[cursor:])
-    return "".join(out), offsets
+    return "".join(out)

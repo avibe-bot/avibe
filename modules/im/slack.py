@@ -31,7 +31,7 @@ from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import (
     SlackFormatter,
-    hold_link_destinations,
+    hold_links,
     hold_markdown_escapes,
     restore_held,
 )
@@ -58,6 +58,9 @@ _SLACK_SECTION_TEXT_LIMIT = 3000
 _SLACK_MARKDOWN_TEXT_LIMIT = 12000
 _BARE_HTTP_URL_RE = re.compile(r"https?://[^\s<>\|]+")
 _TRAILING_URL_PUNCTUATION = ".,!?;:"
+# A line break inside a link label: one space to a Markdown reader, and the
+# only way a two-line label can reach Slack as one link.
+_SOFT_LINE_BREAK_RE = re.compile(r"[ \t]*(?:\r\n|\r|\n)[ \t]*")
 _EVENT_TASK_SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 70.0
 
 
@@ -379,6 +382,20 @@ class SlackBot(BaseIMClient):
             pattern = rf"^\s*<@{re.escape(user_id)}>\s*"
         return re.sub(pattern, "", text, count=1).strip()
 
+    def _render_slack_link(self, label: str, destination: str) -> str:
+        """Spell one Markdown link the way Slack reads one.
+
+        ``<destination|label>`` is a single unit, so whatever formatting the
+        label carried has to be mrkdwn by the time it lands inside: the
+        converter formats a label in place, and it no longer sees this one.
+        A label written across two lines is one line to a Markdown reader and
+        has to be one here too, because a newline inside the angle brackets is
+        not a link on Slack. A link spelling no label at all is sent bare
+        rather than with an empty one.
+        """
+        label = self.markdown_converter.convert(_SOFT_LINE_BREAK_RE.sub(" ", label))
+        return f"<{destination}|{label}>" if label else f"<{destination}>"
+
     def _convert_markdown_to_slack_mrkdwn(self, text: str) -> str:
         """Convert standard markdown to Slack mrkdwn format using third-party library
 
@@ -399,13 +416,16 @@ class SlackBot(BaseIMClient):
             # protected keeps the converter off exactly the text that was marked
             # as literal.
             held_text, escaped = hold_markdown_escapes(text)
-            # A link destination is not text to format either, and the
-            # converter scanned those too: ``https://a*b*.example/x`` came back
-            # as ``https://a_b_.example/x``, a link to a different site.
-            held_text, destinations = hold_link_destinations(held_text)
+            # A link is not text to format either, and the converter scanned
+            # both halves of one: ``https://a*b*.example/x`` came back as
+            # ``https://a_b_.example/x``, a link to a different site, and a
+            # bracket it paired with the wrong text sent a footnote definition
+            # out labelled ``^f]: [p``. Slack spells a link itself below.
+            held_text, links = hold_links(held_text, render=self._render_slack_link)
             converted_text = self.markdown_converter.convert(held_text)
-            # Destinations first: one may still hold an escape placeholder.
-            converted_text = restore_held(converted_text, destinations)
+            # Links first: a label or a destination may still hold an escape
+            # placeholder.
+            converted_text = restore_held(converted_text, links)
             return restore_held(converted_text, escaped)
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")

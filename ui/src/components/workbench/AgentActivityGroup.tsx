@@ -29,6 +29,7 @@ import clsx from 'clsx';
 import { Markdown } from '../ui/markdown';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
+import { bindCitations } from '../../lib/citations';
 import {
   filterActivityRows,
   formatActivityElapsedClock,
@@ -328,21 +329,27 @@ const ActivityToolRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
 
 // ----- One interim assistant row: sparkles + full text (owner decision), the
 // existing Markdown renderer in a compact style. -----
-const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => (
-  <div className="flex items-start gap-2 px-1.5 py-1">
-    <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint-ink" aria-hidden="true" />
-    <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground/90 [&_p]:my-0.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto">
-      {row.text ? (
-        // Narration rows are the agent's own words, so the same authorship gate the
-        // transcript applies is satisfied here by construction: an assistant row may
-        // draw a source badge; without a sidecar the link stays the plain domain.
-        <Markdown content={row.text} className="vr-markdown--inherit-size" citations={row.citations} />
-      ) : (
-        <span className="text-muted">—</span>
-      )}
+const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
+  // Narration rows are the agent's own words, so the same authorship gate the
+  // transcript applies is satisfied here by construction: an assistant row may
+  // draw a source badge. Unlike a transcript row this one is rendered verbatim,
+  // so the body the sidecar was measured in IS the body handed to the renderer.
+  // Without a sidecar — or with one that no longer describes this text — the
+  // link stays the plain domain the backend wrote.
+  const citations = useMemo(() => bindCitations(row.citations, row.text), [row.citations, row.text]);
+  return (
+    <div className="flex items-start gap-2 px-1.5 py-1">
+      <Sparkles className="mt-0.5 size-3.5 shrink-0 text-mint-ink" aria-hidden="true" />
+      <div className="min-w-0 flex-1 text-[12px] leading-relaxed text-foreground/90 [&_p]:my-0.5 [&_pre]:max-w-full [&_pre]:overflow-x-auto">
+        {row.text ? (
+          <Markdown content={row.text} className="vr-markdown--inherit-size" citations={citations} />
+        ) : (
+          <span className="text-muted">—</span>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ActivityRowItem = memo(function ActivityRowItem({ row }: { row: ActivityRow }) {
   return row.kind === 'tool_call' ? <ActivityToolRow row={row} /> : <ActivityAssistantRow row={row} />;

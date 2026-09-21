@@ -27,7 +27,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import en from '@/i18n/en.json';
-import type { CitationSource } from '@/lib/citations';
+import { bindCitations, type CitationSource } from '@/lib/citations';
 import type { MentionReference } from '@/lib/mentions';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { Markdown } from './markdown';
@@ -39,7 +39,9 @@ type BridgeCase = {
   key: string;
   why: string;
   web_text: string;
-  citations: CitationSource[];
+  web_citations: CitationSource[];
+  /** The same reply as IM delivers it, measured in that body. */
+  im_citations: CitationSource[];
   web_anchors: Anchor[];
   anchors_exhaustive: boolean;
 };
@@ -58,10 +60,14 @@ void i18n.use(initReactI18next).init({
   interpolation: { escapeValue: false },
 });
 
+// Exactly what ChatPage does with a stored row: read the sidecar against the
+// body it was measured in, and hand the renderer the result. Passing the raw
+// rows and the text separately would let this file decide they match, which is
+// the decision under test.
 const renderCase = (content: string, citations?: CitationSource[]) => render(
   <I18nextProvider i18n={i18n}>
     <RouteSurfaceActiveContext.Provider value>
-      <Markdown content={content} citations={citations} interactive />
+      <Markdown content={content} citations={bindCitations(citations, content)} interactive />
     </RouteSurfaceActiveContext.Provider>
   </I18nextProvider>,
 );
@@ -74,11 +80,20 @@ const webLinks = (container: HTMLElement) =>
 
 const badged = (anchor: HTMLAnchorElement) => anchor.hasAttribute('data-citation-index');
 
+/** The characters a citation's first span covers, in the body it was measured in. */
+const spelling = (row: BridgeCase, entry: CitationSource) => {
+  const [start, end] = (entry.spans as number[][])[0];
+  // A JavaScript string index is a UTF-16 code unit, which is the unit the
+  // backend counted in.
+  return row.web_text.slice(start, end);
+};
+
 describe('citation bridge: the real renderer, on one real producer run', () => {
   const cited = cases.map((row) => [row.key, row] as const);
+  const withSidecar = cited.filter(([, row]) => row.web_citations.length > 0);
 
   it.each(cited)('%s shows every source the producer cited', (_key, row) => {
-    const { container } = renderCase(row.web_text, row.citations);
+    const { container } = renderCase(row.web_text, row.web_citations);
     const links = webLinks(container);
     const expected = row.web_anchors.filter((anchor) => anchor.cited);
 
@@ -91,7 +106,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
       expected.map((anchor) => anchor.url),
     );
     badges.forEach((anchor, at) => {
-      const source = row.citations.find((entry) => entry.url === expected[at].url);
+      const source = row.web_citations.find((entry) => entry.url === expected[at].url);
       expect(anchor.getAttribute('aria-label')).toBe(
         `Source ${source?.index}: ${source?.title || source?.label}`,
       );
@@ -99,7 +114,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
   });
 
   it.each(cited)('%s leaves every link the answer wrote itself ordinary', (_key, row) => {
-    const { container } = renderCase(row.web_text, row.citations);
+    const { container } = renderCase(row.web_text, row.web_citations);
     const ordinary = webLinks(container).filter((anchor) => !badged(anchor));
     const expected = row.web_anchors.filter((anchor) => !anchor.cited);
 
@@ -117,7 +132,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
   it.each(cited.filter(([, row]) => row.anchors_exhaustive))(
     '%s badges the occurrence the producer wrote and no other',
     (_key, row) => {
-      const { container } = renderCase(row.web_text, row.citations);
+      const { container } = renderCase(row.web_text, row.web_citations);
 
       // Position, not just count: three identical links where the middle one is
       // the citation is exactly the case a count cannot tell apart.
@@ -143,14 +158,15 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     }
   });
 
-  it.each(cited.filter(([, row]) => row.citations.length > 0))(
+  it.each(withSidecar)(
     '%s refuses to guess when the sidecar no longer matches the text',
     (_key, row) => {
-      // The stored text and the stored sidecar disagree - an edit, a truncation,
-      // a row written for another message. Guessing which link was meant is how
-      // an ordinary link gets impersonated, so nothing is badged.
-      const stale = row.citations.map((entry) => ({ ...entry, spelling: `${entry.spelling} ` }));
-      const { container } = renderCase(row.web_text, stale);
+      // The stored text and the stored sidecar disagree - an edit after the row
+      // was written, a truncation, a row written for another message. The spans
+      // still land on real links here, which is exactly why the digest is what
+      // decides: guessing is how an ordinary link gets impersonated.
+      const edited = `${row.web_text}\n\nEdited.`;
+      const { container } = renderCase(edited, row.web_citations);
       const links = webLinks(container);
 
       expect(links.filter(badged)).toHaveLength(0);
@@ -162,13 +178,30 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     },
   );
 
-  it.each(cited.filter(([, row]) => row.citations.length > 0))(
+  it.each(withSidecar)('%s refuses a sidecar it cannot locate in this text', (_key, row) => {
+    // Same body, but the measurement is damaged: a span past the end, or a row
+    // that names the contract without stating it. One bad row drops the whole
+    // set rather than leaving the rest to be matched some other way.
+    for (const broken of [
+      row.web_citations.map((entry) => ({ ...entry, spans: [[0, row.web_text.length + 1]] })),
+      row.web_citations.map((entry) => ({ ...entry, spans: undefined })),
+    ]) {
+      const { container } = renderCase(row.web_text, broken as CitationSource[]);
+      expect(webLinks(container).filter(badged)).toHaveLength(0);
+      cleanup();
+    }
+  });
+
+  it.each(withSidecar)(
     '%s still renders a row persisted before provenance existed',
     (_key, row) => {
-      // Rows already on disk carry no spelling, and the match they were written
-      // for is the exact destination and link text. It is less precise - every
-      // identical link in the answer gets a badge - and it keeps working.
-      const legacy = row.citations.map(({ spelling: _spelling, ...rest }) => rest);
+      // Rows already on disk carry no measurement at all, and the match they
+      // were written for is the exact destination and link text. It is less
+      // precise - every identical link in the answer gets a badge - and it
+      // keeps working.
+      const legacy = row.web_citations.map(
+        ({ spans: _spans, body_sha256: _digest, ...rest }) => rest,
+      );
       const { container } = renderCase(row.web_text, legacy as CitationSource[]);
       const links = webLinks(container);
       const matches = row.web_anchors.filter((anchor) => legacy.some(
@@ -188,7 +221,7 @@ describe('citation bridge: the counterexamples this contract was written for', (
     const row = only('ipv6_port');
     const [url] = row.web_anchors.map((anchor) => anchor.url);
 
-    const withBadge = webLinks(renderCase(row.web_text, row.citations).container);
+    const withBadge = webLinks(renderCase(row.web_text, row.web_citations).container);
     cleanup();
     const without = webLinks(renderCase(row.web_text).container);
 
@@ -204,12 +237,12 @@ describe('citation bridge: the counterexamples this contract was written for', (
 
   it('keeps a footnote definition ordinary and badges the real citation', () => {
     const row = only('footnote');
-    const { container } = renderCase(row.web_text, row.citations);
+    const { container } = renderCase(row.web_text, row.web_citations);
     const links = webLinks(container);
 
     // Both links point at the same page and only one was written by the
     // backend. Counting parsed links disagreed across the two parsers here and
-    // the badge was silently lost; counting the exact spelling does not.
+    // the badge was silently lost; the span the producer measured does not.
     expect(links.filter(badged)).toHaveLength(1);
     expect(links.filter((anchor) => !badged(anchor)).map((anchor) => anchor.textContent))
       .toContain('p');
@@ -217,7 +250,7 @@ describe('citation bridge: the counterexamples this contract was written for', (
 
   it('shows a host spelled with Markdown emphasis as that host', () => {
     const row = only('star_host');
-    const { container } = renderCase(row.web_text, row.citations);
+    const { container } = renderCase(row.web_text, row.web_citations);
     const [badge] = webLinks(container);
 
     expect(badge.getAttribute('href')).toBe('https://a*b*.example/x');
@@ -235,30 +268,55 @@ describe('citation bridge: the counterexamples this contract was written for', (
 
   it('does not hand the badge to a surviving copy when the citation is deleted', () => {
     const row = only('prose_repeat');
-    const [entry] = row.citations;
-    const trimmed = row.web_text.replace(`Cited. ${entry.spelling}\n\n`, '');
+    const [entry] = row.web_citations;
+    const trimmed = row.web_text.replace(`Cited. ${spelling(row, entry)}\n\n`, '');
 
-    const { container } = renderCase(trimmed, row.citations);
+    const { container } = renderCase(trimmed, row.web_citations);
     const links = webLinks(container);
 
     // An edit that drops the sentence, or a quotation that copies only part of
-    // the answer: what is left points at the same page with the same spelling
-    // and is still the agent's own prose. Inheriting the badge would credit it
-    // to the search result, so the sidecar and the text disagreeing costs the
-    // reader the preview and nothing else.
+    // the answer: what is left is the agent's own prose pointing at the same
+    // page, character for character the citation's own spelling, and shifted
+    // into the range it used to occupy. Inheriting the badge would credit the
+    // search result for what the answer said, so the sidecar and the text
+    // disagreeing costs the reader the preview and nothing else.
+    expect(trimmed).not.toContain('Cited.');
+    expect(trimmed.split(spelling(row, entry))).toHaveLength(3);
     expect(links).toHaveLength(2);
     expect(links.filter(badged)).toHaveLength(0);
     expect(links.map((anchor) => anchor.getAttribute('href'))).toEqual([entry.url, entry.url]);
+  });
+
+  it('does not read one surface of a reply with the other surface\'s measurement', () => {
+    // One producer run writes two bodies - the workbench keeps the `file://`
+    // attachment and IM flattens it to a label - so the same citation sits at
+    // [63, 99) in one and [15, 51) in the other. Nothing in a bare range says
+    // which body it was counted in; the digest does, and it is the only reason
+    // a row cannot be read against the wrong one.
+    const row = only('file_link_above');
+
+    expect(row.im_citations[0].spans).not.toEqual(row.web_citations[0].spans);
+    expect(webLinks(renderCase(row.web_text, row.im_citations).container).filter(badged))
+      .toHaveLength(0);
+    cleanup();
+    expect(webLinks(renderCase(row.web_text, row.web_citations).container).filter(badged))
+      .toHaveLength(1);
   });
 });
 
 // ChatPage hands ONE `Markdown` the citation sidecar, the mention sidecar and
 // the secret-request opt-in together, and the last two take effect by REWRITING
 // the source text before Markdown parses it: `$<NAME>` becomes a secure-input
-// card, `@<…>` / `#<…>` become chips. That inserts characters around the very
-// link the producer counted, which is the one thing a positional contract can
-// be silently broken by — so every case is rendered a second time through that
-// production combination, with markers added to the prose.
+// card, `@<…>` / `#<…>` become chips. That moves the very link the producer
+// counted, which is the one thing a positional contract can be silently broken
+// by — so every case is rendered a second time through that production
+// combination, and the `marker_shaped` case, whose own producer-written body
+// carries all three markers before the citation, is where the shift is real.
+//
+// The markers are not pasted around the recorded bodies: adding characters
+// makes a different body, the digest says so, and the run would prove only that
+// a refusal is a refusal. The rewrite has to be measured on a body the producer
+// actually wrote.
 //
 // The archived-transcript card is the one drawn here because it needs no live
 // vault client. The rewrite under test runs before either card exists.
@@ -266,15 +324,13 @@ const REFERENCES: MentionReference[] = [
   { kind: 'agent', name: 'claude' },
   { kind: 'session', session_id: 'ses6jr7c5h2q6', title: 'Bridge' },
 ];
-const MARKERS_BEFORE = 'Ping @<claude> in #<ses6jr7c5h2q6>.\n\n';
-const MARKERS_AFTER = '\n\nThen provide $<openAiKey>.';
 
 const renderWithSurfaceRewrites = (content: string, citations?: CitationSource[]) => render(
   <I18nextProvider i18n={i18n}>
     <RouteSurfaceActiveContext.Provider value>
       <Markdown
         content={content}
-        citations={citations}
+        citations={bindCitations(citations, content)}
         references={REFERENCES}
         secretRequests
         readOnly
@@ -287,16 +343,9 @@ const renderWithSurfaceRewrites = (content: string, citations?: CitationSource[]
 describe('citation bridge: the rewrites that run beside it on the real surface', () => {
   const cited = cases.map((row) => [row.key, row] as const);
 
-  it.each(cited)('%s badges the same links once chips and cards are inserted', (_key, row) => {
-    const { container } = renderWithSurfaceRewrites(
-      `${MARKERS_BEFORE}${row.web_text}${MARKERS_AFTER}`,
-      row.citations,
-    );
+  it.each(cited)('%s badges the same links once chips and cards are enabled', (_key, row) => {
+    const { container } = renderWithSurfaceRewrites(row.web_text, row.web_citations);
     const links = webLinks(container);
-
-    // If no marker was rewritten, nothing was inserted and this proves nothing.
-    expect(container.textContent).not.toContain('@<claude>');
-    expect(container.textContent).not.toContain('$<openAiKey>');
 
     expect(links.filter(badged).map((anchor) => anchor.getAttribute('href'))).toEqual(
       row.web_anchors.filter((anchor) => anchor.cited).map((anchor) => anchor.url),
@@ -309,16 +358,40 @@ describe('citation bridge: the rewrites that run beside it on the real surface',
     }
   });
 
+  it('carries the citation across the chips and the card minted before it', () => {
+    const row = cases.find((entry) => entry.key === 'marker_shaped') as BridgeCase;
+    const [entry] = row.web_citations;
+    const { container } = renderWithSurfaceRewrites(row.web_text, row.web_citations);
+    const [badge] = webLinks(container);
+
+    // Three markers stand in the prose ahead of the citation, and each is
+    // replaced by something of a different length - so the link the backend
+    // measured at [71, 142) is not written at 71 by the time Markdown parses
+    // it. If no marker were rewritten nothing would have moved and this would
+    // prove nothing, so the absence of the raw markers is asserted too.
+    expect((entry.spans as number[][])[0][0]).toBe(71);
+    expect(container.textContent).not.toContain('@<claude>');
+    expect(container.textContent).not.toContain('#<ses6jr7c5h2q6>');
+    expect(container.textContent).not.toContain('$<openAiKey>');
+    // The chips carry the session's title rather than its id, so the text they
+    // replaced the markers with is a different length in both directions.
+    expect(container.textContent).toContain('@claude');
+    expect(container.textContent).toContain('#Bridge');
+
+    expect(badged(badge)).toBe(true);
+    expect(badge.getAttribute('href')).toBe(entry.url);
+  });
+
   it('leaves an address spelled like those markers alone', () => {
     const row = cases.find((entry) => entry.key === 'marker_shaped') as BridgeCase;
-    const { container } = renderWithSurfaceRewrites(row.web_text, row.citations);
+    const { container } = renderWithSurfaceRewrites(row.web_text, row.web_citations);
     const [badge] = webLinks(container);
 
     // `$<…>` and `@<…>` inside a destination are not markers to rewrite, and a
     // card minted inside the link would take the address apart. The producer's
     // percent-encoding is what keeps the two apart, so it is asserted here as
     // the address the reader reaches, not as a spelling rule.
-    expect(badge.getAttribute('href')).toBe(row.citations[0].url);
+    expect(badge.getAttribute('href')).toBe(row.web_citations[0].url);
     expect(new URL(badge.href).searchParams.get('q')).toBe('$<openAiKey>');
     expect(badge.querySelector('button')).toBeNull();
   });
