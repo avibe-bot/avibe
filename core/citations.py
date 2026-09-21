@@ -64,6 +64,15 @@ _TOKEN_RE = re.compile(
 # untouched.
 CITATION_MARKER_RE = re.compile(f"{_START}cite{_SEP}([^{_START}{_END}]*){_END}")
 
+# A marker and the token it is registered as are both this module's own text:
+# one is replaced by the citation it asked for, the other by the marker it
+# stands for, and neither reaches a reader. So neither is part of a reference
+# identifier the Markdown parser matches against a definition, and the reply
+# parser is told so wherever it is asked where a citation may be written.
+_SLOT_TRANSPARENT_RE = re.compile(
+    f"{CITATION_MARKER_RE.pattern}|{_TOKEN_RE.pattern}"
+)
+
 # Real ref_ids look like ``turn0view1``. Keep the shape permissive but bounded so
 # a malformed payload falls through to the unresolved fallback.
 _REF_ID_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}")
@@ -867,7 +876,8 @@ def citation_ref_ids(text: Optional[str]) -> list[str]:
     if not text or _START not in text:
         return []
     requested: dict[str, None] = {}
-    for match in CITATION_MARKER_RE.finditer(mask_citation_slots(text)):
+    mask = mask_citation_slots(text, transparent=_SLOT_TRANSPARENT_RE)
+    for match in CITATION_MARKER_RE.finditer(mask):
         for ref in match.group(1).split(_SEP):
             if ref and _REF_ID_RE.fullmatch(ref):
                 requested.setdefault(ref, None)
@@ -1181,7 +1191,7 @@ def _write_citations(
     """
     registered = {marker.token: marker for marker in bundle.markers}
     if as_markdown:
-        mask = mask_citation_slots(text)
+        mask = mask_citation_slots(text, transparent=_SLOT_TRANSPARENT_RE)
         units = markdown_link_units(text)
     else:
         mask = mask_hidden_and_code(text)
@@ -1276,7 +1286,7 @@ def _rewrite_citable_markers(
     matched against the mask and spliced back into the original source, which
     leaves every byte this function does not replace exactly as it arrived.
     """
-    mask = mask_citation_slots(text)
+    mask = mask_citation_slots(text, transparent=_SLOT_TRANSPARENT_RE)
     out: list[str] = []
     cursor = 0
     # A match in the mask cannot overlap a blanked region, so the marker text

@@ -111,7 +111,18 @@ blob with no way to reach the page the answer is based on.
   same mask — delivery does not wait for a source it could never show. A
   shortcut or collapsed reference is the dual-use case, both the words a reader
   sees and the identifier that finds the address, so it and its definition are
-  preserved whole. The decision is re-asked of the final text for this bundle's
+  preserved whole — including when the marker is what keeps the run from
+  resolving. CommonMark cannot match `[docs <marker>]` against `[docs]`, reads
+  the brackets as prose, and would hand the run over as ordinary label text;
+  the marker is not part of that identifier though, because citation delivery
+  replaces it before a reader sees any of this. So the same parser is asked the
+  same question a second time with the caller's own text — its markers and the
+  tokens standing for them — blanked to spaces, which preserves every offset
+  and normalises out of an identifier exactly as the marker would have been
+  absent. Runs the text already parses inside a unit are left to the first
+  answer: CommonMark has no link inside a link, so a bracket run in a label is
+  shown text and nothing more. The decision is re-asked of the final text for
+  this bundle's
   own tokens, so a token a transform moved into a label follows the rule above
   and one moved into code, a hidden block or a data slot gets its original
   marker text back. A structured field is not Markdown on any surface: a file
@@ -491,7 +502,10 @@ blob with no way to reach the page the answer is based on.
   one source in reading order; and, byte for byte unchanged with an empty
   sidecar and an empty `citation_ref_ids`, a marker in a destination, a title,
   an angle destination, an angle autolink, an image `src`, a reference
-  identifier and its definition, and a shortcut and a collapsed reference. Then
+  identifier and its definition, a shortcut and a collapsed reference whose
+  definition repeats the marker, and the four forms whose definition does not —
+  shortcut and collapsed, link and image — where the marker alone is what stops
+  the run resolving. Then
   the tokens a transform moved, judged where they ended up, and the structured
   fields — a file label and a quick-reply button — keeping plain attribution in
   place. `TestRegisteredIdentity` already covered the copied, deleted, spliced

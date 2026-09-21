@@ -22,7 +22,7 @@ import os
 import re
 from bisect import bisect_left
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 from markdown_it import MarkdownIt
@@ -1295,13 +1295,62 @@ def _merged_ranges(ranges: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     return merged
 
 
-def _markdown_data_ranges(text: str) -> List[Tuple[int, int]]:
+def _reference_identifier_ranges(
+    text: str,
+    units: List[MarkdownUnit],
+    transparent: "re.Pattern[str]",
+) -> List[Tuple[int, int]]:
+    """Label runs that are a reference identifier once *transparent* text goes.
+
+    A collapsed or shortcut reference names its definition with the very
+    characters it shows, so CommonMark reads one run as both - and accepts the
+    unit at all only when that run matches an identifier the block pass filed.
+    Text the caller replaces before anyone reads the reply is not part of that
+    identifier, but the parser cannot know it: ``[Docs <marker>][]`` matches no
+    definition, so the run stops being a unit and the marker inside it looks
+    like ordinary label text. It is not - writing a citation there spends the
+    link the definition was about to give the reader, and leaves the brackets
+    beside it in the message.
+
+    Asking the same parser the same question with that text blanked to spaces
+    puts the run back in the answer: every offset still lines up, and a
+    reference identifier normalises away the blanks exactly as it would have
+    ignored the marker. Runs inside a unit the text already parses as are left
+    alone - CommonMark has no link inside a link, so a bracket run in a label
+    is shown text and nothing more.
+    """
+    blanked = transparent.sub(
+        lambda match: " " * (match.end() - match.start()), text
+    )
+    ranges: List[Tuple[int, int]] = []
+    for candidate in markdown_link_units(blanked):
+        dual_use = (
+            candidate.label_start < 0
+            and candidate.data_start == candidate.start
+            and candidate.data_end == candidate.end
+        )
+        if not dual_use:
+            continue
+        if any(
+            unit.start <= candidate.start and candidate.end <= unit.end
+            for unit in units
+        ):
+            continue
+        ranges.append((candidate.start, candidate.end))
+    return ranges
+
+
+def _markdown_data_ranges(
+    text: str, transparent: Optional["re.Pattern[str]"] = None
+) -> List[Tuple[int, int]]:
     """The source spans CommonMark reads but never shows anyone."""
     units, definitions = _markdown_units(text)
     ranges = [
         (unit.data_start, unit.data_end) for unit in units if unit.data_start >= 0
     ]
     ranges.extend(definitions)
+    if transparent is not None and transparent.search(text):
+        ranges.extend(_reference_identifier_ranges(text, units, transparent))
     return _merged_ranges(ranges)
 
 
@@ -1524,7 +1573,9 @@ def mask_hidden_and_code(text: str) -> str:
     return _mask_ranges(markdown_mask, ranges)
 
 
-def mask_citation_slots(text: str) -> str:
+def mask_citation_slots(
+    text: str, *, transparent: Optional["re.Pattern[str]"] = None
+) -> str:
     """Blank everything a citation cannot be written into, offsets preserved.
 
     ``mask_hidden_and_code`` answers "will a reader be shown this offset"; a
@@ -1540,11 +1591,16 @@ def mask_citation_slots(text: str) -> str:
     then the slots the parser reads without showing. Both preserve every source
     offset, so a consumer still matches its own pattern against the mask and
     splices into the original source.
+
+    *transparent* is the caller's own text - its markers, its handles on them -
+    which stands in the reply now and will not when a reader sees it. It is
+    matched nowhere else; it only stops a marker sitting in a collapsed or
+    shortcut reference from hiding the identifier that run also is.
     """
     if not text:
         return text
     masked = mask_hidden_and_code(text)
-    ranges = _markdown_data_ranges(text)
+    ranges = _markdown_data_ranges(text, transparent)
     if not ranges:
         return masked
     return _mask_ranges(masked, ranges)

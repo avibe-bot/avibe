@@ -1057,6 +1057,10 @@ class TestWhereACitationCanBeShown:
             f"[the docs][{marker('turn0view0')}]\n\n[{marker('turn0view0')}]: https://r.example/p",
             f"[dual {marker('turn0view0')}]\n\n[dual {marker('turn0view0')}]: https://r.example/d",
             f"[dual {marker('turn0view0')}][]\n\n[dual {marker('turn0view0')}]: https://r.example/d",
+            f"[docs {marker('turn0view0')}]\n\n[docs]: https://r.example/d",
+            f"[docs {marker('turn0view0')}][]\n\n[docs]: https://r.example/d",
+            f"![docs {marker('turn0view0')}]\n\n[docs]: https://i.example/d.png",
+            f"![docs {marker('turn0view0')}][]\n\n[docs]: https://i.example/d.png",
         ],
         ids=[
             "destination",
@@ -1067,6 +1071,10 @@ class TestWhereACitationCanBeShown:
             "reference-identifier-and-definition",
             "shortcut-reference",
             "collapsed-reference",
+            "shortcut-reference-the-marker-unresolves",
+            "collapsed-reference-the-marker-unresolves",
+            "shortcut-image-the-marker-unresolves",
+            "collapsed-image-the-marker-unresolves",
         ],
     )
     def test_a_slot_only_the_parser_reads_keeps_the_model_s_own_text(self, native):
@@ -1075,6 +1083,12 @@ class TestWhereACitationCanBeShown:
         A shortcut or collapsed reference is the dual-use case: those brackets
         are both the words a reader sees and the identifier that finds the
         address, so editing them would leave a link pointing at nothing.
+
+        A marker the definition does not repeat is the same run all the same.
+        CommonMark cannot match ``[docs <marker>]`` against ``[docs]`` and so
+        reads the brackets as prose, but the run is still what names that
+        definition - and a citation written into it costs the reader the link
+        the definition was about to give them, image or link alike.
         """
         body, citations = self.written(native)
 
