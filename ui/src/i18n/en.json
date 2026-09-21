@@ -2654,6 +2654,7 @@
       "replied": "Replied",
       "loadMore": "Load more",
       "moreUnreadBeyond": "More unread sessions may be further down — load more to see them.",
+      "moreUnreadInFull": "Some unread sessions aren't in this preview — open the full inbox.",
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
