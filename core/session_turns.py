@@ -2722,7 +2722,30 @@ class SessionTurnManager:
         # The steering claim has committed. Other viewers must see the same
         # read-only pending row while the native write is in flight.
         self._publish_queue_update(str(deliveries[0]["session_id"]))
-        if not self._compatible_steer_memory_authority(logical_turn_id, deliveries):
+        try:
+            memory_authority_compatible = self._compatible_steer_memory_authority(
+                logical_turn_id,
+                deliveries,
+            )
+        except Exception as exc:
+            # An unavailable optional Memory runtime must not strand a claimed
+            # Delivery in ``steering``. No native write has happened yet, so
+            # this is a definitive refusal and the exact input can safely
+            # return to the retryable FIFO queue.
+            logger.exception(
+                "steering memory-authority check failed before native write for delivery=%s",
+                delivery_id,
+            )
+            return await self._finish_steer(
+                delivery_id,
+                steer_result(
+                    SteerOutcome.REFUSED,
+                    reason="memory_runtime_unavailable",
+                    error_type=type(exc).__name__,
+                ),
+                context=context,
+            )
+        if not memory_authority_compatible:
             return await self._finish_steer(
                 delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
             )

@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -1281,6 +1281,32 @@ async def test_steering_preparation_failure_preserves_a_definitively_unwritten_b
     manager._steer.assert_awaited_once()
     assert manager._steer.await_args.args[1].text == "\n".join(row["dispatch_text"] for row in queued)
     assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
+
+
+@pytest.mark.anyio
+async def test_steering_memory_check_failure_restores_a_retryable_queue_row(managers):
+    manager, _other, engine, _engine_b, _starts = managers
+    await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    manager._compatible_steer_memory_authority = Mock(
+        side_effect=ModuleNotFoundError("avibe_memory")
+    )
+
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p1",
+            content="retry after memory recovery",
+        ),
+        context=_context(),
+    )
+
+    assert result.state == "queued"
+    manager._steer.assert_not_awaited()
+    queued = [row for row in _rows(engine) if row["state"] == "queued"]
+    assert len(queued) == 1
+    assert queued[0]["dispatch_text"] == "retry after memory recovery"
+    assert queued[0]["current_attempt_id"] is None
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
