@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
+from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from vibe.model_hub_runtime.api_key_vendors import (
     official_api_key_base_url,
     validate_api_key_auth_scheme,
@@ -40,6 +41,56 @@ class RuntimeSecrets:
     gateway_token: str
 
 
+def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read a record an earlier release stored with addressed model names.
+
+    The address belongs to the outbound call, not to the file, but releases
+    before this one persisted whatever the engine's management API answered
+    with — which is already addressed. Healing on load rather than in a
+    one-shot script keeps one spelling in memory no matter which release wrote
+    the file, and the next ordinary write persists it.
+
+    Unwrapping can collapse two stored names onto one identity. The strict
+    parse below refuses a repeated reasoning key and a repeated route target,
+    so this keeps the first of each instead: a file that loads today must keep
+    loading, and a healed duplicate is the same model named twice, not a
+    conflict to report. Any shape this cannot read is left exactly as it was,
+    so the parse still reports it.
+    """
+
+    healed = dict(payload)
+    model_ids = payload.get("model_ids")
+    if isinstance(model_ids, list):
+        healed["model_ids"] = list(
+            dict.fromkeys(
+                model_id_without_credential_address(str(model)) for model in model_ids
+            )
+        )
+    route_model_ids = payload.get("route_model_ids")
+    if isinstance(route_model_ids, list) and all(
+        isinstance(model, str) for model in route_model_ids
+    ):
+        healed["route_model_ids"] = list(
+            dict.fromkeys(
+                model_id_without_credential_address(model) for model in route_model_ids
+            )
+        )
+    reasoning_efforts = payload.get("model_reasoning_efforts")
+    if isinstance(reasoning_efforts, list) and all(
+        isinstance(item, list) and len(item) == 2 and isinstance(item[0], str)
+        for item in reasoning_efforts
+    ):
+        healed_efforts: dict[str, Any] = {}
+        for model_id, efforts in reasoning_efforts:
+            healed_efforts.setdefault(
+                model_id_without_credential_address(model_id), efforts
+            )
+        healed["model_reasoning_efforts"] = [
+            [model_id, efforts] for model_id, efforts in healed_efforts.items()
+        ]
+    return healed
+
+
 @dataclass(frozen=True)
 class SourceRecord:
     source_id: str
@@ -55,6 +106,7 @@ class SourceRecord:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
+        payload = _without_credential_addresses(payload)
         try:
             raw_reasoning_efforts = payload["model_reasoning_efforts"]
         except KeyError as exc:
@@ -532,7 +584,12 @@ class EngineStateStore:
                 if credential["kind"] == "oauth" and not allowed_origins:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
-                model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
+                model_ids = tuple(
+                    dict.fromkeys(
+                        model_id_without_credential_address(str(model).strip())
+                        for model in binding.model_ids
+                    )
+                )
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
                 route_model_ids = tuple(binding.route_model_ids)
@@ -540,7 +597,7 @@ class EngineStateStore:
                     raise EngineStateError("invalid route model id")
                 reasoning_by_model: dict[str, tuple[str, ...]] = {}
                 for model_id, efforts in binding.model_reasoning_efforts:
-                    normalized_model_id = str(model_id).strip()
+                    normalized_model_id = model_id_without_credential_address(str(model_id).strip())
                     if not normalized_model_id or normalized_model_id not in model_ids:
                         raise EngineStateError("reasoning model id is not registered")
                     if normalized_model_id in reasoning_by_model:
@@ -560,7 +617,14 @@ class EngineStateStore:
                         credential_ref=credential_ref,
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
-                        route_model_ids=tuple(sorted(set(route_model_ids))),
+                        route_model_ids=tuple(
+                            sorted(
+                                {
+                                    model_id_without_credential_address(model)
+                                    for model in route_model_ids
+                                }
+                            )
+                        ),
                         prefix=(
                             str(credential["prefix"])
                             if credential.get("prefix")
@@ -585,7 +649,12 @@ class EngineStateStore:
             current = next((source for source in sources if source.source_id == source_id), None)
             if current is None:
                 raise EngineStateError("source is not registered")
-            models = tuple(dict.fromkeys(str(model).strip() for model in model_ids))
+            models = tuple(
+                dict.fromkeys(
+                    model_id_without_credential_address(str(model).strip())
+                    for model in model_ids
+                )
+            )
             if not models:
                 raise EngineStateError("source requires at least one model id")
             if any(not model for model in models):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 # Usage rows shipped with a 200-character readable head. Keep that threshold
 # stable even when a later API admits longer model identifiers, or one upgrade
@@ -15,6 +16,35 @@ USAGE_LEDGER_VERBATIM_MAX_LENGTH = 200
 USAGE_LEDGER_KEY_MAX_LENGTH = (
     USAGE_LEDGER_VERBATIM_MAX_LENGTH + 1 + 2 * hashlib.sha256().digest_size
 )
+
+# The engine addresses a credential through the model name and no other field,
+# so an outbound call spells one as ``<source prefix>/<model>``. That prefix is
+# the address of a credential, never part of a model's identity, and it is
+# minted per Source as ``avibe-`` plus twelve random bytes. Match that minted
+# spelling exactly rather than any leading segment: an upstream identity may
+# legitimately carry a slash of its own — OpenRouter's ``anthropic/claude-x``,
+# Together's ``meta-llama/Llama-3-70b`` — and stripping one of those would
+# rename the model instead of unwrapping an address.
+_CREDENTIAL_ADDRESS = re.compile(r"avibe-[0-9a-f]{24}")
+
+
+def model_id_without_credential_address(value: str) -> str:
+    """Return the identity ``value`` names, with no credential address around it.
+
+    The engine's management API answers with names it has already addressed, so
+    a discovered identity arrives wrapped and a persisted one may have been
+    stored wrapped by an earlier release. Unwrapping repeatedly rather than once
+    makes the result total: whatever this returns carries no address, so a
+    caller never has to ask how many an identity accumulated.
+    """
+
+    identity = value
+    while True:
+        address, separator, remainder = identity.partition("/")
+        if not separator or not remainder or not _CREDENTIAL_ADDRESS.fullmatch(address):
+            return identity
+        identity = remainder
+
 
 OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL = {
     "openai_responses": "avibe-openai",

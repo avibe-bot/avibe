@@ -2729,10 +2729,16 @@ class ModelHubModelConfig:
         # config, so no admission path can invent a second spelling for one
         # model and split its usage across two ledger rows. New-admission checks
         # stay with callers: this constructor also reads older persisted files.
-        from core.handlers.model_hub.identifiers import normalized_model_id
+        # A credential address is unwrapped as part of that settling, and not
+        # inside `normalized_model_id`, because that spelling is also what a
+        # usage ledger key is derived from and its historical encoding is fixed.
+        from core.handlers.model_hub.identifiers import (
+            model_id_without_credential_address,
+            normalized_model_id,
+        )
 
         return cls(
-            id=normalized_model_id(model_id),
+            id=model_id_without_credential_address(normalized_model_id(model_id)),
             provenance=origin,
             reasoning_efforts=list(reasoning_efforts),
             reasoning_efforts_source=reasoning_efforts_source,
@@ -3071,9 +3077,15 @@ class ModelHubRouteHopConfig:
         ):
             raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
         # Keep saved targets in the same canonical namespace as inventory evidence.
-        from core.handlers.model_hub.identifiers import normalized_model_id
+        from core.handlers.model_hub.identifiers import (
+            model_id_without_credential_address,
+            normalized_model_id,
+        )
 
-        return cls(source_id=source_id, model_id=normalized_model_id(model_id))
+        return cls(
+            source_id=source_id,
+            model_id=model_id_without_credential_address(normalized_model_id(model_id)),
+        )
 
     def to_payload(self) -> dict:
         return {"source_id": self.source_id, "model_id": self.model_id}

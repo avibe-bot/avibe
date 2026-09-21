@@ -34,6 +34,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -2911,7 +2912,14 @@ def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...
     seen: set[str] = set()
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
-        if not isinstance(value, str) or not value or value in seen:
+        if not isinstance(value, str) or not value:
+            continue
+        # The engine answers with the name it addresses this credential by. The
+        # address is how one call reaches one credential, never part of what the
+        # model is called, so it is unwrapped here — at the boundary it enters
+        # the product — rather than by every later reader of the inventory.
+        value = model_id_without_credential_address(value)
+        if not value or value in seen:
             continue
         seen.add(value)
         supported_parameters = None
