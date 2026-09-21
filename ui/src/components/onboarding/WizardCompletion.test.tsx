@@ -336,7 +336,16 @@ describe('saved Discord recovery', () => {
   });
 });
 
-const flowError = () => document.querySelector('.onboarding-flow-error')?.textContent ?? null;
+// e-Da: the block holds two different kinds of string. `flowError` is the sentence a
+// person reads, which is always a bundle key; the disclosure below it is whatever the
+// server or the transport said. Reading them apart is what makes "the raw detail is not
+// the alert" an assertion rather than a coincidence of concatenation.
+const flowError = () => document.querySelector('.onboarding-flow-error p')?.textContent ?? null;
+const flowErrorDetail = () => {
+  const disclosure = document.querySelector('.onboarding-flow-error details');
+  if (!disclosure) return null;
+  return (disclosure.textContent ?? '').slice((disclosure.querySelector('summary')?.textContent ?? '').length);
+};
 const primaryAction = () => document.querySelector('.onboarding-primary-action') as HTMLButtonElement;
 const backAction = () => document.querySelector('.onboarding-back-action') as HTMLButtonElement;
 // The footer's spinner carries Tailwind's `motion-safe:` variant, so the token in the
@@ -358,7 +367,8 @@ function expectNoForwardWrite() {
 // with an answer it could not validate — against controlled responses. The producer half
 // (real authentication refusal, the full envelope shape, CSRF-gated persistence, readback)
 // is the scenario test the catalog entry names. The two do not compose into the assembled
-// browser-to-API journey; that stays with integrated acceptance.
+// browser-to-API journey: that is AUTH-SETUP-123, recorded as partial and owned by
+// integrated acceptance, because no harness without a real browser can claim it.
 describe('fresh prerequisite boundary', () => {
   it.each([
     ['the saved intent', { model_hub: { enabled: false } }],
@@ -374,19 +384,26 @@ describe('fresh prerequisite boundary', () => {
     expect(backAction().hasAttribute('disabled')).toBe(false);
     expect(primaryAction().textContent).toContain(en.common.retry);
   });
+  // The fourth column is what the producer said, and every producer that says anything
+  // here says it in English whatever language the setup is being read in — so it belongs
+  // under the disclosure, never in the sentence. `null` is the honest case where the
+  // server offered nothing quotable: then there is no disclosure to open at all.
   it.each([
-    ['a body that never says what it had to', async () => jsonResponse({ ...baseConfig(), runtime: undefined }), en.onboarding.connection.readFailed],
-    ['a body that is not JSON at all', async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } }) as unknown as Response, en.onboarding.connection.readFailed],
-    ['an HTTP failure that explains itself', async () => jsonResponse({ error: 'config unavailable' }, { ok: false, status: 503 }), 'config unavailable'],
-    ['an HTTP failure that does not', async () => jsonResponse({}, { ok: false, status: 500 }), en.onboarding.connection.readFailedStatus.replace('{{status}}', '500')],
-    ['a transport that never answered', async () => { throw new Error('network down'); }, 'Error: network down'],
-  ])('leaves the prerequisite unknown and offers Retry for %s', async (_label, respond, explanation) => {
+    ['a body that never says what it had to', async () => jsonResponse({ ...baseConfig(), runtime: undefined }), en.onboarding.connection.readFailed, null],
+    ['a body that is not JSON at all', async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } }) as unknown as Response, en.onboarding.connection.readFailed, null],
+    ['an HTTP failure that explains itself', async () => jsonResponse({ error: 'config unavailable' }, { ok: false, status: 503 }), en.onboarding.connection.readFailedStatus.replace('{{status}}', '503'), 'config unavailable'],
+    ['an HTTP failure that does not', async () => jsonResponse({}, { ok: false, status: 500 }), en.onboarding.connection.readFailedStatus.replace('{{status}}', '500'), null],
+    ['a transport that never answered', async () => { throw new Error('network down'); }, en.onboarding.connection.readFailed, 'Error: network down'],
+  ])('leaves the prerequisite unknown and offers Retry for %s', async (_label, respond, explanation, detail) => {
     const enter = await setup();
     serveFreshOnly(respond);
     fireEvent.click(enter);
     await waitFor(() => expect(flowError()).toBe(explanation));
     // Unknown is not "off": the gateway copy would be a claim nobody could confirm.
     expect(flowError()).not.toBe(en.onboarding.flow.gatewayRequired);
+    // What the producer said is kept, and kept out of the sentence.
+    expect(flowErrorDetail()).toBe(detail);
+    if (detail) expect(flowError()).not.toContain(detail);
     expectNoForwardWrite();
     expect(backAction().hasAttribute('disabled')).toBe(false);
     expect(primaryAction().textContent).toContain(en.common.retry);
@@ -395,7 +412,8 @@ describe('fresh prerequisite boundary', () => {
     const enter = await setup();
     serveFreshOnly(async () => { throw new Error('network down'); });
     fireEvent.click(enter);
-    await waitFor(() => expect(flowError()).toBe('Error: network down'));
+    await waitFor(() => expect(flowError()).toBe(en.onboarding.connection.readFailed));
+    expect(flowErrorDetail()).toBe('Error: network down');
     serveConfig(baseConfig());
     fireEvent.click(screen.getByRole('button', { name: en.common.retry }));
     await waitFor(() => expect(flowError()).toBeNull());
@@ -444,7 +462,7 @@ describe('fresh prerequisite boundary', () => {
   // the completion is parked on an await it had already been authorised to make.
   const overtaken = [
     ['the gateway went off', async () => jsonResponse(baseConfig({ model_hub: { enabled: false } })), en.onboarding.flow.gatewayRequired],
-    ['the prerequisite became unreadable', async () => { throw new Error('network down'); }, 'Error: network down'],
+    ['the prerequisite became unreadable', async () => { throw new Error('network down'); }, en.onboarding.connection.readFailed],
   ] as const;
   it.each(overtaken)('stops before the start it was authorised to make once %s', async (_label, respond, explanation) => {
     running = false;

@@ -9,6 +9,9 @@ import { loadingRegion } from '../settings/models/regionRead';
 import { useRef, useState, type ComponentProps } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SETUP_SCREENS, type SetupAction, type SetupScreenHandle } from './setupFlow';
+import { SETUP_REGISTERED_SCREENS } from './setupScreenRegistry';
+import { ASSISTANT_ORDER } from './collaborationTimeline';
+import { RouteSurfaceActiveContext } from '@/lib/routeSurfaceActivity';
 import { CollaborationStory } from './CollaborationStory';
 import { AccessTiles } from './AccessTiles';
 import en from '../../i18n/en.json';
@@ -112,6 +115,45 @@ describe('Welcome', () => {
     // cannot feel.
     expect(footer.compareDocumentPosition(aside) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Retry' }).closest('.onboarding-primary-action')).toBeTruthy();
+  });
+  // e-Dq: detection awaits three CLI probes and only then asks to move. That
+  // continuation captured its answer before the await, so it cannot know the setup
+  // route stopped being the surface being read — and teaching this screen to re-check
+  // would only move the obligation onto the next screen that forgets. Movement has one
+  // owner, the shell, which is where a journey sitting behind another retained surface
+  // is held still and where it is handed back when the route returns.
+  it('refuses a detection that settles after the route went quiet, then moves when it returns', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const probes: ((result: { found: boolean; path: string }) => void)[] = [];
+    mocks.api.detectCli.mockImplementation(() => new Promise((resolve) => { probes.push(resolve); }));
+    const onward = SETUP_REGISTERED_SCREENS[1];
+    const shell = (routeActive: boolean) => wrap(
+      <RouteSurfaceActiveContext.Provider value={routeActive}>
+        <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability="enabled" gatewayEnabled
+          onRetrySetup={vi.fn()} runtimeRead={loadingRegion()}
+          renderScreen={(id, { active, onActionChange, onNavigate }, ref) => (id === 'intro'
+            ? <Welcome active={active} onActionChange={onActionChange} ref={ref} onNext={() => { onNavigate(onward); }} />
+            : <h1 tabIndex={-1}>{id}</h1>)} />
+      </RouteSurfaceActiveContext.Provider>);
+    const { container, rerender } = render(shell(true));
+    const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
+    const answer = async () => act(async () => { for (const resolve of probes.splice(0)) resolve({ found: true, path: '/test/bin' }); });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(probes).toHaveLength(ASSISTANT_ORDER.length));
+    rerender(shell(false));
+    await answer();
+    expect(current()).toBe('intro');
+    expect(document.activeElement?.textContent).not.toBe(onward);
+    // Refused, not broken: nothing failed, so there is nothing to report to anybody.
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    rerender(shell(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(probes).toHaveLength(ASSISTANT_ORDER.length));
+    await answer();
+    await waitFor(() => expect(current()).toBe(onward));
   });
   it('renders the approved Chinese copy and keeps the entry block mounted, hidden and inert', async () => {
     await i18n.changeLanguage('zh');

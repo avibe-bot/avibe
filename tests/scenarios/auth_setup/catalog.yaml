@@ -361,7 +361,28 @@ scenarios:
     # test owns the browser side against controlled responses: unread or disabled
     # evidence producing zero mutation and no completion, and recovery only through an
     # explicit successful read. Neither runs a real browser against the real boundary, so
-    # the assembled journey is not covered by this entry.
+    # the assembled journey is not covered by this entry; it is AUTH-SETUP-123.
+    supporting_tests:
+      - ui/src/components/onboarding/WizardCompletion.test.tsx
+  - id: AUTH-SETUP-123
+    name: Assembled browser-to-real-API setup journey from first screen to persisted completion
+    status: partial
+    kind: authorization
+    layer: scenario
+    missing_layer: ui-e2e
+    backend: web
+    reason: >-
+      the rule under test is a browser rule — the setup shell reading the config
+      endpoint uncached, carrying that answer as a lease across its awaited work, and
+      writing completion only while the lease is still current. Neither half of
+      AUTH-SETUP-122 can assemble it: the pytest harness drives the real boundary with
+      no browser, and the browser tests drive the real shell against controlled
+      responses. A pytest node claiming this journey would assert nothing the two
+      halves do not already assert, which is why this entry names the gap instead.
+    owning_layer: L4 integrated acceptance (real browser against a live instance)
+    partial_evidence:
+      covers: the producer side at the real boundary — authentication refusal that persists nothing, every field the setup parser requires, CSRF-gated persistence and per-call readback; the browser side is the supporting test below, against controlled responses
+      test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_authorized_config_envelope_and_completion_persistence_closed_loop
     supporting_tests:
       - ui/src/components/onboarding/WizardCompletion.test.tsx
 next_priority: []

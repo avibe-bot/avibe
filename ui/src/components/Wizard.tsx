@@ -48,13 +48,31 @@ function SetupHeader() {
   );
 }
 
+/**
+ * A read that failed, kept as two different kinds of string.
+ *
+ * `message` is the line a person reads, and it only ever comes from a bundle key — the
+ * producer resolves it, so a Chinese setup is addressed in Chinese whatever the server
+ * happened to say. `detail` is what the server or the transport said: English error
+ * text, a backend code, a transport exception. That is diagnostics, not copy, and it is
+ * shown as a disclosure beside the sentence rather than as the sentence.
+ *
+ * Because `message` is language-bound the moment it is produced, the read that produces
+ * it re-runs when the language changes — which is also how a second config read can
+ * legitimately start while an earlier one is still open.
+ */
+export type SetupReadFailure = {
+  message: string;
+  detail?: string;
+};
+
 type FlowShellProps = {
   sequence: readonly SetupScreenId[];
   capability: SetupCapability;
   gatewayEnabled: boolean | null;
   onRetrySetup: () => void;
   loading?: boolean;
-  error?: string;
+  error?: SetupReadFailure | null;
   paused?: boolean;
   /**
    * Something the parent is showing inside the active screen owns the flow until it
@@ -77,7 +95,7 @@ function SetupScreenContent({ id, screenProps, renderScreen, ref }: {
 }
 
 /** One mounted screen collection and one action pair. Activation epochs reject late work. */
-export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySetup, loading = false, error = '', paused = false, navigationLocked = false, runtimeRead, renderScreen }: FlowShellProps) {
+export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySetup, loading = false, error = null, paused = false, navigationLocked = false, runtimeRead, renderScreen }: FlowShellProps) {
   const { t } = useTranslation();
   const routeActive = useRouteSurfaceActive();
   const [activation, setActivation] = useState({ id: sequence[0], epoch: 0 });
@@ -91,8 +109,8 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   const transition = useRef<(() => void) | null>(null);
   const transitioning = useRef(false);
   const ready = setupNavigationReady(capability, gatewayEnabled);
-  const policy = useRef({ ready, sequence, locked: navigationLocked });
-  useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked }; });
+  const policy = useRef({ ready, sequence, locked: navigationLocked, routeActive });
+  useLayoutEffect(() => { current.current = activation; policy.current = { ready, sequence, locked: navigationLocked, routeActive }; });
   useLayoutEffect(() => {
     roots.current[activation.id]?.querySelector<HTMLElement>('h1')?.focus({ preventScroll: true });
   }, [activation]);
@@ -100,8 +118,16 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
 
   const navigate = useCallback((target: SetupScreenId) => {
     // The guard is here rather than on the Back button, because a screen's own
-    // `onNavigate` reaches the same journey without touching that button at all.
-    if (policy.current.locked) return;
+    // `onNavigate` reaches the same journey without touching that button at all —
+    // and an asynchronous continuation that settles after `/setup` was retained
+    // behind another surface reaches it without anyone touching anything.
+    //
+    // Three facts decide whether this journey may move, and this is the one place
+    // that answers for all three: the recovery hold, the activation that issued the
+    // request, and whether the route surface holding this shell is the one being
+    // read. A screen may re-check its own activity, but it cannot be the owner:
+    // every screen would have to remember to, and a future one would not.
+    if (policy.current.locked || !policy.current.routeActive) return;
     if (transitioning.current || !policy.current.sequence.includes(target) || target === current.current.id) return;
     const previous = current.current;
     const backwards = policy.current.sequence.indexOf(target) < policy.current.sequence.indexOf(previous.id);
@@ -168,7 +194,11 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
         so a caption that grows can neither move the anchor nor cover it. */}
     <div className="onboarding-action-aside" data-setup-action-aside="" />
     {(authoritativeBlock || (!!error && !loading)) && <div className="onboarding-flow-error" role="alert">
-      <p>{capability === 'disabled' || gatewayEnabled === false ? t('onboarding.flow.gatewayRequired') : error || t('onboarding.connection.readFailed')}</p>
+      <p>{authoritativeBlock ? t('onboarding.flow.gatewayRequired') : error?.message ?? t('onboarding.connection.readFailed')}</p>
+      {/* Same shape the detection failure already uses one screen over: the sentence
+          addresses the reader, the disclosure keeps what the server actually said. */}
+      {!authoritativeBlock && error?.detail && <details className="mt-2 max-w-xl break-words">
+        <summary>{t('onboarding.details')}</summary>{error.detail}</details>}
     </div>}
     {/* The owner handoff, the design boards and the prototype all collapse the six entry
         tiles for the whole setup journey; the block stays mounted hidden and inert so its
@@ -184,7 +214,7 @@ export function Wizard() {
   const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [recovery, setRecovery] = useState<VibeAgentBrief | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<SetupReadFailure | null>(null);
   const [loading, setLoading] = useState(true);
   const [capability, setCapability] = useState<SetupCapability>('pending');
   const [gatewayEnabled, setGatewayEnabled] = useState<boolean | null>(null);
@@ -206,14 +236,21 @@ export function Wizard() {
   const applyRead = useCallback((result: SetupConfigRead): SetupConfigSnapshot | null => {
     if (result.state === 'unread') {
       setCapability('pending'); setGatewayEnabled(null);
-      // The status is a diagnostic the user can quote, so it stays — but the sentence
-      // carrying it is copy, and copy is the bundles' to own in both languages.
-      setError(result.detail || (result.status !== undefined ? t('onboarding.connection.readFailedStatus', { status: result.status }) : t('onboarding.connection.readFailed')));
+      // The sentence is copy, so both bundles own it, and an HTTP status is a number
+      // the sentence can carry. What the server or the transport said is not copy — it
+      // is written in whatever language that producer speaks — so it travels beside
+      // the sentence as a disclosure and never becomes the sentence itself.
+      setError({
+        message: result.status !== undefined
+          ? t('onboarding.connection.readFailedStatus', { status: result.status })
+          : t('onboarding.connection.readFailed'),
+        detail: result.detail,
+      });
       setRuntimeRead((previous) => failRegionRead(previous));
       return null;
     }
     const snapshot = result.config;
-    setData(snapshot.raw); setError('');
+    setData(snapshot.raw); setError(null);
     setCapability(setupCapability(modelHubEnabledFromConfig(snapshot.raw)));
     setGatewayEnabled(snapshot.savedIntentEnabled);
     return snapshot;
@@ -221,7 +258,7 @@ export function Wizard() {
   const load = useCallback(async () => {
     const generation = ++configGeneration.current;
     setRuntimeRead((previous) => beginRegionRead(previous));
-    setLoading(true); setError(''); setCapability('pending'); setGatewayEnabled(null);
+    setLoading(true); setError(null); setCapability('pending'); setGatewayEnabled(null);
     const result = await fetchSetupConfig();
     // A newer read — another Retry, or a completion boundary — already owns the state.
     if (generation !== configGeneration.current) return;
