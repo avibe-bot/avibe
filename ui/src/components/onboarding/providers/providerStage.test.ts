@@ -18,7 +18,9 @@ import {
   PROVIDER_SLOT_COUNT,
   addedThroughMoreCount,
   adoptionBackend,
+  defaultSelection,
   gatewayIntent,
+  offeredImportKeys,
   pendingImportRows,
   providerAction,
   providerSetupAction,
@@ -127,6 +129,36 @@ describe('providerSlots', () => {
     expect([...slot.backends].sort()).toEqual(['codex', 'opencode']);
   });
 
+  it('marks a source saved but not yet verified, and nothing else', () => {
+    // `save_unverified: true` is what both hosts of the key form send, so a card can
+    // be connected with nothing having confirmed the key answers. Settings discloses
+    // that state; a card that did not would report it as a working provider.
+    const slots = providerSlots({
+      sources: [
+        source({ id: 'src_1', vendor: 'openai', state: { status: 'standby' }, verification_pending: true }),
+        source({ id: 'src_2', vendor: 'anthropic' }),
+      ],
+      scan: null,
+    });
+
+    expect(slots.map((slot) => [slot.vendor, slot.kind, slot.pending])).toEqual([
+      ['openai', 'connected', true],
+      ['anthropic', 'connected', false],
+    ]);
+  });
+
+  it('never marks a detected or empty card pending: neither has a key that was written', () => {
+    const slots = providerSlots({
+      sources: [],
+      scan: scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai' })),
+    });
+
+    expect(slots.map((slot) => [slot.kind, slot.pending])).toEqual([
+      ['detected', false],
+      ['empty', false],
+    ]);
+  });
+
   it('leaves a row the server did not name to the import dialog', () => {
     // No vendor means no brand slot. The row still migrates — it just has no card.
     const slots = providerSlots({
@@ -230,6 +262,60 @@ describe('pendingImportRows', () => {
     });
 
     expect(rows).toEqual([]);
+  });
+});
+
+describe('offeredImportKeys', () => {
+  it('advertises only what the review could really act on', () => {
+    // The capsule's number and the dialog's batch come from one grouping. A count
+    // taken from the raw scan would offer keys the review then refuses to build,
+    // which reads as the dialog losing them.
+    const offered = offeredImportKeys({
+      scan: scanOf(
+        row({ id: 'mig_1', backend: 'codex', vendor: 'openai' }),
+        row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+        row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
+      ),
+      selectedBackends: [],
+    });
+
+    expect(offered.map((item) => item.id)).toEqual(['mig_1']);
+  });
+
+  it('is independent of what is consented to, unlike the batch', () => {
+    const scan = scanOf(row({ id: 'mig_1', backend: 'codex', vendor: 'openai' }));
+
+    expect(offeredImportKeys({ scan, selectedBackends: [] })).toHaveLength(1);
+    expect(pendingImportRows({ scan, selectedBackends: [] })).toHaveLength(0);
+  });
+});
+
+describe('defaultSelection', () => {
+  it('opens on the rows the server itself proposes, the way the shipped dialog does', () => {
+    expect(defaultSelection(scanOf(
+      row({ id: 'mig_1', backend: 'codex', vendor: 'openai' }),
+      row({ id: 'mig_2', backend: 'opencode', kind: 'opencode_provider', vendor: 'xai' }),
+    ))).toEqual(['codex', 'opencode']);
+  });
+
+  it('leaves a group the server did not tick alone', () => {
+    // `selected: false` is the server declining to propose that row. Ticking it here
+    // would be this screen consenting on someone's behalf.
+    expect(defaultSelection(scanOf(
+      row({ id: 'mig_1', backend: 'codex', vendor: 'openai' }),
+      row({ id: 'mig_2', backend: 'opencode', kind: 'opencode_provider', vendor: 'xai', selected: false }),
+    ))).toEqual(['codex']);
+  });
+
+  it('never opens on a blocked group', () => {
+    expect(defaultSelection(scanOf(
+      row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+      row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
+    ))).toEqual([]);
+  });
+
+  it('has nothing to open on without a scan', () => {
+    expect(defaultSelection(null)).toEqual([]);
   });
 });
 
@@ -477,10 +563,8 @@ describe('slotSelected', () => {
 });
 
 describe('providerSummary', () => {
-  const slots = (input: Parameters<typeof providerSlots>[0]) => providerSlots(input);
-
   it('says nothing when nothing is added or chosen', () => {
-    expect(providerSummary({ slots: [], sources: [], selected: [], failed: false })).toEqual({ kind: 'none' });
+    expect(providerSummary({ scan: null, sources: [], selected: [], failed: false })).toEqual({ kind: 'none' });
   });
 
   it('counts every added provider, not just the two on the stage', () => {
@@ -490,7 +574,7 @@ describe('providerSummary', () => {
       source({ id: 'src_3', vendor: 'xai' }),
     ];
 
-    expect(providerSummary({ slots: slots({ sources, scan: null }), sources, selected: [], failed: false }))
+    expect(providerSummary({ scan: null, sources, selected: [], failed: false }))
       .toEqual({ kind: 'added', count: 3, names: ['OpenAI', 'Anthropic', 'xAI'] });
   });
 
@@ -500,7 +584,7 @@ describe('providerSummary', () => {
       source({ id: 'src_2', vendor: 'openai', display_name: 'OpenAI (work)' }),
     ];
 
-    expect(providerSummary({ slots: [], sources, selected: [], failed: false }))
+    expect(providerSummary({ scan: null, sources, selected: [], failed: false }))
       .toMatchObject({ kind: 'added', count: 1 });
   });
 
@@ -509,7 +593,7 @@ describe('providerSummary', () => {
     const scan = scanOf(row({ id: 'mig_1', backend: 'claude', vendor: 'anthropic' }));
 
     expect(providerSummary({
-      slots: slots({ sources, scan }),
+      scan,
       sources,
       selected: ['claude'],
       failed: false,
@@ -520,17 +604,34 @@ describe('providerSummary', () => {
     const scan = scanOf(row({ id: 'mig_1', backend: 'claude', vendor: 'anthropic' }));
 
     expect(providerSummary({
-      slots: slots({ sources: [], scan }),
+      scan,
       sources: [],
       selected: ['claude'],
       failed: false,
     })).toEqual({ kind: 'selected', count: 1, names: ['Anthropic'] });
   });
 
+  it('names a consented provider the stage had no room to show', () => {
+    // Three detected backends, two slots. Reading the sentence off the slots would
+    // silently drop the third from a count the person is about to act on.
+    const scan = scanOf(
+      row({ id: 'mig_1', backend: 'claude', vendor: 'anthropic' }),
+      row({ id: 'mig_2', backend: 'codex', vendor: 'openai' }),
+      row({ id: 'mig_3', backend: 'opencode', kind: 'opencode_provider', vendor: 'xai' }),
+    );
+
+    expect(providerSummary({
+      scan,
+      sources: [],
+      selected: ['claude', 'codex', 'opencode'],
+      failed: false,
+    })).toMatchObject({ kind: 'selected', count: 3 });
+  });
+
   it('reports a failure ahead of anything it could otherwise say', () => {
     const sources = [source({ id: 'src_1', vendor: 'openai' })];
 
-    expect(providerSummary({ slots: [], sources, selected: [], failed: true })).toEqual({ kind: 'error' });
+    expect(providerSummary({ scan: null, sources, selected: [], failed: true })).toEqual({ kind: 'error' });
   });
 });
 
@@ -569,6 +670,7 @@ describe('providerAction', () => {
     importFailed: false,
     hasSource: false,
     gatewayBusy: false,
+    gatewayRunning: true,
     verifying: false,
     ...over,
   });
@@ -578,7 +680,22 @@ describe('providerAction', () => {
   });
 
   it('offers to continue once a source exists', () => {
-    expect(state({ hasSource: true })).toEqual({ kind: 'continue', count: 0 });
+    expect(state({ hasSource: true })).toEqual({ kind: 'continue', count: 0, blocked: false });
+  });
+
+  it('keeps saying continue but refuses it while the engine is not serving', () => {
+    // The next screen picks a model per assistant out of what the Hub supplies, so
+    // arriving there with a stopped engine is arriving at an empty screen. Changing
+    // the label instead would move that explanation off the card it belongs to.
+    expect(state({ hasSource: true, gatewayRunning: false }))
+      .toEqual({ kind: 'continue', count: 0, blocked: true });
+    expect(providerSetupAction(state({ hasSource: true, gatewayRunning: false })))
+      .toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: true, busy: false });
+  });
+
+  it('does not block the states that are not going to the next screen', () => {
+    expect(state({ gatewayRunning: false })).toEqual({ kind: 'add', count: 0 });
+    expect(state({ gatewayRunning: false, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
   });
 
   it('puts a pending take-over ahead of continuing, and carries its count', () => {

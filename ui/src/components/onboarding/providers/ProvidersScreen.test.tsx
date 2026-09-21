@@ -333,18 +333,77 @@ describe('ProvidersScreen — the stage', () => {
     // A fact is not a toggle: no pressed state to announce, and nothing to press.
     expect(connected.getAttribute('aria-pressed')).toBeNull();
     expect((connected as HTMLButtonElement).disabled).toBe(true);
-    expect(detected.getAttribute('aria-pressed')).toBe('false');
+    // The server proposed this row, so the card opens on that proposal.
+    expect(detected.getAttribute('aria-pressed')).toBe('true');
 
     await user.click(detected);
-    await waitFor(() => expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true'));
-    expect(cardFor('openai').querySelector('.setup-provider-check')).toBeTruthy();
+    await waitFor(() => expect(cardFor('openai').getAttribute('aria-pressed')).toBe('false'));
+    expect(cardFor('openai').querySelector('.setup-provider-check')).toBeNull();
     expect(cardFor('zhipuai').dataset.state).toBe('connected');
     expect(cardFor('zhipuai').querySelector('.setup-provider-check')).toBeTruthy();
 
     await user.click(cardFor('openai'));
-    await waitFor(() => expect(cardFor('openai').getAttribute('aria-pressed')).toBe('false'));
-    expect(cardFor('openai').querySelector('.setup-provider-check')).toBeNull();
+    await waitFor(() => expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true'));
+    expect(cardFor('openai').querySelector('.setup-provider-check')).toBeTruthy();
     expect(cardFor('zhipuai').querySelector('.setup-provider-check')).toBeTruthy();
+  });
+
+  it('opens on the rows the server proposed, and leaves the ones it did not', async () => {
+    // The shipped takeover opens ticked on exactly these rows. A screen that ignored
+    // them would show the same scan with a different answer, and someone who trusted
+    // the cards would import less than the dialog behind them offered.
+    serve({ scan: [CODEX_KEY, { ...OPENCODE_KEY, selected: false }] });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true'));
+    expect(cardFor('gemini').getAttribute('aria-pressed')).toBe('false');
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
+  });
+
+  it('says so when a key is stored but nothing has checked it yet', async () => {
+    // `save_unverified: true` is what the key form sends, so a card can be connected
+    // with nothing having confirmed the key answers. Settings discloses that; a card
+    // that did not would report it as a provider already supplying models.
+    serve({
+      sources: [source({
+        id: 'src_pending',
+        vendor: 'openai',
+        state: { status: 'standby' },
+        verification_pending: true,
+      })],
+    });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('openai').dataset.pending).toBe('true'));
+    expect(within(cardFor('openai')).getByText(/Saved/)).toBeTruthy();
+    expect(cardFor('openai').getAttribute('aria-label')).toContain('Saved');
+  });
+
+  it('says a source was written even when the read that would show it fails', async () => {
+    serve();
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: source({ id: 'src_new', vendor: 'custom' }),
+      added_to: [],
+      adopted_by: [],
+    });
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+
+    await user.click(cards()[2]);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'API Key' }));
+    await user.type(within(dialog).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(dialog).getByLabelText('API key'), 'sk-live-1');
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }));
+
+    // The write landed; the read that would show it did not. Keeping the old list
+    // silently would report a provider that exists as one that does not.
+    await waitFor(() => expect(summary()?.dataset.tone).toBe('error'));
   });
 
   it('counts only the sources added through Add more that are still there', async () => {
@@ -463,13 +522,18 @@ describe('ProvidersScreen — the action the shell renders', () => {
     await settled();
     const user = userEvent.setup();
 
-    // A source exists, so the standing offer is to continue.
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
-
-    await user.click(cardFor('openai'));
-
+    // A source already holds the first slot, so the stage has room to draw one of
+    // the two proposed groups. The count is the batch the dialog would submit, not
+    // the number of cards that fit.
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
-    expect(lastAction().labelArgs).toEqual({ count: 1 });
+    expect(lastAction().labelArgs).toEqual({ count: 2 });
+    expect(cards().filter((card) => card.dataset.state === 'detected')).toHaveLength(1);
+
+    // Dropping the group that is drawn leaves the one that is not: still a batch,
+    // one row smaller.
+    await user.click(cardFor('openai'));
+    await waitFor(() => expect(lastAction().labelArgs).toEqual({ count: 1 }));
+    expect(lastAction().labelKey).toBe('onboarding.providers.actionImport');
     await activate(handle);
 
     const dialog = await screen.findByRole('dialog');
@@ -487,8 +551,7 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await settled();
     const user = userEvent.setup();
 
-    await user.click(cardFor('openai'));
-    await user.click(cardFor('gemini'));
+    // Both proposed groups arrive consented to; the third is blocked and cannot be.
     await waitFor(() => expect(lastAction().labelArgs).toEqual({ count: 2 }));
 
     await activate(handle);
@@ -499,10 +562,34 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await waitFor(() => expect(applied).toHaveLength(1));
     expect(applied[0]).toEqual([CODEX_KEY.id, OPENCODE_KEY.id]);
     expect(await screen.findByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
-    // The rescan is what retires the consent, so the footer stops offering a
-    // batch the dialog would now refuse to build.
+    // The batch is spent in the tick it landed, not a round trip later: until the
+    // rescan answers, the old scan still names rows that are now imported.
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
     expect(modelsApi.listSources).toHaveBeenCalledTimes(2);
+  });
+
+  it('never re-offers a spent batch while the rescan is still in flight', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const { handle } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    // Hold the rescan open, so the window between the apply and its answer is the
+    // whole of what this case observes.
+    const rescan = deferred<{ items: MigrationItem[] }>();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    vi.mocked(modelsApi.scanMigration).mockReturnValueOnce(rescan.promise);
+
+    await activate(handle);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /Start migration/ }));
+
+    await waitFor(() => expect(applied).toHaveLength(1));
+    // The capsule, the cards and the action all read the same emptied scan.
+    await waitFor(() => expect(lastAction().labelKey).not.toBe('onboarding.providers.actionImport'));
+    expect(screen.queryByText(/API key to import/)).toBeNull();
+
+    await act(async () => { rescan.resolve({ items: [] }); });
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
   });
 
   it('keeps the selection and asks to retry when the batch is refused', async () => {
@@ -511,7 +598,6 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await settled();
     const user = userEvent.setup();
 
-    await user.click(cardFor('openai'));
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
     vi.mocked(modelsApi.applyMigration)
       .mockRejectedValueOnce(new ApiCallError('migration_credentials_invalid', 'refused'));
@@ -579,6 +665,23 @@ describe('ProvidersScreen — the engine', () => {
     expect(modelsApi.installRuntime).not.toHaveBeenCalled();
     expect(modelsApi.startRuntime).not.toHaveBeenCalled();
     expect(within(gatewayCard()).getByRole('button', { name: 'Retry' })).toBeTruthy();
+    // On its own a recheck is a button that will keep saying no. The guide is the
+    // other half of the answer: what would have to change for it to say yes.
+    const guide = within(gatewayCard()).getByRole('link', { name: 'View installation guide' });
+    expect(guide.getAttribute('href')).toBe('https://docs.avibe.bot');
+    expect(guide.getAttribute('rel')).toContain('noopener');
+  });
+
+  it('offers no guide for a failure a guide would not explain', async () => {
+    serve({ runtime: runtimeOf('not_started') });
+    vi.mocked(modelsApi.startRuntime).mockRejectedValue(new ApiCallError('engine_down', 'down'));
+    renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
+    // The engine is installable here; it did not start. Pointing at installation
+    // instructions would send someone to fix something that is not broken.
+    expect(within(gatewayCard()).queryByRole('link')).toBeNull();
+    expect(within(gatewayCard()).getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
 
   it('reports a failed step on the card it is about, and retries from there', async () => {
@@ -591,9 +694,49 @@ describe('ProvidersScreen — the engine', () => {
 
     await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
 
-    expect(retrySetup).toHaveBeenCalledTimes(1);
+    // Both halves are re-armed at once: the failure could be the engine or the read
+    // that described it, and from here neither is distinguishable.
+    expect(retrySetup).toHaveBeenCalled();
     await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(gatewayCard().dataset.state).not.toBe('failed'));
+    // The engine moved, so the shell's read now describes where it was. Asking for
+    // it again is the only thing that turns the card and the footer around; the
+    // attempt's own success is not the machine answering.
+    await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(2));
+  });
+
+  it('refuses to continue into a screen with no engine behind it', async () => {
+    // The next screen picks a model per assistant out of what the Hub supplies, so
+    // arriving with a stopped engine is arriving at an empty screen with no way to
+    // tell why. The label does not change; what went wrong stays on the card.
+    const stopped = { ...UNSUPPORTED, status: { ...UNSUPPORTED.status, health: 'not_started' as const } };
+    serve({ runtime: stopped, sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    vi.mocked(modelsApi.startRuntime).mockRejectedValue(new ApiCallError('engine_down', 'down'));
+    const { handle } = renderScreen({ runtimeRead: readyRegion(stopped) });
+    await settled();
+
+    await waitFor(() => expect(lastAction()).toMatchObject({
+      labelKey: 'onboarding.providers.actionContinue',
+      disabled: true,
+      busy: false,
+    }));
+
+    await activate(handle);
+    expect(navigated).toEqual([]);
+  });
+
+  it('continues once the engine is really serving', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    const { handle } = renderScreen();
+    await settled();
+
+    await waitFor(() => expect(lastAction()).toMatchObject({
+      labelKey: 'onboarding.providers.actionContinue',
+      disabled: false,
+    }));
+
+    await activate(handle);
+    expect(navigated).toEqual(['assistants']);
   });
 
   it('treats a machine with no CLI as nothing to adopt, not as a failure', async () => {

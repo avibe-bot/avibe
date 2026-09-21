@@ -92,6 +92,17 @@ export type ProviderSlot = {
   /** Masked credential for the card's second line; never secret material. */
   mask: string | null;
   /**
+   * Connected, but no successful model call has been made with this credential yet.
+   *
+   * `save_unverified` is deliberate policy in both hosts of the key form, so a source
+   * the person just added is routinely `standby` with a pending marker. It stays
+   * usable — that is what `usableSource` already says — but a card that states a
+   * working connection the server has never observed is a claim nobody made. This is
+   * the same distinction `sourceStatePresentation` draws as 「已保存」 rather than
+   * 「供应中」 on the Settings row.
+   */
+  pending: boolean;
+  /**
    * The backends whose consent this card carries, empty unless detected.
    * One entry per consent group the card's credentials sit in — the migration
    * feature expands each to its linked group when the card is toggled, so this
@@ -137,6 +148,7 @@ function detectedProviders(scan: MigrationScan | null): ProviderSlot[] {
         label: providerBrandLabel(named, row.display_name),
         kind: 'detected',
         mask: row.masked_credential?.trim() || null,
+        pending: false,
         backends: [group.backend],
       });
     }
@@ -168,6 +180,7 @@ export function providerSlots(input: {
       label: providerBrandLabel(source.vendor, source.display_name),
       kind: 'connected',
       mask: source.masked_credential?.trim() || null,
+      pending: Boolean(source.verification_pending),
       backends: [],
     });
   }
@@ -182,7 +195,7 @@ export function providerSlots(input: {
     if (slots.length >= PROVIDER_SLOT_COUNT) break;
     if (seen.has(vendor)) continue;
     seen.add(vendor);
-    slots.push({ vendor, label: providerBrandLabel(vendor), kind: 'empty', mask: null, backends: [] });
+    slots.push({ vendor, label: providerBrandLabel(vendor), kind: 'empty', mask: null, pending: false, backends: [] });
   }
 
   return slots.slice(0, PROVIDER_SLOT_COUNT);
@@ -231,6 +244,41 @@ export function pendingImportRows(selection: MigrationSelection): MigrationItem[
       .map((group) => group.backend),
   );
   return appliableItems(items, consented);
+}
+
+/**
+ * The keys the capsule offers to review.
+ *
+ * Not every importable key in the scan: a key whose consent group is blocked by an
+ * OAuth row or a blocker cannot be consented to from here, so advertising it would
+ * open a review with nothing to press. The offer is therefore built from the same
+ * selectable groups the cards and the dialog are built from, narrowed back to keys
+ * because「发现 N 个可导入的 API Key」 is what the sentence says.
+ */
+export function offeredImportKeys(selection: MigrationSelection): MigrationItem[] {
+  const items = selection.scan?.items ?? [];
+  return groupMigrationCandidates(items, isImportableKey)
+    .filter(groupSelectable)
+    .flatMap((group) => group.importRows)
+    .filter(isImportableKey);
+}
+
+/**
+ * The consent a scan arrives already carrying.
+ *
+ * The server marks rows `selected`, and the uncontrolled dialog has always honoured
+ * that — a group whose every linked importable row is marked opens ticked. A
+ * controlled caller that built its selection only from what it previously held would
+ * throw those defaults away on the first scan and show a stage where nothing is
+ * chosen and a capsule announcing keys to import, which is two answers to one
+ * question. Seeded once, on the first scan; every later scan is reconciled instead,
+ * because by then the selection is the person's rather than the server's.
+ */
+export function defaultSelection(scan: MigrationScan | null): AgentBackend[] {
+  const items = scan?.items ?? [];
+  return groupMigrationCandidates(items, isImportableKey)
+    .filter((group) => groupSelectable(group) && group.linkedImportRows.every((row) => row.selected))
+    .map((group) => group.backend);
 }
 
 /**
@@ -284,11 +332,14 @@ export type ProviderSummary =
  * The sentence under the stage.
  *
  * Added wins over selected: once a provider is really there, what setup has is
- * no longer an intention. The added count spans every source, not just the two
- * on the stage, because a person who added five through Add more has five.
+ * no longer an intention. Both counts span everything, not just the two cards on
+ * the stage — a person who added five through Add more has five, and one who
+ * consented to a third provider inside the add dialog consented to three. The
+ * sentence describes the flow's state, and the stage is only the part of it that
+ * happens to be drawn.
  */
 export function providerSummary(input: {
-  slots: readonly ProviderSlot[];
+  scan: MigrationScan | null;
   sources: readonly Source[];
   selected: readonly AgentBackend[];
   failed: boolean;
@@ -300,7 +351,7 @@ export function providerSummary(input: {
     if (!added.has(vendor)) added.set(vendor, providerBrandLabel(source.vendor, source.display_name));
   }
   if (added.size > 0) return { kind: 'added', count: added.size, names: [...added.values()] };
-  const selected = input.slots
+  const selected = detectedProviders(input.scan)
     .filter((slot) => slotSelected(slot, input.selected))
     .map((slot) => slot.label);
   if (selected.length > 0) return { kind: 'selected', count: selected.length, names: selected };
@@ -386,7 +437,13 @@ export type ProviderActionKind =
   | 'connecting'
   | 'checking';
 
-export type ProviderActionState = { kind: ProviderActionKind; count: number };
+export type ProviderActionState = {
+  kind: ProviderActionKind;
+  count: number;
+  /** The state is the right one to show and the wrong one to press. Distinct from a
+   *  busy state, which is also unpressable but is going somewhere on its own. */
+  blocked?: boolean;
+};
 
 /**
  * Which of its states the primary action is in.
@@ -395,6 +452,14 @@ export type ProviderActionState = { kind: ProviderActionKind; count: number };
  * interesting: while the engine is coming up nothing else is possible, a
  * pending take-over is the shortest path to a working provider, and continuing
  * is only offered once something is really there to continue with.
+ *
+ * Continuing additionally needs the engine to be serving. C4 says as much —
+ * `setupCandidateAllowed` requires `setupHubRunning` — and the reason is not
+ * procedural: the next screen picks a model per assistant out of what the Hub
+ * supplies, so arriving there with a source and a stopped, failed or unsupported
+ * engine is arriving at an empty screen with no way to tell why. The action keeps
+ * saying 「继续」 and stops being pressable; what went wrong is on the gateway card,
+ * with the recovery next to it.
  */
 export function providerAction(input: {
   /** Rows the current selection would submit in one batch. */
@@ -404,6 +469,8 @@ export function providerAction(input: {
   hasSource: boolean;
   /** The engine is installing or starting. */
   gatewayBusy: boolean;
+  /** The engine is up and serving — the authoritative read, not the attempt. */
+  gatewayRunning: boolean;
   /** A source was written and its connection is being read back. */
   verifying: boolean;
 }): ProviderActionState {
@@ -412,7 +479,7 @@ export function providerAction(input: {
   if (input.pendingCount > 0) {
     return { kind: input.importFailed ? 'retryImport' : 'import', count: input.pendingCount };
   }
-  if (input.hasSource) return { kind: 'continue', count: 0 };
+  if (input.hasSource) return { kind: 'continue', count: 0, blocked: !input.gatewayRunning };
   return { kind: 'add', count: 0 };
 }
 
@@ -451,7 +518,7 @@ export function providerSetupAction(state: ProviderActionState): SetupAction {
   return {
     labelKey: ACTION_LABEL[state.kind] as TranslationKey,
     ...(state.count > 0 ? { labelArgs: { count: state.count } } : {}),
-    disabled: busy,
+    disabled: busy || state.blocked === true,
     busy,
     icon: busy ? 'spinner' : state.kind === 'add' ? 'none' : 'arrow-right',
   };

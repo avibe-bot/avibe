@@ -251,14 +251,27 @@ export const AddSourceDialog: React.FC<{
   };
 
   const authorized = (source?: Source, placement?: Adoption) => {
+    // No source is 「你手上的行已经过期」, not 「新增了一个来源」. The shipped dialog fires
+    // that argument-less call on every terminal arrival — failures, cancellations,
+    // cleanup, a flow resolved after its frame closed — so refresh behind it and stay
+    // where we are. Landing on it would close this dialog on someone's cancelled
+    // sign-in and report it as a provider they added.
+    if (!source) {
+      void onAdded(null).catch(() => undefined);
+      return;
+    }
     const seq = continuation.begin();
-    void land(seq, source
-      ? { source, ...(placement ?? { added_to: [], adopted_by: source.adopted_by ?? [] }) }
-      : null);
+    void land(seq, { source, ...(placement ?? { added_to: [], adopted_by: source.adopted_by ?? [] }) });
   };
 
   const writing = phase.kind === 'saving' || phase.kind === 'checking';
   const busy = writing || phase.kind === 'waitingAuth';
+  // An unsettled failure has an unknown outcome and a nonce that must outlive the
+  // retry. Editing under it would produce a form whose edits the retry can discard
+  // without saying so — reconciliation adopts the row the ORIGINAL draft wrote — so
+  // the fields stay locked until that retry has an answer.
+  const unsettled = phase.kind === 'failed' && !phase.settled;
+  const keyBlocked = busy || !draftComplete(draft);
   const keyPreset = apiKeyVendorPreset(draft.vendor);
 
   const primary = active === 'detected'
@@ -277,7 +290,7 @@ export const AddSourceDialog: React.FC<{
         label: writing
           ? t('onboarding.providers.addFooterAdding')
           : t(phase.kind === 'failed' ? 'common.retry' : 'onboarding.providers.addFooterAddKey'),
-        disabled: busy || !draftComplete(draft),
+        disabled: keyBlocked,
         run: () => void submitKey(),
       };
 
@@ -397,14 +410,17 @@ export const AddSourceDialog: React.FC<{
             {active === 'apiKey' && (
               <ApiKeySourceForm
                 draft={draft}
-                disabled={writing}
+                disabled={writing || unsettled}
                 revealed={revealed}
                 keyLabel={keyPreset
                   ? t('onboarding.providers.addKeyLabelNamed', { name: keyPreset.label })
                   : undefined}
                 onChange={editDraft}
                 onToggleReveal={() => setRevealed((value) => !value)}
-                onSubmit={() => void submitKey()}
+                // Enter is the footer button, so it obeys the footer button's rule:
+                // an incomplete draft submitted from the keyboard is the same write
+                // the disabled control exists to refuse.
+                onSubmit={() => { if (!keyBlocked) void submitKey(); }}
               />
             )}
           </div>

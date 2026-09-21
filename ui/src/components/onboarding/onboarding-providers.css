@@ -293,6 +293,12 @@
   font-size: var(--obp-card-key);
 }
 .setup-summary-retry { margin-inline-start: calc(8 * var(--ob-u)); flex: none; }
+/* Below the recheck, not beside it: the two are not alternatives of the same weight —
+   one asks the machine again, the other explains what would have to change first. */
+.setup-gateway-help {
+  height: calc(20 * var(--ob-u));
+  font-size: var(--obp-card-key);
+}
 .setup-gateway-name {
   font-size: var(--obp-gateway-name);
   font-weight: 600;

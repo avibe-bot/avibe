@@ -10,7 +10,7 @@
 // `providers.spec.ts`. What is provable here is the structural half it rests on:
 // the anchored parts are the same nodes before and after, and only the body
 // changes.
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as React from 'react';
 import { I18nextProvider } from 'react-i18next';
@@ -23,6 +23,22 @@ import type { Source } from '@/components/settings/models/types';
 
 const showToast = vi.hoisted(() => vi.fn());
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
+
+// The authorization flow owns its own frame, poll and cancellation; what this file
+// has to prove is how its two callback shapes are read. Standing in for it keeps
+// that readable without driving a device-code flow to get there.
+type OAuthProps = {
+  vendor: string | null;
+  onConnected: (source?: Source, placement?: unknown) => void;
+  onClose: () => void;
+};
+const oauth = vi.hoisted(() => ({ current: null as OAuthProps | null }));
+vi.mock('@/components/settings/models/OAuthConnectDialog', () => ({
+  OAuthConnectDialog: (props: OAuthProps) => {
+    oauth.current = props;
+    return React.createElement('div', { 'data-testid': 'oauth-stub' });
+  },
+}));
 
 import { ApiCallError, modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { AddSourceDialog } from './AddSourceDialog';
@@ -137,6 +153,7 @@ beforeEach(async () => {
   onClose.mockReset();
   onAdded.mockReset();
   onAdded.mockResolvedValue(undefined);
+  oauth.current = null;
   vi.stubGlobal('ResizeObserver', class {
     observe() {}
     unobserve() {}
@@ -482,5 +499,90 @@ describe('AddSourceDialog — the one write it owns', () => {
     // tell which one it is on.
     expect(cancelButton().textContent).toBe('Cancel');
     expect(screen.getByRole('button', { name: 'Close' })).toBeTruthy();
+  });
+
+  it('refuses from the keyboard exactly what the footer refuses', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockResolvedValue(created(source({ id: 'src_new', vendor: 'custom' })));
+    renderDialog();
+    const user = userEvent.setup();
+    await chooseMethod(user, 'API Key');
+    await user.type(within(body()).getByLabelText('Base URL'), 'https://api.example/v1');
+
+    await user.type(within(body()).getByLabelText('API key'), '{Enter}');
+
+    // Enter IS the footer button. An incomplete draft sent from the keyboard would
+    // be the same write the disabled control is there to refuse.
+    expect(primary().disabled).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+
+    await user.type(within(body()).getByLabelText('API key'), 'sk-live-1{Enter}');
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  });
+
+  it('locks the draft an unknown outcome is still attached to', async () => {
+    vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new ApiCallError('gateway_timeout', 'timeout', true, [], [], [], 504))
+      .mockRejectedValueOnce(new ApiCallError('source_invalid', 'bad key', true, [], [], [], 400));
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+    await waitFor(() => expect(screen.getByText(/Your entries are preserved/)).toBeTruthy());
+
+    // Reconciliation adopts the row the ORIGINAL draft wrote, so an edit made under
+    // an unknown outcome is one the retry can discard without saying so.
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).disabled).toBe(true);
+    expect((within(body()).getByLabelText('Base URL') as HTMLInputElement).disabled).toBe(true);
+
+    await user.click(primary());
+
+    // A verdict ends that: the server answered about this draft, so editing it is
+    // the whole point of keeping the entries.
+    await waitFor(() => expect((within(body()).getByLabelText('API key') as HTMLInputElement).disabled).toBe(false));
+    expect((within(body()).getByLabelText('Base URL') as HTMLInputElement).disabled).toBe(false);
+  });
+});
+
+describe('AddSourceDialog — what comes back from an authorization', () => {
+  const signIn = async () => {
+    renderDialog();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: /Sign in with Claude/ }));
+    await user.click(primary());
+    await screen.findByTestId('oauth-stub');
+    return user;
+  };
+
+  it('reads an argument-less arrival as stale rows, not as a provider added', async () => {
+    await signIn();
+
+    // The shipped dialog fires this on every terminal arrival — failures,
+    // cancellations, cleanup, a flow resolved after its frame closed.
+    act(() => oauth.current?.onConnected());
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith(null));
+    // Closing here would report someone's cancelled sign-in as a provider they
+    // added, and take the frame they were working in with it.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(frame()).toBeTruthy();
+    expect(screen.getByTestId('oauth-stub')).toBeTruthy();
+  });
+
+  it('lands a source that really arrived, with the placement it arrived in', async () => {
+    const row = source({ id: 'src_claude', vendor: 'anthropic' });
+    await signIn();
+
+    act(() => oauth.current?.onConnected(row, { added_to: ['claude'], adopted_by: ['claude'] }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith({
+      source: row,
+      added_to: ['claude'],
+      adopted_by: ['claude'],
+    }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 });

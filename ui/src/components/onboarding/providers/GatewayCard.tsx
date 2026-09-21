@@ -7,7 +7,7 @@
 // running-but-degraded engine still routes, so it reads as running; saying otherwise
 // would push someone to repair something that is working.
 import type { FC } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { ExternalLink, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
@@ -26,6 +26,11 @@ const PHASE_LINE = {
 } as const satisfies Record<GatewayPhase, TranslationKey>;
 
 const BUSY: ReadonlySet<GatewayPhase> = new Set<GatewayPhase>(['installing', 'starting']);
+
+/** Where 「查看安装指南」 goes. The docs site is the project's own published
+ *  troubleshooting surface; a deeper path would be one this screen invented, and a
+ *  link that 404s is worse than one that lands a page away from the answer. */
+const INSTALL_GUIDE_URL = 'https://docs.avibe.bot';
 
 /**
  * @param failedStep Which step of the lifecycle failed, published as a DOM hook
@@ -75,6 +80,18 @@ export const GatewayCard: FC<{
           onClick={onRetry}
         >
           {t('common.retry')}
+        </Button>
+      )}
+      {/* Rechecking availability is the only thing this screen can do about an
+          unsupported host, and on its own it is a button that will keep saying no.
+          The guide is the other half of that answer — what would have to change for
+          the recheck to come back differently — which is why C1 ships the label. */}
+      {phase === 'unsupported' && (
+        <Button variant="link" size="sm" className="setup-gateway-help gap-1.5 px-0" asChild>
+          <a href={INSTALL_GUIDE_URL} target="_blank" rel="noopener noreferrer">
+            {t('onboarding.providers.gatewayEnvironmentHelp')}
+            <ExternalLink className="size-[13px]" aria-hidden="true" />
+          </a>
         </Button>
       )}
     </div>

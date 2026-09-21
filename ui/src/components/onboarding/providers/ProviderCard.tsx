@@ -25,9 +25,18 @@ export const ProviderCard: FC<{
 
   // The second line says where the card's knowledge came from. An empty card has no
   // key to describe, so it describes the offer instead.
-  const keyLine = slot.mask
+  const written = slot.mask
     ? t(connected ? 'onboarding.providers.cardKeyAdded' : 'onboarding.providers.cardKeyDetected', { mask: slot.mask })
     : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
+
+  // A key saved without verification is `standby` carrying `verification_pending`:
+  // stored, but nothing has confirmed it answers. Settings states that difference
+  // with the same word, and a card that looked identical either way would report an
+  // unchecked key as a provider that is already supplying models. It is said in both
+  // places the card is read, because `aria-label` replaces the text rather than
+  // adding to it.
+  const note = slot.pending ? ` · ${t('settings.models.sourceDetail.status.saved')}` : '';
+  const keyLine = `${written}${note}`;
 
   const label = connected
     ? t('onboarding.providers.cardUseExistingNamed', { name: slot.label })
@@ -41,8 +50,9 @@ export const ProviderCard: FC<{
       className="setup-provider-card"
       data-provider={slot.vendor}
       data-state={slot.kind}
+      {...(slot.pending ? { 'data-pending': 'true' } : {})}
       {...(detected ? { 'aria-pressed': selected } : {})}
-      aria-label={detected ? `${slot.label} · ${keyLine}` : label}
+      aria-label={detected ? `${slot.label} · ${keyLine}` : `${label}${note}`}
       disabled={connected}
       onClick={detected ? onToggle : onAdd}
     >

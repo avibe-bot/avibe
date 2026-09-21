@@ -119,18 +119,22 @@ test.describe('providers screen', () => {
     expect(numbers(await capsule.textContent())).toEqual([importableCount(server.facts())]);
 
     // ── An import ───────────────────────────────────────────────────────────
+    // Every proposed row arrives consented to, as the shipped takeover opens it.
+    await expect(primaryAction(page)).toContainText(String(importableCount(server.facts())));
+
+    // Withdrawing one card withdraws that provider's rows and nothing else.
     await page.locator('.setup-provider-card[data-provider="openai"]').click();
-    // Consenting to one provider offers one batch, and the action names its size.
-    await expect(primaryAction(page)).toContainText('1');
+    await expect(primaryAction(page)).toContainText('2');
     await primaryAction(page).click();
 
     const takeover = page.getByRole('dialog');
     await takeover.getByRole('button', { name: 'Start migration' }).click();
     await expect(takeover.getByRole('button', { name: 'Done', exact: true })).toBeVisible();
 
-    // One atomic batch holding exactly the consented group's rows — the other group's
-    // keys were never in it, and nothing was submitted a second time.
-    expect(server.facts().applied).toEqual([['codex-key']]);
+    // One atomic batch holding exactly the consented rows — the withdrawn provider's
+    // key was never in it, and nothing was submitted a second time.
+    expect(server.facts().applied).toHaveLength(1);
+    expect([...server.facts().applied[0]].sort()).toEqual(['opencode-qwen', 'opencode-zhipu']);
 
     await takeover.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);

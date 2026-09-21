@@ -21,7 +21,7 @@ import {
 } from '@/components/settings/models/collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
-import { importableKeys, isImportableKey } from '@/components/settings/models/migrationScan';
+import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
 import type { AgentBackend, Source } from '@/components/settings/models/types';
 
@@ -36,7 +36,9 @@ import { SupplyWires } from './SupplyWires';
 import {
   addedThroughMoreCount,
   adoptionBackend,
+  defaultSelection,
   gatewayIntent,
+  offeredImportKeys,
   pendingImportRows,
   providerAction,
   providerSetupAction,
@@ -134,15 +136,17 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       [sources, selection.scan],
     );
     const pending = React.useMemo(() => pendingImportRows(selection), [selection]);
-    // The capsule counts the same filtered scan the import list is built from, so the
-    // sentence and the dialog can never advertise different numbers of the same keys.
-    const offered = React.useMemo(
-      () => importableKeys(selection.scan?.items ?? []),
-      [selection.scan],
-    );
+    // The capsule counts through the same consent grouping the cards and the dialog
+    // use, so a key it advertises is always one the review can actually act on.
+    const offered = React.useMemo(() => offeredImportKeys(selection), [selection]);
 
     // ── Supply ──────────────────────────────────────────────────────────────
 
+    // Whether the server's own row defaults have been honoured yet. A scan is nulled
+    // again once a batch lands, so 「no scan held」 alone cannot answer this: it is
+    // also true for the rescan that follows an import, whose consent has just been
+    // spent on purpose and must not come back ticked.
+    const seededSelectionRef = React.useRef(false);
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
@@ -152,13 +156,23 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           if (cancelled) return;
           setSupplyFailed(false);
           if (read.kind === 'current') setSources(read.value);
+          // Read outside the updater and written after it: an updater has to be pure,
+          // and one that flips this on its first call answers its own question
+          // differently on the second.
+          const first = !seededSelectionRef.current;
           setFlowState((previous) => {
-            const next = { scan, selectedBackends: previous.providerSelection.selectedBackends };
-            // A fresh scan can retire a consent: imported, newly blocked, or simply
-            // gone. Carrying the old name forward would keep the CTA offering a batch
-            // the dialog would refuse to build.
-            return { ...previous, providerSelection: { scan, selectedBackends: reconcileSelection(next) } };
+            // The first scan has no prior consent to carry, so it opens on the
+            // server's own defaults — the same rows the shipped dialog opens ticked.
+            // Afterwards the selection is the person's: a fresh scan can only retire
+            // a consent that was imported, newly blocked or simply gone, because
+            // carrying a stale name forward would keep the CTA offering a batch the
+            // dialog would refuse to build.
+            const selectedBackends = first && previous.providerSelection.scan === null
+              ? defaultSelection(scan)
+              : reconcileSelection({ scan, selectedBackends: previous.providerSelection.selectedBackends });
+            return { ...previous, providerSelection: { scan, selectedBackends } };
           });
+          seededSelectionRef.current = true;
         } catch {
           if (!cancelled) setSupplyFailed(true);
         }
@@ -175,6 +189,12 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     React.useEffect(() => {
       if (!active) attemptedRef.current = null;
     }, [active]);
+
+    // Held in a ref for the same reason the publication is: a shell whose callback is
+    // re-created each render would otherwise re-run the effect below, and its cleanup
+    // cancels an attempt that is still in flight.
+    const refreshRuntimeRef = React.useRef(onRetrySetup);
+    refreshRuntimeRef.current = onRetrySetup;
 
     const resumeStep = intent.kind === 'resume' ? intent.step : null;
     React.useEffect(() => {
@@ -193,8 +213,15 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           const outcome = await resumeGatewayAdoption(modelsApi, agentReads, backend);
           if (cancelled) return;
           setGatewayRun(outcome.ok ? { kind: 'idle' } : { kind: 'failed', step: outcome.failure.step });
-          // An engine that just came up can answer reads that failed before it did.
-          if (outcome.ok) setSupplyToken((token) => token + 1);
+          if (outcome.ok) {
+            // The engine moved; the shell's read still describes where it was. Asking
+            // for that read again is what turns the card from 「正在启动」 to 「运行中」
+            // and unblocks Continue — without it the attempt succeeds and the screen
+            // falls back to the stale intent, which is still 'resume'.
+            refreshRuntimeRef.current();
+            // And an engine that just came up can answer reads that failed before it did.
+            setSupplyToken((token) => token + 1);
+          }
         } catch {
           if (!cancelled) setGatewayRun({ kind: 'failed', step: 'read' });
         }
@@ -229,6 +256,9 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       importFailed,
       hasSource: sources.some(usableSource),
       gatewayBusy,
+      // The authoritative read, not this screen's attempt: an attempt that reported
+      // success is not the engine answering, and C4 gates the next screen on the read.
+      gatewayRunning: intent.kind === 'running',
       verifying,
     });
 
@@ -238,11 +268,20 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     publishRef.current = onActionChange;
     React.useEffect(() => {
       if (!active) return;
-      publishRef.current(providerSetupAction({ kind: action.kind, count: action.count }));
-    }, [active, action.kind, action.count]);
+      publishRef.current(providerSetupAction({
+        kind: action.kind,
+        count: action.count,
+        ...(action.blocked ? { blocked: true } : {}),
+      }));
+    }, [active, action.kind, action.count, action.blocked]);
 
     React.useImperativeHandle(ref, () => ({
       activate: () => {
+        // A blocked state is the right one to show and the wrong one to press. The
+        // shell already renders it disabled; refusing it here too is what makes a
+        // keyboard activation on a stale render unrepresentable rather than merely
+        // unlikely.
+        if (action.blocked) return;
         switch (action.kind) {
           case 'import':
           case 'retryImport':
@@ -262,7 +301,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             // rather than trusting that is what makes it unrepresentable.
         }
       },
-    }), [action.kind, onNavigate]);
+    }), [action.kind, action.blocked, onNavigate]);
 
     // ── First-entry sequence ────────────────────────────────────────────────
 
@@ -287,8 +326,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     const landSource = React.useCallback(async (created: SourceCreated | null, viaMore: boolean) => {
       setVerifying(true);
       try {
-        const read = await sourceReads.refresh();
-        if (read.kind === 'current') setSources(read.value);
+        try {
+          const read = await sourceReads.refresh();
+          if (read.kind === 'current') setSources(read.value);
+        } catch {
+          // The write may well have landed; what failed is the read that would show
+          // it. The dialog swallows a rejection here to stay closable, so saying so
+          // is this screen's job — keeping the old list silently would report a
+          // provider that exists as one that does not.
+          setSupplyFailed(true);
+        }
         const id = created?.source.id;
         if (!viaMore || !id) return;
         setFlowState((previous) => (previous.addedThroughMore.includes(id)
@@ -323,7 +370,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // ── Sentence ────────────────────────────────────────────────────────────
 
     const summary = providerSummary({
-      slots,
+      scan: selection.scan,
       sources,
       selected: selection.selectedBackends,
       failed: supplyFailed,
@@ -451,7 +498,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
               // batch that landed and one that did not is this number.
               if (applied === 0) { setImportFailed(true); return; }
               setImportFailed(false);
-              setFlowState((previous) => ({ ...previous, importedCount: previous.importedCount + applied }));
+              setFlowState((previous) => ({
+                ...previous,
+                importedCount: previous.importedCount + applied,
+                // The batch is spent in the same tick it landed. The rescan is a round
+                // trip away, and until it answers the old scan still names rows that
+                // are now imported — which would keep the capsule advertising them,
+                // the cards offering them and the action saying 「导入」 for a batch the
+                // dialog would refuse to build.
+                providerSelection: { scan: null, selectedBackends: [] },
+              }));
               setSupplyToken((token) => token + 1);
             }}
             onClose={() => setImportOpen(false)}
