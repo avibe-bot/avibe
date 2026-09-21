@@ -31,7 +31,7 @@ from urllib.parse import unquote
 
 import idna
 
-from core.reply_enhancer import inline_link_destinations, mask_hidden_and_code
+from core.reply_enhancer import hidden_block_ranges, mask_hidden_and_code
 
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
@@ -137,8 +137,10 @@ class Citation:
     title: str
     url: str
     label: str
-    # Which links in the delivered text this citation actually wrote. See
-    # ``_link_provenance`` for what the two numbers mean and why they exist.
+    # The exact Markdown link this citation writes, character for character,
+    # and which of that spelling's occurrences in the delivered text are its
+    # own. See ``_link_provenance``.
+    spelling: str = ""
     occurrences: tuple[int, ...] = ()
     occurrence_total: int = 0
 
@@ -150,6 +152,7 @@ class Citation:
             "title": self.title,
             "url": self.url,
             "label": self.label,
+            "spelling": self.spelling,
             "occurrences": list(self.occurrences),
             "occurrence_total": self.occurrence_total,
         }
@@ -686,22 +689,27 @@ def source_label(url: str, title: str = "") -> str:
     return "…" + host[-(_LABEL_MAX - 1) :]
 
 
+# Every character CommonMark (plus GFM) still reads as syntax inside link
+# text. Two different kinds of damage, one answer: a backtick, an angle bracket
+# or an unbalanced square bracket opens a construct that runs past ``](url)``
+# and swallows the link itself, while emphasis, strikethrough, a character
+# reference or a table cell divider quietly change which characters the reader
+# is shown. The label is the source's domain - the whole attribution claim - so
+# a label that reads as ``ab.example`` when the link goes to ``a*b*.example``
+# is the same defect as no link at all.
+_LABEL_SYNTAX_RE = re.compile(r"([\\\[\]`<*_~&|])")
+
+
 def _escape_label(value: str) -> str:
-    """Escape the label characters that would destroy the link around them.
+    """Escape every character a Markdown reader would not show verbatim.
 
-    A backtick or an angle bracket in a label does not merely change what the
-    label reads as: a code span, an HTML comment, a processing instruction or an
-    unclosed attribute opened inside the brackets runs past ``](url)`` looking
-    for its closer, and takes the link and the sentence after it along. The
-    reader is then shown raw Markdown with nothing to click.
-
-    Only the characters that can do that are escaped. Emphasis and character
-    references change how a label *reads* without ever breaking the link, and
-    the citation's identity no longer depends on reading it back - so escaping
-    them would buy nothing and cost a visible backslash on every IM dialect
-    that does not speak CommonMark.
+    What comes out is a label that reads back exactly as the sidecar spells it
+    on every surface. The Web renderer resolves the escapes itself; each IM
+    formatter resolves them once, ahead of its own dialect pass, through
+    ``modules.im.formatters.hold_markdown_escapes`` - so no reader is shown a
+    backslash that was only ever there to keep a domain intact.
     """
-    return re.sub(r"([\\\[\]`<])", r"\\\1", value)
+    return _LABEL_SYNTAX_RE.sub(r"\\\1", value)
 
 
 def has_citation_markers(text: Optional[str]) -> bool:
@@ -792,6 +800,7 @@ def resolve_citations(
             title=title,
             url=url,
             label=label,
+            spelling=f"[{_escape_label(label)}]({url})",
         )
         citations.append(citation)
         by_url[url] = citation
@@ -816,7 +825,7 @@ def resolve_citations(
             if citation is None:
                 unresolved = True
                 continue
-            link = f"[{_escape_label(citation.label)}]({citation.url})"
+            link = citation.spelling
             placed.append((cursor, citation))
             # One space joins the links below, so the next one starts past it.
             cursor += len(link) + 1
@@ -842,8 +851,8 @@ def resolve_citations(
         for c in (
             replace_dataclass(
                 citation,
-                occurrences=provenance[0].get(citation.url, ()),
-                occurrence_total=provenance[1].get(citation.url, 0),
+                occurrences=provenance[0].get(citation.spelling, ()),
+                occurrence_total=provenance[1].get(citation.spelling, 0),
             )
             for citation in citations
         )
@@ -854,40 +863,63 @@ def _link_provenance(
     text: str,
     written: Mapping[int, Citation],
 ) -> tuple[dict[str, tuple[int, ...]], dict[str, int]]:
-    """Which links in *text* each citation wrote, and how many share its URL.
+    """Which occurrences of its own link spelling each citation wrote.
 
     A badge is an attribution claim, so it has to belong to a link this module
-    wrote - not to any link that happens to point at the same page, which is
-    what matching a rendered label against a sidecar entry amounted to. The
-    delivered text is the only thing both sides hold, so provenance travels as
-    a position in it: the 1-based ordinal of the link among the links sharing
-    its destination, counted in document order.
+    wrote - not to any link the answer's prose happens to point at the same
+    page with. The delivered text is the only thing the producer and a consumer
+    both hold, so provenance travels as a position in it.
 
-    The destination is the counting key rather than the rendered label, because
-    that is what both parsers agree on - a label is what is left after emphasis,
-    character references and escapes have been resolved, and every one of those
-    is a way for the two to disagree.
+    The position is counted over one exact string: the complete link this
+    module wrote, ``[escaped label](url)``, character for character. Counting a
+    literal substring is the one measurement two different Markdown
+    implementations cannot disagree about - it asks nothing of either
+    vocabulary. Counting by parsed destination did ask: a GFM footnote
+    definition holding ``[p](url)`` is a link to one parser and part of a
+    definition to another, and the citation lost its badge over the
+    disagreement. So every occurrence of the spelling counts here, whether it
+    is a link, a code example, or a footnote, and the consumer counts the same
+    way over the same characters.
 
-    The total is recorded alongside so a disagreement is detectable. A consumer
-    that counts a different number of links is looking at different text, and
-    the honest answer there is an ordinary link rather than a badge on the wrong
-    one. That is also what makes reference links safe to leave uncounted.
+    What the reader is never handed is not counted, because the consumer never
+    sees it either: a silent block is removed before delivery, so an occurrence
+    inside one would put the producer one ahead for the rest of the message.
+    Every other delivery transform was measured to leave the relative order of
+    an exact spelling alone (see ``tests/test_citation_consumers.py``).
+
+    The total is recorded alongside so a disagreement is still detectable. A
+    consumer that counts a different number is looking at different text, and
+    the honest answer there is the ordinary link the reader already has, not a
+    badge on whichever link landed in that position.
     """
-    mask = mask_hidden_and_code(text)
+    hidden = hidden_block_ranges(text)
+
+    def shown(offset: int) -> bool:
+        return not any(start <= offset < end for start, end in hidden)
+
+    ordinals: dict[str, dict[int, int]] = {}
     totals: dict[str, int] = {}
+    for spelling in {citation.spelling for citation in written.values()}:
+        seen: dict[int, int] = {}
+        # Overlapping matches are searched for from one character in, not one
+        # spelling on, so the two sides scan identically whatever the label
+        # holds. A link spelling cannot actually overlap itself - it opens with
+        # ``[`` and closes with ``)`` - but neither side has to prove that.
+        at = text.find(spelling)
+        while at != -1:
+            if shown(at):
+                seen[at] = len(seen) + 1
+            at = text.find(spelling, at + 1)
+        ordinals[spelling] = seen
+        totals[spelling] = len(seen)
+
     occurrences: dict[str, list[int]] = {}
-    for offset, destination in inline_link_destinations(text):
-        # A link the reader is never shown is not a link: one inside a hidden
-        # block leaves with the block before any consumer sees the text.
-        if mask[offset : offset + 1] != "[":
-            continue
-        ordinal = totals.get(destination, 0) + 1
-        totals[destination] = ordinal
-        citation = written.get(offset)
-        if citation is not None and citation.url == destination:
-            occurrences.setdefault(citation.url, []).append(ordinal)
+    for offset, citation in written.items():
+        ordinal = ordinals[citation.spelling].get(offset)
+        if ordinal is not None:
+            occurrences.setdefault(citation.spelling, []).append(ordinal)
     return (
-        {url: tuple(found) for url, found in occurrences.items()},
+        {spelling: tuple(sorted(found)) for spelling, found in occurrences.items()},
         totals,
     )
 

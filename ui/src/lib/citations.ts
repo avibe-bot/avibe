@@ -12,13 +12,18 @@
 //
 // Recognizing one is a provenance question rather than a text question. A badge
 // is an attribution claim, so it belongs to a link the backend actually wrote —
-// not to any link the answer's own prose happens to point at the same page. So
-// the sidecar records where each link it wrote sits among the links sharing that
-// destination, and `remarkCitationOccurrences` counts the same thing here from
-// the delivered text. The destination is the counting key rather than the
-// rendered label, because that is what both parsers agree on: a label is what is
-// left after emphasis, character references and escapes have been resolved, and
-// every one of those is a way for the two to disagree.
+// not to any link the answer's own prose happens to point at the same page. The
+// backend knows exactly which characters it wrote and where, so that is what
+// travels: the complete link spelling, plus which of that spelling's literal
+// occurrences in the delivered text are its own.
+//
+// Counting a literal substring is the one measurement two Markdown
+// implementations cannot disagree about. Counting parsed links did disagree: a
+// GFM footnote definition holding `[p](url)` is a link to this renderer and part
+// of a definition to the backend, and the real citation silently lost its badge
+// over the difference. So both sides now count the same characters in the same
+// text, and a link is only upgraded when its source span IS one of the
+// occurrences the backend claims.
 
 export type CitationSource = {
   /** 1-based first-appearance order within the message; the badge's label. */
@@ -31,33 +36,36 @@ export type CitationSource = {
   url: string;
   /** Exactly the link text the backend used — the source's domain. */
   label: string;
-  /** 1-based positions of the links this citation wrote, among the links
-   *  sharing `url`. Absent on rows persisted before provenance existed. */
+  /** The complete Markdown link the backend wrote, character for character —
+   *  `[escaped label](url)`. Present only on rows written with provenance;
+   *  its absence is what selects the legacy match below. */
+  spelling?: string;
+  /** 1-based positions of the links this citation wrote, among the literal
+   *  occurrences of `spelling`. Absent on rows persisted before provenance. */
   occurrences?: number[];
-  /** How many links the backend counted for `url` in the whole message. */
+  /** How many occurrences of `spelling` the backend counted in the message. */
   occurrence_total?: number;
 };
 
-/** Where one rendered link sits among the links sharing its destination. */
+/** Where one rendered link sits among the literal occurrences of its spelling. */
 export type CitationOccurrence = {
-  /** The parsed Markdown destination — NOT the href the renderer resolved. */
-  url: string;
-  /** 1-based position in document order among the links sharing `url`. */
+  /** The exact source characters this link is spelled with. */
+  spelling: string;
+  /** 1-based position among the literal occurrences of `spelling`. */
   ordinal: number;
-  /** How many links this render counted for `url`. */
+  /** How many occurrences of `spelling` this render counted. */
   total: number;
 };
 
 // The annotation travels from the remark plugin to the renderer as hast data
 // attributes, which is the one channel mdast → hast preserves verbatim.
-const OCCURRENCE_URL = 'dataCitationUrl';
+const OCCURRENCE_SPELLING = 'dataCitationSpelling';
 const OCCURRENCE_ORDINAL = 'dataCitationOrdinal';
 const OCCURRENCE_TOTAL = 'dataCitationTotal';
 
 /** The parts of an mdast node this counts on, none of which it can assume. */
 type MarkdownNode = {
   type?: unknown;
-  url?: unknown;
   position?: { start?: { offset?: unknown }; end?: { offset?: unknown } };
   data?: { hProperties?: Record<string, unknown> };
   children?: unknown;
@@ -71,41 +79,63 @@ function eachLink(node: MarkdownNode, visit: (link: MarkdownNode) => void): void
 }
 
 /**
- * Annotate each inline link with its position among the links sharing its
- * destination, so `findCitation` can recognize the ones the backend wrote.
+ * Every offset in `source` where `needle` occurs, in order.
  *
- * Only a link actually spelled ``[label](destination)`` is counted, because
- * that is the only shape the backend counts: the first source character is
- * ``[`` and the last is ``)``, and that pair excludes images, reference links
- * and both autolink forms without depending on either parser's vocabulary for
- * them. The key is the parsed destination, never the resolved href — the
- * renderer percent-encodes an href, so an IPv6 literal's brackets would stop
- * being the URL the backend stored.
+ * The next search starts one character on rather than one needle on, so an
+ * overlapping occurrence still counts. A link spelling cannot overlap itself —
+ * it opens with `[` and closes with `)` — but the backend scans the same way
+ * without proving that either, and the two scans have to agree exactly.
+ */
+function literalOccurrences(source: string, needle: string): number[] {
+  const found: number[] = [];
+  for (let at = source.indexOf(needle); at !== -1; at = source.indexOf(needle, at + 1)) {
+    found.push(at);
+  }
+  return found;
+}
+
+/**
+ * Annotate each inline link with the source characters it is spelled with and
+ * which of that spelling's literal occurrences it is, so `findCitation` can
+ * recognize the links the backend wrote.
+ *
+ * The spelling is the exact source slice, not the parsed destination and not
+ * the rendered label: both of those are what is left after escapes, character
+ * references and emphasis have been resolved, and every one of those is a way
+ * for two implementations to disagree. Every literal occurrence counts, whether
+ * this renderer reads it as a link, a code example or a footnote — the backend
+ * counted it too, and a shared count is the whole point.
  */
 export function remarkCitationOccurrences() {
   return (tree: unknown, file: { value?: unknown }) => {
     const source = typeof file?.value === 'string' ? file.value : '';
     if (!source) return;
-    const totals = new Map<string, number>();
-    const counted: Array<{ link: MarkdownNode; url: string; ordinal: number }> = [];
+    const positions = new Map<string, number[]>();
+    const annotate: Array<{ link: MarkdownNode; spelling: string; ordinal: number }> = [];
     eachLink(tree as MarkdownNode, (link) => {
       const start = link.position?.start?.offset;
       const end = link.position?.end?.offset;
-      const url = link.url;
       if (typeof start !== 'number' || typeof end !== 'number') return;
-      if (typeof url !== 'string' || !url) return;
-      if (source[start] !== '[' || source[end - 1] !== ')') return;
-      const ordinal = (totals.get(url) ?? 0) + 1;
-      totals.set(url, ordinal);
-      counted.push({ link, url, ordinal });
+      const spelling = source.slice(start, end);
+      if (!spelling) return;
+      let occurrences = positions.get(spelling);
+      if (!occurrences) {
+        occurrences = literalOccurrences(source, spelling);
+        positions.set(spelling, occurrences);
+      }
+      // Only a link whose source span coincides exactly with an occurrence may
+      // be upgraded; the slice was taken from that span, so this holds unless
+      // the node's own offsets disagree with the source it came from.
+      const ordinal = occurrences.indexOf(start) + 1;
+      if (!ordinal) return;
+      annotate.push({ link, spelling, ordinal });
     });
-    // The total is only known once the walk ends, so the writes wait for it.
-    for (const { link, url, ordinal } of counted) {
+    for (const { link, spelling, ordinal } of annotate) {
       const data = (link.data ??= {});
       const properties = (data.hProperties ??= {});
-      properties[OCCURRENCE_URL] = url;
+      properties[OCCURRENCE_SPELLING] = spelling;
       properties[OCCURRENCE_ORDINAL] = ordinal;
-      properties[OCCURRENCE_TOTAL] = totals.get(url);
+      properties[OCCURRENCE_TOTAL] = positions.get(spelling)?.length;
     }
   };
 }
@@ -125,13 +155,13 @@ function isUsable(value: unknown): value is CitationSource {
 function linkOccurrence(node: unknown): CitationOccurrence | null {
   const properties = (node as { properties?: Record<string, unknown> } | undefined)?.properties;
   if (!properties) return null;
-  const url = properties[OCCURRENCE_URL];
+  const spelling = properties[OCCURRENCE_SPELLING];
   const ordinal = properties[OCCURRENCE_ORDINAL];
   const total = properties[OCCURRENCE_TOTAL];
-  if (typeof url !== 'string' || typeof ordinal !== 'number' || typeof total !== 'number') {
+  if (typeof spelling !== 'string' || typeof ordinal !== 'number' || typeof total !== 'number') {
     return null;
   }
-  return { url, ordinal, total };
+  return { spelling, ordinal, total };
 }
 
 /**
@@ -150,17 +180,17 @@ export function findCitation(
   const occurrence = linkOccurrence(node);
   for (const candidate of citations) {
     if (!isUsable(candidate)) continue;
-    if (Array.isArray(candidate.occurrences)) {
-      // A row that records its provenance is matched on provenance alone. An
+    if (candidate.spelling) {
+      // A row that carries its provenance is matched on provenance alone. An
       // ordinal it does not list belongs to the answer's own prose, and a total
       // this render disagrees with means the two sides are reading different
       // text — where the honest answer is the plain link the reader already has,
       // not a badge on whichever link happened to land in that position.
       if (
         occurrence
-        && candidate.url === occurrence.url
+        && candidate.spelling === occurrence.spelling
         && candidate.occurrence_total === occurrence.total
-        && candidate.occurrences.includes(occurrence.ordinal)
+        && candidate.occurrences?.includes(occurrence.ordinal)
       ) {
         return candidate;
       }

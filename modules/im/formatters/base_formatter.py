@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 
-from core.reply_enhancer import unescape_markdown
+from core.reply_enhancer import inline_links, unescape_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,58 @@ def hold_markdown_escapes(
     held: Dict[str, str] = {}
 
     def hold(character: str) -> str:
-        token = f"\ue000MD{uuid.uuid4().hex}\ue001"
+        token = _placeholder()
         held[token] = render(character) if render else character
         return token
 
     return unescape_markdown(text, replace=hold), held
+
+
+def hold_link_destinations(text: str) -> Tuple[str, Dict[str, str]]:
+    """Hide every inline link's destination from a platform's text scanner.
+
+    A link destination is data, not prose: it is the address a tap goes to, and
+    an ``*`` or a ``_`` inside it is a character of that address rather than
+    markup. A converter that scans a whole message for formatting does not know
+    that - Slack's third-party mrkdwn converter read
+    ``https://a*b*.example/x`` as emphasis and delivered a link to
+    ``https://a_b_.example/x``, a different site. Holding the destinations
+    keeps that pass on the prose it is meant to format.
+
+    What comes back is the destination a Markdown reader resolves rather than
+    the characters that spelled it - angle-bracket form, backslash escapes and
+    character references already applied - because the platform on the other
+    side speaks none of those. Restore with ``restore_held`` BEFORE restoring
+    an escape pass, whose placeholders a destination may still contain.
+    """
+    links = inline_links(text)
+    if not links:
+        return text, {}
+    held: Dict[str, str] = {}
+    parts: List[str] = []
+    cursor = 0
+    for link in links:
+        # Nested links cannot happen in CommonMark, but a capture that mapped
+        # back to an overlapping span would splice the text twice; skipping is
+        # the one behaviour that always leaves the source readable.
+        if link.destination_start < cursor:
+            continue
+        token = _placeholder()
+        held[token] = link.destination
+        parts.append(text[cursor : link.destination_start])
+        parts.append(token)
+        cursor = link.destination_end
+    parts.append(text[cursor:])
+    return "".join(parts), held
+
+
+def _placeholder() -> str:
+    """An inert stand-in no platform's formatter reads as markup of its own.
+
+    The shape is shared by every hold pass so one ``restore_held`` call can put
+    back whichever of them wrote the token it finds.
+    """
+    return f"\ue000MD{uuid.uuid4().hex}\ue001"
 
 
 def restore_held(text: str, held: Dict[str, str]) -> str:

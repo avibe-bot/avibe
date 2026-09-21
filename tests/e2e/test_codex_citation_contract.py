@@ -379,7 +379,21 @@ def test_real_notifications_deliver_and_persist_resolved_citations(
         (2, "turn0view1", PROBE_URL),
     ]
     assert citations[1]["title"] == "引用探针来源 — Café"
-    # Every sidecar entry names a link the stored answer actually carries: that
-    # (href, text) pair is what the Web renderer matches on to draw a badge.
+    # Every sidecar entry names a link the stored answer actually carries, and
+    # names it the way a badge is matched: the exact characters the backend
+    # wrote, plus which of that spelling's literal occurrences are its own. The
+    # renderer counts the same characters in the same text (ui/src/lib/
+    # citations.ts), scanning one character on from each hit, so the count
+    # recorded here is the one it has to arrive at independently.
     for citation in citations:
-        assert f"[{citation['label']}]({citation['url']})" in row["text"]
+        spelling = citation["spelling"]
+        # These labels need no escaping, so the link reads exactly as spelled.
+        assert spelling == f"[{citation['label']}]({citation['url']})"
+        found = []
+        at = row["text"].find(spelling)
+        while at != -1:
+            found.append(at)
+            at = row["text"].find(spelling, at + 1)
+        assert len(found) == citation["occurrence_total"]
+        assert citation["occurrences"]
+        assert all(1 <= ordinal <= len(found) for ordinal in citation["occurrences"])

@@ -1,0 +1,752 @@
+{
+  "generated_by": "tests/citation_bridge.py",
+  "cases": [
+    {
+      "key": "star_host",
+      "why": "A host holding Markdown emphasis: the label must read as the host it names, and the address must arrive character for character.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [a\\*b\\*.example](https://a*b*.example/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Star Host",
+          "url": "https://a*b*.example/x",
+          "label": "a*b*.example",
+          "spelling": "[a\\*b\\*.example](https://a*b*.example/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [a\\*b\\*.example](https://a*b*.example/x)",
+      "im_text": "Cited. [a\\*b\\*.example](https://a*b*.example/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "a*b*.example",
+          "url": "https://a*b*.example/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "a*b*.example",
+          "url": "https://a*b*.example/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "entity_host",
+      "why": "A host that spells a character reference once decoded; the reader must see the reference, not whatever it would expand to.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [a\\&copy;.example](https://a%26copy%3B.example/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Entity Host",
+          "url": "https://a%26copy%3B.example/x",
+          "label": "a&copy;.example",
+          "spelling": "[a\\&copy;.example](https://a%26copy%3B.example/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [a\\&copy;.example](https://a%26copy%3B.example/x)",
+      "im_text": "Cited. [a\\&copy;.example](https://a%26copy%3B.example/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "a&copy;.example",
+          "url": "https://a%26copy%3B.example/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "a&copy;.example",
+          "url": "https://a%26copy%3B.example/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "underscore_path",
+      "why": "Underscores in the path and the query - not CommonMark emphasis, but Slack mrkdwn and Telegram both read them as italics.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [example.com](https://example.com/a_b_c?q=_u_&r=1)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Underscores",
+          "url": "https://example.com/a_b_c?q=_u_&r=1",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/a_b_c?q=_u_&r=1)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/a_b_c?q=_u_&r=1)",
+      "im_text": "Cited. [example.com](https://example.com/a_b_c?q=_u_&r=1)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/a_b_c?q=_u_&r=1",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/a_b_c?q=_u_&r=1",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "backtick_query",
+      "why": "A backtick and an asterisk inside the query string, where a converter that scans destinations rewrites the address itself.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [example.com](https://example.com/p?q=%60code%60&r=a*b*)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Query",
+          "url": "https://example.com/p?q=%60code%60&r=a*b*",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/p?q=%60code%60&r=a*b*)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/p?q=%60code%60&r=a*b*)",
+      "im_text": "Cited. [example.com](https://example.com/p?q=%60code%60&r=a*b*)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=%60code%60&r=a*b*",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=%60code%60&r=a*b*",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "format_chars",
+      "why": "A zero-width space in the query, percent-encoded: invisible characters must not silently drop out of an address.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [example.com](https://example.com/p?q=a%E2%80%8Bb)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Invisible",
+          "url": "https://example.com/p?q=a%E2%80%8Bb",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/p?q=a%E2%80%8Bb)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/p?q=a%E2%80%8Bb)",
+      "im_text": "Cited. [example.com](https://example.com/p?q=a%E2%80%8Bb)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=a%E2%80%8Bb",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=a%E2%80%8Bb",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "ipv6_port",
+      "why": "A literal IPv6 authority with a port. The brackets are reserved authority syntax, and a link nobody can open is not attribution.",
+      "agent_text": "Cited. citeturn0view0",
+      "delivered": "Cited. [\\[::1\\]](https://[::1]:8443/x?q=1)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Loopback",
+          "url": "https://[::1]:8443/x?q=1",
+          "label": "[::1]",
+          "spelling": "[\\[::1\\]](https://[::1]:8443/x?q=1)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [\\[::1\\]](https://[::1]:8443/x?q=1)",
+      "im_text": "Cited. [\\[::1\\]](https://[::1]:8443/x?q=1)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "[::1]",
+          "url": "https://[::1]:8443/x?q=1",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "[::1]",
+          "url": "https://[::1]:8443/x?q=1",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "footnote",
+      "why": "A GFM footnote definition holding a link to the same page. One renderer reads a link there and the other reads a definition, which is exactly the disagreement that cost the real citation its badge.",
+      "agent_text": "[^f]: [p](https://example.com/x)\n\nCited. citeturn0view0 [^f]",
+      "delivered": "[^f]: [p](https://example.com/x)\n\nCited. [example.com](https://example.com/x) [^f]",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Footnoted",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "[^f]: [p](https://example.com/x)\n\nCited. [example.com](https://example.com/x) [^f]",
+      "im_text": "[^f]: [p](https://example.com/x)\n\nCited. [example.com](https://example.com/x) [^f]",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": false
+    },
+    {
+      "key": "code_fence",
+      "why": "The citation's own exact spelling shown as a code example. It is not a link to any reader, but it is the same characters, and both ends have to count it the same way.",
+      "agent_text": "```\n[example.com](https://example.com/x)\n```\n\nCited. citeturn0view0",
+      "delivered": "```\n[example.com](https://example.com/x)\n```\n\nCited. [example.com](https://example.com/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Fenced",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            2
+          ],
+          "occurrence_total": 2
+        }
+      ],
+      "web_text": "```\n[example.com](https://example.com/x)\n```\n\nCited. [example.com](https://example.com/x)",
+      "im_text": "```\n[example.com](https://example.com/x)\n```\n\nCited. [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "table",
+      "why": "The same spelling inside a GFM table cell, where `|` ends a cell and a label that spells one would split the row.",
+      "agent_text": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. citeturn0view0",
+      "delivered": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. [example.com](https://example.com/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Tabled",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            2
+          ],
+          "occurrence_total": 2
+        }
+      ],
+      "web_text": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. [example.com](https://example.com/x)",
+      "im_text": "| Source |\n| --- |\n| [example.com](https://example.com/x) |\n\nCited. [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "near_html",
+      "why": "The same spelling next to inline HTML, which each renderer is free to keep, escape or drop.",
+      "agent_text": "Cited. citeturn0view0 <span>[example.com](https://example.com/x)</span>",
+      "delivered": "Cited. [example.com](https://example.com/x) <span>[example.com](https://example.com/x)</span>",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Inline HTML",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 2
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/x) <span>[example.com](https://example.com/x)</span>",
+      "im_text": "Cited. [example.com](https://example.com/x) <span>[example.com](https://example.com/x)</span>",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "prose_repeat",
+      "why": "The agent points at the cited page in its own prose, before and after, spelled identically. Only the middle one is a citation, and an ordinary link must never be impersonated.",
+      "agent_text": "Background: [example.com](https://example.com/x)\n\nCited. citeturn0view0\n\nAlso [example.com](https://example.com/x)",
+      "delivered": "Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\nAlso [example.com](https://example.com/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Repeated",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            2
+          ],
+          "occurrence_total": 3
+        }
+      ],
+      "web_text": "Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\nAlso [example.com](https://example.com/x)",
+      "im_text": "Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)\n\nAlso [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": false
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "emoji_prefix",
+      "why": "Non-ASCII text before the marker: offsets counted in characters on one side and in UTF-16 units on the other stop agreeing here.",
+      "agent_text": "🔎 出处 citeturn0view0",
+      "delivered": "🔎 出处 [example.com](https://example.com/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Emoji",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "🔎 出处 [example.com](https://example.com/x)",
+      "im_text": "🔎 出处 [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "silent_strip",
+      "why": "A silent control block holding the same spelling. Delivery removes it, so the consumer never counts it - and neither may the producer.",
+      "agent_text": "<silent>note to self: [example.com](https://example.com/x)</silent>\nCited. citeturn0view0",
+      "delivered": "<silent>note to self: [example.com](https://example.com/x)</silent>\nCited. [example.com](https://example.com/x)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Silent",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/x)",
+      "im_text": "Cited. [example.com](https://example.com/x)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "file_link",
+      "why": "A file:// attachment link in the same reply: IM strips it to a plain label and the workbench keeps it, so the two surfaces get different text and the citation has to survive both.",
+      "agent_text": "Cited. citeturn0view0\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
+      "delivered": "Cited. [example.com](https://example.com/x)\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "With attachment",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/x)\n\n[report](file:///tmp/avibe-citation-bridge/report.txt)",
+      "im_text": "Cited. [example.com](https://example.com/x)\n\nreport",
+      "quick_replies": [],
+      "files": [
+        {
+          "label": "report",
+          "path": "/tmp/avibe-citation-bridge/report.txt"
+        }
+      ],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "quick_replies",
+      "why": "A trailing quick-reply block, which delivery strips from the body on both surfaces.",
+      "agent_text": "Cited. citeturn0view0\n\n---\n[👌 继续] | [✅ 完成]",
+      "delivered": "Cited. [example.com](https://example.com/x)\n\n---\n[👌 继续] | [✅ 完成]",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "With buttons",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/x)",
+      "im_text": "Cited. [example.com](https://example.com/x)",
+      "quick_replies": [
+        "👌 继续",
+        "✅ 完成"
+      ],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "marker_shaped",
+      "why": "The workbench rewrites `$<NAME>` into a secure-input card and `@<…>`/`#<…>` into chips by editing the source text before Markdown parses it - so a reply carrying those markers, and a source address spelled like one, is where an inserted card could move or swallow the link the producer counted.",
+      "agent_text": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. citeturn0view0",
+      "delivered": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. [example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Marker Shaped",
+          "url": "https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. [example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
+      "im_text": "Provide $<openAiKey>, then ping @<claude> in #<ses6jr7c5h2q6>.\n\nCited. [example.com](https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/p?q=$%3CopenAiKey%3E&a=@%3Cclaude%3E",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "multi_source",
+      "why": "Two sources in one reply, each with its own index and its own spelling.",
+      "agent_text": "First citeturn0view0, second citeturn0view1.",
+      "delivered": "First [example.com](https://example.com/x), second [a\\*b\\*.example](https://a*b*.example/y).",
+      "citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "First",
+          "url": "https://example.com/x",
+          "label": "example.com",
+          "spelling": "[example.com](https://example.com/x)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        },
+        {
+          "index": 2,
+          "ref_id": "turn0view1",
+          "title": "Second",
+          "url": "https://a*b*.example/y",
+          "label": "a*b*.example",
+          "spelling": "[a\\*b\\*.example](https://a*b*.example/y)",
+          "occurrences": [
+            1
+          ],
+          "occurrence_total": 1
+        }
+      ],
+      "web_text": "First [example.com](https://example.com/x), second [a\\*b\\*.example](https://a*b*.example/y).",
+      "im_text": "First [example.com](https://example.com/x), second [a\\*b\\*.example](https://a*b*.example/y).",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "a*b*.example",
+          "url": "https://a*b*.example/y",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/x",
+          "cited": true
+        },
+        {
+          "label": "a*b*.example",
+          "url": "https://a*b*.example/y",
+          "cited": true
+        }
+      ],
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "unresolved",
+      "why": "A marker naming a source the backend never captured. It degrades to a visible label rather than vanishing, and writes no sidecar row.",
+      "agent_text": "Claimed. citeturn0view0",
+      "delivered": "Claimed. (source unavailable)",
+      "citations": [],
+      "web_text": "Claimed. (source unavailable)",
+      "im_text": "Claimed. (source unavailable)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [],
+      "im_anchors": [],
+      "anchors_exhaustive": true
+    }
+  ]
+}

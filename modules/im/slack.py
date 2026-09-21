@@ -29,7 +29,12 @@ from .message_facts import (
 from .download_target import open_download_target
 from config.v2_config import SlackConfig
 from core.auth import AuthResult
-from .formatters import SlackFormatter, hold_markdown_escapes, restore_held
+from .formatters import (
+    SlackFormatter,
+    hold_link_destinations,
+    hold_markdown_escapes,
+    restore_held,
+)
 from .slack_modal import parse_routing_modal_selection
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
@@ -394,7 +399,13 @@ class SlackBot(BaseIMClient):
             # protected keeps the converter off exactly the text that was marked
             # as literal.
             held_text, escaped = hold_markdown_escapes(text)
+            # A link destination is not text to format either, and the
+            # converter scanned those too: ``https://a*b*.example/x`` came back
+            # as ``https://a_b_.example/x``, a link to a different site.
+            held_text, destinations = hold_link_destinations(held_text)
             converted_text = self.markdown_converter.convert(held_text)
+            # Destinations first: one may still hold an escape placeholder.
+            converted_text = restore_held(converted_text, destinations)
             return restore_held(converted_text, escaped)
         except Exception as e:
             logger.warning(f"Error converting markdown to mrkdwn: {e}, using original text")

@@ -88,8 +88,13 @@ class TestResolution:
                 "title": "Web search - OpenAI API",
                 "url": "https://developers.openai.com/api/docs/guides/tools-web-search",
                 "label": "developers.openai.com",
-                # The one link this citation wrote, of the one link in the
-                # message pointing there. See TestLinkProvenance.
+                # The complete link this citation wrote, and the one occurrence
+                # of that exact spelling in the message that is its own. See
+                # TestLinkProvenance.
+                "spelling": (
+                    "[developers.openai.com]"
+                    "(https://developers.openai.com/api/docs/guides/tools-web-search)"
+                ),
                 "occurrences": [1],
                 "occurrence_total": 1,
             }
@@ -496,18 +501,47 @@ class TestUntrustedMetadata:
 
         assert MARKDOWN.render(document).count('<a href="https://s.example/p">') == 1
 
-    def test_emphasis_in_a_label_is_left_alone(self):
-        """What a badge stands for is no longer read back off its text.
+    @pytest.mark.parametrize(
+        "label, shown",
+        [
+            ("a*b*.example", "a<em>b</em>.example"),
+            ("a&copy;.example", "a\u00a9.example"),
+        ],
+        ids=["emphasis", "entity"],
+    )
+    def test_a_label_reads_as_the_host_it_names(self, label, shown):
+        """A label is attribution, so it has to name the host character for
+        character - and left raw, each of these names a different one.
 
-        Emphasis, a tilde and an ampersand change how a label *reads* without
-        ever breaking the link around it, and escaping them would put a visible
-        backslash in front of each one on every IM dialect that does not speak
-        CommonMark - Telegram and Slack both re-interpret the escape rather
-        than removing it.
+        These do not break the link the way a backtick does; they change what
+        the reader is told the source IS. ``shown`` records what CommonMark
+        makes of the raw label, measured rather than assumed, and the escaped
+        label has to render as the host instead. The IM dialects were measured
+        too (tests/test_citation_consumers.py): none of them shows the
+        backslash.
         """
         from core.citations import _escape_label
 
-        assert _escape_label("a*b_c~d&e") == "a*b_c~d&e"
+        url = "https://s.example/p"
+        raw = MARKDOWN.render(f"[{label}]({url})")
+        escaped = MARKDOWN.render(f"[{_escape_label(label)}]({url})")
+
+        assert f'<a href="{url}">{shown}</a>' in raw
+        assert f'<a href="{url}">{label.replace("&", "&amp;")}</a>' in escaped
+
+    def test_a_label_also_marks_what_only_another_dialect_reads_as_syntax(self):
+        """The reader is not always reading CommonMark.
+
+        CommonMark leaves an intraword ``_``, a single ``~`` and a ``|`` alone,
+        so the test above cannot show them changing anything. Slack mrkdwn
+        reads ``_italic_`` and ``~strike~``, and a ``|`` ends a GFM table cell -
+        and a label is untrusted text that lands in all of them. Escaping is
+        the one spelling every dialect agrees means "literal"; what each one
+        actually shows is measured in tests/test_citation_consumers.py.
+        """
+        from core.citations import _escape_label
+
+        assert _escape_label("a_b~c|d") == "a\\_b\\~c\\|d"
 
     @pytest.mark.parametrize(
         "ref_id",
@@ -800,34 +834,60 @@ class TestLinkProvenance:
     in the direction that matters, since the prose link is the one nobody
     vouched for.
 
-    So the sidecar carries the answer instead: the 1-based ordinal of each link
-    it wrote among the links sharing that destination, plus how many links that
-    destination has in the whole message. The destination is the key rather
-    than the label, because that is what both parsers agree on - a label is
-    what is left after emphasis, character references and escapes have been
-    resolved, and every one of those is a way for the two to disagree.
+    So the sidecar carries the answer instead, as one exact string: the
+    complete link this module wrote, character for character, plus which of
+    that spelling's literal occurrences in the delivered text are its own.
+
+    Counting a literal substring is the one measurement two Markdown
+    implementations cannot disagree about. Counting parsed links by destination
+    did disagree - a GFM footnote definition holding ``[p](url)`` is a link to
+    one and part of a definition to the other - and the real citation lost its
+    badge over the difference. So everything in the delivered text counts here,
+    code examples and footnotes included, and the consumer counts the same
+    characters in the same text.
     """
 
     GUIDE_URL = "https://developers.openai.com/api/docs/guides/tools-web-search"
+    GUIDE_LINK = f"[developers.openai.com]({GUIDE_URL})"
 
     def test_a_citation_records_the_link_it_wrote(self):
         _, citations = resolve(f"Documented.{marker('turn0view0')}")
 
+        assert citations[0]["spelling"] == self.GUIDE_LINK
         assert citations[0]["occurrences"] == [1]
         assert citations[0]["occurrence_total"] == 1
 
-    def test_prose_pointing_at_the_same_page_is_counted_but_not_claimed(self):
-        """The link the answer wrote itself is not the one the citation vouches for."""
+    def test_prose_worded_its_own_way_is_a_different_string_entirely(self):
+        """Same page, different characters - so it is not this citation's link.
+
+        The old contract counted by destination and had to number this one to
+        stay in step with the consumer. Counting the exact spelling makes it
+        simply absent: nothing in the answer's own wording can shift a
+        citation's position, and the consumer reaches the same conclusion from
+        the same text.
+        """
         _, citations = resolve(
             f"See [the guide]({self.GUIDE_URL}) first.{marker('turn0view0')}"
+        )
+
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 1
+
+    def test_prose_that_spells_the_link_identically_is_counted_but_not_claimed(self):
+        """Character for character the same link - so the reader cannot tell
+        them apart either, and neither side pretends to. It is counted, which
+        keeps both totals equal, and left unclaimed, which keeps the badge on
+        the one this module wrote."""
+        _, citations = resolve(
+            f"See {self.GUIDE_LINK} first.{marker('turn0view0')}"
         )
 
         assert citations[0]["occurrences"] == [2]
         assert citations[0]["occurrence_total"] == 2
 
-    def test_a_prose_link_after_the_marker_shifts_nothing_before_it(self):
+    def test_an_identical_prose_link_after_the_marker_shifts_nothing_before_it(self):
         _, citations = resolve(
-            f"Documented.{marker('turn0view0')} Also [the guide]({self.GUIDE_URL})."
+            f"Documented.{marker('turn0view0')} Also {self.GUIDE_LINK}."
         )
 
         assert citations[0]["occurrences"] == [1]
@@ -839,7 +899,7 @@ class TestLinkProvenance:
         assert citations[0]["occurrences"] == [1, 2]
         assert citations[0]["occurrence_total"] == 2
 
-    def test_ordinals_are_counted_per_destination(self):
+    def test_ordinals_are_counted_per_spelling(self):
         """A citation to another page sits between these two and moves neither."""
         _, citations = resolve(
             f"A.{marker('turn0view0')} B.{marker('turn0view1')} C.{marker('turn1view0')}"
@@ -851,30 +911,55 @@ class TestLinkProvenance:
     @pytest.mark.parametrize(
         "decoy",
         [
-            "<silent>[dup]({url})</silent>",
-            "`[dup]({url})`",
-            "![alt]({url})",
-            "<{url}>",
-            "[dup][k]",
+            "`{link}`",
+            "```\n{link}\n```",
+            "[^f]: {link}",
+            "| {link} |",
+            "![alt]({url})\n\n{link}",
+            "<div>{link}</div>",
         ],
-        ids=["hidden", "code-span", "image", "autolink", "reference-link"],
+        ids=["code-span", "code-fence", "footnote", "table-cell", "after-image", "html"],
     )
-    def test_only_a_link_the_reader_can_click_is_counted(self, decoy):
+    def test_every_literal_occurrence_counts_wherever_it_sits(self, decoy):
         """The total has to mean the same thing on both sides of the boundary.
 
-        Every shape here is one the consumer counts the same way: a hidden
-        block leaves before delivery, a code span is text, and an image, an
-        autolink and a reference link are not spelled ``[label](destination)``
-        at all. Counting one here and not there would make the totals disagree,
-        and a disagreement costs the badge.
+        A parser decides whether each of these is a link; a literal scan does
+        not have to, and that is the point - the consumer scans the same
+        characters and reaches the same numbers without either side agreeing
+        about footnotes, tables or HTML blocks. The citation still takes the
+        occurrence it wrote, which is the last one here.
         """
-        text, citations = resolve(
+        _, citations = resolve(
+            decoy.format(link=self.GUIDE_LINK, url=self.GUIDE_URL)
+            + f"\n\nShown.{marker('turn0view0')}"
+        )
+
+        assert citations[0]["occurrence_total"] == 2
+        assert citations[0]["occurrences"] == [2]
+
+    @pytest.mark.parametrize(
+        "decoy",
+        [
+            "![developers.openai.com]({url})",
+            "<{url}>",
+            "[dup][k]",
+            "[developers.openai.com]({url} \"t\")",
+        ],
+        ids=["image", "autolink", "reference-link", "titled-link"],
+    )
+    def test_a_link_spelled_any_other_way_is_not_this_citation(self, decoy):
+        """Same destination, different characters. An image is the one to watch:
+        ``![label](url)`` does contain ``[label](url)``, so it IS one literal
+        occurrence - and the consumer, scanning the same text, counts it too."""
+        # An image spells the citation's own link with one `!` in front of it.
+        total = 2 if decoy.startswith("!") else 1
+        _, citations = resolve(
             f"{decoy.format(url=self.GUIDE_URL)} Shown.{marker('turn0view0')}"
             f"\n\n[k]: {self.GUIDE_URL}"
         )
 
-        assert citations[0]["occurrences"] == [1]
-        assert citations[0]["occurrence_total"] == 1
+        assert citations[0]["occurrence_total"] == total
+        assert citations[0]["occurrences"] == [total]
 
     def test_a_hidden_citation_is_not_counted_against_the_visible_one(self):
         """Stripping the block must not leave the sidecar describing text that left with it."""
@@ -883,7 +968,20 @@ class TestLinkProvenance:
         )
         delivered = strip_silent_blocks(text)
 
-        assert delivered.count(f"]({self.GUIDE_URL})") == 1
+        assert delivered.count(self.GUIDE_LINK) == 1
+        assert citations[0]["occurrences"] == [1]
+        assert citations[0]["occurrence_total"] == 1
+
+    def test_a_hidden_copy_of_the_link_is_not_counted_either(self):
+        """The one delivery transform measured to move an occurrence: the block
+        is removed, so counting its copy would put every later ordinal one
+        ahead of what the consumer can see."""
+        text, citations = resolve(
+            f"<silent>{self.GUIDE_LINK}</silent>Shown.{marker('turn0view0')}"
+        )
+        delivered = strip_silent_blocks(text)
+
+        assert delivered.count(self.GUIDE_LINK) == 1
         assert citations[0]["occurrences"] == [1]
         assert citations[0]["occurrence_total"] == 1
 

@@ -57,18 +57,24 @@ blob with no way to reach the page the answer is based on.
   question: an answer may word its own sentence around the same page, and that
   link is the one nobody vouched for. Matching a rendered label back to a
   sidecar row cannot tell the two apart, so the row carries the answer instead
-  — `occurrences` is where each link the rewrite wrote sits among the links
-  sharing its destination, in document order, and `occurrence_total` is how many
-  links that destination has in the whole message. The renderer counts the same
-  thing from the same delivered text. The destination is the counting key rather
-  than the label, because that is what both parsers agree on: a label is what is
-  left after emphasis, character references and escapes have been resolved, and
-  every one of those is a way for the two to disagree. Only a link spelled
-  `[label](destination)` is counted — an image, a reference link and both
-  autolink forms are excluded on both sides without either parser's vocabulary
-  for them — and a total the two sides disagree on degrades to the plain link
-  the reader already has rather than a badge on whichever link landed in that
-  position. A row persisted before provenance existed keeps the exact
+  — `spelling` is the complete Markdown link the rewrite wrote, character for
+  character, `occurrences` is which of that spelling's literal occurrences in
+  the delivered text are its own, and `occurrence_total` is how many the backend
+  counted. The renderer counts the same characters in the same text and upgrades
+  only a link whose source span IS one of them. Counting a literal substring is
+  the one measurement two Markdown implementations cannot disagree about, and
+  counting parsed links did disagree: a GFM footnote definition holding
+  `[p](url)` is a link to this renderer and part of a definition to the backend,
+  so the real citation silently lost its badge over the difference. Nothing here
+  needs either parser's vocabulary, then — a code example, a footnote and a
+  table cell all count as the characters they are, on both sides — and the only
+  text the producer leaves out is the text no reader is handed (`<silent>`
+  blocks, which delivery removes before the consumer sees them). A total the two
+  sides disagree on degrades to the plain link the reader already has rather
+  than a badge on whichever link landed in that position, which is also what
+  makes an edit or a partial quotation cost the preview instead of crediting a
+  surviving copy of the same link. A row persisted before provenance existed
+  carries no `spelling`, and that absence is what selects the exact
   `(destination, link text)` match it was written for, because history is a
   shipped surface.
 - **A backslash escape is resolved before a platform reads it.** An escape says
@@ -82,13 +88,23 @@ blob with no way to reach the page the answer is based on.
   done, and each of those three platforms applies it — honouring upstream's
   intent in the dialect that is actually about to parse the text. Discord and
   Feishu are left as they were: their `format_markdown` returns the text
-  unchanged, so nothing here re-reads it. Labels are therefore escaped for exactly the
-  characters that would otherwise destroy the link around them: a backtick or an
-  angle bracket opens a code span, comment, processing instruction, declaration
-  or CDATA section that runs past `](url)` and leaves the reader raw Markdown
-  with nothing to click. Emphasis characters are left alone — they change how a
-  label reads without ever breaking the link, and the citation's identity is no
-  longer read back off its text.
+  unchanged, so nothing here re-reads it. A destination is held the same way and
+  for a stronger reason: Slack's converter scans the whole line for emphasis,
+  including inside the parentheses, and turned `https://a*b*.example/x` into
+  `https://a_b_.example/x` — not a formatting difference but a different site.
+  A destination is opaque data to a text dialect, so it is held across the
+  platform pass and restored byte-for-byte afterwards. Labels are escaped for
+  every character that is active syntax in a dialect the label will be read in:
+  the ones that destroy the link around it (a backtick or an angle bracket opens
+  a code span, comment, processing instruction, declaration or CDATA section
+  that runs past `](url)` and leaves the reader raw Markdown with nothing to
+  click, and a bracket or backslash ends the label early), and the ones that
+  merely re-read it as markup — `*`, `_`, `~`, `&`, `|`. The second group used
+  to be left alone because the citation's identity was read back off its
+  rendered text, so escaping it cost the badge; identity is the spelling the
+  backend wrote now, so the label can be protected at no such price. It has to
+  be: a host is the attribution, and `a*b*.example` shown as `ab.example` in
+  italics names a site the link does not open.
 - **Never invent, never silently drop.** A URL is never derived from a `ref_id`
   or from search order. An unknown, malformed, or non-http(s) source degrades to
   a visible localized label (`message.citationUnresolved`); a marker with
@@ -165,8 +181,13 @@ blob with no way to reach the page the answer is based on.
   as 3 where a browser reads no port at all; empty is no port, in range is kept
   as written). The brackets of an IPv6 host are written literally rather than
   percent-encoded, because `%5B` is a destination the URL parser refuses
-  outright; the badge carries the stored URL, so the address stays reachable
-  even though the rendered anchor's href does not. An authority is read only
+  outright — and the renderer's own href is where that promise was still being
+  broken: `mdast-util-to-hast` percent-encodes the brackets on the way out, so
+  the anchor rendered correctly and went nowhere. The shared `urlTransform` puts
+  them back, in the authority only and only when the platform's own URL parser
+  then accepts the result, so the ordinary link reaches the same address the
+  badge does. A badge is a presentation enhancement; it may never be the only
+  thing able to navigate. An authority is read only
   where one is written: a browser repairs `https:example.com/x`, but the rule
   that keeps a hostless URL out keeps this out too, and a search result always
   writes the slashes. The label attributes the host a browser would actually reach:
@@ -234,10 +255,26 @@ blob with no way to reach the page the answer is based on.
   an escape inside a code span stays a backslash, and an escaped backtick in a
   label no longer takes the link and the code span after it.
 - `ui/src/components/ui/markdown.test.tsx` — renderer matching, provenance
-  (a word-for-word prose link left alone, ordinals counted per destination, a
+  (a word-for-word prose link left alone, occurrences counted by spelling, a
   total mismatch degrading to a plain link, a legacy row still recognized),
   degradation to a plain link, hover/focus/touch behavior, and accessible
   naming.
+- `tests/citation_bridge.py` → `tests/fixtures/citation_consumer_bridge.json` —
+  one recording of what the real producer and the real delivery pass emit for
+  each case, so the two ends of the contract are measured against one run
+  instead of against each other's assumptions. Nothing in it is hand-authored:
+  the body, the sidecar and the links a reader must end up with are derived from
+  the run, and regenerating it (`python -m tests.citation_bridge`) is how a
+  deliberate change is recorded. `tests/test_citation_consumers.py` asks the
+  real Slack, Telegram and WeChat renderers what they show of that recording —
+  and Discord and Feishu that they still pass it through — asserting the label
+  read and the address reached rather than that a URL appears somewhere; no
+  message is sent to any platform. `ui/src/components/ui/citation-bridge.test.tsx`
+  asks the real `Markdown` component the same questions, with the sidecar,
+  without it, with a stale one and with a pre-provenance one, and again with the
+  mention and secret-request rewrites running beside it — those edit the source
+  text before Markdown parses it, which is exactly what a positional contract
+  can be broken by.
 - `ui/e2e/citations/` — real-browser layout and pointer routing on desktop,
   mobile Chromium, and mobile WebKit, in English and Chinese, including the
   falsifiable form of the no-fetch rule: zero requests to the cited site after

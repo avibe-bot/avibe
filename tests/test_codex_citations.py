@@ -371,6 +371,12 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
                     "title": "Web search - OpenAI API",
                     "url": GUIDE_URL,
                     "label": "developers.openai.com",
+                    # The complete link this citation wrote, and the one
+                    # occurrence of that exact spelling in the answer that is
+                    # its own. See test_citations.TestLinkProvenance.
+                    "spelling": f"[developers.openai.com]({GUIDE_URL})",
+                    "occurrences": [1],
+                    "occurrence_total": 1,
                 }
             ],
         )
@@ -485,7 +491,21 @@ class CodexCitationResolutionTests(IsolatedCodexHome, unittest.IsolatedAsyncioTe
         self.assertEqual(call.args[1], f"Two. [example.com]({PROBE_URL}) {UNRESOLVED}")
         self.assertEqual(
             call.kwargs["citations"],
-            [{"index": 1, "ref_id": "turn0view1", "title": "中文標題", "url": PROBE_URL, "label": "example.com"}],
+            [
+                {
+                    "index": 1,
+                    "ref_id": "turn0view1",
+                    "title": "中文標題",
+                    "url": PROBE_URL,
+                    "label": "example.com",
+                    # The rejected source wrote no link at all, so the one that
+                    # survived is both the first and the only occurrence of the
+                    # link it spells.
+                    "spelling": f"[example.com]({PROBE_URL})",
+                    "occurrences": [1],
+                    "occurrence_total": 1,
+                }
+            ],
         )
 
     async def test_a_hidden_block_neither_numbers_nor_leaks_its_source(self):

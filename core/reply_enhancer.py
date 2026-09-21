@@ -180,7 +180,7 @@ def _capture_inline_link(rule):
         )
         if destination.ok:
             state.env.setdefault(_LINK_CAPTURES_KEY, []).append(
-                (start, destination.str)
+                (start, pos, destination.pos, destination.str)
             )
         return matched
 
@@ -965,20 +965,29 @@ def _extract_secret_requests(
     return out
 
 
-def inline_link_destinations(text: str) -> List[Tuple[int, str]]:
-    """Return ``(source offset, destination)`` for each CommonMark inline link.
+@dataclass(frozen=True)
+class InlineLink:
+    """One CommonMark inline link, located in the source that spells it."""
+
+    start: int  # source offset of the opening ``[``
+    destination_start: int  # source offset the destination begins at
+    destination_end: int  # source offset just past the destination
+    destination: str  # the destination a Markdown reader resolves
+
+
+def inline_links(text: str) -> List[InlineLink]:
+    """Locate every CommonMark inline link, destination span included.
 
     The destination is the one a Markdown reader resolves, so a backslash
-    escape or a character reference spelled inside it reads the same here as
-    it does in the browser. Reference links are left out on purpose: they
-    carry no destination of their own, and a consumer that counts links by
-    destination is told the total so a disagreement degrades instead of
-    pointing at the wrong link.
+    escape or a character reference spelled inside it reads the same here as it
+    does in the browser; the span is where that destination was written, which
+    is what a platform pass needs in order to leave it alone. Reference links
+    are left out on purpose: they spell no destination of their own.
     """
     if not text or "](" not in text:
         return []
     _, inline_ranges, _ = _markdown_block_ranges(text)
-    destinations: List[Tuple[int, str]] = []
+    links: List[InlineLink] = []
     for source_start, source_end, content in inline_ranges:
         env: dict = {}
         _LINK_MARKDOWN.inline.parse(content, _LINK_MARKDOWN, env, [])
@@ -991,12 +1000,31 @@ def inline_link_destinations(text: str) -> List[Tuple[int, str]]:
             source_end,
             content,
         )
-        for relative_start, destination in captures:
-            source_offset = offsets.get(relative_start)
-            if source_offset is not None:
-                destinations.append((source_offset, destination))
-    destinations.sort()
-    return destinations
+        for relative_start, relative_open, relative_close, destination in captures:
+            start = offsets.get(relative_start)
+            open_at = offsets.get(relative_open)
+            close_at = offsets.get(relative_close)
+            if start is None or open_at is None or close_at is None:
+                continue
+            links.append(InlineLink(start, open_at, close_at, destination))
+    links.sort(key=lambda link: link.start)
+    return links
+
+
+def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:
+    """The source ranges delivery removes: this reply's ``<silent>`` controls.
+
+    ``mask_hidden_and_code`` answers "would a reader be shown this offset as
+    prose"; a consumer that has to count what the reader is actually handed
+    needs the hidden half on its own, because a code example survives delivery
+    and a silent block does not.
+    """
+    if not text or "<silent" not in text.lower():
+        return []
+    ranges, _ = _silent_control_ranges_and_mask(
+        text, _silent_control_candidates(text)
+    )
+    return ranges
 
 
 def unescape_markdown(text: str, *, replace=None) -> str:

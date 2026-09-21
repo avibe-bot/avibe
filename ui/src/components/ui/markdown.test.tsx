@@ -105,24 +105,28 @@ describe('Markdown source citations', () => {
 
   const GUIDE = 'https://developers.openai.com/api/docs/guides/tools-web-search';
   const PROBE = 'https://example.com/citation-probe-source';
-  // A row the backend writes today: the one link it wrote, of the one link
-  // pointing at that page. A test that renders a second link to the same page
-  // says so by overriding both numbers, the same way the backend would.
-  const guide = (over: Partial<CitationSource> = {}): CitationSource => ({
-    index: 1,
-    ref_id: 'turn0view0',
-    title: 'Web search — OpenAI API',
-    url: GUIDE,
-    label: 'developers.openai.com',
-    occurrences: [1],
-    occurrence_total: 1,
-    ...over,
-  });
-  // What core/citations.py's _escape_label writes: the characters that would
-  // otherwise let a label swallow the link around it.
-  const escapeLabel = (label: string) => label.replace(/([\\[\]`<])/g, '\\$1');
+  // What core/citations.py's _escape_label writes: every character a Markdown
+  // reader - or an IM dialect - would not show verbatim.
+  const escapeLabel = (label: string) => label.replace(/([\\[\]`<*_~&|])/g, '\\$1');
   const link = (citation: { label: string; url: string }) =>
     `[${escapeLabel(citation.label)}](${citation.url})`;
+  // A row the backend writes today: the complete link it wrote, and the one
+  // occurrence of that exact spelling in the message that is its own. A test
+  // that renders the same link twice says so by overriding both numbers, the
+  // same way the backend would.
+  const guide = (over: Partial<CitationSource> = {}): CitationSource => {
+    const row: CitationSource = {
+      index: 1,
+      ref_id: 'turn0view0',
+      title: 'Web search — OpenAI API',
+      url: GUIDE,
+      label: 'developers.openai.com',
+      occurrences: [1],
+      occurrence_total: 1,
+      ...over,
+    };
+    return { ...row, spelling: over.spelling ?? link(row) };
+  };
 
   const renderMarkdown = (content: string, citations?: unknown[], interactive = true) => render(
     <I18nextProvider i18n={i18n}>
@@ -240,7 +244,9 @@ describe('Markdown source citations', () => {
   });
 
   it('leaves a link the agent worded itself as an ordinary anchor', () => {
-    const citation = guide({ occurrences: [2], occurrence_total: 2 });
+    // Same page, different characters, so it is not an occurrence of this
+    // citation's link at all - the backend numbers the citation 1 of 1.
+    const citation = guide();
     const { container } = renderMarkdown(
       `See [the web search guide](${GUIDE}) and ${link(citation)}.`,
       [citation],
@@ -321,8 +327,9 @@ describe('Markdown source citations', () => {
   // row, which cannot tell that link apart from one the answer's own prose
   // wrote to the same page - and got it wrong in the direction that matters,
   // since the prose link is the one nobody vouched for. So the row carries
-  // where each link it wrote sits among the links sharing that destination, and
-  // the renderer counts the same thing from the same delivered text.
+  // the complete link it wrote plus which of that spelling's literal
+  // occurrences are its own, and the renderer counts the same characters in the
+  // same delivered text.
   describe('provenance', () => {
     it('leaves a prose link alone even when it is word-for-word the citation', () => {
       const citation = guide({ occurrences: [2], occurrence_total: 2 });
@@ -348,7 +355,7 @@ describe('Markdown source citations', () => {
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1', '1']);
     });
 
-    it('counts ordinals per destination, so another citation between shifts neither', () => {
+    it('counts ordinals per spelling, so another citation between shifts neither', () => {
       const citations = [
         guide({ occurrences: [1, 2], occurrence_total: 2 }),
         guide({ index: 2, ref_id: 'turn0view1', title: '引用探针来源', url: PROBE, label: 'example.com' }),
@@ -376,9 +383,10 @@ describe('Markdown source citations', () => {
       ['an image', `![alt](${'https://developers.openai.com/api/docs/guides/tools-web-search'})`],
       ['an autolink', `<${'https://developers.openai.com/api/docs/guides/tools-web-search'}>`],
       ['a reference link', '[dup][k]'],
-    ])('does not count %s among the links sharing a destination', (_why, decoy) => {
-      // The backend counts only `[label](destination)`, so anything else here
-      // would make the totals disagree and cost the badge.
+    ])('does not count %s, which spells the destination some other way', (_why, decoy) => {
+      // Same page, different characters. Only the exact spelling is counted,
+      // so none of these moves the citation's position - and the backend,
+      // scanning the same text, reaches the same number.
       const citation = guide();
       const { container } = renderMarkdown(
         `${decoy} Shown. ${link(citation)}\n\n[k]: ${GUIDE}`,
@@ -388,32 +396,62 @@ describe('Markdown source citations', () => {
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
     });
 
+    it.each([
+      ['a code span', (l: string) => `\`${l}\``],
+      ['a fenced block', (l: string) => `\`\`\`\n${l}\n\`\`\``],
+      ['a footnote definition', (l: string) => `[^f]: ${l}`],
+      ['a table cell', (l: string) => `| a |\n| - |\n| ${l} |`],
+      ['an image alt', (l: string) => `!${l}`],
+    ])('counts the same exact link inside %s, because the backend does too', (_why, wrap) => {
+      // This is the case that used to break: the two sides disagreed about
+      // whether a footnote definition holds a link, the totals diverged, and
+      // the real citation silently lost its badge. Neither side has an opinion
+      // now - both count characters.
+      const citation = guide({ occurrences: [2], occurrence_total: 2 });
+      const { container } = renderMarkdown(
+        `${wrap(link(citation))}\n\nShown. ${link(citation)}`,
+        [citation],
+      );
+      const badged = badges(container);
+
+      expect(badged.map((badge) => badge.textContent)).toEqual(['1']);
+      expect(badged[0].getAttribute('href')).toBe(GUIDE);
+    });
+
     it('still recognizes a row persisted before provenance existed', () => {
       // History is a shipped surface: a message stored by an earlier release
       // has no occurrences to compare, so it keeps the match it was written
       // for - the exact destination and link text.
-      const { occurrences, occurrence_total, ...legacy } = guide();
+      const { occurrences, occurrence_total, spelling, ...legacy } = guide();
       void occurrences;
       void occurrence_total;
+      void spelling;
       const { container } = renderMarkdown(`Documented. ${link(legacy)}`, [legacy]);
 
       expect(badges(container).map((badge) => badge.textContent)).toEqual(['1']);
     });
 
-    it('opens an IPv6 source the rendered anchor cannot', () => {
-      // micromark percent-encodes the brackets, and `new URL` refuses what it
-      // writes. The badge is an anchor of its own carrying the stored URL, so
-      // the address stays reachable - which is why matching keys on the parsed
-      // destination and never on the href the renderer resolved.
-      const citation = guide({ url: 'https://[2001:db8::1]/x', label: '[2001:db8::1]' });
+    it.each([
+      ['a bare literal', 'https://[2001:db8::1]/x', '[2001:db8::1]'],
+      ['a port', 'https://[2001:db8::1]:8443/x', '[2001:db8::1]'],
+      ['userinfo in front of it', 'https://attacker.example@[::1]/x', '[::1]'],
+    ])('reaches an IPv6 source with %s, badge or not', (_why, url, label) => {
+      // An IPv6 host is REQUIRED to be bracketed, and `[`/`]` are two of the
+      // characters mdast-util-to-hast percent-encodes into an href: the link
+      // rendered, looked right, and went nowhere. A badge is a presentation
+      // upgrade, so the ORDINARY link has to reach the page on its own and the
+      // badge has to agree with it - same address, whether or not a sidecar
+      // ever arrives.
+      const citation = guide({ url, label });
       const { container } = renderMarkdown(`Documented. ${link(citation)}`, [citation]);
       const plain = renderMarkdown(`Documented. ${link(citation)}`);
+      const badged = badges(container)[0].getAttribute('href') as string;
+      const ordinary = plain.container.querySelector('a')?.getAttribute('href') as string;
 
-      expect(badges(container)[0].getAttribute('href')).toBe(citation.url);
-      expect(new URL(badges(container)[0].getAttribute('href') as string).hostname)
-        .toBe(citation.label);
-      expect(plain.container.querySelector('a')?.getAttribute('href'))
-        .toBe('https://%5B2001:db8::1%5D/x');
+      expect(badged).toBe(url);
+      expect(ordinary).toBe(url);
+      expect(new URL(ordinary).hostname).toBe(label);
+      expect(new URL(badged).href).toBe(new URL(ordinary).href);
     });
 
     it('recognizes a citation whose label had to be escaped, and keeps the code after it', () => {

@@ -89,6 +89,33 @@ function linkText(children: React.ReactNode): string {
   return '';
 }
 
+// An IPv6 host is REQUIRED to be written in brackets — and `[`/`]` are two of
+// the characters mdast-util-to-hast percent-encodes when it turns a parsed
+// destination into an href. So `https://[::1]/x` arrives here spelled
+// `https://%5B::1%5D/x`, which is not a URL any browser will parse: the link is
+// rendered, looks right, and goes nowhere. Put the brackets back — in the
+// authority only, never across the rest of the href, and only when the platform
+// itself then accepts the result as a URL. Anything else is returned untouched
+// for the sanitizer below to judge.
+// Userinfo is part of the authority and may precede the host, so the match
+// runs to the last `@` before the path rather than assuming the host is first.
+const ENCODED_IPV6_AUTHORITY = /^(https?:\/\/(?:[^/?#]*@)?)(%5B[^/?#]*%5D[^/?#]*)/i;
+
+function repairIpv6Authority(url: string): string {
+  const match = ENCODED_IPV6_AUTHORITY.exec(url);
+  if (!match) return url;
+  const authority = match[2].replace(/%5B/gi, '[').replace(/%5D/gi, ']');
+  const repaired = `${match[1]}${authority}${url.slice(match[0].length)}`;
+  try {
+    // Not a shape check: the browser's own parser decides, so a host it would
+    // reject (`https://[nope]/`) stays encoded rather than becoming a new URL.
+    new URL(repaired);
+  } catch {
+    return url;
+  }
+  return repaired;
+}
+
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
 // only http/https/mailto/tel/relative by default).
 function mentionUrlTransform(url: string, allowLocalFiles: boolean): string {
@@ -97,7 +124,7 @@ function mentionUrlTransform(url: string, allowLocalFiles: boolean): string {
     || url.startsWith(`${SECRET_LINK_SCHEME}:`)
     || (allowLocalFiles && isAbsoluteWindowsFileHref(url))
   ) return url;
-  return defaultUrlTransform(url);
+  return defaultUrlTransform(repairIpv6Authority(url));
 }
 
 // A fenced code block with a hover/tap copy button. The button lives on a
