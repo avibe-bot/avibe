@@ -200,9 +200,43 @@ mind. That is a broken selection becoming a working one, not a pin being
 silently moved, and the mechanism that does pin a Source — a manual route — is
 unchanged and still available.
 
-Falsifiable claim: an addressed menu entry, with no manual route, that
-completed a call before the repair. If one exists, the rename does move a live
-binding and this reasoning needs replacing.
+Two falsifiable claims, one per direction. Everything above guards a single
+one: that a selection which never worked is not being misread as one that did.
+The direction that costs more for a *repair* is the opposite — a working id
+renamed into a broken one. An aggregating relay names its models
+`openai/gpt-5.5` natively; that id goes out as `<prefix>/openai/gpt-5.5`, the
+engine strips its own layer and forwards the rest, and the call **succeeds**: a
+slashed, unpinned, working menu entry. Nothing about it is repaired, and that is
+closed structurally rather than by argument. The authority is the *proven set*,
+never a spelling: a segment is removed only when it equals an address recorded
+for a credential this installation holds. The minted shape
+(`_CREDENTIAL_ADDRESS_SHAPE`, `avibe-[0-9a-f]{24}` under `fullmatch` per
+segment) is the fallback for the one caller with no owner to compare against,
+and wherever the owning prefix is in hand the comparison is literal.
+
+1. **An addressed menu entry, with no manual route, that completed a call
+   before the repair.** If one exists, the rename does move a live binding and
+   the reasoning above needs replacing.
+2. **A model id this repair rewrote whose removed segment was not a proven
+   address** — not the prefix recorded for any credential or Source here. Note
+   the wording: *not* "carried no `avibe-<hex>` segment". `prefix` is settled
+   from `credential["prefix"]`, else `previous.prefix`, before the mint is
+   reached (`state.py:600-605`), so an installation can legitimately hold a
+   prefix the mint would not produce today and removing it is correct —
+   `test_only_the_owning_address_is_unwrapped` pins `legacy-prefix/gpt-5.5`
+   unwrapping for the credential addressed by `legacy-prefix`. Where every
+   recorded prefix is mint-shaped, the ordinary case, this reduces to one
+   `grep`.
+
+Both directions are test invariants rather than prose.
+`test_only_the_minted_address_is_unwrapped` holds `x-ai/grok-4.6-latest`,
+`meta-llama/Llama-3-70b-instruct`, `accounts/fireworks/models/mixtral` and
+`anthropic/claude-sonnet-4` unchanged, along with the near-misses that make the
+shape rule load-bearing: `avibe-short/…`, an uppercased address, and
+`avibe-openai/gpt-5.5`, which reads as minted until the hex is counted.
+
+The second direction is owed to the #2098 lane, which went looking for
+counterexamples to the first and found the missing direction instead.
 
 ### The ledger is deliberately excluded
 
