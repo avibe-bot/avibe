@@ -9,6 +9,7 @@ import os
 import shlex
 import time
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Sequence
 
@@ -37,6 +38,7 @@ from core.prompt_registry import prompt_text
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
+    SteerReconcileRequest,
     SteerRequest,
     SteerResult,
     result as steer_result,
@@ -81,6 +83,19 @@ _CODEX_REBINDABLE_SAME_ID_PROVIDERS = _CODEX_MANAGED_PROVIDER_IDS | frozenset(
 CODEX_CALLER_ENV_DIR = "codex-caller-env"
 CODEX_CONNECTION_PROBE_DIR = "codex-connection-probe"
 CODEX_PROMPT_STRATEGY_METADATA_KEY = "codex_prompt_strategy"
+_STEER_RECONCILIATION_TTL_SECONDS = 300.0
+_MAX_STEER_RECONCILIATION_TARGETS = 128
+
+
+@dataclass(frozen=True)
+class _CodexSteerReconciliationTarget:
+    target: ActiveSteerTarget
+    target_session_id: str
+    logical_turn_id: str
+    native_turn_id: str
+    thread_id: str
+    cwd: str
+    recorded_at: float
 
 
 class _CodexConnectionProbeState:
@@ -173,6 +188,10 @@ class CodexAgent(BaseAgent):
 
         # base_session_id → asyncio.Lock (serialize turn lifecycle per session)
         self._session_locks: Dict[str, asyncio.Lock] = {}
+        # A native steer can be accepted just before the Codex turn completes.
+        # Keep its exact thread/session addressing briefly so a lost RPC response
+        # can still be reconciled after the live turn registry is cleaned up.
+        self._steer_reconciliation_targets: dict[str, _CodexSteerReconciliationTarget] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
         # base_session_id → (thread_id, collaboration | fallback |
@@ -600,6 +619,122 @@ class CodexAgent(BaseAgent):
             return None
         return self._turn_registry.get_active_turn(active_request.base_session_id)
 
+    def _prune_steer_reconciliation_targets(self) -> None:
+        targets = getattr(self, "_steer_reconciliation_targets", None)
+        if not targets:
+            return
+        cutoff = time.monotonic() - _STEER_RECONCILIATION_TTL_SECONDS
+        for attempt_id, retained in list(targets.items()):
+            if retained.recorded_at < cutoff:
+                targets.pop(attempt_id, None)
+        if len(targets) <= _MAX_STEER_RECONCILIATION_TARGETS:
+            return
+        oldest = sorted(targets.items(), key=lambda item: item[1].recorded_at)
+        for attempt_id, _retained in oldest[: len(targets) - _MAX_STEER_RECONCILIATION_TARGETS]:
+            targets.pop(attempt_id, None)
+
+    def _remember_steer_reconciliation_target(
+        self,
+        request: SteerRequest,
+        target: ActiveSteerTarget,
+        *,
+        thread_id: str,
+        cwd: str,
+    ) -> None:
+        if not request.attempt_id or not thread_id or not cwd:
+            return
+        targets = getattr(self, "_steer_reconciliation_targets", None)
+        if targets is None:
+            targets = {}
+            self._steer_reconciliation_targets = targets
+        self._prune_steer_reconciliation_targets()
+        targets[request.attempt_id] = _CodexSteerReconciliationTarget(
+            target=target,
+            target_session_id=request.target_session_id,
+            logical_turn_id=request.expected_logical_turn_id,
+            native_turn_id=request.expected_native_turn_id,
+            thread_id=thread_id,
+            cwd=cwd,
+            recorded_at=time.monotonic(),
+        )
+
+    def _forget_steer_reconciliation_target(self, attempt_id: str) -> None:
+        if not attempt_id:
+            return
+        targets = getattr(self, "_steer_reconciliation_targets", None)
+        if targets is not None:
+            targets.pop(attempt_id, None)
+
+    def _finish_steer_receipt(
+        self,
+        request: SteerRequest,
+        receipt: SteerResult,
+    ) -> SteerResult:
+        if receipt.outcome is not SteerOutcome.UNKNOWN:
+            self._forget_steer_reconciliation_target(request.attempt_id)
+        return receipt
+
+    @staticmethod
+    def _durable_reconciliation_binding(
+        session_id: str,
+        *,
+        backend: str,
+    ) -> tuple[str, str] | None:
+        """Return the persisted native thread and workdir for a Session."""
+
+        try:
+            from core.scheduled_tasks import resolve_session_id_target
+
+            target = resolve_session_id_target(session_id)
+        except Exception:
+            logger.debug(
+                "Could not resolve durable Codex reconciliation binding for Session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return None
+        if str(target.agent_backend or "").strip() != backend:
+            return None
+        native_session_id = str(target.native_session_id or "").strip()
+        workdir = str(target.workdir or "").strip()
+        if not native_session_id or not workdir:
+            return None
+        return native_session_id, workdir
+
+    def reconciliation_steer_target(
+        self,
+        request: SteerReconcileRequest,
+    ) -> ActiveSteerTarget | None:
+        """Return a live or durable target for a write whose acknowledgement was lost."""
+
+        self._prune_steer_reconciliation_targets()
+        targets = getattr(self, "_steer_reconciliation_targets", None) or {}
+        retained = targets.get(request.attempt_id)
+        if retained is not None:
+            if (
+                retained.target_session_id != request.target_session_id
+                or retained.logical_turn_id != request.expected_logical_turn_id
+                or retained.native_turn_id != request.expected_native_turn_id
+            ):
+                return None
+            return retained.target
+
+        # Recovery may run after a restart, when the in-memory target was lost.
+        # The Session row still pins the Codex thread and workdir, so a read-only
+        # reconciliation can proceed without reconstructing a live Turn gate.
+        if self._durable_reconciliation_binding(
+            request.target_session_id,
+            backend=self.name,
+        ) is None:
+            return None
+        return ActiveSteerTarget(
+            runtime_key=request.target_session_id,
+            logical_turn_id=request.expected_logical_turn_id,
+            context=None,
+            agent_request=None,
+            agent=self,
+        )
+
     async def steer_active_turn(
         self,
         request: SteerRequest,
@@ -621,15 +756,28 @@ class CodexAgent(BaseAgent):
             return steer_result(SteerOutcome.NOT_ACTIVE, reason="missing_native_thread", backend=self.name)
         if transport is None or not transport.is_initialized:
             return steer_result(SteerOutcome.REFUSED, reason="runtime_unavailable", backend=self.name)
+        self._remember_steer_reconciliation_target(
+            request,
+            target,
+            thread_id=thread_id,
+            cwd=cwd,
+        )
+
+        steer_params = {
+            "threadId": thread_id,
+            "expectedTurnId": request.expected_native_turn_id,
+            "input": self._build_native_input(request.text, request.files, request.input_metadata),
+        }
+        if request.attempt_id:
+            # Codex persists this opaque client id on the userMessage item. It
+            # lets recovery prove whether an acknowledgement-ambiguous write
+            # landed without matching by text or replaying the input.
+            steer_params["clientUserMessageId"] = request.attempt_id
 
         try:
             response = await transport.send_request(
                 "turn/steer",
-                {
-                    "threadId": thread_id,
-                    "expectedTurnId": request.expected_native_turn_id,
-                    "input": self._build_native_input(request.text, request.files, request.input_metadata),
-                },
+                steer_params,
             )
         except RuntimeError as exc:
             diagnostic = str(exc)
@@ -643,24 +791,33 @@ class CodexAgent(BaseAgent):
                     "expectedturnid",
                 )
             ):
-                return steer_result(
-                    SteerOutcome.NOT_ACTIVE,
-                    reason="native_turn_mismatch",
-                    backend=self.name,
-                    diagnostic=diagnostic,
+                return self._finish_steer_receipt(
+                    request,
+                    steer_result(
+                        SteerOutcome.NOT_ACTIVE,
+                        reason="native_turn_mismatch",
+                        backend=self.name,
+                        diagnostic=diagnostic,
+                    ),
                 )
             if "activeturnnotsteerable" in lowered or "not steerable" in lowered:
-                return steer_result(
+                return self._finish_steer_receipt(
+                    request,
+                    steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="native_turn_not_steerable",
+                        backend=self.name,
+                        diagnostic=diagnostic,
+                    ),
+                )
+            return self._finish_steer_receipt(
+                request,
+                steer_result(
                     SteerOutcome.REFUSED,
-                    reason="native_turn_not_steerable",
+                    reason="backend_refused",
                     backend=self.name,
                     diagnostic=diagnostic,
-                )
-            return steer_result(
-                SteerOutcome.REFUSED,
-                reason="backend_refused",
-                backend=self.name,
-                diagnostic=diagnostic,
+                ),
             )
         except ConnectionError as exc:
             diagnostic = str(exc)
@@ -668,11 +825,14 @@ class CodexAgent(BaseAgent):
                 "Codex app-server transport is not available",
                 "Codex app-server stdin is not available",
             }:
-                return steer_result(
-                    SteerOutcome.REFUSED,
-                    reason="runtime_unavailable",
-                    backend=self.name,
-                    diagnostic=diagnostic,
+                return self._finish_steer_receipt(
+                    request,
+                    steer_result(
+                        SteerOutcome.REFUSED,
+                        reason="runtime_unavailable",
+                        backend=self.name,
+                        diagnostic=diagnostic,
+                    ),
                 )
             self._touch_transport_activity(cwd)
             return steer_result(
@@ -693,17 +853,152 @@ class CodexAgent(BaseAgent):
         self._touch_transport_activity(cwd)
         response_turn_id = str(response.get("turnId") or "").strip()
         if response_turn_id != request.expected_native_turn_id:
+            return self._finish_steer_receipt(
+                request,
+                steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="untrusted_acknowledgement",
+                    backend=self.name,
+                    response_turn_id=response_turn_id,
+                ),
+            )
+        return self._finish_steer_receipt(
+            request,
+            steer_result(
+                SteerOutcome.ACCEPTED,
+                backend=self.name,
+                thread_id=thread_id,
+                turn_id=response_turn_id,
+            ),
+        )
+
+    async def reconcile_steer_attempt(
+        self,
+        request: SteerReconcileRequest,
+        target: ActiveSteerTarget,
+    ) -> SteerResult:
+        """Read Codex's persisted user-message id for one prior steer."""
+
+        if not request.attempt_id:
             return steer_result(
                 SteerOutcome.UNKNOWN,
-                reason="untrusted_acknowledgement",
+                reason="missing_attempt_identity",
                 backend=self.name,
-                response_turn_id=response_turn_id,
             )
+
+        active_request = target.agent_request
+        base_session_id = (
+            active_request.base_session_id
+            if active_request is not None
+            else request.target_session_id
+        )
+        targets = getattr(self, "_steer_reconciliation_targets", None) or {}
+        retained = targets.get(request.attempt_id)
+        if retained is not None:
+            thread_id = retained.thread_id
+            cwd = retained.cwd
+        else:
+            active_turn_id = self._turn_registry.get_active_turn(base_session_id)
+            if active_turn_id == request.expected_native_turn_id:
+                thread_id = self._session_mgr.get_thread_id(base_session_id)
+                cwd = self._session_mgr.get_cwd(base_session_id)
+                if not cwd and active_request is not None:
+                    cwd = active_request.working_path
+            else:
+                durable = self._durable_reconciliation_binding(
+                    request.target_session_id,
+                    backend=self.name,
+                )
+                if durable is None:
+                    return steer_result(
+                        SteerOutcome.UNKNOWN,
+                        reason="stale_native_turn",
+                        backend=self.name,
+                    )
+                thread_id, cwd = durable
+
+        transport = self._transports.get(cwd) if cwd else None
+        if transport is not None and getattr(transport, "is_alive", True) is False:
+            transport = None
+        if transport is None and cwd:
+            try:
+                # A timed-out request marks the transport uninitialized, but an
+                # alive reader can still answer this read-only evidence query.
+                # If no usable process remains, create a fresh app-server for
+                # thread/read; this never replays the original steer.
+                transport = await self._get_or_create_transport(cwd)
+            except Exception as exc:
+                return steer_result(
+                    SteerOutcome.UNKNOWN,
+                    reason="attempt_evidence_unavailable",
+                    backend=self.name,
+                    diagnostic=str(exc),
+                )
+        if not thread_id or transport is None:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+            )
+
+        try:
+            response = await transport.send_request(
+                "thread/read",
+                {
+                    "threadId": thread_id,
+                    "includeTurns": True,
+                },
+            )
+        except (ConnectionError, TimeoutError) as exc:
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001 - absence is not negative proof
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+                diagnostic=str(exc),
+            )
+
+        thread = response.get("thread") if isinstance(response, dict) else None
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        if not isinstance(turns, list):
+            return steer_result(
+                SteerOutcome.UNKNOWN,
+                reason="attempt_evidence_unavailable",
+                backend=self.name,
+            )
+
+        for turn in turns:
+            if not isinstance(turn, dict) or str(turn.get("id") or "") != request.expected_native_turn_id:
+                continue
+            items = turn.get("items")
+            if not isinstance(items, list):
+                break
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "userMessage"
+                    and str(item.get("clientId") or "") == request.attempt_id
+                ):
+                    self._forget_steer_reconciliation_target(request.attempt_id)
+                    return steer_result(
+                        SteerOutcome.ACCEPTED,
+                        reason="native_attempt_client_id_found",
+                        backend=self.name,
+                        native_turn_id=request.expected_native_turn_id,
+                        client_user_message_id=request.attempt_id,
+                    )
+            break
+
         return steer_result(
-            SteerOutcome.ACCEPTED,
+            SteerOutcome.UNKNOWN,
+            reason="untrusted_attempt_evidence",
             backend=self.name,
-            thread_id=thread_id,
-            turn_id=response_turn_id,
         )
 
     async def handle_stop(self, request: AgentRequest) -> bool:

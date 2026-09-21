@@ -148,7 +148,9 @@ test('an unconfirmed image survives reload and can be inspected but not resent o
     await expect(pendingRow).toContainText('队列图片.png');
     const image = pendingRow.locator('img');
     await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
-    await expect(page.getByRole('button', { name: 'Confirming…' })).toBeDisabled();
+    const pending = page.getByRole('button', { name: 'Send status not confirmed' });
+    await expect(pending).toBeDisabled();
+    await expect(pending.locator('.animate-spin')).toHaveCount(0);
     await expect(pendingRow.getByRole('button', { name: 'Remove from queue' })).toBeDisabled();
     await activate(page, pendingRow.locator('[data-queue-attachment]').first());
     await expect(page.getByRole('dialog')).toBeVisible();

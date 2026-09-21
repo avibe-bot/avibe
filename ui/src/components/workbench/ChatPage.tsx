@@ -3429,7 +3429,9 @@ export const QueueStrip: React.FC<{
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
   const headFenced = isQueueDeliveryFenced(queue[0]);
+  const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
+  const buttonBusy = sendingNow || (headFenced && !reconciling);
   return (
     <div className="shrink-0 px-4 md:px-8">
       <div className="mx-auto w-full max-w-[1080px] rounded-xl border border-cyan/25 bg-cyan/[0.04] p-2">
@@ -3444,20 +3446,24 @@ export const QueueStrip: React.FC<{
             size="sm"
             onClick={onSendNow}
             disabled={busy}
-            aria-busy={busy}
+            aria-busy={buttonBusy}
             className="h-6 min-w-[60px] justify-center px-2 text-[11px] text-cyan-ink"
           >
             {busy ? (
               <>
-                <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-                {t(queue[0].state === 'reconciling_steer' ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow')}
+                {reconciling ? (
+                  <Info className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                )}
+                {t(reconciling ? 'chat.queue.confirmingNow' : 'chat.queue.sendingNow')}
               </>
             ) : (
               t('chat.queue.sendNow')
             )}
           </Button>
         </div>
-        {headFenced && (
+        {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
         {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}

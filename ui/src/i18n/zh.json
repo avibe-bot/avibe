@@ -4336,10 +4336,10 @@
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "sendingNow": "发送中…",
-      "confirmingNow": "确认中…",
+      "confirmingNow": "发送状态未确认",
       "sendDeferred": "暂时无法发送到当前任务，消息仍保留在队列中。",
       "attachmentsUnavailable": "部分附件已不可用，原消息仍保留在队列中。请重新上传附件后再发送。",
-      "sendReconciling": "正在确认消息是否送达，原消息已保留，请勿重复发送。",
+      "sendReconciling": "暂时无法确认这条消息是否发送成功。消息已保留，系统不会重复发送；请刷新页面查看最新状态。",
       "recall": "撤回到输入框",
       "remove": "移出队列",
       "attachments": {
