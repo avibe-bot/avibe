@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -1866,8 +1866,14 @@ class ConsolidatedMessageDispatcher:
         return f"{prefix}{text[:keep]}{suffix}"
 
     @staticmethod
-    def _find_result_split_index(text: str, max_chars: int) -> int:
-        minimum_boundary = max_chars // 2
+    def _find_result_split_index(text: str, max_chars: int, floor: int = 0) -> int:
+        """The preferred boundary at or before ``max_chars``, above ``floor``.
+
+        ``floor`` is a position the chunk has already committed to keeping -
+        the end of a link that fits - so whitespace behind it is no longer a
+        candidate. With the default it is the boundary search this always did.
+        """
+        minimum_boundary = max(max_chars // 2, floor)
         for separator in ("\n\n", "\n", " "):
             index = text.rfind(separator, 0, max_chars + 1)
             if index >= minimum_boundary:
@@ -1876,7 +1882,7 @@ class ConsolidatedMessageDispatcher:
         return max_chars
 
     @staticmethod
-    def _link_units(text: str) -> list[tuple[int, int]]:
+    def _link_units(text: str) -> Optional[list[tuple[int, int]]]:
         """Where each Markdown link unit starts and ends in ``text``.
 
         A link is one unit - a label a reader taps and an address the tap goes
@@ -1885,21 +1891,29 @@ class ConsolidatedMessageDispatcher:
         Markdown where the source should have been. The enumeration is the
         shared one every platform pass already holds a link with, so splitting
         and spelling agree on where a link is.
+
+        Returns ``None`` when the scan could not run. That is not the same
+        answer as "there are no links": nothing here knows where a link is
+        without it, so the plan may still split on text boundaries but may not
+        certify that those boundaries kept anything whole.
         """
         try:
             return [(link.start, link.end) for link in inline_links(text)]
         except Exception:
-            logger.debug("Link scan failed while planning a split; falling back to text boundaries", exc_info=True)
-            return []
+            logger.warning(
+                "Link scan failed while planning a split; the plan cannot certify a whole link",
+                exc_info=True,
+            )
+            return None
 
     @staticmethod
-    def _boundary_outside_links(split_at: int, links: Sequence[tuple[int, int]], consumed: int) -> int:
-        """Pull a proposed boundary back to the start of the link it would cut.
+    def _straddling_link(
+        split_at: int, links: Sequence[tuple[int, int]], consumed: int
+    ) -> Optional[tuple[int, int]]:
+        """The chunk-relative link a boundary at ``split_at`` would cut, if any.
 
         ``links`` are offsets into the whole text and ``consumed`` is how much
-        of it earlier chunks already took. Returns ``0`` when the link begins
-        the chunk and outruns it - there is no boundary that keeps that one
-        whole, which is the caller's signal to stop splitting.
+        of it earlier chunks already took.
         """
         for start, end in links:
             start -= consumed
@@ -1907,29 +1921,79 @@ class ConsolidatedMessageDispatcher:
             if end <= split_at:
                 continue
             if start >= split_at:
-                break
-            return start
-        return split_at
+                return None
+            return max(start, 0), end
+        return None
+
+    def _boundary_keeping_links_whole(
+        self,
+        links: Sequence[tuple[int, int]],
+        consumed: int,
+        capacity: int,
+        preferred: Callable[[int], int],
+    ) -> tuple[int, bool]:
+        """Choose a boundary in ``(0, capacity]`` that no link straddles.
+
+        ``capacity`` is what one message actually holds, measured in the same
+        characters ``preferred`` proposes a cut in; ``preferred(floor)`` is the
+        platform's own boundary search above a position already committed to.
+
+        The decision is the link's size against that capacity, never against
+        the preferred cut. A link the cut lands inside can be kept three ways:
+        cut before it, so it rides the next message whole; or, when it starts
+        the chunk, cut after it if it fits, because a chunk that is nothing but
+        the link is still a legal message. Only a link that outruns a whole
+        message on its own has no boundary left, and that is the one case this
+        reports as unwhole. Reading "the preferred whitespace is inside the
+        link" as that case rejected links half the size of the message.
+
+        Returns ``(split_at, links_whole)``.
+        """
+        floor = 0
+        while True:
+            split_at = preferred(floor)
+            if split_at <= floor:
+                # The preferred cut is behind what this chunk already keeps;
+                # the whole capacity is the boundary to try instead.
+                split_at = capacity
+            straddling = self._straddling_link(split_at, links, consumed)
+            if straddling is None:
+                return split_at, True
+            start, end = straddling
+            if start > 0:
+                return start, True
+            if end <= capacity:
+                # The link begins the chunk and fits in one message: keep it
+                # and look for the boundary again beyond its end. ``floor``
+                # strictly increases, so this settles.
+                floor = end
+                continue
+            return capacity, False
 
     def _plan_result_split(self, text: str, max_chars: int) -> _ResultSplit:
         if len(text) <= max_chars:
             return _ResultSplit(chunks=[text], links_whole=True)
 
-        links = self._link_units(text)
+        scanned = self._link_units(text)
+        links = scanned or []
+        # A scan that could not run has not found zero links; it has found
+        # nothing at all, and a plan that cannot see a link cannot promise one
+        # survived. Splitting still proceeds on text boundaries - the message
+        # is too long either way - but the promise is withheld.
+        links_whole = scanned is not None
         chunks: list[str] = []
-        links_whole = True
         remaining = text
         consumed = 0
 
         while len(remaining) > max_chars:
-            split_at = self._find_result_split_index(remaining, max_chars)
-            if split_at <= 0:
-                split_at = max_chars
-            whole_at = self._boundary_outside_links(split_at, links, consumed)
-            if whole_at <= 0:
-                links_whole = False
-            else:
-                split_at = whole_at
+            chunk = remaining
+            split_at, whole = self._boundary_keeping_links_whole(
+                links,
+                consumed,
+                max_chars,
+                lambda floor: self._find_result_split_index(chunk, max_chars, floor),
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
             consumed += split_at
@@ -1946,28 +2010,32 @@ class ConsolidatedMessageDispatcher:
         if self._get_text_byte_length(text) <= max_bytes:
             return _ResultSplit(chunks=[text], links_whole=True)
 
-        links = self._link_units(text)
+        scanned = self._link_units(text)
+        links = scanned or []
+        links_whole = scanned is not None
         chunks: list[str] = []
-        links_whole = True
         remaining = text
         consumed = 0
 
         while self._get_text_byte_length(remaining) > max_bytes:
+            # The longest prefix this budget holds, decoded: its length is the
+            # capacity in the same characters the boundary search counts, so a
+            # link that ends at or before it is a link the message can carry.
             prefix = remaining.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-            minimum_boundary = max(1, len(prefix) // 2)
-            split_at = len(prefix)
-            for separator in ("\n\n", "\n", " "):
-                index = prefix.rfind(separator)
-                if index >= minimum_boundary:
-                    candidate = index + len(separator)
-                    if self._get_text_byte_length(remaining[:candidate]) <= max_bytes:
-                        split_at = candidate
-                        break
-            whole_at = self._boundary_outside_links(split_at, links, consumed)
-            if whole_at <= 0:
-                links_whole = False
-            else:
-                split_at = whole_at
+            capacity = len(prefix)
+
+            def preferred(floor: int, prefix: str = prefix, capacity: int = capacity) -> int:
+                minimum_boundary = max(1, capacity // 2, floor)
+                for separator in ("\n\n", "\n", " "):
+                    index = prefix.rfind(separator)
+                    if index >= minimum_boundary:
+                        return index + len(separator)
+                return capacity
+
+            split_at, whole = self._boundary_keeping_links_whole(
+                links, consumed, capacity, preferred
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
             consumed += split_at
@@ -2004,12 +2072,32 @@ class ConsolidatedMessageDispatcher:
         context: MessageContext,
         text: str,
     ) -> Optional[str]:
+        """Send an intermediate message on a platform that cannot edit one.
+
+        This is the second consumer of the shared split plan. It stays an
+        intermediate message throughout - it settles no turn, signals no
+        result lifecycle, and writes no transcript row of its own - so the
+        only thing it takes from the result path is the narrow whole-document
+        upload, and only for a body no boundary can keep whole.
+        """
         target_context = self._get_target_context(context)
         max_bytes = self._get_consolidated_max_bytes(context)
-        chunks = self._split_result_text_by_bytes(text, max_bytes)
+        plan = self._plan_result_split_by_bytes(text, max_bytes)
+        if not plan.links_whole:
+            # The same answer the result path acts on, honoured by the plan's
+            # other consumer. A boundary drawn through a link delivers neither
+            # half and both halves send successfully, so nothing after this
+            # would notice - the whole body goes out as one document instead,
+            # BEFORE any fragment, and an upload that did not happen is
+            # reported as no delivery rather than as a partial one.
+            logger.warning(
+                "Log message split would break a link unit; delivering the whole body as a document"
+            )
+            return await self._upload_result_document(im_client, target_context, text)
+
         first_message_id: Optional[str] = None
 
-        for chunk in chunks:
+        for chunk in plan.chunks:
             try:
                 message_id = await im_client.send_message(target_context, chunk, parse_mode="markdown")
             except Exception as err:

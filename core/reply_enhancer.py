@@ -1103,6 +1103,51 @@ def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:
     return ranges
 
 
+# A CommonMark character reference: a name, a decimal code point or a
+# hexadecimal one, between ``&`` and ``;``. Matching the shape here and handing
+# the match to ``unescapeAll`` keeps the entity table - which names resolve and
+# which are literal text - where CommonMark already defines it.
+_CHARACTER_REFERENCE_RE = re.compile(
+    r"&(?:#[0-9]{1,8}|#[xX][0-9a-fA-F]{1,8}|[a-zA-Z][a-zA-Z0-9]{1,31});"
+)
+
+
+def resolve_character_references(text: str) -> str:
+    """Resolve CommonMark character references outside code, exactly once.
+
+    The other half of ``unescape_markdown``: a backslash and a character
+    reference are the two ways a Markdown author writes a character the reader
+    must see rather than syntax the parser must read. An IM dialect resolves
+    neither the same way - Slack knows three references and shows the rest
+    verbatim - so a label that said ``&copy;`` reached the reader as six
+    characters instead of ``©``.
+
+    Resolving is one pass, not a loop: ``&amp;copy;`` is the text ``&copy;`` to
+    a Markdown reader, and resolving what that produced would turn it into
+    ``©`` - a character the source never wrote. Code is left alone through the
+    shared mask, because a reference inside a code span is a literal the reader
+    is shown as written.
+
+    Call this only where Markdown has actually been interpreted. Text a
+    backslash escape protected is NOT a reference: hold it behind a placeholder
+    (``hold_markdown_escapes``) and restore it after, so the escaped spelling
+    and the real reference stay two different strings.
+    """
+    if not text or "&" not in text:
+        return text
+    masked = mask_markdown_code(text)
+    parts: List[str] = []
+    cursor = 0
+    for match in _CHARACTER_REFERENCE_RE.finditer(masked):
+        parts.append(text[cursor : match.start()])
+        parts.append(unescapeAll(text[match.start() : match.end()]))
+        cursor = match.end()
+    if not parts:
+        return text
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def unescape_markdown(text: str, *, replace=None) -> str:
     """Resolve CommonMark backslash escapes outside code, autolinks and HTML.
 

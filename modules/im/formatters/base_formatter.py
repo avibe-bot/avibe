@@ -20,13 +20,17 @@ def hold_markdown_escapes(
     One Markdown text is delivered to every platform, and a backslash escape in
     it means "show this character, do not read it as syntax". No IM dialect
     knows that: Slack and Telegram read the escaped character as markup of
-    their own, and Discord, Feishu and WeChat were measured here only as local
-    pass-through - what their renderers show for a stray backslash has not been
-    observed on those platforms. So the escape is resolved here, before a
-    platform formatter runs, and the character it protected is held behind a
-    placeholder until that formatter is done - which is the same reason it was
-    escaped upstream, honoured in the dialect that is actually about to parse
-    the text.
+    their own, and WeChat does not forward Markdown at all - its own pass
+    converts the text locally, turning
+    ``[a\\*b\\*.example](https://a*b*.example/x)`` into
+    ``a*b*.example (https://a*b*.example/x)``, so an escaped bracket or star is
+    a syntax question for that conversion too. Discord and Feishu were measured
+    here only as local pass-through - what their renderers show for a stray
+    backslash has not been observed on those platforms. So the escape is
+    resolved here, before a platform formatter runs, and the character it
+    protected is held behind a placeholder until that formatter is done - which
+    is the same reason it was escaped upstream, honoured in the dialect that is
+    actually about to parse the text.
 
     ``render`` is how the platform wants the character to come back: Telegram
     needs it HTML-escaped, the others want it verbatim. Restore with

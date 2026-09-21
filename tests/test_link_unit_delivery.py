@@ -18,14 +18,26 @@ downstream reads them anyway - and what the real Slack client sends for each.
 
 from __future__ import annotations
 
+import html
+import re
 import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from markdown_it import MarkdownIt
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import WeChatConfig
+from core.citations import (
+    _END,
+    _SEP,
+    _START,
+    CitationSource,
+    register_citations,
+    resolve_citations,
+)
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.reply_enhancer import inline_links
 from modules.im import MessageContext
@@ -56,6 +68,56 @@ def slack(text: str) -> str:
     bot = SlackBot.__new__(SlackBot)
     bot.markdown_converter = SlackMarkdownConverter()
     return bot._convert_markdown_to_slack_mrkdwn(text)
+
+
+_SLACK_WRAPPER_RE = re.compile(r"<([^|>]*)\|([^>]*)>")
+# The three references Slack resolves on the way in, and nothing else: what the
+# reader is shown for a wire string is that string with these three decoded, in
+# one pass.
+_SLACK_DECODED = {"&amp;": "&", "&lt;": "<", "&gt;": ">"}
+_SLACK_REFERENCE_RE = re.compile(r"&(?:amp|lt|gt);")
+_ANCHOR_TEXT_RE = re.compile(r"<a [^>]*>(.*)</a>", re.S)
+
+
+def one_link(wire: str) -> tuple[str, str]:
+    """The ``(destination, label)`` of the single ``<url|label>`` in *wire*."""
+    match = _SLACK_WRAPPER_RE.search(wire)
+    assert match is not None, wire
+    return match.group(1), match.group(2)
+
+
+def slack_label(markdown: str) -> str:
+    """The label half of the one link *markdown* is delivered as."""
+    return one_link(slack(markdown))[1]
+
+
+def slack_decodes(wire: str) -> str:
+    """What a Slack reader is shown for *wire*."""
+    return _SLACK_REFERENCE_RE.sub(lambda match: _SLACK_DECODED[match.group()], wire)
+
+
+def commonmark_shows(label: str) -> str:
+    """What a Markdown reader is shown for *label* written as a link's text.
+
+    The oracle for every reference case below: CommonMark decides whether a
+    label means a character or spells one, and Slack has to show the reader
+    the same thing. Code literals are excluded - their rendering is a ``<code>``
+    element rather than text - and are asserted directly instead.
+    """
+    rendered = MarkdownIt().renderInline(f"[{label}]({PLAIN})")
+    match = _ANCHOR_TEXT_RE.search(rendered)
+    assert match is not None, rendered
+    return html.unescape(match.group(1))
+
+
+def citation_body(url: str, title: str = "Source") -> str:
+    """The delivered text a real citation of *url* produces."""
+    body, _ = resolve_citations(
+        f"Cited. {_START}cite{_SEP}turn0view0{_END}",
+        {"turn0view0": CitationSource(ref_id="turn0view0", url=url, title=title)},
+        unresolved_label="(source unavailable)",
+    )
+    return body
 
 
 def converter_alone(text: str) -> str:
@@ -269,19 +331,10 @@ class TestSlackSpellsTheWholeLabel:
         """
         assert slack(rf"[a \> b \& c \< d]({PLAIN})") == f"<{PLAIN}|a &gt; b &amp; c &lt; d>"
 
-    def test_a_reference_the_source_already_spells_is_not_encoded_twice(self):
-        """``&amp;`` means ``&`` to the reader, and Slack resolves it too."""
+    def test_a_reference_the_source_spells_arrives_as_the_character_it_names(self):
+        """``&amp;`` means ``&`` to the reader, and Slack spells ``&`` that way too."""
         assert slack(f"[AT&amp;T]({PLAIN})") == f"<{PLAIN}|AT&amp;T>"
         assert slack(f"[a &lt;b&gt; c]({PLAIN})") == f"<{PLAIN}|a &lt;b&gt; c>"
-
-    def test_a_reference_slack_does_not_resolve_is_spelled_out_in_full(self):
-        """``&copy;`` is six characters to Slack, and the reader must see six.
-
-        Only ``&amp;``, ``&lt;`` and ``&gt;`` come back as a character there,
-        so every other ``&`` is an ampersand the label means literally - a host
-        that spells one is a real citation case.
-        """
-        assert slack(f"[a&copy;.example]({PLAIN})") == f"<{PLAIN}|a&amp;copy;.example>"
 
     def test_a_label_that_looks_like_a_mention_is_delivered_as_text(self):
         """A label reading ``<@U123>`` is text somebody wrote, not a mention."""
@@ -301,6 +354,88 @@ class TestSlackSpellsTheWholeLabel:
         """Only the link wrapper is this change's boundary."""
         for text in ("a > b & c", "5 < 6", "plain &amp; text"):
             assert slack(text) == converter_alone(text)
+
+
+class TestSlackTellsAReferenceFromItsSpelling:
+    """Two labels, one wire: a reference and the text that spells one.
+
+    ``&amp;`` in a Markdown label is the character ``&``; ``\\&amp;`` is the
+    five characters ``&amp;``. The escape is what tells them apart, and it is
+    held behind a placeholder for the whole platform pass - so the distinction
+    is still there to use, right up to the moment the label is serialized. A
+    pass that restores the escape first and then guesses from the finished
+    string cannot tell the two apart any more, and picked one meaning for both.
+
+    A real citation writes both spellings: ``https://a%26amp%3B.example/x`` is
+    a host that literally contains ``&amp;``, and a reader shown ``a&.example``
+    is being told the page is on a different site.
+    """
+
+    def test_every_reference_is_the_character_commonmark_shows(self):
+        """The oracle, paired: each reference and the escaped text that spells it."""
+        for label in (
+            "a&amp;b",
+            r"a\&amp;b",
+            "a&lt;b",
+            r"a\&lt;b",
+            "a&gt;b",
+            r"a\&gt;b",
+            "a&copy;b",
+            r"a\&copy;b",
+            "a&#38;b",
+            r"a\&#38;b",
+            "a&#x3C;b",
+            "a&COPY;b",
+            "a&nope;b",
+        ):
+            assert slack_decodes(slack_label(f"[{label}]({PLAIN})")) == commonmark_shows(label), label
+
+    def test_the_two_spellings_do_not_arrive_as_the_same_wire_string(self):
+        """Encoding is not the same as resolving, and the wire has to say which."""
+        assert slack_label(f"[a&amp;b]({PLAIN})") == "a&amp;b"
+        assert slack_label(rf"[a\&amp;b]({PLAIN})") == "a&amp;amp;b"
+        assert slack_label(f"[a&lt;b]({PLAIN})") == "a&lt;b"
+        assert slack_label(rf"[a\&lt;b]({PLAIN})") == "a&amp;lt;b"
+
+    def test_a_reference_slack_cannot_resolve_is_resolved_here(self):
+        """``&copy;`` is a character to a Markdown reader, whatever Slack knows.
+
+        Slack resolves only three references, so the character has to arrive
+        already resolved. The escaped spelling is the literal-text case, and it
+        arrives as the six characters it names.
+        """
+        assert slack_label(f"[a&copy;b]({PLAIN})") == "a©b"
+        assert slack_label(rf"[a\&copy;b]({PLAIN})") == "a&amp;copy;b"
+
+    def test_a_reference_is_resolved_once_and_not_again(self):
+        """``&amp;copy;`` is ``&copy;`` to a reader, not ``©``."""
+        assert slack_label(f"[a&amp;copy;b]({PLAIN})") == "a&amp;copy;b"
+        assert slack_decodes(slack_label(f"[a&amp;copy;b]({PLAIN})")) == "a&copy;b"
+
+    def test_a_reference_inside_a_code_literal_stays_written_out(self):
+        """Code is a literal, so its ``&amp;`` is five characters the reader sees."""
+        assert slack_label(f"[`&amp;`]({PLAIN})") == "`&amp;amp;`"
+        assert slack_decodes(slack_label(f"[`&amp;`]({PLAIN})")) == "`&amp;`"
+
+    def test_a_citation_host_that_spells_a_reference_reaches_slack_whole(self):
+        """The producer end: a real citation of a host that contains ``&amp;``.
+
+        The label a citation writes is escaped character by character, so the
+        host's own ``&`` is literal text - and the address is percent-encoded
+        and must arrive as it stands.
+        """
+        for url, shown in (
+            ("https://a%26amp%3B.example/x", "a&amp;.example"),
+            ("https://a%26lt%3B.example/x", "a&lt;.example"),
+            ("https://a%26copy%3B.example/x", "a&copy;.example"),
+        ):
+            destination, label = one_link(slack(citation_body(url)))
+
+            assert destination == url, url
+            assert slack_decodes(label) == shown, url
+
+    def test_emphasis_and_a_reference_in_one_label_both_survive(self):
+        assert slack(f"[**bold** &amp; &copy;]({PLAIN})") == f"<{PLAIN}|*bold* &amp; ©>"
 
 
 class _TextOnlyClient:
@@ -399,6 +534,87 @@ class TestTheSplitKeepsALinkWhole:
         assert sum(chunk.count(link) for chunk in chunks) == 1
         assert all(len(chunk.encode("utf-8")) <= 1900 for chunk in chunks)
 
+    def test_a_link_that_fits_the_message_is_not_called_unsplittable(self):
+        """Capacity is the message, not the last space before the link ends.
+
+        The preferred cut is whitespace, and here every space inside the
+        budget is inside the label. Pulling the boundary back to the link's
+        start lands on ``0`` - the link begins the chunk - which said nothing
+        about whether the link fits: it fits with 426 characters to spare, and
+        the cut belongs after it.
+        """
+        dispatcher = dispatcher_for("discord", _DiscordLikeClient())
+        link = "[" + ("word " * 220) + "](https://example.com/" + ("x" * 350) + ")"
+        text = link + "x" * 1000
+        assert (len(link), len(text)) == (1474, 2474)
+
+        for plan in (
+            dispatcher._plan_result_split(text, 1900),
+            dispatcher._plan_result_split_by_bytes(text, 1900),
+        ):
+            assert plan.links_whole is True
+            assert "".join(plan.chunks) == text
+            assert len(plan.chunks) > 1
+            assert sum(chunk.count(link) for chunk in plan.chunks) == 1
+            assert all(len(chunk) <= 1900 for chunk in plan.chunks)
+            assert all(len(chunk.encode("utf-8")) <= 1900 for chunk in plan.chunks)
+
+    def test_a_multibyte_link_that_fits_is_measured_on_its_own_ruler(self):
+        """Same shape on the byte budget, where capacity is not the character count."""
+        dispatcher = dispatcher_for("wechat", _DiscordLikeClient())
+        link = f"[{'文 档 ' * 100}]({PLAIN})"
+        text = link + "字" * 1000
+
+        plan = dispatcher._plan_result_split_by_bytes(text, 1900)
+
+        assert plan.links_whole is True
+        assert "".join(plan.chunks) == text
+        assert sum(chunk.count(link) for chunk in plan.chunks) == 1
+        assert all(len(chunk.encode("utf-8")) <= 1900 for chunk in plan.chunks)
+
+    def test_two_links_at_the_head_of_a_chunk_are_both_kept_whole(self):
+        """The search resumes past the first link, so the second is seen too.
+
+        The only whitespace inside the budget is inside the first link's
+        label. Once that link is allowed to stay, the boundary has to be
+        looked for again beyond it - and what it finds there is the second
+        link, which must not be cut either.
+        """
+        dispatcher = dispatcher_for("discord", _DiscordLikeClient())
+        first = "[" + ("word " * 220) + "](https://example.com/" + ("x" * 350) + ")"
+        second = f"[ab]({STAR})"
+        text = first + second + "x" * 1000
+
+        plan = dispatcher._plan_result_split(text, 1900)
+
+        assert plan.links_whole is True
+        assert "".join(plan.chunks) == text
+        assert sum(chunk.count(first) for chunk in plan.chunks) == 1
+        assert sum(chunk.count(second) for chunk in plan.chunks) == 1
+        assert all(len(chunk) <= 1900 for chunk in plan.chunks)
+
+    def test_a_scan_that_fails_does_not_certify_a_plan(self):
+        """No answer is not the answer "there are no links".
+
+        The enumeration is the only thing that knows where a link is. When it
+        cannot run, the plan still has to make progress - the text is longer
+        than one message either way - but it may not claim the boundaries it
+        drew kept anything whole.
+        """
+        dispatcher = dispatcher_for("discord", _DiscordLikeClient())
+        text = "word " * 800
+
+        with mock.patch(
+            "core.message_dispatcher.inline_links", side_effect=RuntimeError("scanner down")
+        ):
+            plan = dispatcher._plan_result_split(text, 1900)
+            by_bytes = dispatcher._plan_result_split_by_bytes(text, 1900)
+
+        assert plan.links_whole is False
+        assert by_bytes.links_whole is False
+        assert "".join(plan.chunks) == text
+        assert all(len(chunk) <= 1900 for chunk in plan.chunks)
+
     def test_a_link_longer_than_one_message_leaves_no_whole_boundary(self):
         """No cut keeps this one intact, and the plan says so instead of pretending."""
         dispatcher = dispatcher_for("discord", _DiscordLikeClient())
@@ -445,6 +661,42 @@ class TestALinkTooLongToSplitIsDeliveredWhole(unittest.IsolatedAsyncioTestCase):
         assert "".join(client.sent) == text
         assert sum(sent.count(link) for sent in client.sent) == 1
 
+    async def test_a_fitting_link_is_delivered_as_text_by_a_client_with_no_file_route(self):
+        """The case that used to end in a failure notice with nothing sent.
+
+        A text-only client has no attachment to fall back to, so a plan that
+        wrongly reports the link unsplittable costs the reader the whole
+        message. There is a legal boundary here, and taking it delivers
+        everything as text.
+        """
+        client = _TextOnlyClient()
+        dispatcher = dispatcher_for("discord", client)
+        link = "[" + ("word " * 220) + "](https://example.com/" + ("x" * 350) + ")"
+        text = link + "x" * 1000
+
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            message_id = await dispatcher.emit_agent_message(discord_context(), "result", text)
+
+        assert message_id == "msg-1"
+        assert "".join(client.sent) == text
+        assert sum(sent.count(link) for sent in client.sent) == 1
+        assert dispatcher._t("error.resultDeliveryFailed") not in client.sent
+        assert dispatcher._t("info.resultDeliveredAsAttachment") not in client.sent
+
+    async def test_a_fitting_link_does_not_cost_an_attachment(self):
+        """A client that CAN attach must not be asked to, for a link that fits."""
+        client = _DiscordLikeClient()
+        dispatcher = dispatcher_for("discord", client)
+        link = "[" + ("word " * 220) + "](https://example.com/" + ("x" * 350) + ")"
+        text = link + "x" * 1000
+
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            message_id = await dispatcher.emit_agent_message(discord_context(), "result", text)
+
+        assert message_id == "msg-1"
+        assert client.uploads == []
+        assert "".join(client.sent) == text
+
     async def test_a_platform_with_no_file_route_reports_no_delivery(self):
         """Honest failure beats a half link the user is told arrived."""
         client = _TextOnlyClient()
@@ -458,6 +710,53 @@ class TestALinkTooLongToSplitIsDeliveredWhole(unittest.IsolatedAsyncioTestCase):
         assert client.sent == [dispatcher._t("error.resultDeliveryFailed")]
 
 
+def wechat_dispatcher() -> tuple[WeChatBot, ConsolidatedMessageDispatcher]:
+    bot = WeChatBot(WeChatConfig(bot_token="token"))
+    return bot, dispatcher_for("wechat", bot)
+
+
+def text_items(calls: list) -> list[str]:
+    return [
+        item["text_item"]["text"]
+        for call in calls
+        for item in call
+        if item.get("type") == 1
+    ]
+
+
+async def deliver_through_wechat(
+    dispatcher,
+    text: str,
+    *,
+    cdn_meta,
+    message_type: str = "result",
+    citations=None,
+):
+    """Emit *text* through the real adapter with only its network replaced."""
+    calls: list = []
+    uploaded: dict = {}
+
+    async def fake_upload_to_cdn(base_url, token, cdn_base_url, user_id, file_path, proxy=None):
+        uploaded["path"] = file_path
+        uploaded["content"] = Path(file_path).read_text(encoding="utf-8")
+        return cdn_meta
+
+    async def fake_send_message(base_url, token, to_user_id, context_token, item_list, proxy=None):
+        calls.append(item_list)
+        return {"message_id": f"wc-{len(calls)}"}
+
+    with (
+        mock.patch.object(wechat_cdn, "upload_file_to_cdn", fake_upload_to_cdn),
+        mock.patch.object(wechat_api, "send_message", fake_send_message),
+        mock.patch("core.message_dispatcher.persist_agent_message"),
+    ):
+        message_id = await dispatcher.emit_agent_message(
+            wechat_context(), message_type, text, citations=citations
+        )
+
+    return message_id, calls, uploaded
+
+
 class TestTheWeChatAdapterCarriesTheWholeResult(unittest.IsolatedAsyncioTestCase):
     """The real adapter, with only its network calls replaced.
 
@@ -467,46 +766,11 @@ class TestTheWeChatAdapterCarriesTheWholeResult(unittest.IsolatedAsyncioTestCase
     is exactly how a link too long to split used to go out in halves.
     """
 
-    def _wechat(self):
-        bot = WeChatBot(WeChatConfig(bot_token="token"))
-        return bot, dispatcher_for("wechat", bot)
-
-    @staticmethod
-    def _text_items(calls: list) -> list[str]:
-        return [
-            item["text_item"]["text"]
-            for call in calls
-            for item in call
-            if item.get("type") == 1
-        ]
-
-    async def _deliver(self, dispatcher, text, *, cdn_meta):
-        calls: list = []
-        uploaded: dict = {}
-
-        async def fake_upload_to_cdn(base_url, token, cdn_base_url, user_id, file_path, proxy=None):
-            uploaded["path"] = file_path
-            uploaded["content"] = Path(file_path).read_text(encoding="utf-8")
-            return cdn_meta
-
-        async def fake_send_message(base_url, token, to_user_id, context_token, item_list, proxy=None):
-            calls.append(item_list)
-            return {"message_id": f"wc-{len(calls)}"}
-
-        with (
-            mock.patch.object(wechat_cdn, "upload_file_to_cdn", fake_upload_to_cdn),
-            mock.patch.object(wechat_api, "send_message", fake_send_message),
-            mock.patch("core.message_dispatcher.persist_agent_message"),
-        ):
-            message_id = await dispatcher.emit_agent_message(wechat_context(), "result", text)
-
-        return message_id, calls, uploaded
-
     async def test_the_whole_result_rides_the_file_upload_the_adapter_has(self):
-        bot, dispatcher = self._wechat()
+        bot, dispatcher = wechat_dispatcher()
         text = f"来源：\n\n[{'标签' * 600}]({PLAIN})"
 
-        message_id, calls, uploaded = await self._deliver(
+        message_id, calls, uploaded = await deliver_through_wechat(
             dispatcher,
             text,
             cdn_meta={"encrypt_query_param": "q", "aes_key": "k", "file_size": 12, "file_id": "wc-file-1"},
@@ -521,20 +785,20 @@ class TestTheWeChatAdapterCarriesTheWholeResult(unittest.IsolatedAsyncioTestCase
         # One file item, and the only text sent is the notice - no fragment of
         # the link was delivered before it.
         assert [item["type"] for call in calls for item in call].count(4) == 1
-        assert self._text_items(calls) == [
+        assert text_items(calls) == [
             bot.format_markdown(dispatcher._t("info.resultDeliveredAsAttachment"))
         ]
 
     async def test_a_failed_upload_is_not_reported_as_a_delivery(self):
         """The CDN refuses, so ``upload_file_from_path`` answers with an empty id."""
-        bot, dispatcher = self._wechat()
+        bot, dispatcher = wechat_dispatcher()
         text = f"来源：\n\n[{'标签' * 600}]({PLAIN})"
 
-        message_id, calls, uploaded = await self._deliver(dispatcher, text, cdn_meta=None)
+        message_id, calls, uploaded = await deliver_through_wechat(dispatcher, text, cdn_meta=None)
 
         assert message_id is None
         assert not Path(uploaded["path"]).exists()
-        assert self._text_items(calls) == [
+        assert text_items(calls) == [
             bot.format_markdown(dispatcher._t("error.resultDeliveryFailed"))
         ]
 
@@ -544,10 +808,10 @@ class TestTheWeChatAdapterCarriesTheWholeResult(unittest.IsolatedAsyncioTestCase
         WeChat renders the unit its own way - ``label (url)`` - so what has to
         survive the split is that rendering, whole and in one message.
         """
-        bot, dispatcher = self._wechat()
+        bot, dispatcher = wechat_dispatcher()
         text = "字" * 629 + f"[文 档]({PLAIN})" + "字" * 400
 
-        message_id, calls, uploaded = await self._deliver(
+        message_id, calls, uploaded = await deliver_through_wechat(
             dispatcher,
             text,
             cdn_meta={"file_id": "wc-file-1"},
@@ -555,7 +819,90 @@ class TestTheWeChatAdapterCarriesTheWholeResult(unittest.IsolatedAsyncioTestCase
 
         assert message_id == "wc-1"
         assert uploaded == {}
-        chunks = self._text_items(calls)
+        chunks = text_items(calls)
+        assert len(chunks) > 1
+        assert sum(chunk.count(bot.format_markdown(f"[文 档]({PLAIN})")) for chunk in chunks) == 1
+        assert sum(chunk.count("字") for chunk in chunks) == 1029
+        assert all(len(chunk.encode("utf-8")) <= 1900 for chunk in chunks)
+
+
+class TestTheLogPathCarriesTheWholeMessage(unittest.IsolatedAsyncioTestCase):
+    """The plan's other consumer, on the path an intermediate message takes.
+
+    A WeChat message cannot be edited, so an assistant message on the way to a
+    result is delivered as its own sends rather than by editing one bubble.
+    That path splits with the same shared planner and used to read only the
+    chunks out of it - so the link-integrity answer the planner had already
+    computed was discarded, and a citation whose address outran one message
+    went out in pieces that all sent successfully.
+
+    This is the same narrow whole-document route the result path uses, taken
+    before any fragment. Nothing else about an intermediate message changes:
+    it settles no turn, signals no result, and writes no second transcript row.
+    """
+
+    async def test_an_unsplittable_citation_rides_the_file_instead_of_fragments(self):
+        bot, dispatcher = wechat_dispatcher()
+        url = "https://example.com/" + ("x" * 2000)
+        text, bundle = register_citations(
+            f"Source: {_START}cite{_SEP}turn0search0{_END}",
+            {"turn0search0": CitationSource(ref_id="turn0search0", url=url)},
+            unresolved_label="(source unavailable)",
+        )
+
+        message_id, calls, uploaded = await deliver_through_wechat(
+            dispatcher,
+            text,
+            cdn_meta={"file_id": "wc-file-1"},
+            message_type="assistant",
+            citations=bundle,
+        )
+
+        assert message_id == "wc-file-1"
+        # The document carries the whole address the fragments cut in half.
+        assert url in uploaded["content"]
+        assert Path(uploaded["path"]).name == "result.md"
+        assert not Path(uploaded["path"]).exists()
+        assert [item["type"] for call in calls for item in call].count(4) == 1
+        # An intermediate message has no notice of its own, and no fragment of
+        # it was sent before the document.
+        assert text_items(calls) == []
+
+    async def test_a_failed_upload_is_not_reported_as_a_log_delivery(self):
+        bot, dispatcher = wechat_dispatcher()
+        url = "https://example.com/" + ("x" * 2000)
+        text, bundle = register_citations(
+            f"Source: {_START}cite{_SEP}turn0search0{_END}",
+            {"turn0search0": CitationSource(ref_id="turn0search0", url=url)},
+            unresolved_label="(source unavailable)",
+        )
+
+        message_id, calls, uploaded = await deliver_through_wechat(
+            dispatcher,
+            text,
+            cdn_meta=None,
+            message_type="assistant",
+            citations=bundle,
+        )
+
+        assert message_id is None
+        assert not Path(uploaded["path"]).exists()
+        assert text_items(calls) == []
+
+    async def test_a_log_message_whose_links_fit_is_still_split_as_before(self):
+        bot, dispatcher = wechat_dispatcher()
+        text = "字" * 629 + f"[文 档]({PLAIN})" + "字" * 400
+
+        message_id, calls, uploaded = await deliver_through_wechat(
+            dispatcher,
+            text,
+            cdn_meta={"file_id": "wc-file-1"},
+            message_type="assistant",
+        )
+
+        assert message_id == "wc-1"
+        assert uploaded == {}
+        chunks = text_items(calls)
         assert len(chunks) > 1
         assert sum(chunk.count(bot.format_markdown(f"[文 档]({PLAIN})")) for chunk in chunks) == 1
         assert sum(chunk.count("字") for chunk in chunks) == 1029

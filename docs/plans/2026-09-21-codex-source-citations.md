@@ -142,23 +142,43 @@ blob with no way to reach the page the answer is based on.
   through `[label](url)` delivers neither half — both chunks send successfully,
   so nothing falls back, and the reader is shown raw Markdown with no way to
   reach the source. The split now asks the same `inline_links` enumeration
-  where a link is and pulls a boundary back to the link's start; non-link text
-  keeps the boundaries it had. When one link is longer than a whole message no
-  boundary can save it, so the split is abandoned **before the first chunk is
-  sent** and the complete result goes out as the `result.md` attachment the
-  fallback already had. WeChat has no `upload_markdown` — it inherits the base
-  class's `NotImplementedError` — so that fallback also takes the ordinary
-  `upload_file_from_path` route it does implement, staging the text in a
-  temporary file that is removed once the upload returns; an adapter that
-  reports failure with an empty id has delivered nothing, and the turn says so
-  rather than claiming an attachment. And at Slack's own serialization
-  boundary, `&`, `<` and `>` in a label are encoded as Slack requires: a bare
-  `>` closes `<url|label>` at that character, so the rest of the label and the
-  whole address arrive as plain text. The label is finished before the wrapper
-  closes over it — escapes restored, then encoded — because a character a
-  backslash protected only comes back after the platform pass, and a reference
-  the source already spells (`&amp;`) is left alone rather than encoded twice.
-  The destination is delivered exactly as it stands.
+  where a link is and chooses a boundary no link straddles; non-link text keeps
+  the boundaries it had. Whether a link can be kept is decided against what one
+  message actually holds, never against the preferred whitespace: a boundary is
+  drawn before the link so it rides the next message whole, or — when the link
+  begins the chunk — after it, because a chunk that is nothing but a link that
+  fits is still a legal message, and the search then resumes past it so the
+  next link is seen too. Only a link longer than a whole message has no
+  boundary left. A link scan that fails answers "unknown", not "no links", so a
+  plan that could not see a link never certifies one.
+  When no boundary can save a link the split is abandoned **before the first
+  chunk is sent** and the complete result goes out as the `result.md`
+  attachment the fallback already had. WeChat has no `upload_markdown` — it
+  inherits the base class's `NotImplementedError` — so that fallback also takes
+  the ordinary `upload_file_from_path` route it does implement, staging the
+  text in a temporary file that is removed once the upload returns; an adapter
+  that reports failure with an empty id has delivered nothing, and the turn
+  says so rather than claiming an attachment. The same answer is honoured by
+  the plan's other consumer: an intermediate message on a platform that cannot
+  edit one (WeChat) takes the unconsolidated log path, and it now takes that
+  same whole-document route before sending any fragment, while staying an
+  intermediate message — no terminal settlement, no result lifecycle signal, no
+  transcript row of its own, and no notice copy.
+  And at Slack's own serialization boundary, `&`, `<` and `>` in a label are
+  encoded as Slack requires: a bare `>` closes `<url|label>` at that character,
+  so the rest of the label and the whole address arrive as plain text. The
+  label is finished before the wrapper closes over it, in the order that keeps
+  Markdown's two spellings of a literal character apart: character references
+  are resolved once after the platform converter ran (so `&copy;` is the `©` a
+  reader sees, and `&amp;copy;` is the text `&copy;`), then the escape
+  placeholders are restored — what a backslash protected is literal text that
+  merely looks like a reference — and only then is every remaining `&`, `<` and
+  `>` encoded, unconditionally. So `[a&amp;b]` and `[a\&amp;b]` reach Slack as
+  two different strings and each reader sees what CommonMark shows; a reference
+  inside a code literal stays written out. A citation of
+  `https://a%26amp%3B.example/x` is exactly this case: the host contains
+  `&amp;` literally, and the reader must not be told the page is on
+  `a&.example`. The destination is delivered exactly as it stands.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -364,17 +384,29 @@ blob with no way to reach the page the answer is based on.
   ordinary prose and prose wrapped across lines, plus a code span written
   across two lines that must stay one code span. Then what happens to the unit
   after the hold: a label spelling `&`, `<` or `>` — written plainly, written
-  as a backslash escape restored after the converter ran, spelled as a
-  character reference that must not be encoded twice, or looking like a
-  mention — and the destination delivered untouched; a fitting link crossing a
-  proposed boundary, two adjacent links, and a multibyte byte budget, each
-  keeping every link whole and every chunk within the platform limit; and the
-  delivery itself, through the real dispatcher with only the network replaced —
-  Discord attaching the complete result rather than fragmenting a link no
-  message can hold, the real WeChat adapter carrying it over
-  `upload_file_from_path` with the staging file cleaned up, a refused CDN
-  upload reported as no delivery rather than as an attachment, and in every one
-  of those cases not one fragment sent before the fallback.
+  as a backslash escape restored after the converter ran, or looking like a
+  mention — and the destination delivered untouched. What Slack shows is then
+  asserted against CommonMark itself: each named and numeric reference is
+  paired with its escaped spelling (`&amp;`/`\&amp;`, `&lt;`/`\&lt;`,
+  `&gt;`, `&copy;`/`\&copy;`, `&#38;`, `&COPY;`), a real `markdown-it` render
+  says what a reader should see, and Slack's wire form is decoded back and
+  required to equal it — with a reference inside a code literal left written
+  out and a nested-looking one decoded only once. Two producer-side citations
+  of `https://a%26amp%3B.example/x` and `https://a%26lt%3B.example/x` run the
+  same assertion end to end, over both the visible label and the destination.
+  Then the boundary: a fitting link crossing a proposed boundary, a fitting
+  link at the head of a chunk, two adjacent links, and a multibyte byte budget,
+  each keeping every link whole and every chunk within the platform limit —
+  and a link scan made to fail, which must not certify the plan it could not
+  read. Then the delivery itself, through the real dispatcher with only the
+  network replaced: a text-only client sending a fitting link as ordinary text,
+  with no attachment and no delivery-failure notice; Discord attaching the
+  complete result rather than fragmenting a link no message can hold; the real
+  WeChat adapter carrying it over `upload_file_from_path` with the staging file
+  cleaned up; a refused CDN upload reported as no delivery rather than as an
+  attachment; and the same three answers on the intermediate log path, driven
+  from a registered citation through the real WeChat adapter — in every
+  fallback case not one fragment sent before it.
 - `ui/src/components/workbench/CitationStoredRows.test.tsx` — the rows
   `tests/citation_bridge.py` wrote through the real dispatcher, read by the
   real `MessageRow` and the real activity card: an IM row whose footer is

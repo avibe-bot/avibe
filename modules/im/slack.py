@@ -34,6 +34,7 @@ from .formatters import (
     encode_slack_delimiters,
     hold_links,
     hold_markdown_escapes,
+    resolve_character_references,
     restore_held,
 )
 from .slack_modal import parse_routing_modal_selection
@@ -405,6 +406,13 @@ class SlackBot(BaseIMClient):
         nothing left to encode it.
         """
         label = self.markdown_converter.convert(_SOFT_LINE_BREAK_RE.sub(" ", label))
+        # Markdown's own two spellings of a literal character, resolved in the
+        # order that keeps them apart. A character reference is resolved after
+        # the converter ran - before it, ``&lt;em&gt;`` would be handed to the
+        # converter as a tag it reads rather than as the text it is - and only
+        # then are the escaped characters restored, because what a backslash
+        # protected is literal text that merely looks like a reference.
+        label = resolve_character_references(label)
         label = encode_slack_delimiters(restore_held(label, escaped))
         return f"<{destination}|{label}>" if label else f"<{destination}>"
 
