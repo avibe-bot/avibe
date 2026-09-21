@@ -131,10 +131,29 @@ const InboxHoverPopover: React.FC<{
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const shown = sessions.slice(0, 5);
   // The unread map is authoritative; a session absent from it has 0 unread
   // (don't fall back to the card's stale unread_count — see InboxPage).
   const unreadOf = (s: InboxSession) => unreadBySession[s.session_id] ?? 0;
+  // Unread first, then the rest. `sort` is stable, so within each group the feed
+  // keeps the backend's activity order untouched.
+  //
+  // This decides *which* five appear, not only how they are stacked — and that is
+  // the point. The popover is a five-row peek at a feed that is usually longer, so
+  // a strictly chronological slice hides the unread session the user opened it to
+  // act on behind ones they have already read. The full Inbox page keeps the
+  // chronological order on purpose: it has unread/all tabs and keyset pagination,
+  // which a client-side reorder would fight.
+  const shown = useMemo(
+    () =>
+      [...sessions]
+        .sort(
+          (a, b) =>
+            Number((unreadBySession[b.session_id] ?? 0) > 0) -
+            Number((unreadBySession[a.session_id] ?? 0) > 0),
+        )
+        .slice(0, 5),
+    [sessions, unreadBySession],
+  );
   return (
     // Portaled (PopoverContent) so it escapes the sidebar's stacking context and
     // floats above the chat panel — a plain `absolute z-50` div was painted under
