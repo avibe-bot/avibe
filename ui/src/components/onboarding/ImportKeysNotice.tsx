@@ -164,6 +164,7 @@ export const ImportKeysNotice: React.FC<{
         <MigrationDialog
           open
           eligible={isImportableKey}
+          takeable={isImportableKey}
           onClose={() => setDialogOpen(false)}
           onApplied={(applied) => {
             setDialogOpen(false);

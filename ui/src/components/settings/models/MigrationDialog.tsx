@@ -131,6 +131,14 @@ const BLOCKED_NOTE_KEYS = new Set<string>([
   'settings.models.migration.blocked.transport',
 ] satisfies TranslationKey[]);
 const BLOCKED_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
+/**
+ * Why a row this entry point could otherwise have taken is nonetheless blocked.
+ *
+ * The server's own reasons all say the credential cannot be imported at all, which
+ * is untrue of this one: it is importable, just not from here. Unreachable in
+ * Settings, whose scope takes over everything the scan proposes.
+ */
+const OUT_OF_SCOPE_KEY = 'onboarding.import.outOfScope' satisfies TranslationKey;
 
 function blockedMessages(
   t: TFunction,
@@ -138,14 +146,16 @@ function blockedMessages(
 ): { key: string; source: string; message: string }[] {
   const messages = new Map<string, { key: string; source: string; message: string }>();
   for (const item of rows) {
+    const outOfScope = isImportable(item);
     const noteKey = item.notes_key && BLOCKED_NOTE_KEYS.has(item.notes_key) ? item.notes_key : undefined;
-    const message = serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
+    const reason = outOfScope ? OUT_OF_SCOPE_KEY : item.notes_key ?? BLOCKED_FALLBACK_KEY;
+    const message = outOfScope ? t(OUT_OF_SCOPE_KEY) : serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
     const paths = sourcePaths(item);
     // Older scans cannot identify a file. Keep their backend-level locator,
     // with each distinct reason, without duplicating an account or key title.
     const sources = paths.length > 0 ? paths : [t(SOURCE_KEY[item.backend])];
     for (const source of sources) {
-      const key = JSON.stringify([source, item.notes_key ?? BLOCKED_FALLBACK_KEY]);
+      const key = JSON.stringify([source, reason]);
       messages.set(key, { key, source, message });
     }
   }
@@ -243,6 +253,11 @@ export const MigrationDialog: React.FC<{
   /** Scopes the entry point, then includes every native row and required
    *  backend so shared-file custody and blockers remain explicit. */
   eligible?: (item: MigrationItem) => boolean;
+  /** Which of the rows in view this entry point may actually take over. One in view
+   *  that fails it blocks its group — the server migrates a backend whole — so it
+   *  stays visible, with its blocker, rather than riding along in someone else's
+   *  batch. Omitted means every row the scan proposes importing, which is Settings. */
+  takeable?: (item: MigrationItem) => boolean;
   /** Which entry point this is. `settings` is the shipped surface and renders
    *  exactly as it always has. */
   scope?: MigrationDialogScope;
@@ -251,7 +266,7 @@ export const MigrationDialog: React.FC<{
    *  because its screen already holds both (C2). */
   value?: MigrationSelection;
   onChange?: (next: MigrationSelection) => void;
-}> = ({ open, onClose, onApplied, eligible, scope = 'settings', value, onChange }) => {
+}> = ({ open, onClose, onApplied, eligible, takeable, scope = 'settings', value, onChange }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const copy = SCOPE_COPY[scope];
@@ -304,7 +319,7 @@ export const MigrationDialog: React.FC<{
   const items = controlled ? (value.scan?.items ?? []) : ownItems;
   const loading = controlled ? value.scan === null : ownLoading;
   const scopePredicate = eligible ?? DEFAULT_SCOPE;
-  const grouped = groupMigrationCandidates(items, scopePredicate);
+  const grouped = groupMigrationCandidates(items, scopePredicate, takeable);
   // Uncontrolled selection lives on the rows, as it always has. A controlled
   // caller names backends instead, and a backend it named that this scope
   // cannot consent to selects nothing.

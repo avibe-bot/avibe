@@ -5471,6 +5471,7 @@
       "action_one": "Review {{count}} selected",
       "action_other": "Review {{count}} selected",
       "scopeNote": "This entry handles complete API-key groups only. Linked groups with subscription sign-ins or blockers cannot be taken over here; review them in Settings.",
+      "outOfScope": "This credential can be migrated, but not from here. Review it in Settings.",
       "progress_one": "Migrating {{count}} configuration item…",
       "progress_other": "Migrating {{count}} configuration items…",
       "progressDetail": "Migrating authentication and updating linked assistant connections",

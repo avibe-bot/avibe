@@ -5471,6 +5471,7 @@
       "action_one": "查看选中的 {{count}} 项",
       "action_other": "查看选中的 {{count}} 项",
       "scopeNote": "此入口仅处理完整的 API Key 组。涉及订阅登录或阻塞项的关联组不可在此接管，请前往设置检查。",
+      "outOfScope": "此凭据可以迁移，但不能在此入口迁移，请前往设置检查。",
       "progress_one": "正在迁移 {{count}} 项配置…",
       "progress_other": "正在迁移 {{count}} 项配置…",
       "progressDetail": "正在迁移认证并更新关联助手的连接",

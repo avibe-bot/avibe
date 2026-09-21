@@ -313,6 +313,32 @@ export const AddSourceDialog: React.FC<{
 
   const close = () => {
     if (busy) return;
+    // An unknown outcome is closable — holding someone in a dialog because a request
+    // timed out is its own failure — but it may not be closed by forgetting it. The
+    // nonce that identifies this write lives in this frame, so a source it did create
+    // would become unattributable the moment the frame went away: the parent would
+    // still show nothing, the next attempt would carry a new nonce, and that attempt
+    // is the duplicate reconciliation exists to prevent.
+    //
+    // So the read is started here and not awaited: it runs outside the continuation,
+    // which this very close invalidates, and reports through the same `onAdded` a
+    // settled landing uses. A read that fails leaves the outcome exactly as unknown
+    // as it already was, which the parent's own refresh is what reports.
+    if (unsettled) {
+      const nonce = clientNonce.current;
+      void reconcileUnknownWrite(
+        () => sourceReads.readValue(),
+        (rows) => rows.find((row) => row.client_nonce === nonce),
+      ).then((reconciliation) => onAdded(
+        reconciliation.kind === 'committed'
+          ? {
+            source: reconciliation.value,
+            added_to: [],
+            adopted_by: reconciliation.value.adopted_by ?? [],
+          }
+          : null,
+      )).catch(() => undefined);
+    }
     continuation.invalidate();
     onClose();
   };

@@ -116,6 +116,23 @@ describe('providerSlots', () => {
     expect(slots.map((slot) => slot.kind)).toEqual(['empty', 'empty']);
   });
 
+  it('keeps a candidate out when its group also holds an importable subscription', () => {
+    // The harder half of the same rule, and the one that reads as working. This
+    // OAuth store is importable — Settings would take it over — so nothing on the
+    // server declines it. What declines it is setup's own scope: its copy names API
+    // keys only. And the key beside it cannot be taken alone, because the server
+    // migrates a backend whole and refuses a batch that omits one of its rows.
+    const slots = providerSlots({
+      sources: [],
+      scan: scanOf(
+        row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+        row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
+      ),
+    });
+
+    expect(slots.map((slot) => slot.kind)).toEqual(['empty', 'empty']);
+  });
+
   it('carries the masked credential and every consenting backend on a detected card', () => {
     const [slot] = providerSlots({
       sources: [],
@@ -263,6 +280,22 @@ describe('pendingImportRows', () => {
 
     expect(rows).toEqual([]);
   });
+
+  it('never submits a subscription store alongside the key it is linked to', () => {
+    // The one that would have shipped silently: the batch is unscoped by design, so
+    // a backend reaching the selection at all is what has to be impossible. If this
+    // returned both rows, setup would take over an OAuth sign-in its copy never
+    // mentioned; if it returned only the key, the server would refuse the batch.
+    const rows = pendingImportRows({
+      scan: scanOf(
+        row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+        row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
+      ),
+      selectedBackends: ['claude'],
+    });
+
+    expect(rows).toEqual([]);
+  });
 });
 
 describe('offeredImportKeys', () => {
@@ -280,6 +313,20 @@ describe('offeredImportKeys', () => {
     });
 
     expect(offered.map((item) => item.id)).toEqual(['mig_1']);
+  });
+
+  it('does not count a key it could only take by taking a subscription too', () => {
+    // Counting this key would put 「发现 1 个可导入的 API Key」 above a review whose
+    // only group is blocked — an offer with nothing to press.
+    const offered = offeredImportKeys({
+      scan: scanOf(
+        row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+        row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
+      ),
+      selectedBackends: [],
+    });
+
+    expect(offered).toEqual([]);
   });
 
   it('is independent of what is consented to, unlike the batch', () => {
@@ -311,6 +358,15 @@ describe('defaultSelection', () => {
     expect(defaultSelection(scanOf(
       row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
       row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
+    ))).toEqual([]);
+  });
+
+  it('never opens on a group setup itself cannot take whole', () => {
+    // The server ticked both rows; Settings would open on them. Setup may not, and
+    // opening ticked would make the CTA promise a batch it refuses to build.
+    expect(defaultSelection(scanOf(
+      row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+      row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
     ))).toEqual([]);
   });
 
@@ -378,33 +434,82 @@ describe('toggleSlotSelection', () => {
 
 describe('reconcileSelection', () => {
   it('keeps a consent the fresh scan still supports', () => {
+    const before = scanOf(row({ id: 'mig_1', backend: 'codex' }));
     expect(reconcileSelection({
       scan: scanOf(row({ id: 'mig_1', backend: 'codex' })),
       selectedBackends: ['codex'],
-    })).toEqual(['codex']);
+    }, before)).toEqual(['codex']);
+  });
+
+  it('keeps a consent whose rows came back in a different order', () => {
+    // Scan order is the server's, not a promise. Comparing the rows as a set is
+    // what stops a reordered rescan from reading as changed credentials and
+    // silently un-ticking a card nobody touched.
+    const before = scanOf(
+      row({ id: 'mig_1', backend: 'codex' }),
+      row({ id: 'mig_2', backend: 'codex', vendor: 'openai' }),
+    );
+    expect(reconcileSelection({
+      scan: scanOf(
+        row({ id: 'mig_2', backend: 'codex', vendor: 'openai' }),
+        row({ id: 'mig_1', backend: 'codex' }),
+      ),
+      selectedBackends: ['codex'],
+    }, before)).toEqual(['codex']);
   });
 
   it('drops a backend the rescan no longer offers', () => {
     // What this prevents: importing one of two consented backends, rescanning, and
     // leaving the CTA counting a batch the dialog would now build as empty.
+    const before = scanOf(
+      row({ id: 'mig_1', backend: 'codex' }),
+      row({ id: 'mig_2', backend: 'claude', vendor: 'anthropic' }),
+    );
     expect(reconcileSelection({
       scan: scanOf(row({ id: 'mig_1', backend: 'codex' })),
       selectedBackends: ['codex', 'claude'],
-    })).toEqual(['codex']);
+    }, before)).toEqual(['codex']);
+  });
+
+  it('drops a backend that gained a row nobody consented to', () => {
+    // The quiet one. A key that appeared under an already-ticked backend would ride
+    // into the next batch on a decision made about a different set of credentials.
+    const before = scanOf(row({ id: 'mig_1', backend: 'codex' }));
+    expect(reconcileSelection({
+      scan: scanOf(
+        row({ id: 'mig_1', backend: 'codex' }),
+        row({ id: 'mig_2', backend: 'codex', vendor: 'openai' }),
+      ),
+      selectedBackends: ['codex'],
+    }, before)).toEqual([]);
+  });
+
+  it('drops a backend whose closure grew into one that was never consented to', () => {
+    // Half a custody closure is a press that always fails: the server refuses a
+    // batch that migrates one backend and leaves a linked one out.
+    const before = scanOf(row({ id: 'mig_1', backend: 'codex' }));
+    expect(reconcileSelection({
+      scan: scanOf(
+        row({ id: 'mig_1', backend: 'codex', required_backends: ['codex', 'claude'] }),
+        row({ id: 'mig_2', backend: 'claude', vendor: 'anthropic' }),
+      ),
+      selectedBackends: ['codex'],
+    }, before)).toEqual([]);
   });
 
   it('drops a backend that became blocked between scans', () => {
+    const before = scanOf(row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }));
     expect(reconcileSelection({
       scan: scanOf(
         row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
         row({ id: 'mig_b', backend: 'claude', kind: 'oauth_native', proposed_action: 'reauth' }),
       ),
       selectedBackends: ['claude'],
-    })).toEqual([]);
+    }, before)).toEqual([]);
   });
 
   it('empties the selection when the scan itself is gone', () => {
-    expect(reconcileSelection({ scan: null, selectedBackends: ['codex'] })).toEqual([]);
+    expect(reconcileSelection({ scan: null, selectedBackends: ['codex'] }, null)).toEqual([]);
   });
 });
 
@@ -466,8 +571,11 @@ describe('gatewayIntent', () => {
   });
 
   it('installs a missing engine where installation is admitted', () => {
-    expect(gatewayIntent({ ...enabled, runtimeRead: readyRegion(runtime('not_installed')) }))
-      .toEqual({ kind: 'resume', step: 'install' });
+    // The snapshot rides along: the resume starts from the state that authorized
+    // it rather than reading the same runtime a second time and racing itself.
+    const missing = runtime('not_installed');
+    expect(gatewayIntent({ ...enabled, runtimeRead: readyRegion(missing) }))
+      .toEqual({ kind: 'resume', step: 'install', runtime: missing });
   });
 
   it('starts an installed but stopped engine even where installation is unsupported', () => {
@@ -478,7 +586,7 @@ describe('gatewayIntent', () => {
     });
 
     expect(gatewayIntent({ ...enabled, runtimeRead: readyRegion(unsupported) }))
-      .toEqual({ kind: 'resume', step: 'start' });
+      .toEqual({ kind: 'resume', step: 'start', runtime: unsupported });
   });
 
   it('reports installation as unsupported rather than attempting it', () => {

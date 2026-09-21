@@ -381,6 +381,38 @@ describe('ProvidersScreen — the stage', () => {
     expect(cardFor('openai').getAttribute('aria-label')).toContain('Saved');
   });
 
+  it('names a subscription by its sign-in, not by a mask it cannot have', async () => {
+    // A subscription has no key to mask by construction. A card describing itself by
+    // its mask alone would fall through to the offer an empty card makes and invite
+    // a key for a provider that is already connected — and the card is disabled, so
+    // that invitation is to press something that does nothing. What it says instead
+    // is what Settings says about the same source.
+    serve({
+      sources: [source({
+        id: 'src_claude',
+        vendor: 'anthropic',
+        kind: 'subscription',
+        account_label: 'max@example.com',
+      })],
+    });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('anthropic').dataset.state).toBe('connected'));
+    expect(within(cardFor('anthropic')).getByText('Subscription · max@example.com')).toBeTruthy();
+    expect(within(cardFor('anthropic')).queryByText(/Add a .* API Key/)).toBeNull();
+  });
+
+  it('names a connected API key by its kind when the server sent no mask', async () => {
+    serve({ sources: [source({ id: 'src_key', vendor: 'openai' })] });
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('openai').dataset.state).toBe('connected'));
+    // No account either: the line is the kind alone rather than a stray separator.
+    expect(within(cardFor('openai')).getByText('API key')).toBeTruthy();
+  });
+
   it('says a source was written even when the read that would show it fails', async () => {
     serve();
     renderScreen();
@@ -440,6 +472,32 @@ describe('ProvidersScreen — the stage', () => {
     // could be what is stale.
     expect(retrySetup).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+  });
+
+  it('keeps the sources that did arrive when the scan beside them fails', async () => {
+    // Two reads, two questions. A scan that fails says nothing about the sources,
+    // and throwing away a list that did arrive would report providers that exist as
+    // providers that do not — leaving the action offering 「添加」 on a machine that
+    // already has credentials.
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipuai' })] });
+    vi.mocked(modelsApi.scanMigration).mockRejectedValue(new Error('offline'));
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('zhipuai').dataset.state).toBe('connected'));
+    // Said, not hidden: half the machine could not be read.
+    expect(summary()?.dataset.tone).toBe('error');
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+  });
+
+  it('keeps the scan that did arrive when the source read beside it fails', async () => {
+    serve({ scan: [CODEX_KEY] });
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    renderScreen();
+    await settled();
+
+    await waitFor(() => expect(cardFor('openai').dataset.state).toBe('detected'));
+    expect(summary()?.dataset.tone).toBe('error');
   });
 });
 
@@ -609,6 +667,10 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     // Nothing landed, so nothing is retired: the same batch is still the offer.
     expect(lastAction().labelArgs).toEqual({ count: 1 });
     expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true');
+    // `onApplied(0)` is a refresh trigger on this path too. The server terminalised
+    // the batch and closed the dialog behind it, so the held scan now describes rows
+    // it has just disagreed about — retrying that same batch would fail forever.
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
 
     await activate(handle);
     expect(await screen.findByRole('dialog')).toBeTruthy();
@@ -691,18 +753,20 @@ describe('ProvidersScreen — the engine', () => {
 
     await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
     expect(gatewayCard().dataset.failedStep).toBe('start');
+    // A failed start moved supervisor health too. The shell's read still describes
+    // the health the engine had before the attempt, so it is asked again here.
+    await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(1));
 
     await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
 
     // Both halves are re-armed at once: the failure could be the engine or the read
     // that described it, and from here neither is distinguishable.
-    expect(retrySetup).toHaveBeenCalled();
     await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(gatewayCard().dataset.state).not.toBe('failed'));
-    // The engine moved, so the shell's read now describes where it was. Asking for
-    // it again is the only thing that turns the card and the footer around; the
-    // attempt's own success is not the machine answering.
-    await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(2));
+    // Three reads, not two: the press asked for one, and the engine moving asked for
+    // another. That last one is the only thing that turns the card and the footer
+    // around — the attempt's own success is not the machine answering.
+    await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(3));
   });
 
   it('refuses to continue into a screen with no engine behind it', async () => {
@@ -747,10 +811,31 @@ describe('ProvidersScreen — the engine', () => {
     renderScreen({ runtimeRead: readyRegion(runtimeOf('not_installed')) });
     await settled();
 
+    // The engine is ensured whatever there is to adopt. Nothing to adopt is not
+    // nothing to do: the next screen picks a model per assistant out of what the Hub
+    // supplies, so a machine with no CLI still arrives there needing one behind it.
+    await waitFor(() => expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
     // Presence is read fresh: a CLI installed while setup was open is exactly the
     // case a cached list would get wrong.
     await waitFor(() => expect(modelsApi.refreshAgentPresence).toHaveBeenCalled());
-    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('idle'));
+  });
+
+  it('still ensures the engine on a machine where every CLI is already adopted', async () => {
+    // The other exit that used to strand this screen. `resumeGatewayAdoption` returns
+    // success without touching the runtime when its backend is already in hub mode,
+    // so the engine stayed missing: card idle, no retry beside it, Continue blocked
+    // on a read that never moves.
+    serve({
+      agents: [supply({ backend: 'codex', mode: 'hub' }), supply({ backend: 'claude', mode: 'hub' })],
+      runtime: runtimeOf('not_installed'),
+    });
+    renderScreen({ runtimeRead: readyRegion(runtimeOf('not_installed')) });
+    await settled();
+
+    await waitFor(() => expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(gatewayCard().dataset.state).toBe('idle'));
   });
 

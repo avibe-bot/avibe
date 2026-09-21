@@ -9,9 +9,18 @@ import type { FC } from 'react';
 import { Check, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import type { SourceKind } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
+import type { TranslationKey } from '@/i18n/types';
 
 import type { ProviderSlot } from './providerStage';
+
+/** What a connected card says when there is no mask to say — Settings' own words for
+ *  the same distinction, so one source reads one way in both places. */
+const SUPPLY_KIND_COPY = {
+  subscription: 'settings.models.upstream.kind.subscription',
+  api_key: 'settings.models.upstream.kind.apiKey',
+} as const satisfies Record<SourceKind, TranslationKey>;
 
 export const ProviderCard: FC<{
   slot: ProviderSlot;
@@ -23,11 +32,16 @@ export const ProviderCard: FC<{
   const detected = slot.kind === 'detected';
   const connected = slot.kind === 'connected';
 
-  // The second line says where the card's knowledge came from. An empty card has no
-  // key to describe, so it describes the offer instead.
+  // The second line says where the card's knowledge came from. A connected
+  // subscription has no key to mask, so it names the sign-in instead; only a card
+  // with nothing behind it describes the offer, which is the one thing a connected
+  // card must never do — it is disabled, so an invitation to add a key there is an
+  // invitation to press something that does nothing.
   const written = slot.mask
     ? t(connected ? 'onboarding.providers.cardKeyAdded' : 'onboarding.providers.cardKeyDetected', { mask: slot.mask })
-    : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
+    : slot.supply
+      ? [t(SUPPLY_KIND_COPY[slot.supply.kind]), slot.supply.account].filter(Boolean).join(' · ')
+      : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
 
   // A key saved without verification is `standby` carrying `verification_pending`:
   // stored, but nothing has confirmed it answers. Settings states that difference

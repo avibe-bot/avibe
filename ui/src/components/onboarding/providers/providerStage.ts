@@ -18,6 +18,7 @@ import {
   groupMigrationCandidates,
   groupSelectable,
   requiredBackends,
+  type MigrationGroup,
   type MigrationSelection,
 } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
@@ -30,6 +31,7 @@ import type {
   MigrationScan,
   RuntimeDependency,
   Source,
+  SourceKind,
 } from '@/components/settings/models/types';
 import {
   SETUP_PRIMARY_VENDORS,
@@ -89,8 +91,22 @@ export type ProviderSlot = {
   vendor: string;
   label: string;
   kind: ProviderSlotKind;
-  /** Masked credential for the card's second line; never secret material. */
+  /**
+   * The card's second line when there is a credential to describe: the separate
+   * mask when the server sends one, and for a detected row the masked detail it has
+   * always carried when it does not. Never secret material.
+   */
   mask: string | null;
+  /**
+   * How a connected source arrives, and whose sign-in it is. `null` for anything
+   * that is not connected.
+   *
+   * A subscription has no mask by construction — there is no key to mask — so a card
+   * that described itself by its mask alone would fall through to the offer an EMPTY
+   * card makes and invite a key for a provider already connected. What it says
+   * instead is what Settings says about the same source.
+   */
+  supply: { kind: SourceKind; account: string | null } | null;
   /**
    * Connected, but no successful model call has been made with this credential yet.
    *
@@ -110,6 +126,23 @@ export type ProviderSlot = {
    */
   backends: AgentBackend[];
 };
+
+/**
+ * Every group the scan offers setup, on setup's terms.
+ *
+ * Both scopes are the same predicate, and that is the point: setup opens from
+ * importable API keys and may take over nothing else. A backend that also carries an
+ * importable subscription store therefore appears — its key is right there, and a
+ * screen that silently dropped it would leave a detected credential unexplained —
+ * but blocked, for review in Settings. The server migrates a backend whole and
+ * refuses a batch that omits any of its rows, so there is no half of it to take.
+ *
+ * One helper rather than the call spelled out five times, so the cards, the capsule's
+ * count, the CTA's batch, the seeded consent and the reconciliation cannot drift into
+ * answering the same question two ways.
+ */
+const setupGroups = (items: MigrationItem[]): MigrationGroup[] =>
+  groupMigrationCandidates(items, isImportableKey, isImportableKey);
 
 const byPrimaryRank = (left: ProviderSlot, right: ProviderSlot): number => {
   const leftRank = setupPrimaryRank(left.vendor);
@@ -132,7 +165,7 @@ const byPrimaryRank = (left: ProviderSlot, right: ProviderSlot): number => {
 function detectedProviders(scan: MigrationScan | null): ProviderSlot[] {
   if (!scan) return [];
   const byVendor = new Map<string, ProviderSlot>();
-  for (const group of groupMigrationCandidates(scan.items, isImportableKey)) {
+  for (const group of setupGroups(scan.items)) {
     if (!groupSelectable(group)) continue;
     for (const row of group.importRows) {
       const named = row.vendor?.trim();
@@ -147,7 +180,11 @@ function detectedProviders(scan: MigrationScan | null): ProviderSlot[] {
         vendor,
         label: providerBrandLabel(named, row.display_name),
         kind: 'detected',
-        mask: row.masked_credential?.trim() || null,
+        // `masked_credential` is the newer separate field; `masked_detail` is the one
+        // every server has always sent. Falling back to it is what stops a row from an
+        // older server reading as a provider with nothing detected about it.
+        mask: row.masked_credential?.trim() || row.masked_detail?.trim() || null,
+        supply: null,
         pending: false,
         backends: [group.backend],
       });
@@ -180,6 +217,7 @@ export function providerSlots(input: {
       label: providerBrandLabel(source.vendor, source.display_name),
       kind: 'connected',
       mask: source.masked_credential?.trim() || null,
+      supply: { kind: source.kind, account: source.account_label?.trim() || null },
       pending: Boolean(source.verification_pending),
       backends: [],
     });
@@ -195,7 +233,15 @@ export function providerSlots(input: {
     if (slots.length >= PROVIDER_SLOT_COUNT) break;
     if (seen.has(vendor)) continue;
     seen.add(vendor);
-    slots.push({ vendor, label: providerBrandLabel(vendor), kind: 'empty', mask: null, pending: false, backends: [] });
+    slots.push({
+      vendor,
+      label: providerBrandLabel(vendor),
+      kind: 'empty',
+      mask: null,
+      supply: null,
+      pending: false,
+      backends: [],
+    });
   }
 
   return slots.slice(0, PROVIDER_SLOT_COUNT);
@@ -239,7 +285,7 @@ export const slotSelected = (
 export function pendingImportRows(selection: MigrationSelection): MigrationItem[] {
   const items = selection.scan?.items ?? [];
   const consented = new Set(
-    groupMigrationCandidates(items, isImportableKey)
+    setupGroups(items)
       .filter((group) => groupSelectable(group) && selection.selectedBackends.includes(group.backend))
       .map((group) => group.backend),
   );
@@ -252,15 +298,15 @@ export function pendingImportRows(selection: MigrationSelection): MigrationItem[
  * Not every importable key in the scan: a key whose consent group is blocked by an
  * OAuth row or a blocker cannot be consented to from here, so advertising it would
  * open a review with nothing to press. The offer is therefore built from the same
- * selectable groups the cards and the dialog are built from, narrowed back to keys
- * because「发现 N 个可导入的 API Key」 is what the sentence says.
+ * selectable groups the cards and the dialog are built from — already only keys,
+ * because that is setup's scope, and 「发现 N 个可导入的 API Key」 is what the
+ * sentence says.
  */
 export function offeredImportKeys(selection: MigrationSelection): MigrationItem[] {
   const items = selection.scan?.items ?? [];
-  return groupMigrationCandidates(items, isImportableKey)
+  return setupGroups(items)
     .filter(groupSelectable)
-    .flatMap((group) => group.importRows)
-    .filter(isImportableKey);
+    .flatMap((group) => group.importRows);
 }
 
 /**
@@ -276,7 +322,7 @@ export function offeredImportKeys(selection: MigrationSelection): MigrationItem[
  */
 export function defaultSelection(scan: MigrationScan | null): AgentBackend[] {
   const items = scan?.items ?? [];
-  return groupMigrationCandidates(items, isImportableKey)
+  return setupGroups(items)
     .filter((group) => groupSelectable(group) && group.linkedImportRows.every((row) => row.selected))
     .map((group) => group.backend);
 }
@@ -304,22 +350,51 @@ export function toggleSlotSelection(
   return [...next];
 }
 
+/** A backend's rows as an order-independent identity, so two scans can be asked
+ *  whether they describe the same credentials rather than merely the same names. */
+const backendRowIdentity = (items: readonly MigrationItem[], backend: AgentBackend): string =>
+  items.filter((item) => item.backend === backend).map((item) => item.id).sort().join('\n');
+
 /**
  * Consent a fresh scan still supports.
  *
- * Run whenever the scan is replaced. A backend that was consented to and has since
- * been imported, blocked, or lost its importable rows is no longer something this
- * entry point can submit — and a stale name left in the selection would keep the
- * CTA offering a batch the dialog would refuse to build.
+ * Run whenever the scan is replaced, and deliberately conservative: consent was given
+ * to rows that were on screen, so it survives only where the new scan asks the same
+ * question. Three ways it stops doing that.
+ *
+ * A group that was imported, newly blocked or has lost its importable rows can no
+ * longer be submitted at all, and a stale name left behind would keep the CTA
+ * offering a batch the dialog would refuse to build.
+ *
+ * A group whose custody closure has grown can be submitted, and refused: the server
+ * rejects a batch that migrates one backend while leaving a linked one out, so a
+ * selection holding only part of a closure is a press that always fails.
+ *
+ * And a group whose rows have CHANGED is the quiet one — a key that appeared under an
+ * already-consented backend would ride into the next batch on a decision made about
+ * a different set of credentials. Nobody consented to that one, so the group goes
+ * back for review rather than carrying its tick forward.
  */
-export function reconcileSelection(selection: MigrationSelection): AgentBackend[] {
+export function reconcileSelection(
+  selection: MigrationSelection,
+  previous: MigrationScan | null,
+): AgentBackend[] {
   const items = selection.scan?.items ?? [];
-  const selectable = new Set(
-    groupMigrationCandidates(items, isImportableKey)
+  const priorItems = previous?.items ?? [];
+  const carried = new Set(selection.selectedBackends);
+  const selectable = new Map(
+    setupGroups(items)
       .filter(groupSelectable)
-      .map((group) => group.backend),
+      .map((group) => [group.backend, group] as const),
   );
-  return selection.selectedBackends.filter((backend) => selectable.has(backend));
+  return selection.selectedBackends.filter((backend) => {
+    const group = selectable.get(backend);
+    if (!group) return false;
+    return [...group.required].every((linked) => (
+      carried.has(linked)
+      && backendRowIdentity(items, linked) === backendRowIdentity(priorItems, linked)
+    ));
+  });
 }
 
 export type ProviderSummary =
@@ -361,12 +436,13 @@ export function providerSummary(input: {
 /**
  * The backend whose adoption the screen resumes, or `null` when there is none.
  *
- * `resumeGatewayAdoption` is named for one backend and returns early — without
- * touching the runtime at all — when that backend is already in hub mode. So the
- * choice is not cosmetic: naming an already-adopted backend would skip the install
- * and start this screen exists to perform. Hence the first present backend that is
- * NOT already adopted, in the shared backend order, falling back to the first
- * present one when every row is already in hub mode and there is nothing to resume.
+ * The engine is ensured before this is asked, so what is left to choose is what to
+ * ADOPT: the first present backend not already in hub mode, in the shared backend
+ * order. The choice is not cosmetic — `resumeGatewayAdoption` is named for one
+ * backend and returns success immediately when that one is already in hub mode, so
+ * naming an adopted backend would adopt nothing while an unadopted CLI sat beside
+ * it. When every present backend is already adopted, the first present one is that
+ * same no-op and correctly reports there is nothing left to do.
  *
  * Presence is the server's `cli_present`, read from a refreshed collection rather
  * than a cached list: a CLI installed while setup was open is exactly the case a
@@ -386,8 +462,10 @@ export type GatewayIntent =
   /** No authoritative answer yet, or one that authorizes nothing. The shell owns
    *  the read and its recovery; the card waits rather than inventing a verdict. */
   | { kind: 'waiting' }
-  /** The engine is missing or stopped and this screen may resume it. */
-  | { kind: 'resume'; step: 'install' | 'start' }
+  /** The engine is missing or stopped and this screen may resume it. `runtime` is the
+   *  authoritative snapshot the step was read from, carried so the resume starts from
+   *  the state that authorized it rather than reading the same thing a second time. */
+  | { kind: 'resume'; step: 'install' | 'start'; runtime: RuntimeDependency }
   /** Installing here is not something this deployment can do. */
   | { kind: 'unsupported' };
 
@@ -423,9 +501,9 @@ export function gatewayIntent(input: {
   if (!runtime || runtime.enabled === false) return { kind: 'waiting' };
   const step = installAndStartStep(runtime);
   if (step === 'complete') return { kind: 'running' };
-  if (step === 'start') return { kind: 'resume', step: 'start' };
+  if (step === 'start') return { kind: 'resume', step: 'start', runtime };
   return setupCanAttemptInstall(input.capability, input.gatewayEnabled, input.runtimeRead)
-    ? { kind: 'resume', step: 'install' }
+    ? { kind: 'resume', step: 'install', runtime }
     : { kind: 'unsupported' };
 }
 

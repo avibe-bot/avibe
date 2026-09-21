@@ -66,6 +66,21 @@ const REAUTH: MigrationItem = {
   masked_credential: 'sk-ant-…4b7e',
 };
 
+// Importable, and on the same backend as the subscription above: the pair is what
+// setup can see but cannot take, because the server migrates a backend whole.
+const CLAUDE_KEY: MigrationItem = {
+  id: 'mig_claude_key',
+  backend: 'claude',
+  kind: 'api_key',
+  masked_detail: 'sk-ant-…1c05',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+  vendor: 'anthropic',
+  display_name: 'Anthropic',
+  masked_credential: 'sk-ant-…1c05',
+};
+
 // An older server that sends none of the presentation metadata.
 const LEGACY: MigrationItem = {
   id: 'mig_opencode_legacy',
@@ -785,6 +800,25 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
     expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
     expect(within(dialog).queryByText(/complete API-key groups only/)).toBeNull();
   });
+
+  it('still takes a key standing beside a subscription, because its scope is everything', async () => {
+    serve([SUBSCRIPTION, CLAUDE_KEY]);
+    renderDialog();
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText(/sk-ant-…1c05/);
+
+    // No narrower scope was passed, so neither row is out of reach and the group
+    // is not blocked: the whole backend migrates together, as it always has.
+    expect(controls(dialog)).toEqual([
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: false },
+      { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: false },
+      { role: null, name: 'Later', disabled: false },
+      { role: null, name: 'Start migration', disabled: false },
+      { role: null, name: 'Close', disabled: false },
+    ]);
+    expect(within(dialog).queryByText(/but not from here/)).toBeNull();
+  });
 });
 
 const SetupHost: React.FC<{
@@ -804,6 +838,7 @@ const SetupHost: React.FC<{
       open
       scope="setup"
       eligible={isImportableKey}
+      takeable={isImportableKey}
       value={selection}
       onChange={setSelection}
       onApplied={(applied) => {
@@ -934,5 +969,28 @@ describe('MigrationDialog — the setup scope', () => {
     await within(dialog).findByText('Migrated 1 configuration item');
     await user.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('shows a key it cannot take here, and says why rather than offering it', async () => {
+    renderSetup({ scan: [SUBSCRIPTION, CLAUDE_KEY] });
+
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText(/sk-ant-…1c05/);
+
+    // The key stays on screen — a detected credential the screen dropped would be
+    // unexplained — but its group is blocked, because taking it would take the
+    // subscription beside it, which setup has no consent for.
+    expect(controls(dialog)).toEqual([
+      { role: 'checkbox', name: 'Anthropic · Claude 账号登录（OAuth） · Claude Code configuration', disabled: true },
+      { role: 'checkbox', name: 'Anthropic · sk-ant-…1c05 · Claude Code configuration', disabled: true },
+      { role: null, name: 'Not now', disabled: false },
+      { role: null, name: 'Start migration', disabled: true },
+      { role: null, name: 'Close', disabled: false },
+    ]);
+    // Not the server's "cannot be imported": it can be, just not from here.
+    expect(
+      within(dialog).getByText('This credential can be migrated, but not from here. Review it in Settings.'),
+    ).toBeTruthy();
+    expect(within(dialog).queryByText(/cannot be imported/)).toBeNull();
   });
 });

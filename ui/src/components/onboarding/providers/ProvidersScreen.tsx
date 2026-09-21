@@ -8,9 +8,12 @@
 // machine would let the cards, the sentence and the button disagree about it.
 //
 // What this file owns is composition and lifecycle. It owns no migration semantics
-// (the shipped takeover does), no runtime sequence (`resumeGatewayAdoption` does), no
-// credential write (the add dialog does), no derivation (`providerStage.ts` does) and
-// no primary button (the shell does, through `onActionChange` and `activate`).
+// (the shipped takeover does), no install-and-start sequence (`runtimeLifecycle` does),
+// no adoption sequence (`gatewayAdoption` does), no credential write (the add dialog
+// does), no derivation (`providerStage.ts` does) and no primary button (the shell does,
+// through `onActionChange` and `activate`). Ordering those two runtime sequences is
+// composition, and therefore is this file's: the engine has to be up whether or not
+// there is an assistant to adopt.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -23,7 +26,11 @@ import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
-import type { AgentBackend, Source } from '@/components/settings/models/types';
+import {
+  installAndStartStep,
+  resumeInstallAndStartRuntime,
+} from '@/components/settings/models/runtimeLifecycle';
+import type { AgentBackend, RuntimeDependency, Source } from '@/components/settings/models/types';
 
 import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
@@ -65,9 +72,9 @@ import '../onboarding-providers.css';
 const INBOUND_DELAY_MS = 120;
 const OUTBOUND_DELAY_MS = 570;
 
-/** A resume attempt this screen started. `step` is the step the authoritative read
- *  called for when it began — the lifecycle helper reports no intermediate progress,
- *  so the card says what was needed rather than guessing what is happening now. */
+/** A resume attempt this screen started. `step` is the step currently being attempted:
+ *  it opens on what the authoritative read called for and follows the lifecycle
+ *  helper's own report across the install/start boundary. */
 type GatewayRun =
   | { kind: 'idle' }
   | { kind: 'running'; step: 'install' | 'start' }
@@ -151,31 +158,39 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       if (!active || !ready) return;
       let cancelled = false;
       void (async () => {
-        try {
-          const [read, scan] = await Promise.all([sourceReads.refresh(), modelsApi.scanMigration()]);
-          if (cancelled) return;
-          setSupplyFailed(false);
-          if (read.kind === 'current') setSources(read.value);
-          // Read outside the updater and written after it: an updater has to be pure,
-          // and one that flips this on its first call answers its own question
-          // differently on the second.
-          const first = !seededSelectionRef.current;
-          setFlowState((previous) => {
-            // The first scan has no prior consent to carry, so it opens on the
-            // server's own defaults — the same rows the shipped dialog opens ticked.
-            // Afterwards the selection is the person's: a fresh scan can only retire
-            // a consent that was imported, newly blocked or simply gone, because
-            // carrying a stale name forward would keep the CTA offering a batch the
-            // dialog would refuse to build.
-            const selectedBackends = first && previous.providerSelection.scan === null
-              ? defaultSelection(scan)
-              : reconcileSelection({ scan, selectedBackends: previous.providerSelection.selectedBackends });
-            return { ...previous, providerSelection: { scan, selectedBackends } };
-          });
-          seededSelectionRef.current = true;
-        } catch {
-          if (!cancelled) setSupplyFailed(true);
-        }
+        // Settled independently, because they answer different questions. A scan that
+        // fails says nothing about the sources, and discarding a source list that did
+        // arrive would report providers that exist as providers that do not — leaving
+        // the action offering 「添加」 on a machine that already has credentials.
+        const [read, scan] = await Promise.allSettled([
+          sourceReads.refresh(),
+          modelsApi.scanMigration(),
+        ]);
+        if (cancelled) return;
+        // Either failure is still a failure: what the screen cannot report is exactly
+        // what the sentence and its retry exist to say.
+        setSupplyFailed(read.status === 'rejected' || scan.status === 'rejected');
+        if (read.status === 'fulfilled' && read.value.kind === 'current') setSources(read.value.value);
+        if (scan.status === 'rejected') return;
+        const scanned = scan.value;
+        // Read outside the updater and written after it: an updater has to be pure,
+        // and one that flips this on its first call answers its own question
+        // differently on the second.
+        const first = !seededSelectionRef.current;
+        setFlowState((previous) => {
+          // The first scan has no prior consent to carry, so it opens on the
+          // server's own defaults — the same rows the shipped dialog opens ticked.
+          // Afterwards the selection is the person's, and survives only where this
+          // scan asks the same question the last one did.
+          const selectedBackends = first && previous.providerSelection.scan === null
+            ? defaultSelection(scanned)
+            : reconcileSelection(
+              { scan: scanned, selectedBackends: previous.providerSelection.selectedBackends },
+              previous.providerSelection.scan,
+            );
+          return { ...previous, providerSelection: { scan: scanned, selectedBackends } };
+        });
+        seededSelectionRef.current = true;
       })();
       return () => { cancelled = true; };
     }, [active, ready, supplyToken, setFlowState, sourceReads]);
@@ -197,31 +212,59 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     refreshRuntimeRef.current = onRetrySetup;
 
     const resumeStep = intent.kind === 'resume' ? intent.step : null;
+    // The snapshot the step was read from, held for the same reason the callbacks are:
+    // it is a new object on every read, and depending on it would cancel an attempt
+    // that is still in flight. Captured synchronously below, before any await.
+    const resumeRuntimeRef = React.useRef<RuntimeDependency | null>(null);
+    resumeRuntimeRef.current = intent.kind === 'resume' ? intent.runtime : null;
+
     React.useEffect(() => {
       if (!active || resumeStep === null || attemptedRef.current === gatewayToken) return;
+      const runtime = resumeRuntimeRef.current;
+      if (runtime === null) return;
       attemptedRef.current = gatewayToken;
       let cancelled = false;
       setGatewayRun({ kind: 'running', step: resumeStep });
       void (async () => {
         try {
+          // The engine first, and on its own. `resumeGatewayAdoption` is named for
+          // adoption: it returns success without touching the runtime when its backend
+          // is already in hub mode, and on a machine with no assistant CLI there is no
+          // backend to name at all. Either exit used to leave a missing or stopped
+          // engine exactly as it was — card idle, no retry beside it, Continue blocked
+          // on a read that never moves, and the screen that installs assistants on the
+          // far side of it.
+          const started = await resumeInstallAndStartRuntime(modelsApi, runtime, (value) => {
+            // Install and start are one press and two waits; the helper reports the
+            // crossing, so the card can say which one it is in.
+            const step = installAndStartStep(value);
+            if (!cancelled && step !== 'complete') setGatewayRun({ kind: 'running', step });
+          });
+          if (cancelled) return;
+          if (started.failedStep !== null) {
+            setGatewayRun({ kind: 'failed', step: started.failedStep });
+            // A failed install or start changed supervisor health; the shell's read
+            // still describes the health it had before the attempt.
+            refreshRuntimeRef.current();
+            return;
+          }
+          // Then what there is to adopt, which may be nothing: no CLI on this machine
+          // is not a gateway failure, and the engine is up either way.
           const agents = await agentReads.refresh();
           if (cancelled) return;
           const backend = agents.kind === 'current' ? adoptionBackend(agents.value) : null;
-          // No CLI on this machine is not a gateway failure — there is simply nothing
-          // to adopt, and the engine's state stays the shell's read to report.
-          if (backend === null) { setGatewayRun({ kind: 'idle' }); return; }
-          const outcome = await resumeGatewayAdoption(modelsApi, agentReads, backend);
+          const outcome = backend === null
+            ? { ok: true as const }
+            : await resumeGatewayAdoption(modelsApi, agentReads, backend);
           if (cancelled) return;
           setGatewayRun(outcome.ok ? { kind: 'idle' } : { kind: 'failed', step: outcome.failure.step });
-          if (outcome.ok) {
-            // The engine moved; the shell's read still describes where it was. Asking
-            // for that read again is what turns the card from 「正在启动」 to 「运行中」
-            // and unblocks Continue — without it the attempt succeeds and the screen
-            // falls back to the stale intent, which is still 'resume'.
-            refreshRuntimeRef.current();
-            // And an engine that just came up can answer reads that failed before it did.
-            setSupplyToken((token) => token + 1);
-          }
+          // The engine moved; the shell's read still describes where it was. Asking
+          // for that read again is what turns the card from 「正在启动」 to 「运行中」
+          // and unblocks Continue — without it the attempt succeeds and the screen
+          // falls back to the stale intent, which is still 'resume'.
+          refreshRuntimeRef.current();
+          // And an engine that just came up can answer reads that failed before it did.
+          if (outcome.ok) setSupplyToken((token) => token + 1);
         } catch {
           if (!cancelled) setGatewayRun({ kind: 'failed', step: 'read' });
         }
@@ -490,13 +533,25 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             open
             scope="setup"
             eligible={isImportableKey}
+            takeable={isImportableKey}
             value={selection}
             onChange={(next) => changeSelection(next.selectedBackends)}
             onApplied={(applied) => {
               // `onApplied(0)` is a refresh trigger, not a receipt: the takeover reports
               // a rejected batch that way, and the only observable difference between a
               // batch that landed and one that did not is this number.
-              if (applied === 0) { setImportFailed(true); return; }
+              //
+              // It is a trigger on BOTH paths. A rejection the server terminalised —
+              // `migration_credentials_invalid` closes the dialog behind it — leaves the
+              // held scan describing rows the server has just disagreed about, and
+              // retrying that same batch returns the same error forever. Re-reading is
+              // what surfaces the reauthentication; only the count is not touched,
+              // because nothing landed.
+              if (applied === 0) {
+                setImportFailed(true);
+                setSupplyToken((token) => token + 1);
+                return;
+              }
               setImportFailed(false);
               setFlowState((previous) => ({
                 ...previous,

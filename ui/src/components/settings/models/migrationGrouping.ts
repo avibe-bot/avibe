@@ -58,8 +58,9 @@ export type MigrationGroup = {
   importRows: MigrationItem[];
   /** Every backend this one must migrate with, including itself. */
   required: Set<AgentBackend>;
-  /** Importable rows across the whole linked group. */
+  /** Rows across the whole linked group this scope may take over. */
   linkedImportRows: MigrationItem[];
+  /** Linked rows it may not: a blocker, or a credential outside the scope. */
   blockedRows: MigrationItem[];
   blocked: boolean;
 };
@@ -74,20 +75,34 @@ export const scopedBackends = (
 /**
  * The dialog's rows, grouped. `items` stays the complete scan so a group's
  * linked rows can include a backend the scope itself never selected.
+ *
+ * Two scopes, because an entry point asks two different questions. `eligible` says
+ * which rows it was opened FROM: their backends, widened to their custody closures,
+ * are what appears at all. `takeable` says which of the rows that appear it may
+ * actually take OVER — and a row in view that fails it blocks its group rather than
+ * being quietly left behind, because the server migrates a backend whole and refuses
+ * any batch that omits one of its rows. There is no half of a backend to take.
+ *
+ * Settings may take over everything the scan proposes importing, which is the
+ * default and makes the second scope invisible there. Setup may not: it is scoped to
+ * API keys, and a backend whose credentials also include an importable subscription
+ * store is a Settings review rather than a setup card.
  */
 export function groupMigrationCandidates(
   items: MigrationItem[],
   eligible: (item: MigrationItem) => boolean,
+  takeable: (item: MigrationItem) => boolean = () => true,
 ): MigrationGroup[] {
   const scope = scopedBackends(items, eligible);
   const candidates = items.filter((item) => scope.has(item.backend));
+  const importableHere = (item: MigrationItem) => isImportable(item) && takeable(item);
   return BACKEND_ORDER.map((backend) => {
     const rows = candidates.filter((item) => item.backend === backend);
-    const importRows = rows.filter(isImportable);
+    const importRows = rows.filter(importableHere);
     const required = requiredBackends(items, [backend]);
     const linkedRows = candidates.filter((item) => required.has(item.backend));
-    const linkedImportRows = linkedRows.filter(isImportable);
-    const blockedRows = linkedRows.filter((item) => !isImportable(item));
+    const linkedImportRows = linkedRows.filter(importableHere);
+    const blockedRows = linkedRows.filter((item) => !importableHere(item));
     return {
       backend,
       rows,
@@ -104,7 +119,14 @@ export function groupMigrationCandidates(
 export const groupSelectable = (group: MigrationGroup): boolean =>
   !group.blocked && group.importRows.length > 0;
 
-/** The rows a selection submits: every importable row of every selected backend. */
+/**
+ * The rows a selection submits: every importable row of every selected backend.
+ *
+ * Unscoped on purpose, and safe because a backend reaches a selection only through
+ * `groupSelectable` — whose group, by the rule above, has no linked row the scope
+ * cannot take. The server enforces the same completeness from its side: a batch that
+ * omits a row of a backend it is migrating is refused outright.
+ */
 export const appliableItems = (
   items: MigrationItem[],
   selected: ReadonlySet<AgentBackend>,

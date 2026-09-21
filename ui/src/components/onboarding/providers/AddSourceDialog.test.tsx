@@ -480,6 +480,55 @@ describe('AddSourceDialog — the one write it owns', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it('hands an unknown outcome back on the way out rather than forgetting it', async () => {
+    const landed = source({ id: 'src_landed', vendor: 'custom' });
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('gateway_timeout', 'timeout', true, [], [], [], 504));
+    const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+    await waitFor(() => expect(screen.getByText(/Your entries are preserved/)).toBeTruthy());
+
+    // It had landed. The nonce that would identify it lives in this frame, so
+    // leaving without reading would make it unattributable: the parent would show
+    // nothing, and the next attempt would carry a new nonce and write a duplicate.
+    const nonce = create.mock.calls[0][0].client_nonce;
+    list.mockResolvedValue([{ ...landed, client_nonce: nonce }]);
+
+    await user.click(cancelButton());
+
+    // Closed on the press, not held until the read answers — nobody is kept in a
+    // dialog because a request timed out.
+    expect(onClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(onAdded.mock.calls[0][0]).toMatchObject({ source: { id: 'src_landed' } });
+    // And still exactly one write: closing is not a retry.
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes on an unknown outcome it could not read, and says only that', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('gateway_timeout', 'timeout', true, [], [], [], 504));
+    vi.spyOn(modelsApi, 'listSources').mockRejectedValue(new Error('offline'));
+    renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+    await waitFor(() => expect(screen.getByText(/Your entries are preserved/)).toBeTruthy());
+
+    await user.click(cancelButton());
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // A read that failed leaves the outcome exactly as unknown as it already was.
+    // Reporting nothing named is what makes the parent refresh and say so.
+    await waitFor(() => expect(onAdded).toHaveBeenCalledWith(null));
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
   it('cancels without writing anything', async () => {
     const create = vi.spyOn(modelsApi, 'createApiKeySource');
     renderDialog();
