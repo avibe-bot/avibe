@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -55,7 +56,12 @@ from core.citations import (  # noqa: E402
     resolve_citations,
 )
 from core.message_dispatcher import ConsolidatedMessageDispatcher  # noqa: E402
-from core.reply_enhancer import inline_links, process_reply, unescape_markdown  # noqa: E402
+from core.reply_enhancer import (  # noqa: E402
+    inline_links,
+    markdown_link_units,
+    process_reply,
+    unescape_markdown,
+)
 from modules.im import MessageContext  # noqa: E402
 from storage.db import create_sqlite_engine, dispose_cached_sqlite_engines  # noqa: E402
 from storage.importer import ensure_sqlite_state  # noqa: E402
@@ -217,6 +223,107 @@ CASES: tuple[dict[str, Any], ...] = (
         "text": "First {m0}, second {m1}.",
     },
     {
+        "key": "link_label",
+        "why": "The marker written inside a link's own label. A citation is a "
+        "link, and a link inside a link is not one - CommonMark makes the "
+        "outer brackets text again - so the source is shown after the unit "
+        "that encloses it, with that unit's destination and the label's other "
+        "words untouched. Both links name the same page here, which is where "
+        "a binding that matched on the address would badge the wrong one.",
+        "sources": {"turn0view0": ("https://openai.com/docs", "OpenAI Docs")},
+        "text": "See [the docs {m0}](https://openai.com/docs) for details.",
+    },
+    {
+        "key": "link_label_positions",
+        "why": "One source cited from inside three labels - opening one, in "
+        "the middle of the next, closing the third. One row, three spans, and "
+        "each source after its own unit rather than after the last of them.",
+        "sources": {"turn0view0": ("https://example.com/s", "Thrice")},
+        "text": "[{m0} a](https://u.example/1), [b {m0} c](https://u.example/2), "
+        "[d {m0}](https://u.example/3).",
+    },
+    {
+        "key": "data_slots",
+        "why": "The slots of a link that are address or syntax rather than "
+        "anything a reader is shown: a destination, a title, an angle-bracketed "
+        "destination, and an autolink, which is all address. A marker there is "
+        "part of what makes the unit work, so it stays the characters the model "
+        "typed - no token minted, no source fetched, no link spliced in - while "
+        "the one in the prose beside them is still a citation.",
+        "sources": {"turn0view0": ("https://example.com/s", "Prose")},
+        "text": "Cited. {m0}\n\n"
+        "[a](https://example.com/{m0}path) [b](https://example.com/y \"T {m0}\") "
+        "[c](<https://example.com/z{m0}>) <https://example.com/auto{m0}>",
+    },
+    {
+        "key": "reference_slots",
+        "why": "A reference link written in full shows its label and names its "
+        "definition separately, so the label is a place a citation can go. "
+        "Written short, the same brackets are both - the text a reader sees and "
+        "the identifier that finds the address - so editing them would leave a "
+        "link pointing at nothing. Those stay exactly as written, definition "
+        "included.",
+        "sources": {"turn0view0": ("https://example.com/s", "Referenced")},
+        "text": "[the docs {m0}][ref], [dual {m0}] and [dual {m0}][].\n\n"
+        "[ref]: https://r.example/page\n[dual {m0}]: https://r.example/dual",
+    },
+    {
+        "key": "image_slots",
+        "why": "An image's alt text is what a reader is given when the picture "
+        "is not there; its src is an address. One marker is a citation and the "
+        "other is not, in one line. The component does not fetch a foreign "
+        "image - it renders a click-through link instead - so both are links on "
+        "this surface.",
+        "sources": {"turn0view0": ("https://example.com/s", "Illustrated")},
+        "text": "![a diagram {m0}](https://i.example/p.png) and "
+        "![plain](https://i.example/{m0}q.png)",
+    },
+    {
+        "key": "image_in_link",
+        "why": "An image inside a link: two units, one holding the other. The "
+        "source belongs after the outer one. Placed after the image instead it "
+        "would sit in the link's label and take the link down with it.",
+        "sources": {"turn0view0": ("https://example.com/s", "Nested")},
+        "text": "[![a diagram {m0}](https://i.example/p.png)](https://out.example/page)",
+    },
+    {
+        "key": "moved_by_a_transform",
+        "why": "Delivery removes silent blocks, and what closes up behind them "
+        "leaves a registered token somewhere the model never put it. Each one "
+        "is judged where it ends up rather than where it started: inside a "
+        "label it is still a citation and is shown after that link, inside a "
+        "destination or a title it is data again and the marker the model typed "
+        "comes back - the alternative is a link nobody can open and a source "
+        "claimed where no reader can see it.",
+        "sources": {"turn0view0": ("https://example.com/s", "Moved")},
+        "text": "A [lab <silent>](https://z.example) x</silent>{m0}](https://out.example/page) B"
+        "\n\nC [two](https://z.example<silent>) y</silent>{m0}) D"
+        "\n\nE [three](https://z.example \"t<silent>\") y</silent>{m0}\") F",
+    },
+    {
+        "key": "open_fence",
+        "why": "A fence the answer never closed takes the rest of the reply "
+        "into code. The citation's own spelling in there is not a link to any "
+        "renderer here, and a marker in there is not a citation either - which "
+        "is the same rule the closed fence above gets, decided by the parser "
+        "rather than by whether a closing line happens to exist.",
+        "sources": {"turn0view0": ("https://example.com/s", "Unclosed")},
+        "text": "Cited. {m0}\n\n```\n{link0}\n{m0} still open",
+    },
+    {
+        "key": "file_label_and_quick_reply",
+        "why": "A marker in an attachment's label and in a quick-reply button. "
+        "Neither is Markdown a reader parses - one titles a file card, the "
+        "other is a button - so the attribution is plain text left where it "
+        "stands, with no link syntax and no token reaching a structured field. "
+        "In the body the attachment is still a link, and CommonMark refuses "
+        "``file:`` outright: a scan that cannot see that unit would put the "
+        "source inside its label and break the card.",
+        "sources": {"turn0view0": ("https://example.com/s", "Attached")},
+        "text": "Cited. {m0}\n\n[report {m0}](file:///tmp/avibe-citation-bridge/report.txt)"
+        "\n\n---\n[\U0001f44c \u7ee7\u7eed {m0}] | [\u2705 \u5b8c\u6210]",
+    },
+    {
         "key": "splice",
         "why": "Stripping a silent block splices two ordinary halves into "
         "characters that read as a citation marker. Only the first marker here "
@@ -307,6 +414,7 @@ def _anchors(text: str, citations: Iterable[Mapping[str, Any]]) -> list[dict[str
         if row.get("body_sha256") == digest
         for span in row.get("spans") or ()
     }
+    inner = _nested_unit_spans(text)
     anchors: list[dict[str, Any]] = []
     for link in inline_links(text):
         # A citation's span covers the whole link it wrote, so a link that
@@ -315,14 +423,65 @@ def _anchors(text: str, citations: Iterable[Mapping[str, Any]]) -> list[dict[str
             utf16_len(text[: link.start]),
             utf16_len(text[: link.end]),
         ) in spans
-        anchors.append(
-            {
-                "label": unescape_markdown(text[link.label_start : link.label_end]),
-                "url": link.destination,
-                "cited": cited,
-            }
-        )
+        # A label holding an image is not a string of text, and what a renderer
+        # puts inside that anchor is the picture rather than the Markdown that
+        # spelled it. Recording the source here would be recording something no
+        # reader is shown, so the label is left unsaid and the link is known by
+        # its address alone.
+        label = unescape_markdown(text[link.label_start : link.label_end])
+        if any(
+            link.label_start <= start and end <= link.label_end for start, end in inner
+        ):
+            label = None
+        anchors.append({"label": label, "url": link.destination, "cited": cited})
     return anchors
+
+
+def _nested_unit_spans(text: str) -> list[tuple[int, int]]:
+    """The spans of every link or image written inside another one."""
+    units = markdown_link_units(text)
+    return [
+        (unit.start, unit.end)
+        for unit in units
+        if any(
+            other is not unit and other.start <= unit.start and unit.end <= other.end
+            for other in units
+        )
+    ]
+
+
+# A link reference definition, and the address it names. Every other address a
+# renderer can reach is spelled inside a unit the scan below already walks.
+_DEFINITION = re.compile(r"^ {0,3}\[[^\]\n]*\]:[ \t]*(\S+)", re.MULTILINE)
+_ADDRESS = re.compile(r"https?://[^\s<>()\[\]\"']+")
+
+
+def _addresses_cover_the_surface(text: str, anchors: list[dict[str, Any]]) -> bool:
+    """Whether an address a reader of *text* reaches must be one of *anchors*.
+
+    ``inline_links`` reads inline links, which is what the delivery pass needs
+    and less than a reader gets: an image, a reference link or an autolink is a
+    link to a reader and not to that scan, and a reference definition holds an
+    address no unit spells. So everything it did not resolve is read back for
+    the addresses it spells - an attachment names none, and neither does a
+    reference that only points at a definition - and each one has to be an
+    address already recorded. When it is not, the anchors are a floor: a
+    consumer may be shown somewhere this file does not name, so it may be asked
+    which links it must show and never which it must not.
+    """
+    recorded = {anchor["url"] for anchor in anchors}
+    scanned = {(link.start, link.end) for link in inline_links(text)}
+    unresolved = [
+        text[unit.start : unit.end]
+        for unit in markdown_link_units(text)
+        if (unit.start, unit.end) not in scanned
+    ]
+    unresolved.extend(match.group(1) for match in _DEFINITION.finditer(text))
+    return all(
+        address in recorded
+        for spelled in unresolved
+        for address in _ADDRESS.findall(spelled)
+    )
 
 
 # ----- The rows the dispatcher actually stored ------------------------------
@@ -570,6 +729,11 @@ def build() -> dict[str, Any]:
         # its links a reader is owed as a citation.
         im_text = materialize_citations(im.text, bundle)
         im_citations = finalize_citations(im.text, bundle)[1]
+        web_anchors = _anchors(web_text, web_citations)
+        im_anchors = _anchors(im_text, im_citations)
+        cover = _addresses_cover_the_surface(
+            web_text, web_anchors
+        ) and _addresses_cover_the_surface(im_text, im_anchors)
         cases.append(
             {
                 "key": case["key"],
@@ -594,15 +758,17 @@ def build() -> dict[str, Any]:
                     }
                     for f in web.files
                 ],
-                "web_anchors": _anchors(web_text, web_citations),
-                "im_anchors": _anchors(im_text, im_citations),
-                # The scan above reads this text as CommonMark; the Web renderer
-                # adds GFM on top. A footnote definition is the one construct
-                # here that holds a link CommonMark does not see - and it is
-                # also rendered where the footnotes go rather than where it was
-                # written - so a text containing one may be asked which links it
-                # must show, but not "and nothing else, in this order".
-                "anchors_exhaustive": "[^" not in web_text,
+                "web_anchors": web_anchors,
+                "im_anchors": im_anchors,
+                # Two different questions, and a case may answer yes to the
+                # first and no to the second. ``cover`` says the addresses below
+                # are every address a reader is given, so a link pointing
+                # anywhere else is a link nobody wrote. ``exhaustive`` says they
+                # are also in the order they are shown - which a GFM footnote
+                # definition breaks by itself, because its link is rendered
+                # where the footnotes go rather than where it was written.
+                "anchors_cover_destinations": cover,
+                "anchors_exhaustive": cover and "[^" not in web_text,
             }
         )
     return {

@@ -596,6 +596,52 @@ class TestSlackSpellsTheWholeDestination:
         ]
 
 
+# The brackets half of the same table, measured on this side. See
+# tests/fixtures/citation_authority_matrix.json: the citation suite asserts
+# ``safe_url`` and the Web suite asserts the anchor, so a repair the three
+# surfaces agree on still has to be agreed on three times.
+_AUTHORITY_MATRIX = json.loads(
+    (Path(__file__).resolve().parent / "fixtures/citation_authority_matrix.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+class TestSlackKeepsOnlyTheBracketsThatWereAHost:
+    """A bracket is a host's syntax or it is data, and spelling loses which.
+
+    ``spell_uri`` writes every bracket it is given as ``%5B``/``%5D``, so by the
+    time the wrapper is built ``https://[::1]/admin`` and
+    ``https://%5B::1%5D/admin`` are one string. A pass that then restores
+    brackets to whatever looks like an authority gives the second destination a
+    loopback address its author never wrote - and a tap on it opens the
+    reader's own machine. So the destination is qualified before it is spelled,
+    and only a literal authority a URL parser accepts gets its brackets back.
+    """
+
+    def test_every_authority_arrives_as_the_destination_it_named(self):
+        for case in _AUTHORITY_MATRIX["cases"]:
+            wire = slack(case["markdown"])
+
+            assert len(all_links(wire)) == 1, case["markdown"]
+            assert slack_reads(wire) == (case["slack"], "h"), case["why"]
+
+    def test_two_destinations_that_spell_alike_are_still_two_destinations(self):
+        """Per occurrence, not per spelling.
+
+        Both links reach ``https://%5B::1%5D/admin`` if the answer is looked up
+        by the finished text, so the body carries one of each and the pair has
+        to come back apart.
+        """
+        pair = _AUTHORITY_MATRIX["per_occurrence"]
+        wire = slack(pair["markdown"])
+
+        assert [link[0] for link in all_links(wire)] == pair["slack"]
+        assert [link[1] for link in all_links(wire)] == [
+            link["label"] for link in pair["links"]
+        ]
+
+
 class TestSlackTellsAReferenceFromItsSpelling:
     """Two labels, one wire: a reference and the text that spells one.
 

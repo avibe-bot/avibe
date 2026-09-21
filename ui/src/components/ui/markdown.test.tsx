@@ -153,6 +153,68 @@ describe('Markdown link destinations', () => {
     expect([...pair.container.querySelectorAll('a')].map((a) => a.getAttribute('href')))
       .toEqual(['https://example.com/1%3Ex', 'https://example.com/2%7Cy']);
   });
+
+  // The brackets half of the same boundary, and the third shared table. A
+  // bracket is an IPv6 host's syntax in the authority and data everywhere
+  // else, and `normalizeUri` writes both as `%5B`/`%5D` - so by the time an
+  // href exists, `https://[::1]/admin` and `https://%5B::1%5D/admin` are one
+  // string, and restoring brackets to whatever looks like an authority hands
+  // the second one a live loopback address its author never wrote. The
+  // distinction is taken from the parsed destination, before that spelling,
+  // and carried to the href.
+  //
+  // Two facts per row, and they are not the same fact: `href` is the exact
+  // attribute this component writes, and `navigates` is what a browser's URL
+  // parser resolves from it - `null` where it refuses to. The refusals are
+  // asserted rather than skipped: `new URL('https://%5B::1%5D/admin')` throws,
+  // and leaving those rows out because the assertion is awkward is exactly how
+  // an invented address goes unnoticed. The citation and Slack suites assert
+  // their own columns of this table; see the fixture's description.
+  type AuthorityCase = {
+    why: string;
+    markdown: string;
+    href: string;
+    navigates: string | null;
+  };
+  const authorityMatrix = JSON.parse(
+    readFileSync(resolve(process.cwd(), '../tests/fixtures/citation_authority_matrix.json'), 'utf8'),
+  ) as {
+    cases: AuthorityCase[];
+    per_occurrence: {
+      markdown: string;
+      links: { href: string; label: string }[];
+    };
+  };
+
+  it.each(authorityMatrix.cases)('keeps only a real authority\'s brackets: $why', ({
+    markdown,
+    href,
+    navigates,
+  }) => {
+    const { container } = render(<Markdown content={markdown} />);
+    const anchors = [...container.querySelectorAll('a')];
+
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].getAttribute('href')).toBe(href);
+
+    if (navigates === null) {
+      expect(() => new URL(href)).toThrow();
+    } else {
+      expect(new URL(href).href).toBe(navigates);
+    }
+  });
+
+  it('keeps two destinations that spell alike apart', () => {
+    // Both hrefs are `https://%5B::1%5D/admin` if the answer is looked up by
+    // the finished text rather than kept per occurrence.
+    const { markdown, links } = authorityMatrix.per_occurrence;
+    const { container } = render(<Markdown content={markdown} />);
+
+    expect([...container.querySelectorAll('a')].map((a) => ({
+      href: a.getAttribute('href'),
+      label: a.textContent,
+    }))).toEqual(links);
+  });
 });
 
 describe('Markdown emphasis', () => {

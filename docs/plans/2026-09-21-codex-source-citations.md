@@ -69,9 +69,10 @@ blob with no way to reach the page the answer is based on.
 - **So identity is registered once, where the grammar still means what it
   says.** `register_citations` runs at the native input boundary, over the text
   exactly as the backend produced it. It uses the same offset-preserving
-  code/hidden mask the rewrite always used
-  (`core/reply_enhancer.mask_hidden_and_code`), resolves every complete marker
-  it may attribute — including the ones that end in the unresolved label — and
+  mask the rewrite always used, widened to cover the Markdown slots a citation
+  cannot be shown in (`core/reply_enhancer.mask_citation_slots`), resolves every
+  complete marker it may attribute — including the ones that end in the
+  unresolved label — and
   replaces each with an opaque per-occurrence token: a 128-bit nonce, never
   derived from the ref or from its order, and checked against the arriving text
   so a token can only ever be one this call minted. The bundle it returns
@@ -89,6 +90,35 @@ blob with no way to reach the page the answer is based on.
   link or an exposed internal token. Markers that were already in code or
   hidden blocks are never registered, and a native code literal, a truncated
   marker, and a visible unresolved fallback all keep the behaviour they had.
+- **A citation is only written where a link can be shown.** CommonMark has no
+  link inside a link, so a source spliced into a label takes the enclosing unit
+  down with it: `[Docs MARK](https://openai.com/docs)` rendered as a link
+  nested in its own label, and the reader was shown brackets instead of the
+  page. A marker written into a destination, a title, a reference identifier or
+  an angle autolink's address is worse than that — those characters are what
+  makes the unit reach somewhere, and splicing a link through them sends it to
+  an address nobody wrote. So the parser decides, on the offset-preserving
+  CommonMark units `markdown_link_units` already reports: a marker standing
+  where a reader is shown something (a visible inline-link label, an explicit
+  full-reference label, an image's alt text) is eligible, and its attribution
+  is written immediately **after the outermost enclosing unit** — an image
+  inside a link is two units, and only the link has an end a sibling can
+  follow — in occurrence order, with a separating space unless one is already
+  there. Only the registered token is removed from the label; the destination
+  and the label's other text are untouched. A marker in a data or syntax slot
+  is left exactly as the model typed it: no token is minted, no source is
+  fetched, no sidecar row is emitted, and — because `citation_ref_ids` asks the
+  same mask — delivery does not wait for a source it could never show. A
+  shortcut or collapsed reference is the dual-use case, both the words a reader
+  sees and the identifier that finds the address, so it and its definition are
+  preserved whole. The decision is re-asked of the final text for this bundle's
+  own tokens, so a token a transform moved into a label follows the rule above
+  and one moved into code, a hidden block or a data slot gets its original
+  marker text back. A structured field is not Markdown on any surface: a file
+  label or a quick-reply button keeps its plain-domain attribution in place,
+  with no link syntax and no token, because there is no unit to stand after.
+  The sidecar counts only the links actually written as standalone citation
+  links, and binds the body after that relocation.
 - **A span is an identity only together with the body it was measured in.** The
   persisted body is finalized the same way, and each sidecar row carries
   `spans` — the exact ranges its links occupy — and `body_sha256`, one digest
@@ -215,12 +245,25 @@ blob with no way to reach the page the answer is based on.
   consumers and comparing `URL.href` over a bounded matrix
   (`tests/fixtures/link_destination_matrix.json`, asserted from both sides).
   The one escape that has to come back is the pair of brackets around an IPv6
-  host: they are the authority's syntax rather than data, nothing opens
-  `%5B::1%5D`, and `restore_ipv6_authority` puts them back only there and only
-  when the authority parses — the same repair `markdown.tsx` already performs
-  on its own hrefs. A malformed-looking `%zz` is still left alone, because that
-  is what the consumer's own rule does with it rather than a policy chosen
-  here.
+  host: they are the authority's syntax rather than data, and nothing opens
+  `%5B::1%5D`. But only for a host that was *written* in brackets, and the
+  spelled URL can no longer answer that: `[` and `]` are outside the URI-safe
+  set, so spelling writes a literal `[::1]` and a provider's own `%5B::1%5D`
+  as the same characters. Repairing whatever looks escaped turned
+  `https://%5B::1%5D/admin`, which names no host at all, into a live link to
+  the loopback interface — and `safe_url`, the Web renderer and Slack all
+  agreed on that repair, which is agreement on the bug rather than proof of
+  correctness. So the destination is handed over *before* it is spelled:
+  `spell_destination` does both halves, qualifying the authority from the
+  resolved destination (`_authority_brackets_literal`) and then putting the
+  brackets back only there, only when the authority parses, and only when both
+  ends of the wrapper were literal — a mixed `[::1%5D` is not a bracketed host
+  with an escape in it, it is a host that was never bracketed at all, and
+  promoting half of it into syntax invents an address out of the other half.
+  The blind form of the call is gone rather than deprecated, so a caller cannot
+  silently forget to say which spelling it started from. A malformed-looking
+  `%zz` is still left alone, because that is what the consumer's own rule does
+  with it rather than a policy chosen here.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -327,13 +370,28 @@ blob with no way to reach the page the answer is based on.
   as 3 where a browser reads no port at all; empty is no port, in range is kept
   as written). The brackets of an IPv6 host are written literally rather than
   percent-encoded, because `%5B` is a destination the URL parser refuses
-  outright — and the renderer's own href is where that promise was still being
+  outright — and a destination that arrived already spelled that way names no
+  host, so it is rejected rather than repaired into one. Valid literal IPv6
+  stays supported, userinfo and port included; nothing here is a
+  loopback or private-network blacklist, which would reject addresses that are
+  perfectly real. The renderer's own href is where that promise was still being
   broken: `mdast-util-to-hast` percent-encodes the brackets on the way out, so
-  the anchor rendered correctly and went nowhere. The shared `urlTransform` puts
-  them back, in the authority only and only when the platform's own URL parser
-  then accepts the result, so the ordinary link reaches the same address the
-  badge does. A badge is a presentation enhancement; it may never be the only
-  thing able to navigate. An authority is read only
+  the anchor for a real IPv6 host rendered correctly and went nowhere. The
+  shared `urlTransform` puts them back, in the authority only and only when the
+  platform's own URL parser then accepts the result, so the ordinary link
+  reaches the same address the badge does — and only for a destination the
+  Markdown AST says was written with literal brackets. `remarkLiteralAuthority`
+  asks that of `node.url`, or of the definition a reference names, where the
+  parsed destination still exists, and marks the node; the mark travels with
+  the occurrence rather than with the URL text, so two links in one body that
+  spell the same href may disagree about it. It runs on every body, citation or
+  not, over inline links, reference links, autolinks and image destinations —
+  the component turns an image it will not fetch into a click-through link, so
+  an image `src` becomes an `href` too. A generic link a provider wrote encoded
+  keeps its invalid spelling and acquires no citation-only policy: preserving
+  an invalid address is this renderer's job, minting a valid one is not. A
+  badge is a presentation enhancement; it may never be the only thing able to
+  navigate. An authority is read only
   where one is written: a browser repairs `https:example.com/x`, but the rule
   that keeps a hostless URL out keeps this out too, and a search result always
   writes the slashes. The label attributes the host a browser would actually reach:
@@ -408,6 +466,36 @@ blob with no way to reach the page the answer is based on.
   cell or an image alt moving nothing, an image / autolink / reference link
   spelling the same page never badged, a legacy row still recognized, plus
   hover/focus/touch behavior and accessible naming.
+- `tests/fixtures/citation_authority_matrix.json` — one table for the brackets
+  an authority may keep, read by three separate surfaces so that none of them is
+  the oracle for another: `tests/test_citations.py` asserts `safe_url` of the
+  destination (a rejection recorded as `null`, not omitted because constructing
+  the URL throws), `ui/src/components/ui/markdown.test.tsx` renders the same
+  Markdown through the real component and asserts the anchor's exact `href` and
+  then the address a browser resolves from it — or that a browser refuses it —
+  and `tests/test_link_unit_delivery.py` decodes the destination back out of the
+  real Slack wrapper. Agreement between the three on repairing an encoded
+  wrapper would be agreement on the bug, which is why the columns are measured
+  rather than derived. The rows cover literal brackets, an upper- and a
+  lowercase encoded wrapper, each mixed wrapper, a double-encoded one, userinfo
+  and an empty userinfo, an in-range and an out-of-range port, a malformed IPv6
+  host, bracket data in path, query and fragment, and the escape and
+  character-reference spellings that resolve to literal brackets. One row is two
+  links in the SAME body whose hrefs are identical after naive spelling, which is
+  what proves the qualification is kept per occurrence rather than per URL.
+- `tests/test_citations.py::TestWhereACitationCanBeShown` — the producer half of
+  where a citation may land: a source written after the unit for a marker at the
+  start, middle and end of a label, in an image's alt text, inside an image
+  inside a link, in an explicit full-reference label, and after non-ASCII text
+  whose spans are counted in UTF-16; two markers in two labels as two spans of
+  one source in reading order; and, byte for byte unchanged with an empty
+  sidecar and an empty `citation_ref_ids`, a marker in a destination, a title,
+  an angle destination, an angle autolink, an image `src`, a reference
+  identifier and its definition, and a shortcut and a collapsed reference. Then
+  the tokens a transform moved, judged where they ended up, and the structured
+  fields — a file label and a quick-reply button — keeping plain attribution in
+  place. `TestRegisteredIdentity` already covered the copied, deleted, spliced
+  and moved-into-code tokens and is unchanged.
 - `ui/src/lib/citations.test.ts` — the digest and the remap in isolation: the
   UTF-16LE digest against CJK, a non-BMP emoji, CRLF and an unpaired surrogate;
   and `remapCitations` over deletions, insertions and length changes before,
@@ -511,7 +599,20 @@ blob with no way to reach the page the answer is based on.
   without it, with a stale one and with a pre-provenance one, and again with the
   mention and secret-request rewrites running beside it — those edit the source
   text before Markdown parses it, which is exactly what a positional contract
-  can be broken by.
+  can be broken by. Nine cases were added for where a citation may be written:
+  a marker in a label and at three positions in one, the data and syntax slots,
+  the reference slots including the dual-use shortcut and collapsed forms, an
+  image's alt and `src`, an image inside a link, three real `<silent>` strips
+  that move a token into a label, a destination and a title, an open fence, and
+  a file label beside quick-reply buttons. The recording carries two separate
+  questions about its anchors, because a case may answer yes to one and no to
+  the other: whether they are every address a reader is given (so a link
+  pointing anywhere else is a link nobody wrote), and whether they are also in
+  the order shown. An image, an autolink or a reference definition names an
+  address the delivery pass's inline-link scan cannot resolve, so those cases
+  record the first as false and are asked only which links must appear; every
+  case that was recorded before this is unchanged, including the GFM footnote
+  that relocates its link.
 - `ui/e2e/citations/` — real-browser layout and pointer routing on desktop,
   mobile Chromium, and mobile WebKit, in English and Chinese, including the
   falsifiable form of the no-fetch rule: zero requests to the cited site after
@@ -554,6 +655,22 @@ blob with no way to reach the page the answer is based on.
   blanks that one id (and the digest that covers it) and the rebinding itself is
   asserted in Python, where the same run can compare the delivered measurement
   against the stored one.
+- **An attachment is a link, so the unit parser had to be told so.**
+  `markdown-it`'s default `validateLink` rejects `file:` outright, so the
+  CommonMark instance that locates units could not see an attachment at all —
+  and a citation placed relative to "the enclosing unit" would have been written
+  *inside* an attachment's label, which is the defect this whole rule exists to
+  prevent. The unit parsers now use `_validate_file_link_locally`, the
+  acceptance rule the reply parser already applied to the same links, rather
+  than a second policy about schemes.
+- **A token moved into code is asserted directly, not through a delivery
+  case.** The transforms that actually run between registration and
+  materialization — the `<silent>` strip, the `file://` flattening — can move a
+  token into a label, a destination or a title, and each of those is a recorded
+  bridge case. None of them can wrap a token in a code span or a fence, so that
+  branch of the re-evaluation is asserted where it is reachable, by calling
+  materialization with the token already there (`TestRegisteredIdentity`). It is
+  not claimed as delivery-path coverage.
 - **Two product calls are covered by argument rather than by a test.** The
   dispatcher materializes once more inside the duplicate-result short-circuit,
   where `_accepted_message_result_text` only reads the fallback text when the

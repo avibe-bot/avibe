@@ -33,7 +33,14 @@ from urllib.parse import unquote
 
 import idna
 
-from core.reply_enhancer import mask_hidden_and_code, percent_encode, spell_uri
+from core.reply_enhancer import (
+    MarkdownUnit,
+    markdown_link_units,
+    mask_citation_slots,
+    mask_hidden_and_code,
+    percent_encode,
+    spell_uri,
+)
 
 # The private-use delimiters the marker is wrapped in.
 _START = "\ue200"
@@ -117,8 +124,12 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 _PORT_MAX = 65535
 _PORT_DIGITS = len(str(_PORT_MAX))
 # An IPv6 host is wrapped in brackets, which ``_canonical_uri`` percent-encodes
-# along with every other character Markdown would read as syntax - so the
-# wrapper is recognized in either spelling and always written back literally.
+# along with every other character Markdown would read as syntax - so after
+# spelling, a host the provider wrote ``[::1]`` and a host it wrote ``%5B::1%5D``
+# are the same string. These patterns therefore recognize the wrapper in either
+# spelling, and say nothing about which one the destination was written in:
+# ``_authority_brackets_literal`` answers that, from the destination as Markdown
+# resolved it, BEFORE spelling erased the difference.
 _IPV6_OPEN_RE = re.compile(r"\[|%5[Bb]")
 _IPV6_CLOSE_RE = re.compile(r"\]|%5[Dd]")
 # Where an authority ends. A backslash ends one too for a special scheme, but
@@ -576,8 +587,19 @@ def _port_accepted(value: str) -> bool:
     return not trimmed or int(trimmed) <= _PORT_MAX
 
 
-def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
+def _authority(
+    url: str, scheme: str, *, literal_brackets: bool
+) -> Optional[tuple[str, str, str]]:
     """``(authority, label host, rest)`` for *url*, or ``None`` to reject it.
+
+    *literal_brackets* says whether the destination this *url* was spelled from
+    wrapped its host in LITERAL brackets. It is a required argument because the
+    spelled URL no longer holds the answer - ``[`` and ``]`` are outside the
+    URI-safe set, so spelling writes both ``[::1]`` and an already-escaped
+    ``%5B::1%5D`` as the same ``%5B::1%5D`` - and guessing it from the spelling
+    is how a destination that named no host at all acquired a live one. Ask
+    ``_authority_brackets_literal`` of the resolved destination, once, before it
+    is spelled.
 
     One function answers the whole authority, because the parts are not
     independent: which ``@`` starts the host depends on the userinfo, whether a
@@ -615,6 +637,12 @@ def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
 
     opener = _IPV6_OPEN_RE.match(host_port)
     if opener is not None:
+        if not literal_brackets:
+            # The wrapper is here in the spelling and was not in the
+            # destination: the provider wrote its own ``%5B``, which is not
+            # authority syntax but two characters a host may not hold. Reading
+            # it as a bracket would mint an address the destination never named.
+            return None
         closer = _IPV6_CLOSE_RE.search(host_port, opener.end())
         if closer is None:
             return None
@@ -622,9 +650,9 @@ def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
         address = _parse_ipv6(inner)
         if address is None:
             return None
-        # Literal brackets, not the ``%5B`` the URI encoder would leave: a
-        # destination spelled that way is one the URL parser refuses outright,
-        # so the badge could not open the address either.
+        # Literal brackets, not the ``%5B`` the URI encoder left in their
+        # place: this host WAS written in brackets, and no URL parser opens the
+        # escaped spelling, so the badge could not reach the address either.
         host = f"[{inner}]"
         label_host = f"[{_serialize_ipv6(address)}]"
         port = host_port[closer.end() :]
@@ -643,33 +671,71 @@ def _authority(url: str, scheme: str) -> Optional[tuple[str, str, str]]:
     return (f"{userinfo}@{authority}" if userinfo else authority), label_host, rest
 
 
-def restore_ipv6_authority(url: str) -> str:
-    """*url*, already spelled as a URI, with a bracketed IPv6 host readable again.
+def _authority_brackets_literal(resolved: str) -> bool:
+    """Whether *resolved* wraps its host in literal brackets, not escapes.
 
-    An IPv6 host is REQUIRED to be written in brackets, and ``[``/``]`` are two
-    of the characters ``spell_uri`` escapes - so ``https://[::1]/x`` comes out
-    of it spelled ``https://%5B::1%5D/x``, which is not an address any parser
-    opens. The brackets go back in the authority and nowhere else: the same two
-    characters in a path, query or fragment are data, and the consumer spells
-    them ``%5B``/``%5D`` there.
+    *resolved* is the destination as a Markdown reader resolved it and BEFORE
+    any URI spelling: the one moment the two spellings are still distinct. A
+    provider that wrote ``https://[::1]/admin`` named a host; a provider that
+    wrote ``https://%5B::1%5D/admin`` named two characters a host may not hold,
+    and the difference survives nowhere else - spelling writes both the same way.
 
-    They go back only when the authority they belong to parses, so a host like
-    ``[nope]`` stays escaped rather than becoming a different URL - and only
-    when one is bracketed at all, so every other address is returned exactly as
-    it came. ``markdown.tsx`` repairs its own hrefs this way, for this reason;
-    this is the same repair on the way to a consumer that has no renderer to do
-    it later.
+    Both ends of the wrapper have to be literal. A mixed one (``[::1%5D``,
+    ``%5B::1]``) is not a bracketed host with an escape in it; it is a host that
+    was never written in brackets at all, and promoting half of it into syntax
+    invents an address out of the other half.
+
+    The authority is read here the way ``_authority`` reads it there, and the
+    two agree because spelling cannot move the boundaries: ``/``, ``?``, ``#``,
+    ``@`` and ``:`` are all inside the URI-safe set, so they are the same
+    characters in the same places before and after. What a character reference
+    or a backslash escape resolved to counts as written - that resolution
+    already happened, once, in ``_normalize_destination``.
     """
-    scheme, separator, remainder = url.partition(":")
+    scheme, separator, remainder = resolved.partition(":")
     if not separator or not remainder.startswith("//"):
-        return url
-    end = _AUTHORITY_END_RE.search(remainder, 2)
-    authority = remainder[2 : end.start()] if end else remainder[2:]
-    if _IPV6_OPEN_RE.search(authority) is None:
-        return url
-    parsed = _authority(url, scheme)
+        return False
+    remainder = remainder[2:]
+    end = _AUTHORITY_END_RE.search(remainder)
+    authority = remainder[: end.start()] if end else remainder
+    _, separator, host_port = authority.rpartition("@")
+    if not separator:
+        host_port = authority
+    opener = _IPV6_OPEN_RE.match(host_port)
+    if opener is None or opener.group() != "[":
+        return False
+    closer = _IPV6_CLOSE_RE.search(host_port, opener.end())
+    return closer is not None and closer.group() == "]"
+
+
+def spell_destination(resolved: str) -> str:
+    """Spell a resolved destination, keeping a literal IPv6 host readable.
+
+    Takes the destination BEFORE spelling and returns it after, because the two
+    halves of this job cannot be separated: ``[`` and ``]`` are two of the
+    characters ``spell_uri`` escapes, so ``https://[::1]/x`` leaves it spelled
+    ``https://%5B::1%5D/x``, which is not an address any parser opens - and by
+    then nothing in the string says whether those escapes were a host's own
+    syntax or the provider's own characters. A caller that could hand over only
+    the spelled URL could only guess, and guessing turned
+    ``https://%5B::1%5D/admin`` into a live link to the loopback interface.
+
+    The brackets go back in the authority and nowhere else: the same two
+    characters in a path, query, fragment or userinfo are data, and stay
+    spelled. They go back only when the authority they belong to parses, so a
+    host like ``[nope]`` stays escaped rather than becoming a different URL, and
+    every address without a literal bracketed host is returned exactly as
+    ``spell_uri`` wrote it.
+    """
+    spelled = spell_uri(resolved)
+    if not _authority_brackets_literal(resolved):
+        return spelled
+    scheme, separator, remainder = spelled.partition(":")
+    if not separator or not remainder.startswith("//"):
+        return spelled
+    parsed = _authority(spelled, scheme, literal_brackets=True)
     if parsed is None:
-        return url
+        return spelled
     return f"{scheme}://{parsed[0]}{parsed[2]}"
 
 
@@ -700,7 +766,11 @@ def safe_url(value: Any) -> str:
     scheme = scheme.lower()
     if not separator or scheme not in _ALLOWED_SCHEMES:
         return ""
-    parsed = _authority(url, scheme)
+    # Qualified from ``raw``: the resolved destination, before ``_canonical_uri``
+    # spelled it. After spelling there is no such thing as a bracket to ask about.
+    parsed = _authority(
+        url, scheme, literal_brackets=_authority_brackets_literal(raw)
+    )
     if parsed is None:
         return ""
     return f"{scheme}://{parsed[0]}{parsed[2]}"
@@ -712,7 +782,13 @@ def source_label(url: str, title: str = "") -> str:
     if isinstance(url, str):
         scheme, separator, _ = url.partition(":")
         if separator:
-            parsed = _authority(url, scheme.lower())
+            # A label is worked out from a URL ``safe_url`` already accepted,
+            # which is spelled with its brackets literal if it has any.
+            parsed = _authority(
+                url,
+                scheme.lower(),
+                literal_brackets=_authority_brackets_literal(url),
+            )
             if parsed is not None:
                 # The port is left out on purpose. A page is attributed by the
                 # site it is on, a non-default port does not change which site
@@ -778,15 +854,20 @@ def has_citation_markers(text: Optional[str]) -> bool:
 def citation_ref_ids(text: Optional[str]) -> list[str]:
     """The refs a message asks to have attributed, in first-appearance order.
 
-    Only markers the reader will actually see are requests: one inside a code
-    example is literal text, and one inside a hidden block leaves with the
-    block. A malformed ref is not a request either - it can name no source, so
-    the marker degrades to the unresolved label no matter what arrives later.
+    Only markers a citation can actually be written for are requests: one
+    inside a code example is literal text, one inside a hidden block leaves
+    with the block, and one written into an address, a title, or a reference
+    identifier has nowhere a link could be shown. This is the same question
+    registration asks, asked of the same mask - a marker that will not be
+    attributed must not make delivery wait for a source either, or hydrate one
+    into a sidecar nothing points at. A malformed ref is not a request either -
+    it can name no source, so the marker degrades to the unresolved label no
+    matter what arrives later.
     """
     if not text or _START not in text:
         return []
     requested: dict[str, None] = {}
-    for match in CITATION_MARKER_RE.finditer(mask_hidden_and_code(text)):
+    for match in CITATION_MARKER_RE.finditer(mask_citation_slots(text)):
         for ref in match.group(1).split(_SEP):
             if ref and _REF_ID_RE.fullmatch(ref):
                 requested.setdefault(ref, None)
@@ -833,9 +914,10 @@ def register_citations(
     unguessable, never derived from the ref or from its order, and checked
     against the arriving text so a token can only be a token this call minted.
 
-    A marker inside a code example or a ``<silent>`` block is not registered
-    (the existing mask decides both); one whose refs all fail to resolve with no
-    label to fall back to keeps its literal text, exactly as before.
+    A marker inside a code example, a ``<silent>`` block, or a Markdown slot
+    that holds data rather than prose is not registered (one mask decides all
+    three); one whose refs all fail to resolve with no label to fall back to
+    keeps its literal text, exactly as before.
     """
     if not text or _START not in text:
         return text, None
@@ -920,7 +1002,7 @@ def register_citations(
         )
         return token
 
-    registered = _rewrite_outside_code(text, replace)
+    registered = _rewrite_citable_markers(text, replace)
     if not markers:
         return registered, None
     return registered, CitationBundle(
@@ -1044,6 +1126,35 @@ def _utf16_offsets(text: str, offsets: Iterable[int]) -> dict[int, int]:
     return converted
 
 
+def _enclosing_unit_end(
+    units: list[MarkdownUnit], start: int, end: int
+) -> Optional[int]:
+    """Where a citation for a marker inside a link or image has to go instead.
+
+    A link nested inside a link label is not a link on any surface: CommonMark
+    refuses to parse the inner one, and every IM dialect downstream spells the
+    outer one as a single wrapper. So a citation for a marker written in a
+    label belongs immediately after the whole unit, and after the *outermost*
+    one when units nest - an image inside a link is two units, and only the
+    link has an end a sibling can follow. ``units`` is ordered outermost-first
+    at each offset, so the first one that contains the marker is that unit.
+    """
+    for unit in units:
+        if unit.start > start:
+            break
+        if end <= unit.end:
+            return unit.end
+    return None
+
+
+def _separating_lead(parts: list[str]) -> str:
+    """A space before a relocated citation, unless one is already written."""
+    for part in reversed(parts):
+        if part:
+            return "" if part[-1].isspace() else " "
+    return ""
+
+
 def _write_citations(
     text: str,
     bundle: CitationBundle,
@@ -1054,31 +1165,80 @@ def _write_citations(
 
     The placements are ``(citation index, start, end)`` in code points over the
     returned text, one per link actually written.
+
+    Where a citation can go is a question about the text as it stands now, so
+    it is asked of the final text rather than remembered from registration: a
+    transform may have wrapped a token in an example, and an internal token is
+    the one thing that may never be shown. A token that has landed in code, in
+    a hidden block, or in a slot the parser reads without showing gets its
+    original marker text back and claims nothing. A token inside a link or
+    image label is removed from that label and its citation written after the
+    unit, which is the nearest position the reader is actually shown.
+
+    ``as_markdown`` off is a structured field - a file label, a quick-reply
+    button - that is not Markdown on any surface. There is no unit to be inside
+    and no link to nest, so the attribution stays where the marker was.
     """
     registered = {marker.token: marker for marker in bundle.markers}
-    # Whether a token ended up inside code or a hidden block is a question about
-    # the text as it stands now, so it is asked of the final text rather than
-    # remembered from registration: a transform may have wrapped it in an
-    # example, and an internal token is the one thing that may never be shown.
-    mask = mask_hidden_and_code(text)
-    out: list[str] = []
-    placed: list[tuple[int, int, int]] = []
-    cursor = 0
-    written = 0
+    if as_markdown:
+        mask = mask_citation_slots(text)
+        units = markdown_link_units(text)
+    else:
+        mask = mask_hidden_and_code(text)
+        units = []
+
+    # ``(offset, rank, sequence, consumed, marker, literal)``. ``rank`` puts a
+    # citation relocated to an offset ahead of a token that starts there, and
+    # ``sequence`` keeps two citations relocated to the same offset in the order
+    # their markers were written. Both are integers, so sorting never has to
+    # compare the payload.
+    edits: list[tuple[int, int, int, int, Optional[RegisteredMarker], str]] = []
+    sequence = 0
     for match in _TOKEN_RE.finditer(text):
         marker = registered.get(match.group(0))
         if marker is None:
             # Token-shaped text this bundle did not mint. It arrived as ordinary
             # characters and leaves as ordinary characters.
             continue
-        prefix = text[cursor : match.start()]
+        consumed = match.end() - match.start()
+        if mask[match.start() : match.end()] != match.group(0):
+            edits.append(
+                (match.start(), 1, sequence, consumed, None, marker.literal)
+            )
+            sequence += 1
+            continue
+        relocated = _enclosing_unit_end(units, match.start(), match.end())
+        if relocated is None:
+            edits.append((match.start(), 1, sequence, consumed, marker, ""))
+            sequence += 1
+            continue
+        # The label keeps every byte that is not the token, and the citation is
+        # written as a sibling of the unit rather than a link inside its label.
+        edits.append((match.start(), 1, sequence, consumed, None, ""))
+        sequence += 1
+        edits.append((relocated, 0, sequence, 0, marker, ""))
+        sequence += 1
+
+    out: list[str] = []
+    placed: list[tuple[int, int, int]] = []
+    cursor = 0
+    written = 0
+    for offset, _rank, _sequence, consumed, marker, literal in sorted(edits):
+        prefix = text[cursor:offset]
         out.append(prefix)
         written += len(prefix)
-        if mask[match.start() : match.end()] == match.group(0):
-            at = written + len(marker.lead)
-            body = marker.lead
-            for offset, part in enumerate(marker.parts):
-                if offset:
+        if marker is None:
+            out.append(literal)
+            written += len(literal)
+        else:
+            # A relocated citation no longer sits where its marker did, so what
+            # separates it from the text is read off what has actually been
+            # written; one written in place keeps the lead registration measured.
+            lead = marker.lead if consumed else _separating_lead(out)
+            at = written + len(lead)
+            body = lead
+            for index, part in enumerate(marker.parts):
+                if index:
                     body += " "
                     at += 1
                 spelling = part.text if as_markdown else part.plain
@@ -1086,20 +1246,18 @@ def _write_citations(
                     placed.append((part.index, at, at + len(spelling)))
                 body += spelling
                 at += len(spelling)
-        else:
-            body = marker.literal
-        out.append(body)
-        written += len(body)
-        cursor = match.end()
+            out.append(body)
+            written += len(body)
+        cursor = offset + consumed
     out.append(text[cursor:])
     return "".join(out), placed
 
 
-def _rewrite_outside_code(
+def _rewrite_citable_markers(
     text: str,
     replace: Callable[[re.Match[str]], str],
 ) -> str:
-    """Apply ``replace`` to every marker the reader will actually be shown.
+    """Apply ``replace`` to every marker a citation could be written for.
 
     A marker shown inside a code example must stay literal - an agent
     explaining this very grammar is a case seen in real transcripts - and
@@ -1110,12 +1268,15 @@ def _rewrite_outside_code(
     ``<silent>`` block has to stay literal for a different reason: the block is
     removed before delivery, so rewriting it would spend a citation index on
     text nobody reads and lift a URL out of the block meant to hide it. Both
-    decisions are delegated to the reply parser's offset-preserving mask:
-    markers are matched against the mask and spliced back into the original
-    source, which leaves every byte this function does not replace exactly as
-    it arrived.
+    A marker written into a destination, a title, a reference identifier, or an
+    autolink's address has to stay literal for a third reason: there is no
+    reader-facing position there at all, so a link written into one would not be
+    shown - it would change where an existing link points. All three decisions
+    are delegated to the reply parser's offset-preserving mask: markers are
+    matched against the mask and spliced back into the original source, which
+    leaves every byte this function does not replace exactly as it arrived.
     """
-    mask = mask_hidden_and_code(text)
+    mask = mask_citation_slots(text)
     out: list[str] = []
     cursor = 0
     # A match in the mask cannot overlap a blanked region, so the marker text

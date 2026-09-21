@@ -33,6 +33,7 @@ import unittest
 from pathlib import Path
 from typing import Any, Mapping
 from unittest import mock
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -278,6 +279,19 @@ class BridgeFixtureTests(unittest.TestCase):
         self.assertTrue(late_body.endswith(f"Synthetic. {cited}"))
 
 
+# A private marker is not an address. Where the model wrote one in a
+# destination the producer leaves it exactly as typed - claiming a source there
+# would be claiming one no reader can see - and every renderer past that point
+# is free to spell those characters as percent escapes. So a rendered address is
+# read back through that one spelling before it is compared, and through nothing
+# else: a substituted host is still a link nobody wrote.
+_MARKER_ESCAPE = re.compile(r"(?:%EE%88%8[0-2])+", re.IGNORECASE)
+
+
+def as_written(text: str) -> str:
+    return _MARKER_ESCAPE.sub(lambda match: unquote(match.group()), text)
+
+
 class PlatformConsumerTests(unittest.TestCase):
     """One platform's real renderer, asked what the reader sees.
 
@@ -307,7 +321,10 @@ class PlatformConsumerTests(unittest.TestCase):
                 if not anchor["cited"]:
                     continue
                 with self.subTest(case=row["key"], url=anchor["url"]):
-                    self.assertIn((anchor["url"], anchor["label"]), clickable)
+                    self.assertIn(
+                        (anchor["url"], anchor["label"]),
+                        [(as_written(url), label) for url, label in clickable],
+                    )
 
     def test_no_link_points_anywhere_the_producer_did_not_write(self):
         """A converter that reads a destination as text rewrites the address.
@@ -317,11 +334,17 @@ class PlatformConsumerTests(unittest.TestCase):
         still looks like a citation.
         """
         for row in CASES:
+            # Only where the recording names every address a reader can reach.
+            # An image, a reference link or an autolink is a link this scan does
+            # not resolve, and a body holding one says so: its anchors are the
+            # links a consumer must show, not the only ones it may.
+            if not row["anchors_cover_destinations"]:
+                continue
             rendered = self.render(row["im_text"])
             written = {anchor["url"] for anchor in row["im_anchors"]}
             for destination, _ in self.links(rendered):
                 with self.subTest(case=row["key"], destination=destination):
-                    self.assertIn(destination, written)
+                    self.assertIn(as_written(destination), written)
 
     def test_every_address_the_answer_carried_survives_the_renderer(self):
         """Including the ones this platform does not turn into a link.
@@ -331,7 +354,7 @@ class PlatformConsumerTests(unittest.TestCase):
         address the answer pointed at.
         """
         for row in CASES:
-            readable = self.readable(self.render(row["im_text"]))
+            readable = as_written(self.readable(self.render(row["im_text"])))
             for anchor in row["im_anchors"]:
                 with self.subTest(case=row["key"], url=anchor["url"]):
                     self.assertIn(anchor["url"], readable)

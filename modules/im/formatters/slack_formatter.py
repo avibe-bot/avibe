@@ -1,5 +1,4 @@
-from core.citations import restore_ipv6_authority
-from core.reply_enhancer import spell_uri
+from core.citations import spell_destination
 
 from .base_formatter import BaseMarkdownFormatter
 
@@ -50,10 +49,13 @@ def spell_uri_escapes(url: str) -> str:
 
     A bracketed IPv6 authority is the one place an escape has to come back:
     those two brackets are the host's own syntax rather than data, and nothing
-    opens ``%5B::1%5D``. ``restore_ipv6_authority`` puts back exactly those,
-    only in the authority, and only when it parses.
+    opens ``%5B::1%5D``. Which is why the destination is handed over unspelled
+    and ``spell_destination`` does both halves - once spelled, a host written
+    ``[::1]`` and a provider's own ``%5B::1%5D`` are the same characters, and
+    putting brackets back into the second one would deliver a live link to an
+    address the provider never named.
     """
-    return restore_ipv6_authority(spell_uri(url))
+    return spell_destination(url)
 
 
 class SlackFormatter(BaseMarkdownFormatter):

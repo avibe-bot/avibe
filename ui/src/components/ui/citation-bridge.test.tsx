@@ -34,7 +34,7 @@ import { Markdown } from './markdown';
 
 afterEach(cleanup);
 
-type Anchor = { label: string; url: string; cited: boolean };
+type Anchor = { label: string | null; url: string; cited: boolean };
 type BridgeCase = {
   key: string;
   why: string;
@@ -80,6 +80,21 @@ const webLinks = (container: HTMLElement) =>
 
 const badged = (anchor: HTMLAnchorElement) => anchor.hasAttribute('data-citation-index');
 
+// A private marker is not an address. Where the model wrote one in a
+// destination the producer leaves it exactly as typed - claiming a source
+// there would be claiming one no reader can see - and every renderer past that
+// point is free to spell those characters as percent escapes. So a rendered
+// address is read back through that one spelling before it is compared, and
+// through nothing else: a substituted host is still a link nobody wrote.
+const asWritten = (href: string | null) => (href ?? '').replace(/(?:%EE%88%8[0-2])+/gi, decodeURIComponent);
+
+// A label holding an image is not a string of text, and the producer says so by
+// leaving it unsaid; that link is known by its address alone.
+const shows = (links: HTMLAnchorElement[], anchor: Anchor) => links.some(
+  (node) => asWritten(node.getAttribute('href')) === anchor.url
+    && (anchor.label === null || node.textContent === anchor.label),
+);
+
 /** The characters a citation's first span covers, in the body it was measured in. */
 const spelling = (row: BridgeCase, entry: CitationSource) => {
   const [start, end] = (entry.spans as number[][])[0];
@@ -102,7 +117,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     // text, which is the whole point of a compact badge.
     const badges = links.filter(badged);
     expect(badges).toHaveLength(expected.length);
-    expect(badges.map((anchor) => anchor.getAttribute('href'))).toEqual(
+    expect(badges.map((anchor) => asWritten(anchor.getAttribute('href')))).toEqual(
       expected.map((anchor) => anchor.url),
     );
     badges.forEach((anchor, at) => {
@@ -122,9 +137,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     // link. It is still the answer talking, not the search result, and it has
     // to read as what the agent wrote.
     for (const anchor of expected) {
-      expect(ordinary.some(
-        (node) => node.getAttribute('href') === anchor.url && node.textContent === anchor.label,
-      )).toBe(true);
+      expect(shows(ordinary, anchor)).toBe(true);
     }
     if (row.anchors_exhaustive) expect(ordinary).toHaveLength(expected.length);
   });
@@ -137,7 +150,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
       // Position, not just count: three identical links where the middle one is
       // the citation is exactly the case a count cannot tell apart.
       expect(webLinks(container).map((anchor) => ({
-        url: anchor.getAttribute('href'),
+        url: asWritten(anchor.getAttribute('href')),
         cited: badged(anchor),
       }))).toEqual(row.web_anchors.map((anchor) => ({ url: anchor.url, cited: anchor.cited })));
     },
@@ -152,9 +165,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
     // preview. Every link still shows its label and still opens its page.
     expect(links.filter(badged)).toHaveLength(0);
     for (const anchor of row.web_anchors) {
-      expect(links.some(
-        (node) => node.getAttribute('href') === anchor.url && node.textContent === anchor.label,
-      )).toBe(true);
+      expect(shows(links, anchor)).toBe(true);
     }
   });
 
@@ -171,9 +182,7 @@ describe('citation bridge: the real renderer, on one real producer run', () => {
 
       expect(links.filter(badged)).toHaveLength(0);
       for (const anchor of row.web_anchors) {
-        expect(links.some(
-          (node) => node.getAttribute('href') === anchor.url && node.textContent === anchor.label,
-        )).toBe(true);
+        expect(shows(links, anchor)).toBe(true);
       }
     },
   );
@@ -347,12 +356,12 @@ describe('citation bridge: the rewrites that run beside it on the real surface',
     const { container } = renderWithSurfaceRewrites(row.web_text, row.web_citations);
     const links = webLinks(container);
 
-    expect(links.filter(badged).map((anchor) => anchor.getAttribute('href'))).toEqual(
+    expect(links.filter(badged).map((anchor) => asWritten(anchor.getAttribute('href')))).toEqual(
       row.web_anchors.filter((anchor) => anchor.cited).map((anchor) => anchor.url),
     );
     if (row.anchors_exhaustive) {
       expect(links.map((anchor) => ({
-        url: anchor.getAttribute('href'),
+        url: asWritten(anchor.getAttribute('href')),
         cited: badged(anchor),
       }))).toEqual(row.web_anchors.map((anchor) => ({ url: anchor.url, cited: anchor.cited })));
     }

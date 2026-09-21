@@ -30,11 +30,14 @@ from markdown_it.common.normalize_url import validateLink as _validate_markdown_
 from markdown_it.common.utils import ESCAPE_CHAR, isStrSpace, unescapeAll
 from markdown_it.common.html_re import HTML_TAG_RE
 from markdown_it.rules_inline.autolink import AUTOLINK_RE, EMAIL_RE
+from markdown_it.rules_inline.autolink import autolink as _commonmark_autolink
 from markdown_it.rules_inline.backticks import backtick as _commonmark_backtick
 from markdown_it.rules_inline.entity import entity as _commonmark_entity
 from markdown_it.rules_inline.image import image as _commonmark_image
 from markdown_it.rules_inline.link import link as _commonmark_link
 from markdown_it.rules_inline.state_inline import StateInline
+from markdown_it.rules_block.reference import reference as _commonmark_reference
+from markdown_it.rules_block.state_block import StateBlock
 from markdown_it.token import Token
 
 logger = logging.getLogger(__name__)
@@ -46,6 +49,8 @@ _INLINE_ANGLE_RANGES_KEY = "avibe_inline_angle_ranges"
 _INLINE_SILENT_RANGES_KEY = "avibe_inline_silent_ranges"
 _FILE_LINK_CAPTURES_KEY = "avibe_file_link_captures"
 _LINK_CAPTURES_KEY = "avibe_link_captures"
+_UNIT_CAPTURES_KEY = "avibe_unit_captures"
+_DEFINITION_LINES_KEY = "avibe_definition_lines"
 
 
 def _track_inline_code(state: StateInline, silent: bool) -> bool:
@@ -230,6 +235,103 @@ _FILE_LINK_MARKDOWN.inline.ruler.at(
 
 _LINK_MARKDOWN = MarkdownIt("commonmark")
 _LINK_MARKDOWN.inline.ruler.at("link", _capture_inline_link(_commonmark_link))
+
+
+def _capture_markdown_unit(rule, *, is_image: bool = False, is_autolink: bool = False):
+    """Wrap a CommonMark link/image/autolink rule and record what it displays.
+
+    A reader is shown a link's label and an image's alt text; the address, the
+    title, and the identifier that names a definition are the spelling that
+    puts them there, and nothing a reader can be handed goes in them. Which of
+    the two a given span is depends entirely on the form the parser matched, so
+    the form is read back from the source the parser just accepted: a ``(``
+    after the label is an inline destination, a second non-empty ``[`` is an
+    explicit reference identifier, and anything else is a collapsed or shortcut
+    reference whose label is *also* its identifier - shown to the reader and
+    read back by the parser, so it belongs to both and may not be rewritten.
+
+    The spans are recorded for every unit the parser accepts, nested ones
+    included, because an image inside a link is two units and only the outer
+    one has an end a following sibling can be written after.
+    """
+
+    def capture(state: StateInline, silent: bool) -> bool:
+        start = state.pos
+        matched = rule(state, silent)
+        if not matched or silent:
+            return matched
+        end = state.pos
+        if is_autolink:
+            # ``<https://example.com>`` is an address that happens to be shown.
+            # There is no label beside it to write anything into.
+            captured = (start, end, -1, -1, start, end)
+        else:
+            label_end = state.md.helpers.parseLinkLabel(
+                state, start + (1 if is_image else 0), not is_image
+            )
+            if label_end < 0:
+                return matched
+            label_start = start + (2 if is_image else 1)
+            after = label_end + 1
+            following = state.src[after] if after < state.posMax else ""
+            if following == "(":
+                captured = (start, end, label_start, label_end, after + 1, end - 1)
+            elif following == "[" and end - after > 2:
+                captured = (start, end, label_start, label_end, after, end)
+            else:
+                captured = (start, end, -1, -1, start, end)
+        state.env.setdefault(_UNIT_CAPTURES_KEY, []).append(captured)
+        return matched
+
+    return capture
+
+
+def _capture_reference_definition(rule):
+    """Wrap the CommonMark reference rule and record the lines it swallowed.
+
+    A link reference definition emits no token of its own: the block parser
+    reads it, files the address under its identifier, and moves on. The lines
+    are still in the source though, and every character of them - identifier,
+    address, title - is spelling the reader is never shown.
+    """
+
+    def capture(
+        state: StateBlock, start_line: int, end_line: int, silent: bool
+    ) -> bool:
+        matched = rule(state, start_line, end_line, silent)
+        if matched and not silent:
+            state.env.setdefault(_DEFINITION_LINES_KEY, []).append(
+                (start_line, state.line)
+            )
+        return matched
+
+    return capture
+
+
+_UNIT_MARKDOWN = MarkdownIt("commonmark")
+# An attachment is written as an ordinary link, and CommonMark's default
+# validator refuses ``file:`` outright - so without the reply parser's own
+# acceptance rule this scan does not see one at all, and anything placed
+# relative to "the enclosing unit" would be placed inside an attachment's label
+# instead of after it. That nests a link in a link, which CommonMark does not
+# allow: the outer unit stops being a link and its brackets become text the
+# reader is shown.
+_UNIT_MARKDOWN.validateLink = _validate_file_link_locally
+_UNIT_MARKDOWN.inline.ruler.at("link", _capture_markdown_unit(_commonmark_link))
+_UNIT_MARKDOWN.inline.ruler.at(
+    "image", _capture_markdown_unit(_commonmark_image, is_image=True)
+)
+_UNIT_MARKDOWN.inline.ruler.at(
+    "autolink", _capture_markdown_unit(_commonmark_autolink, is_autolink=True)
+)
+
+# Definitions are a block-level fact, and the identifiers they file are what
+# lets the inline pass tell a reference link from bracketed prose.
+_UNIT_BLOCK_MARKDOWN = MarkdownIt("commonmark").disable("inline")
+_UNIT_BLOCK_MARKDOWN.validateLink = _validate_file_link_locally
+_UNIT_BLOCK_MARKDOWN.block.ruler.at(
+    "reference", _capture_reference_definition(_commonmark_reference)
+)
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -995,6 +1097,26 @@ class InlineLink:
     destination: str  # the destination a Markdown reader resolves
 
 
+@dataclass(frozen=True)
+class MarkdownUnit:
+    """One CommonMark link or image, split into what is shown and what is not.
+
+    ``label_start``/``label_end`` are the span a reader is shown - a link's
+    label, an image's alt text - and are ``-1`` when the unit displays nothing
+    that is not also its own spelling. ``data_start``/``data_end`` are the span
+    that only the parser reads: a destination and its title, an explicit
+    reference identifier, an autolink's address, or the dual-use label of a
+    collapsed or shortcut reference. They are ``-1`` when the unit spells none.
+    """
+
+    start: int  # source offset the unit begins at (``[`` or ``!`` or ``<``)
+    end: int  # source offset just past the unit
+    label_start: int
+    label_end: int
+    data_start: int
+    data_end: int
+
+
 def _unclaimed_line_ranges(
     text: str,
     inline_ranges: List[Tuple[int, int, str]],
@@ -1087,6 +1209,100 @@ def inline_links(text: str) -> List[InlineLink]:
         spliceable.append(link)
         cursor = link.end
     return spliceable
+
+
+def _map_unit_capture(
+    capture: tuple[int, int, int, int, int, int],
+    offsets: dict[int, int],
+) -> MarkdownUnit | None:
+    """Translate one inline-token unit capture back to the original source."""
+    start, end, label_start, label_end, data_start, data_end = capture
+    located: List[int] = []
+    for span_start, span_end in (
+        (start, end),
+        (label_start, label_end),
+        (data_start, data_end),
+    ):
+        if span_start < 0 or span_start >= span_end:
+            # An empty destination (``[a]()``) names no span to protect, and a
+            # unit that shows no label of its own already said so with ``-1``.
+            located.extend((-1, -1))
+            continue
+        if span_start not in offsets or span_end - 1 not in offsets:
+            return None
+        located.extend((offsets[span_start], offsets[span_end - 1] + 1))
+    if located[0] < 0:
+        return None
+    return MarkdownUnit(*located)
+
+
+def _markdown_units(text: str) -> Tuple[List[MarkdownUnit], List[Tuple[int, int]]]:
+    """Every link/image unit CommonMark accepts, plus its definition lines.
+
+    The units come back sorted outermost-first at each offset, so the first one
+    that contains a given span is the one a sibling has to be written after.
+    """
+    if not text or ("[" not in text and "<" not in text):
+        return [], []
+    _code_ranges, inline_ranges, _blocking = _markdown_block_ranges(text)
+    block_env: dict = {}
+    _UNIT_BLOCK_MARKDOWN.parse(text, block_env)
+    references = block_env.get("references") or {}
+    line_offsets = [0]
+    line_offsets.extend(
+        match.end() for match in re.finditer(r"\r\n|\r|\n", text)
+    )
+    definitions: List[Tuple[int, int]] = []
+    for start_line, end_line in block_env.get(_DEFINITION_LINES_KEY, []):
+        start = line_offsets[start_line]
+        end = (
+            line_offsets[end_line] if end_line < len(line_offsets) else len(text)
+        )
+        definitions.append((start, end))
+
+    units: List[MarkdownUnit] = []
+    for source_start, source_end, content in inline_ranges:
+        # The identifiers the block pass filed are what lets a reference link
+        # resolve here; without them CommonMark reads ``[a][b]`` as prose, and
+        # so would this.
+        inline_env: dict = {"references": references}
+        _UNIT_MARKDOWN.inline.parse(content, _UNIT_MARKDOWN, inline_env, [])
+        captures = inline_env.get(_UNIT_CAPTURES_KEY)
+        if not captures:
+            continue
+        offsets = _inline_source_offsets(text, source_start, source_end, content)
+        for capture in captures:
+            mapped = _map_unit_capture(capture, offsets)
+            if mapped is not None:
+                units.append(mapped)
+    units.sort(key=lambda unit: (unit.start, -unit.end))
+    return units, definitions
+
+
+def markdown_link_units(text: str) -> List[MarkdownUnit]:
+    """Locate every CommonMark link and image, nested ones included."""
+    return _markdown_units(text)[0]
+
+
+def _merged_ranges(ranges: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Sort and coalesce spans so a masking pass can walk them once."""
+    merged: List[Tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _markdown_data_ranges(text: str) -> List[Tuple[int, int]]:
+    """The source spans CommonMark reads but never shows anyone."""
+    units, definitions = _markdown_units(text)
+    ranges = [
+        (unit.data_start, unit.data_end) for unit in units if unit.data_start >= 0
+    ]
+    ranges.extend(definitions)
+    return _merged_ranges(ranges)
 
 
 def hidden_block_ranges(text: str) -> List[Tuple[int, int]]:
@@ -1306,6 +1522,32 @@ def mask_hidden_and_code(text: str) -> str:
     if not ranges:
         return markdown_mask
     return _mask_ranges(markdown_mask, ranges)
+
+
+def mask_citation_slots(text: str) -> str:
+    """Blank everything a citation cannot be written into, offsets preserved.
+
+    ``mask_hidden_and_code`` answers "will a reader be shown this offset"; a
+    consumer that has to *place* something needs the rest of that question
+    answered too, because a marker can be shown and still have nowhere to put a
+    link. ``[a](https://x/\ue200cite\ue202turn0view0\ue201)`` shows the marker
+    text to nobody: it is part of an address, and a link written into it would
+    silently send the reader somewhere else. The same is true of a title, of the
+    identifier that names a link reference definition, of the definition itself,
+    and of an autolink's address, which is its own label.
+
+    So the two halves compose: code and hidden blocks from the existing mask,
+    then the slots the parser reads without showing. Both preserve every source
+    offset, so a consumer still matches its own pattern against the mask and
+    splices into the original source.
+    """
+    if not text:
+        return text
+    masked = mask_hidden_and_code(text)
+    ranges = _markdown_data_ranges(text)
+    if not ranges:
+        return masked
+    return _mask_ranges(masked, ranges)
 
 
 def _markdown_code_ranges(

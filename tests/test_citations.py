@@ -38,6 +38,7 @@ from core.citations import (
     clean_title,
     finalize_citations,
     has_citation_markers,
+    materialize_citations,
     register_citations,
     resolve_citations,
     safe_url,
@@ -961,6 +962,196 @@ class TestRegisteredIdentity:
         assert citations == []
 
 
+class TestWhereACitationCanBeShown:
+    """Which part of a link may become a citation, and which is only its wiring.
+
+    A citation is a link, and CommonMark has no link inside a link: written into
+    a label it takes the enclosing unit down with it, and the reader is shown
+    the brackets instead of the page the answer meant to point at. Written into
+    a destination, a title, a reference identifier or an autolink's address it
+    is not shown to anyone at all - that text is what makes the unit reach
+    somewhere - and splicing a link through it sends the unit to an address
+    nobody wrote.
+
+    So the parser decides: a marker standing where a reader is shown something
+    is a citation, and its source is written immediately after the outermost
+    unit that encloses it; a marker standing in a slot only the parser reads
+    stays the characters the model typed, mints no token, and claims nothing.
+    """
+
+    GUIDE_LINK = f"[developers.openai.com]({GUIDE.url})"
+
+    def written(self, native: str) -> tuple[str, list[dict]]:
+        """What delivery finally writes for *native*, and what it claims."""
+        registered, bundle = register_citations(
+            native, SOURCES, unresolved_label=UNRESOLVED
+        )
+        return finalize_citations(registered, bundle)
+
+    @pytest.mark.parametrize(
+        ("native", "expected"),
+        [
+            (
+                f"See [the docs {marker('turn0view0')}](https://openai.com/docs) for details.",
+                "See [the docs ](https://openai.com/docs) {link} for details.",
+            ),
+            (
+                f"[{marker('turn0view0')} a](https://u.example/1)",
+                "[ a](https://u.example/1) {link}",
+            ),
+            (
+                f"[a {marker('turn0view0')} b](https://u.example/1)",
+                "[a  b](https://u.example/1) {link}",
+            ),
+            (
+                f"![a diagram {marker('turn0view0')}](https://i.example/p.png)",
+                "![a diagram ](https://i.example/p.png) {link}",
+            ),
+            (
+                f"[![alt {marker('turn0view0')}](https://i.example/p.png)](https://out.example/page)",
+                "[![alt ](https://i.example/p.png)](https://out.example/page) {link}",
+            ),
+            (
+                f"[the docs {marker('turn0view0')}][ref]\n\n[ref]: https://r.example/page",
+                "[the docs ][ref] {link}\n\n[ref]: https://r.example/page",
+            ),
+            (
+                f"\u65e5\u672c\u8a9e [\u30e9\u30d9\u30eb {marker('turn0view0')}](https://u.example/1)",
+                "\u65e5\u672c\u8a9e [\u30e9\u30d9\u30eb ](https://u.example/1) {link}",
+            ),
+        ],
+        ids=[
+            "label-middle",
+            "label-start",
+            "label-inner",
+            "image-alt",
+            "image-inside-a-link",
+            "explicit-reference-label",
+            "non-ascii-before-it",
+        ],
+    )
+    def test_a_source_is_written_after_the_unit_whose_label_asked_for_it(
+        self, native, expected
+    ):
+        """The destination the answer wrote survives, and so does its wording.
+
+        An image inside a link is the case that makes "the outermost unit" the
+        rule rather than "the unit it was in": place the source after the image
+        and it lands in the link's label, which is the defect this describes.
+        """
+        body, citations = self.written(native)
+
+        assert body == expected.format(link=self.GUIDE_LINK)
+        assert [utf16_slice(body, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK
+        ]
+
+    @pytest.mark.parametrize(
+        "native",
+        [
+            f"[a](https://example.com/{marker('turn0view0')}path)",
+            f'[b](https://example.com/y "T {marker("turn0view0")}")',
+            f"[c](<https://example.com/z{marker('turn0view0')}>)",
+            f"<https://example.com/auto{marker('turn0view0')}>",
+            f"![plain](https://i.example/{marker('turn0view0')}q.png)",
+            f"[the docs][{marker('turn0view0')}]\n\n[{marker('turn0view0')}]: https://r.example/p",
+            f"[dual {marker('turn0view0')}]\n\n[dual {marker('turn0view0')}]: https://r.example/d",
+            f"[dual {marker('turn0view0')}][]\n\n[dual {marker('turn0view0')}]: https://r.example/d",
+        ],
+        ids=[
+            "destination",
+            "title",
+            "angle-destination",
+            "angle-autolink",
+            "image-source",
+            "reference-identifier-and-definition",
+            "shortcut-reference",
+            "collapsed-reference",
+        ],
+    )
+    def test_a_slot_only_the_parser_reads_keeps_the_model_s_own_text(self, native):
+        """Nothing is minted, nothing is written, and nothing is waited for.
+
+        A shortcut or collapsed reference is the dual-use case: those brackets
+        are both the words a reader sees and the identifier that finds the
+        address, so editing them would leave a link pointing at nothing.
+        """
+        body, citations = self.written(native)
+
+        assert body == native
+        assert citations == []
+        # The same decision on both sides of the boundary: a marker that cannot
+        # become a link must not hold the message waiting for a source either.
+        assert citation_ref_ids(native) == []
+        assert unresolved_refs(citation_ref_ids(native), {}) == []
+
+    def test_two_markers_in_two_labels_are_two_sources_in_reading_order(self):
+        native = (
+            f"[a {marker('turn0view0')}](https://u.example/1)"
+            f" and [b {marker('turn0view0')}](https://u.example/2)"
+        )
+        body, citations = self.written(native)
+
+        assert body == (
+            f"[a ](https://u.example/1) {self.GUIDE_LINK}"
+            f" and [b ](https://u.example/2) {self.GUIDE_LINK}"
+        )
+        # One source cited twice is one row and two spans - the numbering counts
+        # sources a reader can see, not markers the model wrote.
+        assert len(citations) == 1
+        assert [utf16_slice(body, *span) for span in citations[0]["spans"]] == [
+            self.GUIDE_LINK,
+            self.GUIDE_LINK,
+        ]
+
+    @pytest.mark.parametrize(
+        ("moved", "expected"),
+        [
+            ("[lab {token}](https://out.example/page)", "[lab ](https://out.example/page) {link}"),
+            ("[a](https://example.com/{token}path)", "[a](https://example.com/{marker}path)"),
+            ('[b](https://example.com/y "T {token}")', '[b](https://example.com/y "T {marker}")'),
+        ],
+        ids=["into-a-label", "into-a-destination", "into-a-title"],
+    )
+    def test_a_token_a_transform_moved_is_judged_where_it_ended_up(
+        self, moved, expected
+    ):
+        """Delivery closes gaps, and a token can land somewhere the model never
+        put it. Writing a link into a destination on the strength of where the
+        marker started is how an answer acquires an address nobody wrote."""
+        registered, bundle = register_citations(
+            f"Cited.{marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        token = registered[len("Cited.") :]
+        body, citations = finalize_citations(moved.format(token=token), bundle)
+
+        assert body == expected.format(
+            link=self.GUIDE_LINK, marker=marker("turn0view0")
+        )
+        assert bool(citations) is ("{link}" in expected)
+
+    def test_a_field_that_is_not_markdown_keeps_plain_attribution_in_place(self):
+        """An attachment's title and a quick-reply button are not Markdown a
+        reader parses, so there is no unit to place a source after and no link
+        syntax to write: the source's name stands where the marker stood."""
+        registered, bundle = register_citations(
+            f"report {marker('turn0view0')}", SOURCES, unresolved_label=UNRESOLVED
+        )
+        token = registered[len("report ") :]
+
+        assert (
+            materialize_citations(registered, bundle, as_markdown=False)
+            == "report developers.openai.com"
+        )
+        assert (
+            materialize_citations(f"OK {token}", bundle, as_markdown=False)
+            == "OK developers.openai.com"
+        )
+        assert TOKEN_OPEN not in materialize_citations(
+            registered, bundle, as_markdown=False
+        )
+
+
 class TestBodyBinding:
     """Which body the sidecar describes, and where in it each citation sits.
 
@@ -1159,3 +1350,39 @@ class TestUrlIdentityAcrossTheBoundary:
 
         assert citations[0]["url"] == "https://example.com/%E4%B8%AD%E6%96%87"
         assert f"({citations[0]['url']})" in text
+
+
+class TestAuthorityBracketsAcrossTheBoundary:
+    """The citation's column of the shared authority table.
+
+    ``[`` and ``]`` are an IPv6 host's syntax and data everywhere else, and
+    ``_canonical_uri`` writes every bracket it is handed as ``%5B``/``%5D``.
+    Asking afterwards which ones to restore is asking a string that no longer
+    holds the answer: ``https://[::1]/admin`` and ``https://%5B::1%5D/admin``
+    arrive at the same spelling, and putting brackets back into both hands the
+    second one a live loopback address its source never named. So the question
+    is settled on the resolved destination, before spelling, and the answer is
+    carried through.
+
+    The Web renderer and the Slack adapter are measured on the same rows from
+    their own side - see the fixture's description - because three surfaces
+    agreeing on a repair is agreement, not proof.
+    """
+
+    FIXTURE = json.loads(
+        (Path(__file__).resolve().parent / "fixtures/citation_authority_matrix.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    CASES = FIXTURE["cases"]
+
+    @pytest.mark.parametrize("case", CASES, ids=[c["why"] for c in CASES])
+    def test_only_a_valid_literal_authority_keeps_its_brackets(self, case):
+        assert safe_url(case["destination"]) == (case["safe_url"] or "")
+
+    @pytest.mark.parametrize(
+        "case", [c for c in CASES if c["safe_url"]], ids=[c["why"] for c in CASES if c["safe_url"]]
+    )
+    def test_the_accepted_spelling_is_still_a_fixed_point(self, case):
+        """A restored bracket must not be spelled away by the next pass."""
+        assert safe_url(case["safe_url"]) == case["safe_url"]

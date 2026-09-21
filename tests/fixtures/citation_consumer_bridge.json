@@ -61,6 +61,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -123,6 +124,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -185,6 +187,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -247,6 +250,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -309,6 +313,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -371,6 +376,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -443,6 +449,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": false
     },
     {
@@ -505,6 +512,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -577,6 +585,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -649,6 +658,7 @@
           "cited": false
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -731,6 +741,7 @@
           "cited": false
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -793,6 +804,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -855,6 +867,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -922,6 +935,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -987,6 +1001,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1049,6 +1064,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1153,6 +1169,746 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "link_label",
+      "why": "The marker written inside a link's own label. A citation is a link, and a link inside a link is not one - CommonMark makes the outer brackets text again - so the source is shown after the unit that encloses it, with that unit's destination and the label's other words untouched. Both links name the same page here, which is where a binding that matched on the address would badge the wrong one.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://openai.com/docs",
+          "title": "OpenAI Docs"
+        }
+      },
+      "agent_text": "See [the docs citeturn0view0](https://openai.com/docs) for details.",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "OpenAI Docs",
+          "url": "https://openai.com/docs",
+          "label": "openai.com",
+          "spans": [
+            [
+              41,
+              78
+            ]
+          ],
+          "body_sha256": "9bd459fd35f007f8c109c5b009ac890a807491960fad853a2b1a94abe5d30eb5"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "OpenAI Docs",
+          "url": "https://openai.com/docs",
+          "label": "openai.com",
+          "spans": [
+            [
+              41,
+              78
+            ]
+          ],
+          "body_sha256": "9bd459fd35f007f8c109c5b009ac890a807491960fad853a2b1a94abe5d30eb5"
+        }
+      ],
+      "web_text": "See [the docs ](https://openai.com/docs) [openai.com](https://openai.com/docs) for details.",
+      "im_text": "See [the docs ](https://openai.com/docs) [openai.com](https://openai.com/docs) for details.",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "the docs ",
+          "url": "https://openai.com/docs",
+          "cited": false
+        },
+        {
+          "label": "openai.com",
+          "url": "https://openai.com/docs",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "the docs ",
+          "url": "https://openai.com/docs",
+          "cited": false
+        },
+        {
+          "label": "openai.com",
+          "url": "https://openai.com/docs",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "link_label_positions",
+      "why": "One source cited from inside three labels - opening one, in the middle of the next, closing the third. One row, three spans, and each source after its own unit rather than after the last of them.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Thrice"
+        }
+      },
+      "agent_text": "[citeturn0view0 a](https://u.example/1), [b citeturn0view0 c](https://u.example/2), [d citeturn0view0](https://u.example/3).",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Thrice",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              26,
+              62
+            ],
+            [
+              92,
+              128
+            ],
+            [
+              156,
+              192
+            ]
+          ],
+          "body_sha256": "992e162c046453519eb0dc150c297ceaa10270ee234bd3ee67d1514c95073be3"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Thrice",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              26,
+              62
+            ],
+            [
+              92,
+              128
+            ],
+            [
+              156,
+              192
+            ]
+          ],
+          "body_sha256": "992e162c046453519eb0dc150c297ceaa10270ee234bd3ee67d1514c95073be3"
+        }
+      ],
+      "web_text": "[ a](https://u.example/1) [example.com](https://example.com/s), [b  c](https://u.example/2) [example.com](https://example.com/s), [d ](https://u.example/3) [example.com](https://example.com/s).",
+      "im_text": "[ a](https://u.example/1) [example.com](https://example.com/s), [b  c](https://u.example/2) [example.com](https://example.com/s), [d ](https://u.example/3) [example.com](https://example.com/s).",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": " a",
+          "url": "https://u.example/1",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "b  c",
+          "url": "https://u.example/2",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "d ",
+          "url": "https://u.example/3",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": " a",
+          "url": "https://u.example/1",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "b  c",
+          "url": "https://u.example/2",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "d ",
+          "url": "https://u.example/3",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "data_slots",
+      "why": "The slots of a link that are address or syntax rather than anything a reader is shown: a destination, a title, an angle-bracketed destination, and an autolink, which is all address. A marker there is part of what makes the unit work, so it stays the characters the model typed - no token minted, no source fetched, no link spliced in - while the one in the prose beside them is still a citation.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Prose"
+        }
+      },
+      "agent_text": "Cited. citeturn0view0\n\n[a](https://example.com/citeturn0view0path) [b](https://example.com/y \"T citeturn0view0\") [c](<https://example.com/zciteturn0view0>) <https://example.com/autociteturn0view0>",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Prose",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "a384366aa828fe9aeb90f87aab6eb2d0fbb18a657fd6c59353c046ee02c8f8ab"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Prose",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "a384366aa828fe9aeb90f87aab6eb2d0fbb18a657fd6c59353c046ee02c8f8ab"
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/s)\n\n[a](https://example.com/citeturn0view0path) [b](https://example.com/y \"T citeturn0view0\") [c](<https://example.com/zciteturn0view0>) <https://example.com/autociteturn0view0>",
+      "im_text": "Cited. [example.com](https://example.com/s)\n\n[a](https://example.com/citeturn0view0path) [b](https://example.com/y \"T citeturn0view0\") [c](<https://example.com/zciteturn0view0>) <https://example.com/autociteturn0view0>",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "a",
+          "url": "https://example.com/citeturn0view0path",
+          "cited": false
+        },
+        {
+          "label": "b",
+          "url": "https://example.com/y",
+          "cited": false
+        },
+        {
+          "label": "c",
+          "url": "https://example.com/zciteturn0view0",
+          "cited": false
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "a",
+          "url": "https://example.com/citeturn0view0path",
+          "cited": false
+        },
+        {
+          "label": "b",
+          "url": "https://example.com/y",
+          "cited": false
+        },
+        {
+          "label": "c",
+          "url": "https://example.com/zciteturn0view0",
+          "cited": false
+        }
+      ],
+      "anchors_cover_destinations": false,
+      "anchors_exhaustive": false
+    },
+    {
+      "key": "reference_slots",
+      "why": "A reference link written in full shows its label and names its definition separately, so the label is a place a citation can go. Written short, the same brackets are both - the text a reader sees and the identifier that finds the address - so editing them would leave a link pointing at nothing. Those stay exactly as written, definition included.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Referenced"
+        }
+      },
+      "agent_text": "[the docs citeturn0view0][ref], [dual citeturn0view0] and [dual citeturn0view0][].\n\n[ref]: https://r.example/page\n[dual citeturn0view0]: https://r.example/dual",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Referenced",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              17,
+              53
+            ]
+          ],
+          "body_sha256": "e0e4bfa542b198c14f0171bcc3be1e1b596b1e0a4659044cd5ebc47cef7d7617"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Referenced",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              17,
+              53
+            ]
+          ],
+          "body_sha256": "e0e4bfa542b198c14f0171bcc3be1e1b596b1e0a4659044cd5ebc47cef7d7617"
+        }
+      ],
+      "web_text": "[the docs ][ref] [example.com](https://example.com/s), [dual citeturn0view0] and [dual citeturn0view0][].\n\n[ref]: https://r.example/page\n[dual citeturn0view0]: https://r.example/dual",
+      "im_text": "[the docs ][ref] [example.com](https://example.com/s), [dual citeturn0view0] and [dual citeturn0view0][].\n\n[ref]: https://r.example/page\n[dual citeturn0view0]: https://r.example/dual",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": false,
+      "anchors_exhaustive": false
+    },
+    {
+      "key": "image_slots",
+      "why": "An image's alt text is what a reader is given when the picture is not there; its src is an address. One marker is a citation and the other is not, in one line. The component does not fetch a foreign image - it renders a click-through link instead - so both are links on this surface.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Illustrated"
+        }
+      },
+      "agent_text": "![a diagram citeturn0view0](https://i.example/p.png) and ![plain](https://i.example/citeturn0view0q.png)",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Illustrated",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              39,
+              75
+            ]
+          ],
+          "body_sha256": "de5142f360c26f90728c7e4ad2d7588ed5e3b837524908a6c9e5c15d89884d7a"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Illustrated",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              39,
+              75
+            ]
+          ],
+          "body_sha256": "de5142f360c26f90728c7e4ad2d7588ed5e3b837524908a6c9e5c15d89884d7a"
+        }
+      ],
+      "web_text": "![a diagram ](https://i.example/p.png) [example.com](https://example.com/s) and ![plain](https://i.example/citeturn0view0q.png)",
+      "im_text": "![a diagram ](https://i.example/p.png) [example.com](https://example.com/s) and ![plain](https://i.example/citeturn0view0q.png)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": false,
+      "anchors_exhaustive": false
+    },
+    {
+      "key": "image_in_link",
+      "why": "An image inside a link: two units, one holding the other. The source belongs after the outer one. Placed after the image instead it would sit in the link's label and take the link down with it.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Nested"
+        }
+      },
+      "agent_text": "[![a diagram citeturn0view0](https://i.example/p.png)](https://out.example/page)",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Nested",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              67,
+              103
+            ]
+          ],
+          "body_sha256": "c8d053801e35938d8a6b465e979825b9b732666fa3aab28c5477b961f84318b5"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Nested",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              67,
+              103
+            ]
+          ],
+          "body_sha256": "c8d053801e35938d8a6b465e979825b9b732666fa3aab28c5477b961f84318b5"
+        }
+      ],
+      "web_text": "[![a diagram ](https://i.example/p.png)](https://out.example/page) [example.com](https://example.com/s)",
+      "im_text": "[![a diagram ](https://i.example/p.png)](https://out.example/page) [example.com](https://example.com/s)",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": null,
+          "url": "https://out.example/page",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": null,
+          "url": "https://out.example/page",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": false,
+      "anchors_exhaustive": false
+    },
+    {
+      "key": "moved_by_a_transform",
+      "why": "Delivery removes silent blocks, and what closes up behind them leaves a registered token somewhere the model never put it. Each one is judged where it ends up rather than where it started: inside a label it is still a citation and is shown after that link, inside a destination or a title it is data again and the marker the model typed comes back - the alternative is a link nobody can open and a source claimed where no reader can see it.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Moved"
+        }
+      },
+      "agent_text": "A [lab <silent>](https://z.example) x</silent>citeturn0view0](https://out.example/page) B\n\nC [two](https://z.example<silent>) y</silent>citeturn0view0) D\n\nE [three](https://z.example \"t<silent>\") y</silent>citeturn0view0\") F",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Moved",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              35,
+              71
+            ]
+          ],
+          "body_sha256": "695f872cc2e6bce140460a0e0f174c94370c6bb2905e90ffd43ac1e3dc12aa7a"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Moved",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              35,
+              71
+            ]
+          ],
+          "body_sha256": "695f872cc2e6bce140460a0e0f174c94370c6bb2905e90ffd43ac1e3dc12aa7a"
+        }
+      ],
+      "web_text": "A [lab ](https://out.example/page) [example.com](https://example.com/s) B\n\nC [two](https://z.exampleciteturn0view0) D\n\nE [three](https://z.example \"tciteturn0view0\") F",
+      "im_text": "A [lab ](https://out.example/page) [example.com](https://example.com/s) B\n\nC [two](https://z.exampleciteturn0view0) D\n\nE [three](https://z.example \"tciteturn0view0\") F",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "lab ",
+          "url": "https://out.example/page",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "two",
+          "url": "https://z.exampleciteturn0view0",
+          "cited": false
+        },
+        {
+          "label": "three",
+          "url": "https://z.example",
+          "cited": false
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "lab ",
+          "url": "https://out.example/page",
+          "cited": false
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "two",
+          "url": "https://z.exampleciteturn0view0",
+          "cited": false
+        },
+        {
+          "label": "three",
+          "url": "https://z.example",
+          "cited": false
+        }
+      ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "open_fence",
+      "why": "A fence the answer never closed takes the rest of the reply into code. The citation's own spelling in there is not a link to any renderer here, and a marker in there is not a citation either - which is the same rule the closed fence above gets, decided by the parser rather than by whether a closing line happens to exist.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Unclosed"
+        }
+      },
+      "agent_text": "Cited. citeturn0view0\n\n```\n[example.com](https://example.com/s)\nciteturn0view0 still open",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Unclosed",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "55f17c8c69883e01ff3aa65ae70d8149f2dc53dd14b30c3f76065d4203eadd6b"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Unclosed",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ]
+          ],
+          "body_sha256": "55f17c8c69883e01ff3aa65ae70d8149f2dc53dd14b30c3f76065d4203eadd6b"
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/s)\n\n```\n[example.com](https://example.com/s)\nciteturn0view0 still open",
+      "im_text": "Cited. [example.com](https://example.com/s)\n\n```\n[example.com](https://example.com/s)\nciteturn0view0 still open",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
+      "key": "file_label_and_quick_reply",
+      "why": "A marker in an attachment's label and in a quick-reply button. Neither is Markdown a reader parses - one titles a file card, the other is a button - so the attribution is plain text left where it stands, with no link syntax and no token reaching a structured field. In the body the attachment is still a link, and CommonMark refuses ``file:`` outright: a scan that cannot see that unit would put the source inside its label and break the card.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://example.com/s",
+          "title": "Attached"
+        }
+      },
+      "agent_text": "Cited. citeturn0view0\n\n[report citeturn0view0](file:///tmp/avibe-citation-bridge/report.txt)\n\n---\n[👌 继续 citeturn0view0] | [✅ 完成]",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Attached",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ],
+            [
+              101,
+              137
+            ]
+          ],
+          "body_sha256": "7c0134b567efd0e1b38c11d0b26bff8a157a41719cf5b3f31b4342d5713eea16"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Attached",
+          "url": "https://example.com/s",
+          "label": "example.com",
+          "spans": [
+            [
+              7,
+              43
+            ],
+            [
+              52,
+              88
+            ]
+          ],
+          "body_sha256": "5fe6fc09cbd662d232422fffd26ad244b476c2d4aaa501aacda5587cf52ec8a8"
+        }
+      ],
+      "web_text": "Cited. [example.com](https://example.com/s)\n\n[report ](file:///tmp/avibe-citation-bridge/report.txt) [example.com](https://example.com/s)",
+      "im_text": "Cited. [example.com](https://example.com/s)\n\nreport [example.com](https://example.com/s)",
+      "quick_replies": [
+        "👌 继续 example.com",
+        "✅ 完成"
+      ],
+      "files": [
+        {
+          "label": "report example.com",
+          "path": "/tmp/avibe-citation-bridge/report.txt"
+        }
+      ],
+      "web_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/s",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1215,6 +1971,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1282,6 +2039,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1349,6 +2107,7 @@
           "cited": true
         }
       ],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     },
     {
@@ -1364,6 +2123,7 @@
       "files": [],
       "web_anchors": [],
       "im_anchors": [],
+      "anchors_cover_destinations": true,
       "anchors_exhaustive": true
     }
   ],
@@ -1497,7 +2257,7 @@
       "type": "result",
       "row": {
         "type": "result",
-        "text": "[report](/api/media/MKWtZiWqmgcUMlkmBsaNXQ)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
+        "text": "[report](/api/media/7EPiDrihQUpry6om5gCmSg)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)",
         "content": {
           "kind": "result",
           "result_footer": "✅ ⏱️ 2m 24s",
@@ -1514,10 +2274,10 @@
                   170
                 ]
               ],
-              "body_sha256": "994ecb9c0616b67ad8fdf308f7fd9170ed745e904f6e80d82387a2bb4299d172"
+              "body_sha256": "0a527ac2acef9af97986b634a9d0913cdcefb058e50e8fa3bef90f9300fa1be5"
             }
           ],
-          "text": "[report](/api/media/MKWtZiWqmgcUMlkmBsaNXQ)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
+          "text": "[report](/api/media/7EPiDrihQUpry6om5gCmSg)\n\nProvide $<deployKey> first.\n\n🔎 Background: [example.com](https://example.com/x)\n\nCited. [example.com](https://example.com/x)"
         }
       }
     },

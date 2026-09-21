@@ -105,12 +105,20 @@ function linkText(children: React.ReactNode): string {
 
 // An IPv6 host is REQUIRED to be written in brackets — and `[`/`]` are two of
 // the characters mdast-util-to-hast percent-encodes when it turns a parsed
-// destination into an href. So `https://[::1]/x` arrives here spelled
-// `https://%5B::1%5D/x`, which is not a URL any browser will parse: the link is
-// rendered, looks right, and goes nowhere. Put the brackets back — in the
-// authority only, never across the rest of the href, and only when the platform
-// itself then accepts the result as a URL. Anything else is returned untouched
-// for the sanitizer below to judge.
+// destination into an href. So `https://[::1]/x` arrives at the href below
+// spelled `https://%5B::1%5D/x`, which is not a URL any browser will parse: the
+// link is rendered, looks right, and goes nowhere. Put the brackets back — in
+// the authority only, never across the rest of the href, and only when the
+// platform itself then accepts the result as a URL.
+//
+// Only for a destination that was WRITTEN with brackets, which is the one thing
+// the href no longer says: the same encoder writes a literal `[::1]` and a
+// provider's own `%5B::1%5D` as the same characters, so repairing whatever looks
+// escaped turned `https://%5B::1%5D/admin` — an address with no host, which this
+// renderer should leave exactly as invalid as it arrived — into a live link to
+// the loopback interface. `remarkLiteralAuthority` answers that question up in
+// the AST, where the parsed destination still exists, and marks the node; this
+// runs only for a node it marked.
 // Userinfo is part of the authority and may precede the host, so the match
 // runs to the last `@` before the path rather than assuming the host is first.
 const ENCODED_IPV6_AUTHORITY = /^(https?:\/\/(?:[^/?#]*@)?)(%5B[^/?#]*%5D[^/?#]*)/i;
@@ -130,15 +138,100 @@ function repairIpv6Authority(url: string): string {
   return repaired;
 }
 
+// The mark `remarkLiteralAuthority` leaves on a node whose destination was
+// written with a literal bracketed host. It is read back off the hast element
+// react-markdown hands `urlTransform`, so the qualification travels with the
+// occurrence rather than with the URL text — two links in one message may spell
+// the same href and disagree about this.
+const LITERAL_AUTHORITY = 'dataLiteralAuthority';
+
+type MdastNode = {
+  type?: string;
+  url?: unknown;
+  identifier?: unknown;
+  data?: { hProperties?: Record<string, unknown> };
+  children?: unknown;
+};
+
+function eachMdastNode(node: MdastNode, visit: (node: MdastNode) => void): void {
+  visit(node);
+  if (!Array.isArray(node.children)) return;
+  for (const child of node.children) eachMdastNode(child as MdastNode, visit);
+}
+
+// Whether a destination, as the Markdown parser resolved it and before anything
+// spelled it as a URI, wraps its host in literal brackets. Both ends have to be
+// literal: a mixed wrapper (`[::1%5D`) is not a bracketed host with an escape in
+// it, it is a host that was never bracketed, and promoting half of it into
+// syntax invents an address out of the other half. The boundaries are read the
+// same way a URL parser reads them — `/?#` end the authority, the LAST `@`
+// starts the host — and none of those characters are touched by URI spelling,
+// so both ends of the pipeline see them in the same places.
+function hasLiteralAuthorityBrackets(url: string): boolean {
+  const colon = url.indexOf(':');
+  if (colon < 0) return false;
+  const afterScheme = url.slice(colon + 1);
+  if (!afterScheme.startsWith('//')) return false;
+  const rest = afterScheme.slice(2);
+  const end = rest.search(/[/?#]/);
+  const authority = end < 0 ? rest : rest.slice(0, end);
+  const at = authority.lastIndexOf('@');
+  const hostPort = at < 0 ? authority : authority.slice(at + 1);
+  const opener = /^(?:\[|%5[Bb])/.exec(hostPort);
+  if (!opener || opener[0] !== '[') return false;
+  const closer = /\]|%5[Dd]/.exec(hostPort.slice(opener[0].length));
+  return closer !== null && closer[0] === ']';
+}
+
+// Carry that one bit from the parsed destination to the href consumer.
+// `node.url` (or, for a reference, the url of the definition it names) is the
+// destination mdast still holds; by the time `urlTransform` runs, hast has
+// spelled it and the answer is gone. Inline links, autolinks, reference links
+// and image destinations all pass through here — the component turns an image
+// this renderer will not fetch into a click-through link of its own, so an
+// image `src` reaches an `href` too. Nothing else about the node is read or
+// written, and the mark is consumed by `mentionUrlTransform` rather than
+// rendered: `a` and `img` below take the props they name, not a spread.
+export function remarkLiteralAuthority() {
+  return (tree: unknown) => {
+    const definitions = new Map<string, string>();
+    eachMdastNode(tree as MdastNode, (node) => {
+      if (node.type !== 'definition') return;
+      if (typeof node.identifier === 'string' && typeof node.url === 'string') {
+        definitions.set(node.identifier, node.url);
+      }
+    });
+    eachMdastNode(tree as MdastNode, (node) => {
+      let url: string | undefined;
+      if (node.type === 'link' || node.type === 'image') {
+        if (typeof node.url === 'string') url = node.url;
+      } else if (node.type === 'linkReference' || node.type === 'imageReference') {
+        if (typeof node.identifier === 'string') url = definitions.get(node.identifier);
+      } else {
+        return;
+      }
+      if (url === undefined || !hasLiteralAuthorityBrackets(url)) return;
+      const data = (node.data ??= {});
+      const properties = (data.hProperties ??= {});
+      properties[LITERAL_AUTHORITY] = true;
+    });
+  };
+}
+
 // Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
 // only http/https/mailto/tel/relative by default).
-function mentionUrlTransform(url: string, allowLocalFiles: boolean): string {
+function mentionUrlTransform(
+  url: string,
+  allowLocalFiles: boolean,
+  node?: { properties?: Record<string, unknown> },
+): string {
   if (
     url.startsWith(`${MENTION_LINK_SCHEME}:`)
     || url.startsWith(`${SECRET_LINK_SCHEME}:`)
     || (allowLocalFiles && isAbsoluteWindowsFileHref(url))
   ) return url;
-  return defaultUrlTransform(repairIpv6Authority(url));
+  const literalAuthority = node?.properties?.[LITERAL_AUTHORITY] === true;
+  return defaultUrlTransform(literalAuthority ? repairIpv6Authority(url) : url);
 }
 
 // A fenced code block with a hover/tap copy button. The button lives on a
@@ -317,6 +410,9 @@ export const Markdown: React.FC<{
     () => [
       remarkGfm,
       remarkCjkFriendly,
+      // Unconditional: which destinations were written with a bracketed host is
+      // a fact about this text, not about whether it carries citations.
+      remarkLiteralAuthority,
       ...(softBreaks ? [remarkBreaks] : []),
       ...(annotateCitations ? [remarkCitationSpans] : []),
     ],
@@ -447,7 +543,8 @@ export const Markdown: React.FC<{
     [interactive, secretRequests, prepared.binding, readOnly, localFileWorkdir, onOpenLocalFile],
   );
 
-  const urlTransform = (url: string) => mentionUrlTransform(url, Boolean(onOpenLocalFile));
+  const urlTransform = (url: string, _key: string, node: { properties?: Record<string, unknown> }) =>
+    mentionUrlTransform(url, Boolean(onOpenLocalFile), node);
   return (
     <div className={cn('vr-markdown', className)}>
       <ReactMarkdown
