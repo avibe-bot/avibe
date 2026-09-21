@@ -66,9 +66,12 @@ def hold_links(
     what a Markdown reader actually resolves: ``render(label, destination)``.
     The destination is the resolved one - angle-bracket form, backslash escapes
     and character references already applied, and a title left out, because it
-    is not part of the address and no IM dialect has a place to put it. Restore
-    with ``restore_held`` BEFORE restoring an escape pass, whose placeholders a
-    label or a destination may still contain.
+    is not part of the address and no IM dialect has a place to put it. Both
+    fields may still hold the placeholders of an escape pass that ran first, so
+    ``render`` is where those come back: a character restored after the unit is
+    spelled is a character its dialect can no longer encode. Restore with
+    ``restore_held`` BEFORE restoring that pass, so the text around the units
+    is the only thing left for it to reach.
 
     ``inline_links`` returns non-overlapping spans in source order, so this
     splices each one exactly once.

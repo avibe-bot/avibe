@@ -189,8 +189,25 @@ blob with no way to reach the page the answer is based on.
   `&#xA;`, `&NewLine;`, `&#13;`), the label's existing one-line rule — a
   newline inside `<url|label>` is not a link — is applied once more after
   interpretation, where the label's characters are finally known; an escaped
-  `\&NewLine;` is literal text with no break to fold. The destination is
-  delivered exactly as it stands.
+  `\&NewLine;` is literal text with no break to fold.
+  The destination is finished in the same place and for the same reason. It is
+  the other half of a wrapper built out of `<`, `|` and `>`, and an address is
+  allowed to contain all three: one of them arriving raw ends the unit where
+  the author did not, and the reader is shown a truncated link with the rest of
+  the address beside it as text. What it owes the reader is the page a tap
+  opens, not the bytes that carried it there, so two jobs run in order and stay
+  apart. First the address is written the way a URI may be written — RFC 3986
+  says which characters stand for themselves, and `<`, `>` and `|` are not
+  among them, so they leave as `%3C`, `%3E` and `%7C`, along with spaces,
+  control characters, backslashes and backticks, while `%`, the `[]` of an IPv6
+  authority and the `?#&=` an address is structured by are untouched. Then
+  Slack's text-object escaping runs over the result, which is what a query
+  separator needs: `?a=1&b=2` travels as `?a=1&amp;b=2` and is `?a=1&b=2` again
+  to the client, where percent-encoding that `&` would have survived every
+  decoder and opened a different page. This is delivery, not canonicalization —
+  a malformed `%zz`, a bracket in a path and a non-ASCII host are left as the
+  author wrote them, each naming the same page the Web renderer reaches by
+  rewriting it.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -207,7 +224,9 @@ blob with no way to reach the page the answer is based on.
   including inside the parentheses, and turned `https://a*b*.example/x` into
   `https://a_b_.example/x` — not a formatting difference but a different site.
   A destination is opaque data to a text dialect, so it is held across the
-  platform pass and restored byte-for-byte afterwards. Labels are escaped for
+  platform pass and comes back untouched by it — and, on a platform whose own
+  wrapper it then has to fit inside, is re-spelled for that wrapper while the
+  wrapper is still open, never restored into a finished one. Labels are escaped for
   every character that is active syntax in a dialect the label will be read in:
   the ones that destroy the link around it (a backtick or an angle bracket opens
   a code span, comment, processing instruction, declaration or CDATA section
@@ -397,7 +416,7 @@ blob with no way to reach the page the answer is based on.
   across two lines that must stay one code span. Then what happens to the unit
   after the hold: a label spelling `&`, `<` or `>` — written plainly, written
   as a backslash escape restored after the converter ran, or looking like a
-  mention — and the destination delivered untouched. What Slack shows is then
+  mention. What Slack shows is then
   asserted against CommonMark itself: each named and numeric reference is
   paired with its escaped spelling (`&amp;`/`\&amp;`, `&lt;`/`\&lt;`,
   `&gt;`, `&copy;`/`\&copy;`, `&#38;`, `&COPY;`), a real `markdown-it` render
@@ -413,6 +432,23 @@ blob with no way to reach the page the answer is based on.
   or inside a code literal. A label is then required to be one line however its
   break is spelled: a source LF or CRLF, `&#10;`, `&#xA;`, `&NewLine;`,
   `&#13;`, and `\&NewLine;` staying literal, with the address left alone.
+  The destination has a corpus of its own, run as one batch through the real
+  adapter: each wrapper delimiter written raw, backslash-escaped and as a
+  character reference; a reference spelling a reference and the escape that
+  spells the same five characters; references that produce a control character
+  or a space; `%xx` that was already spelled and a `%b` that is not an escape
+  at all; a query, a fragment, a bracketed IPv6 authority with userinfo and
+  port, a non-ASCII host and path, brackets, a backslash, backticks, and a
+  `mailto:` address. Every row asserts the exact wire and, separately, the
+  address that wire resolves to — the wrapper is parsed structurally first,
+  before a single pass of Slack's three decodings over each field, so a
+  permissive decoder cannot make a delimiter that ended the unit early look
+  like a working link, and the count of units is part of the assertion. An
+  empty label exercises the bare `<url>` branch and two adjacent links the
+  composition. The same corpus is rendered by the Web `Markdown` component in
+  `ui/src/components/ui/markdown.test.tsx`, whose anchors are the independent
+  answer for what address each link names; the two agree on every row except
+  the three the adapter deliberately leaves alone.
   `ui/src/components/ui/markdown.test.tsx` asks the real Web renderer the same
   eight reference questions, so the two surfaces are measured against one
   answer rather than against each other's expectations.

@@ -36,6 +36,7 @@ from .formatters import (
     hold_markdown_escapes,
     resolve_character_references,
     restore_held,
+    spell_uri_escapes,
 )
 from .slack_modal import parse_routing_modal_selection
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -395,15 +396,26 @@ class SlackBot(BaseIMClient):
         not a link on Slack. A link spelling no label at all is sent bare
         rather than with an empty one.
 
-        The label is also finished here rather than left half-built. Slack reads
-        ``&``, ``<`` and ``>`` as markup of its own - a bare ``>`` ends the link
-        at that character, so the rest of the label and the whole address are
-        shown as plain text - and the characters a backslash escape protected
-        only come back when ``escaped`` is restored. Restoring them inside the
-        label, before it is encoded, is the difference between the reader seeing
-        a label that says ``a > b`` and seeing the link fall apart: restoring
-        them after the wrapper is built puts a raw delimiter inside it with
-        nothing left to encode it.
+        BOTH halves are finished here rather than left half-built, and for the
+        same reason. Slack reads ``&``, ``<`` and ``>`` as markup of its own -
+        a bare ``>`` ends the link at that character, so the rest of the link
+        is shown as plain text - and the characters a backslash escape
+        protected only come back when ``escaped`` is restored. Restoring them
+        inside the wrapper's fields, before those fields are spelled for Slack,
+        is the difference between the reader seeing ``a > b`` and seeing the
+        link fall apart: restoring them after the wrapper is built puts a raw
+        delimiter inside it with nothing left to encode it. Finishing only the
+        label left exactly that hole on the other side, where the address is.
+
+        A destination is not text, though, so it is not finished the way a
+        label is. Its characters were never markup to interpret; what it needs
+        is to be spelled as a URI may spell it, which is where ``>``, ``|`` and
+        a control character go, and to have Slack's own three read as
+        characters rather than markup. Those are two jobs and stay two: the
+        escape keeps the address the reader reaches, and the encoding keeps
+        Slack from reading it. A query's ``&`` survives both - the first leaves
+        a separator alone, the second spells it ``&amp;``, and one pass of
+        Slack's decoding hands the reader back the address that was resolved.
         """
         label = self.markdown_converter.convert(_SOFT_LINE_BREAK_RE.sub(" ", label))
         # Markdown's own two spellings of a literal character, resolved in the
@@ -420,6 +432,12 @@ class SlackBot(BaseIMClient):
         # ``\&NewLine;`` stayed literal and has no break to fold.
         label = _SOFT_LINE_BREAK_RE.sub(" ", label)
         label = encode_slack_delimiters(label)
+        # The address, restored before the wrapper closes over it rather than
+        # after. What a backslash protected is a character of the address, so
+        # it is put back as it stands and not read again - the destination a
+        # Markdown reader resolved already interpreted its references.
+        destination = restore_held(destination, escaped)
+        destination = encode_slack_delimiters(spell_uri_escapes(destination))
         return f"<{destination}|{label}>" if label else f"<{destination}>"
 
     def _convert_markdown_to_slack_mrkdwn(self, text: str) -> str:
@@ -452,9 +470,11 @@ class SlackBot(BaseIMClient):
                 render=lambda label, destination: self._render_slack_link(label, destination, escaped),
             )
             converted_text = self.markdown_converter.convert(held_text)
-            # Links first: a destination may still hold an escape placeholder
-            # (a label's are resolved when the link is spelled, so its literals
-            # can be encoded for Slack before the wrapper closes over them).
+            # Links first, and by then a rendered link owes this pass nothing:
+            # both of its fields resolved their own escapes while the wrapper
+            # was open, so the last restoration reaches only the text around
+            # them. A placeholder left inside a wrapper would come back as a
+            # raw character with nothing able to encode it any more.
             converted_text = restore_held(converted_text, links)
             return restore_held(converted_text, escaped)
         except Exception as e:

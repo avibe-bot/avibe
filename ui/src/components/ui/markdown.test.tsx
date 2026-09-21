@@ -44,6 +44,85 @@ describe('Markdown character references in a link label', () => {
   });
 });
 
+// The address half of the same unit. This renderer resolves a destination the
+// way a Markdown reader does - escapes, character references and all - and
+// then writes it as an href, so it is the independent answer for what address
+// each of these links names. The Slack adapter is measured against the same
+// corpus in tests/test_link_unit_delivery.py, and agrees here on every row but
+// three: it leaves `%b` and `[]` in a path exactly as the author wrote them
+// and leaves a non-ASCII host and path unencoded, because delivering an
+// address is not the same job as canonicalizing one. All three still name the
+// same page.
+describe('Markdown link destinations', () => {
+  it.each([
+    // A character the Slack wrapper is built out of, however Markdown spells it.
+    [String.raw`[h](https://example.com/a>b)`, 'https://example.com/a%3Eb'],
+    [String.raw`[h](https://example.com/a\>b)`, 'https://example.com/a%3Eb'],
+    ['[h](https://example.com/a&gt;b)', 'https://example.com/a%3Eb'],
+    ['[h](https://example.com/a&#62;b)', 'https://example.com/a%3Eb'],
+    [String.raw`[h](https://example.com/a<b)`, 'https://example.com/a%3Cb'],
+    [String.raw`[h](https://example.com/a\<b)`, 'https://example.com/a%3Cb'],
+    ['[h](https://example.com/a&lt;b)', 'https://example.com/a%3Cb'],
+    [String.raw`[h](https://example.com/a|b)`, 'https://example.com/a%7Cb'],
+    [String.raw`[h](https://example.com/a\|b)`, 'https://example.com/a%7Cb'],
+    // A query separator is structure, and stays one.
+    ['[h](https://example.com/s?a=1&b=2)', 'https://example.com/s?a=1&b=2'],
+    ['[h](https://example.com/a&amp;b)', 'https://example.com/a&b'],
+    // A reference that spells the text of a reference, and the escape that
+    // spells the same five characters.
+    ['[h](https://example.com/a&amp;amp;b)', 'https://example.com/a&amp;b'],
+    [String.raw`[h](https://example.com/a\&amp;b)`, 'https://example.com/a&amp;b'],
+    // A reference can put a control character or a space in an address.
+    ['[h](https://example.com/p&#10;q)', 'https://example.com/p%0Aq'],
+    ['[h](https://example.com/p&#9;q)', 'https://example.com/p%09q'],
+    ['[h](<https://example.com/a b>)', 'https://example.com/a%20b'],
+    // An escape already spelled stays spelled once.
+    ['[h](https://example.com/a%3Eb)', 'https://example.com/a%3Eb'],
+    ['[h](https://example.com/a%26amp%3Bb)', 'https://example.com/a%26amp%3Bb'],
+    // Structure a URI is made of, including a bracketed IPv6 authority.
+    [String.raw`[h](https://[::1]:8443/a\>b)`, 'https://[::1]:8443/a%3Eb'],
+    ['[h](https://u:p@[::1]:8443/a?x=1&y=2)', 'https://u:p@[::1]:8443/a?x=1&y=2'],
+    ['[h](https://example.com/p?x=1#f%20g)', 'https://example.com/p?x=1#f%20g'],
+    [String.raw`[h](https://example.com/a\\b)`, 'https://example.com/a%5Cb'],
+    ['[h](https://example.com/q=`x`)', 'https://example.com/q=%60x%60'],
+    // A scheme that is not http.
+    [
+      String.raw`[h](mailto:a+b@example.com?subject=a\>b)`,
+      'mailto:a+b@example.com?subject=a%3Eb',
+    ],
+    // The three this renderer spells differently from the Slack adapter. It
+    // rewrites what it is allowed to rewrite; the adapter delivers what it was
+    // given. Same page either way.
+    ['[h](https://example.com/a%b)', 'https://example.com/a%25b'],
+    ['[h](https://example.com/a[b])', 'https://example.com/a%5Bb%5D'],
+    [
+      '[h](https://例子.测试/路径?q=a&b=c)',
+      'https://%E4%BE%8B%E5%AD%90.%E6%B5%8B%E8%AF%95/%E8%B7%AF%E5%BE%84?q=a&b=c',
+    ],
+  ])('opens %j at %j', (markdown, href) => {
+    const { container } = render(<Markdown content={markdown} />);
+    const anchor = container.querySelector('a');
+
+    expect(anchor?.getAttribute('href')).toBe(href);
+    expect(anchor?.textContent).toBe('h');
+  });
+
+  it('keeps a bare destination and two neighbouring links whole', () => {
+    const empty = render(<Markdown content={String.raw`[](https://example.com/a\>b)`} />);
+
+    expect(empty.container.querySelector('a')?.getAttribute('href'))
+      .toBe('https://example.com/a%3Eb');
+    expect(empty.container.querySelector('a')?.textContent).toBe('');
+
+    const pair = render(
+      <Markdown content={String.raw`[a](https://example.com/1\>x) [b](https://example.com/2|y)`} />,
+    );
+
+    expect([...pair.container.querySelectorAll('a')].map((a) => a.getAttribute('href')))
+      .toEqual(['https://example.com/1%3Ex', 'https://example.com/2%7Cy']);
+  });
+});
+
 describe('Markdown emphasis', () => {
   it.each([
     ['', 'p'],

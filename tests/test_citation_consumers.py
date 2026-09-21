@@ -359,15 +359,23 @@ class SlackConsumerTests(PlatformConsumerTests):
     def _resolve(self, text: str) -> str:
         return self._REFERENCE.sub(lambda match: self._RESOLVED[match.group()], text)
 
+    def readable(self, rendered: str) -> str:
+        return self._resolve(rendered)
+
     def links(self, rendered: str) -> list[tuple[str, str]]:
         found = []
         for match in self._LINK.finditer(rendered):
-            destination = match.group(1)
+            # Structure first, then one pass of the three resolutions over each
+            # field. Both halves travel as Slack text, so both are read back
+            # the way Slack reads them - a query ``&`` is sent as ``&amp;``
+            # precisely so the client resolves it to the separator again, and
+            # an oracle that refused to resolve the destination would be
+            # measuring the spelling instead of the page the reader reaches.
+            # The wrapper is parsed before any of that, so a delimiter that
+            # ended the unit early still shows up as a broken unit here.
+            destination = self._resolve(match.group(1))
             if not destination.startswith(("http://", "https://")):
                 continue  # ``<@U1>``/``<#C1>`` and stray angle brackets in prose
-            # The label is resolved, the destination is not: an address is
-            # delivered as it stands, so an encoded one is a defect this
-            # reading must keep visible rather than undo.
             label = match.group(2)
             found.append((destination, self._resolve(label) if label is not None else destination))
         return found
@@ -392,10 +400,20 @@ class SlackConsumerTests(PlatformConsumerTests):
         self.assertIn(f"<{url}|a*b*.example>", held)
 
     def test_a_destination_is_held_through_the_query_string_too(self):
+        """The query survives the converter, and its ``&`` survives the wrapper.
+
+        Two assertions, because they are two different promises. The exact
+        wire says the separator is spelled the way a Slack text object spells
+        one - not percent-encoded, which would survive every decoder and leave
+        the reader on a page with one parameter instead of two. The reading
+        says that spelling resolves back to the address the producer wrote.
+        """
         query = case("backtick_query")
         url = query["im_citations"][0]["url"]
+        rendered = self.render(query["im_text"])
 
-        self.assertIn(f"<{url}|example.com>", self.render(query["im_text"]))
+        self.assertIn("<https://example.com/p?q=%60code%60&amp;r=a*b*|example.com>", rendered)
+        self.assertIn((url, "example.com"), self.links(rendered))
 
 
 class TelegramConsumerTests(PlatformConsumerTests):

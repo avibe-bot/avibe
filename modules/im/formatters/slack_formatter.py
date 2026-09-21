@@ -25,6 +25,57 @@ def encode_slack_delimiters(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# Which ASCII characters may stand for themselves in a URI, from RFC 3986: the
+# unreserved set, the delimiters that give an address its structure, and the
+# ``%`` that introduces an escape the address already spells. Everything else
+# has to be written as an escape - and ``<``, ``>`` and ``|``, the three
+# characters ``<url|label>`` is built out of, are all outside it, so the rule
+# an address already lives by is the same rule that keeps it inside a wrapper.
+_URI_SAFE = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789"
+    "-._~"
+    ":/?#[]@"
+    "!$&'()*+,;="
+    "%"
+)
+
+
+def spell_uri_escapes(url: str) -> str:
+    """Write a resolved destination so every character in it is one a URI may hold.
+
+    Not an encoder for a URL that was never one, and not a canonicaliser: this
+    is the address a Markdown reader already resolved, on its way into a place
+    that cannot hold every character. A character RFC 3986 does not allow to
+    stand for itself becomes its percent escape, and nothing else is touched -
+    ``%`` above all, so ``%3E`` that arrived spelled stays spelled once rather
+    than becoming ``%253E``. A malformed escape such as ``%zz`` is left exactly
+    as it came: repairing one would be a policy about addresses, not about
+    getting this one through the wrapper intact.
+
+    What it buys inside ``<url|label>`` follows from the same rule. ``>`` ends
+    the link early and ``|`` starts the label early, so a destination holding
+    either arrives truncated with the rest shown as plain text; both are
+    outside the safe set and leave as ``%3E`` and ``%7C``. So do a space, a
+    backslash, a backtick and every C0 control - including the newline a
+    character reference can put in an address, which no single-line wrapper
+    survives. A bracketed IPv6 authority needs no exception: ``[`` and ``]``
+    are delimiters a URI is allowed to contain.
+
+    Non-ASCII is left as it arrived. A browser spells the same address in
+    punycode and percent-encoded UTF-8; both name the same page, and rewriting
+    one into the other here would be canonicalising an address this layer was
+    only asked to deliver.
+    """
+    return "".join(
+        character
+        if not character.isascii() or character in _URI_SAFE
+        else "".join(f"%{byte:02X}" for byte in character.encode())
+        for character in url
+    )
+
+
 class SlackFormatter(BaseMarkdownFormatter):
     """Slack mrkdwn formatter
     

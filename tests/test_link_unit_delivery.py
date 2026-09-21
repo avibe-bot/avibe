@@ -71,7 +71,13 @@ def slack(text: str) -> str:
     return bot._convert_markdown_to_slack_mrkdwn(text)
 
 
-_SLACK_WRAPPER_RE = re.compile(r"<([^|>]*)\|([^>]*)>")
+# Slack's own grammar for the unit, and the only way to read one honestly:
+# structure first. A field stops at a raw ``<``, ``>`` or ``|`` because that is
+# where Slack stops reading it, so a destination that let one through does not
+# parse into a field here at all - which is the point. Decoding before parsing
+# would quietly turn a truncated link into a plausible one and let a broken
+# delimiter pass as a passing test.
+_SLACK_WRAPPER_RE = re.compile(r"<([^<>|]*)(?:\|([^<>]*))?>")
 # The three references Slack resolves on the way in, and nothing else: what the
 # reader is shown for a wire string is that string with these three decoded, in
 # one pass.
@@ -80,11 +86,21 @@ _SLACK_REFERENCE_RE = re.compile(r"&(?:amp|lt|gt);")
 _ANCHOR_TEXT_RE = re.compile(r"<a [^>]*>(.*)</a>", re.S)
 
 
+def all_links(wire: str) -> list[tuple[str, str]]:
+    """Every ``(destination, label)`` in *wire*, exactly as the wire spells them."""
+    return _SLACK_WRAPPER_RE.findall(wire)
+
+
 def one_link(wire: str) -> tuple[str, str]:
-    """The ``(destination, label)`` of the single ``<url|label>`` in *wire*."""
-    match = _SLACK_WRAPPER_RE.search(wire)
-    assert match is not None, wire
-    return match.group(1), match.group(2)
+    """The ``(destination, label)`` of the single wrapper in *wire*, undecoded.
+
+    Asserting there is exactly one is half the contract: a destination that
+    ended the wrapper early leaves a second ``<...>`` behind it, or none that
+    parses at all, and either way the count says so before any field is read.
+    """
+    units = all_links(wire)
+    assert len(units) == 1, wire
+    return units[0]
 
 
 def slack_label(markdown: str) -> str:
@@ -95,6 +111,17 @@ def slack_label(markdown: str) -> str:
 def slack_decodes(wire: str) -> str:
     """What a Slack reader is shown for *wire*."""
     return _SLACK_REFERENCE_RE.sub(lambda match: _SLACK_DECODED[match.group()], wire)
+
+
+def slack_reads(wire: str) -> tuple[str, str]:
+    """The ``(destination, label)`` a Slack client resolves out of *wire*.
+
+    One pass of the three decodings over each field, once the structure is
+    settled. The destination here is the address a tap opens, which is the
+    thing the wire owes the reader - not the bytes it took to spell it.
+    """
+    destination, label = one_link(wire)
+    return slack_decodes(destination), slack_decodes(label)
 
 
 def commonmark_shows(label: str) -> str:
@@ -353,17 +380,172 @@ class TestSlackSpellsTheWholeLabel:
     def test_emphasis_in_a_label_survives_the_encoding(self):
         assert slack(f"[**bold** & <em>]({PLAIN})") == f"<{PLAIN}|*bold* &amp; &lt;em&gt;>"
 
-    def test_the_destination_is_delivered_as_it_stands(self):
-        """The address is not text: encoding it would open a different page."""
+    def test_the_destination_reaches_the_address_it_named(self):
+        """The address is not text - but the wire that carries it is.
+
+        Slack reads ``&`` in a text object as the start of one of the three
+        references it resolves, so a query separator travels spelled the way
+        that object spells one. What the reader is owed is the address a tap
+        opens, not the bytes that carried it there: ``?a=1&amp;b=2`` on the
+        wire is ``?a=1&b=2`` to the client, which is the page the Markdown
+        named. Percent-encoding that ``&`` instead would survive every decoder
+        and open a different page - one parameter ``a`` holding ``1&b=2``.
+        """
+        query = "https://example.com/s?a=1&b=2"
+        wire = slack(f"[q]({query})")
+
+        assert wire == "<https://example.com/s?a=1&amp;b=2|q>"
+        assert slack_reads(wire) == (query, "q")
+
+    def test_an_autolink_is_not_this_serializers_unit(self):
+        """``<https://...>`` arrives already wrapped, and is left as it was."""
         query = "https://example.com/s?a=1&b=2"
 
-        assert slack(f"[q]({query})") == f"<{query}|q>"
         assert slack(f"<{query}>") == f"<{query}>"
 
     def test_text_outside_a_link_keeps_the_behaviour_it_had(self):
         """Only the link wrapper is this change's boundary."""
         for text in ("a > b & c", "5 < 6", "plain &amp; text"):
             assert slack(text) == converter_alone(text)
+
+
+# The destination half of the unit, as one batch: the Markdown a reader wrote,
+# the exact bytes Slack is sent, and the address a tap on it opens. The wire is
+# asserted on its own so a permissive decoder cannot make a broken delimiter
+# look like a working link, and the address on its own because that - not the
+# spelling - is what the reader was promised.
+_DESTINATION_CORPUS = (
+    # A delimiter of the wrapper, however the source spells it. Raw, escaped
+    # and written as a reference all resolve to the same address, and all three
+    # have to leave it whole: a ``>`` ends the link early, a ``|`` starts the
+    # label early, and a ``<`` opens a second unit inside the first.
+    (r"[h](https://example.com/a>b)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
+    (r"[h](https://example.com/a\>b)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
+    ("[h](https://example.com/a&gt;b)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
+    ("[h](https://example.com/a&#62;b)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
+    (r"[h](https://example.com/a<b)", "<https://example.com/a%3Cb|h>", "https://example.com/a%3Cb"),
+    (r"[h](https://example.com/a\<b)", "<https://example.com/a%3Cb|h>", "https://example.com/a%3Cb"),
+    ("[h](https://example.com/a&lt;b)", "<https://example.com/a%3Cb|h>", "https://example.com/a%3Cb"),
+    (r"[h](https://example.com/a|b)", "<https://example.com/a%7Cb|h>", "https://example.com/a%7Cb"),
+    (r"[h](https://example.com/a\|b)", "<https://example.com/a%7Cb|h>", "https://example.com/a%7Cb"),
+    # ``&`` is the one Slack control character an address genuinely needs: it
+    # separates query parameters. So it is spelled, not escaped away, and the
+    # separator comes back when the client resolves the reference.
+    ("[h](https://example.com/s?a=1&b=2)", "<https://example.com/s?a=1&amp;b=2|h>", "https://example.com/s?a=1&b=2"),
+    ("[h](https://example.com/a&amp;b)", "<https://example.com/a&amp;b|h>", "https://example.com/a&b"),
+    # A reference that stands for the text of a reference, paired with the
+    # escape that spells the same thing. Both name an address holding the five
+    # characters ``&amp;``, and one decoding pass has to leave them standing.
+    ("[h](https://example.com/a&amp;amp;b)", "<https://example.com/a&amp;amp;b|h>", "https://example.com/a&amp;b"),
+    (r"[h](https://example.com/a\&amp;b)", "<https://example.com/a&amp;amp;b|h>", "https://example.com/a&amp;b"),
+    # A reference can put a control character in an address. A newline would
+    # end the one line this wrapper is allowed to be.
+    ("[h](https://example.com/p&#10;q)", "<https://example.com/p%0Aq|h>", "https://example.com/p%0Aq"),
+    ("[h](https://example.com/p&#9;q)", "<https://example.com/p%09q|h>", "https://example.com/p%09q"),
+    ("[h](<https://example.com/a b>)", "<https://example.com/a%20b|h>", "https://example.com/a%20b"),
+    # An escape the address already spells is left spelled once. Encoding the
+    # ``%`` again would send ``%253E``, which is a path holding the text
+    # ``%3E`` rather than the one the author wrote.
+    ("[h](https://example.com/a%3Eb)", "<https://example.com/a%3Eb|h>", "https://example.com/a%3Eb"),
+    ("[h](https://example.com/a%26amp%3Bb)", "<https://example.com/a%26amp%3Bb|h>", "https://example.com/a%26amp%3Bb"),
+    # ``%b`` is not an escape at all. Repairing it would be a policy about
+    # addresses; this layer was asked to deliver one, so it leaves it alone.
+    ("[h](https://example.com/a%b)", "<https://example.com/a%b|h>", "https://example.com/a%b"),
+    # Structure a URI is made of survives, because the rule being applied is
+    # the URI's own: an IPv6 authority keeps its brackets, and so do userinfo,
+    # port, query and fragment.
+    (r"[h](https://[::1]:8443/a\>b)", "<https://[::1]:8443/a%3Eb|h>", "https://[::1]:8443/a%3Eb"),
+    (
+        "[h](https://u:p@[::1]:8443/a?x=1&y=2)",
+        "<https://u:p@[::1]:8443/a?x=1&amp;y=2|h>",
+        "https://u:p@[::1]:8443/a?x=1&y=2",
+    ),
+    ("[h](https://example.com/p?x=1#f%20g)", "<https://example.com/p?x=1#f%20g|h>", "https://example.com/p?x=1#f%20g"),
+    ("[h](https://example.com/a[b])", "<https://example.com/a[b]|h>", "https://example.com/a[b]"),
+    # Characters with no meaning to a URI and none to Slack either, but every
+    # one of them outside the set a URI may hold as itself.
+    (r"[h](https://example.com/a\\b)", "<https://example.com/a%5Cb|h>", "https://example.com/a%5Cb"),
+    ("[h](https://example.com/q=`x`)", "<https://example.com/q=%60x%60|h>", "https://example.com/q=%60x%60"),
+    # Non-ASCII is the author's spelling of a name, and it is left as it came.
+    (
+        "[h](https://例子.测试/路径?q=a&b=c)",
+        "<https://例子.测试/路径?q=a&amp;b=c|h>",
+        "https://例子.测试/路径?q=a&b=c",
+    ),
+    # A scheme that is not http, already delivered today.
+    (
+        r"[h](mailto:a+b@example.com?subject=a\>b)",
+        "<mailto:a+b@example.com?subject=a%3Eb|h>",
+        "mailto:a+b@example.com?subject=a%3Eb",
+    ),
+)
+
+
+class TestSlackSpellsTheWholeDestination:
+    """The other half of the unit, and the half a broken wrapper takes with it.
+
+    ``<url|label>`` is built out of ``<``, ``|`` and ``>``, and an address is
+    allowed to contain all three. One of them in the destination ends the unit
+    where the author did not: the reader is shown a truncated link followed by
+    the rest of the address as plain text, and the tap goes somewhere else or
+    nowhere. Escaped or spelled as a reference, it is the same character by the
+    time the wrapper is built - so the destination is finished before the
+    wrapper closes over it, the same as the label.
+
+    Two jobs, kept apart. First the address is written the way a URI is allowed
+    to be written: RFC 3986 says which characters may stand for themselves, and
+    ``<``, ``>`` and ``|`` are not among them, so they leave as ``%3C``, ``%3E``
+    and ``%7C`` - along with spaces, controls, backslashes and backticks, and
+    without touching the ``%``, the ``[]`` of an IPv6 authority or the ``?#&=``
+    an address is structured by. Then Slack's own text-object escaping runs over
+    the result, which is what a query ``&`` needs and percent-encoding would
+    destroy.
+    """
+
+    def test_every_destination_arrives_as_the_address_it_named(self):
+        for markdown, wire, address in _DESTINATION_CORPUS:
+            assert slack(markdown) == wire, markdown
+            assert slack_reads(wire) == (address, "h"), markdown
+
+    def test_a_destination_that_breaks_out_leaves_more_than_one_unit_behind(self):
+        """Why the wire is asserted and not just the decoding: the failure shape.
+
+        A raw ``>`` in the destination does not corrupt a field, it ends the
+        wrapper - and what follows is text, not a link. Reading the fields of
+        whatever parsed first would find a plausible ``(destination, label)``
+        and say nothing was wrong, so the shape of the wire is checked first.
+        """
+        for markdown, _, _ in _DESTINATION_CORPUS:
+            rendered = slack(markdown)
+
+            assert (rendered.count("<"), rendered.count("|"), rendered.count(">")) == (
+                1,
+                1,
+                1,
+            ), markdown
+            assert len(all_links(rendered)) == 1, markdown
+
+        broken = "<https://example.com/a>b|h>"
+
+        assert all_links(broken) == [("https://example.com/a", "")]
+        assert all_links(slack_decodes(broken)) == [("https://example.com/a", "")]
+
+    def test_an_empty_label_leaves_the_bare_wrapper_intact(self):
+        """No label, so no ``|`` - and the destination is still finished first."""
+        wire = slack(r"[](https://example.com/a\>b)")
+
+        assert wire == "<https://example.com/a%3Eb>"
+        assert slack_reads(wire) == ("https://example.com/a%3Eb", "")
+
+    def test_two_links_side_by_side_stay_two_links(self):
+        """Composition: each unit closes over its own address, and only its own."""
+        wire = slack(r"[a](https://example.com/1\>x) [b](https://example.com/2|y)")
+
+        assert wire == "<https://example.com/1%3Ex|a> <https://example.com/2%7Cy|b>"
+        assert all_links(wire) == [
+            ("https://example.com/1%3Ex", "a"),
+            ("https://example.com/2%7Cy", "b"),
+        ]
 
 
 class TestSlackTellsAReferenceFromItsSpelling:
@@ -431,18 +613,22 @@ class TestSlackTellsAReferenceFromItsSpelling:
         """The producer end: a real citation of a host that contains ``&amp;``.
 
         The label a citation writes is escaped character by character, so the
-        host's own ``&`` is literal text - and the address is percent-encoded
-        and must arrive as it stands.
+        host's own ``&`` is literal text. The address arrives from citation
+        ingestion already percent-encoded and holds no character Slack reads,
+        so here the wire and the address a tap opens are the same string - and
+        both are asserted, because a decoder permissive enough to agree with a
+        broken wire would have agreed with this one too.
         """
         for url, shown in (
             ("https://a%26amp%3B.example/x", "a&amp;.example"),
             ("https://a%26lt%3B.example/x", "a&lt;.example"),
             ("https://a%26copy%3B.example/x", "a&copy;.example"),
         ):
-            destination, label = one_link(slack(citation_body(url)))
+            wire = slack(citation_body(url))
+            destination, label = one_link(wire)
 
             assert destination == url, url
-            assert slack_decodes(label) == shown, url
+            assert slack_reads(wire) == (url, shown), url
 
     def test_every_name_the_parser_knows_reaches_slack_as_that_character(self):
         """The whole entity table, against the parser that owns it.
