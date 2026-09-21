@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Welcome } from './steps/Welcome';
 import { AgentDetection } from './steps/AgentDetection';
-import { BrandLogo } from './visual';
+import logoImg from '@/assets/logo.png';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi, type VibeAgentBrief } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
@@ -15,7 +15,28 @@ import { SetupModelRecovery } from './onboarding/SetupModelRecovery';
 import { readOpencodeSetupRoutes } from './onboarding/opencodeSetupRoutes';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
 
-/** Owns explicit setup completion; credential and lifecycle writes stay with their owners. */
+/**
+ * The setup's top bar, drawn as the design draws it at every size: the brand lockup —
+ * the logo asset, which already carries its white tile, beside the two-line wordmark —
+ * at the window's own gutter, and the shared language switcher wearing its round
+ * trigger opposite it.
+ */
+function SetupHeader() {
+  const { t } = useTranslation();
+  return (
+    <header>
+      <div className="onboarding-brand">
+        <span className="onboarding-brand-mark"><img src={logoImg} alt="" /></span>
+        <span className="onboarding-brand-wordmark">
+          <strong>{t('onboarding.brand.name')}</strong>
+          <span>{t('onboarding.brand.tagline')}</span>
+        </span>
+      </div>
+      <LanguageSwitcher variant="icon-round" />
+    </header>
+  );
+}
+
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
@@ -23,6 +44,10 @@ export function Wizard() {
   const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [recovery, setRecovery] = useState<VibeAgentBrief | null>(null);
   const [step, setStep] = useState<'welcome' | 'agents'>('welcome');
+  // The first screen arrives without an entrance of its own — the reference opens
+  // on it, settled. Only a switch between the two screens plays the transition, so
+  // the flag flips in the two places that move between them, never on mount.
+  const [entered, setEntered] = useState(false);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState('');
   const completing = useRef(false);
@@ -95,10 +120,16 @@ export function Wizard() {
     {error ? <><p role="alert">{error}</p><button onClick={() => void load()}>{t('common.retry')}</button></> : t('common.loading')}
   </div>;
   return <div className="onboarding-shell">
-    <header><BrandLogo size={36} /><LanguageSwitcher /></header>
+    <SetupHeader />
     <main className="onboarding-shell-content">
-      {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
-        : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}
+      {/* One keyed wrapper per step: switching steps swaps the composition and
+          the incoming one fades, slides and unblurs in, the way the reference's
+          connection layer arrives over the introduction. Reduced motion takes the
+          whole shell's animation away, so the swap stays instant for it. */}
+      <div key={step} className={entered ? 'onboarding-step onboarding-step-enter' : 'onboarding-step'}>
+        {step === 'welcome' ? <Welcome data={data} onNext={(next) => { setData({ ...data, ...Object(next) }); setStep('agents'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />
+          : <AgentDetection data={data} completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined} onNext={complete} onBack={(next) => { setData({ ...data, ...next }); setStep('welcome'); setEntered(true); window.scrollTo({ top: 0, behavior: 'instant' }); }} />}
+      </div>
     </main>
   </div>;
 }

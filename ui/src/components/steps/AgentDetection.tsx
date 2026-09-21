@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  ArrowUpToLine,
   ChevronDown,
   ChevronUp,
   Download,
@@ -13,12 +14,13 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { BackendIcon } from '../visual';
 import { AssistantRow } from '../onboarding/AssistantRow';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
 import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
-import { BackendLifecycleChip } from '../settings/BackendLifecycleChip';
+import { BackendLifecycleChip, type BackendLifecycleVisual } from '../settings/BackendLifecycleChip';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { BackendConnectionDialog } from '../onboarding/BackendConnectionDialog';
 import type { BackendConnectionState } from '@/context/ApiContext';
@@ -80,6 +82,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const routeSurfaceActive = useRouteSurfaceActive();
   const modelHubEnabled = useModelHubCapability();
@@ -108,6 +111,17 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const [syncing, setSyncing] = useState(false);
   const [detectingAgents, setDetectingAgents] = useState<Record<string, boolean>>({});
   const [detectionErrors, setDetectionErrors] = useState<Record<string, string>>({});
+  // The lifecycle the each card's chip derives, reported up so the card can draw
+  // the action the pill offers — update or upgrade-in-flight — on its state row.
+  const [visuals, setVisuals] = useState<Partial<Record<string, BackendLifecycleVisual>>>({});
+  const [refreshingAgents, setRefreshingAgents] = useState<Record<string, boolean>>({});
+  const [chipRefresh, setChipRefresh] = useState<Record<string, number>>({});
+  // A successful upgrade leaves the chip's own runtime probe in flight while this
+  // handler has already finished, so the pill still reads `update` for a moment and
+  // would re-arm the card's upgrade button against a backend that was just upgraded.
+  // The lock holds the button disabled until the chip's reported visual leaves
+  // `update`, which is the probe confirming what the upgrade did.
+  const [upgradeLocks, setUpgradeLocks] = useState<Record<string, boolean>>({});
   const pendingInstalls = useRef(new Set<string>());
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
@@ -261,6 +275,60 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     });
   };
 
+  // The setup card draws the update action on the state row, beside the pill the
+  // chip renders, while the chip still owns the probe and the write. Bumping
+  // `chipRefresh` is what lets the chip re-probe a runtime the card's own button
+  // changed, without the card duplicating the chip's lifecycle knowledge.
+  useEffect(() => {
+    setUpgradeLocks((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [name, locked] of Object.entries(current)) {
+        if (locked && visuals[name] !== 'update' && visuals[name] !== 'updating') {
+          next[name] = false;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [visuals]);
+
+  const releaseUpgradeLock = (name: string) =>
+    setUpgradeLocks((current) => (current[name] ? { ...current, [name]: false } : current));
+
+  const upgradeAgent = async (name: string) => {
+    setRefreshingAgents((current) => ({ ...current, [name]: true }));
+    setUpgradeLocks((current) => ({ ...current, [name]: true }));
+    // The chip's own upgrade handler owns the toast contract for lifecycle
+    // operations; the card's affordance is the same operation drawn on the state
+    // row, so it settles failures the same way rather than swallowing them, and
+    // `refreshingAgents` is handed to the chip as externally busy so its popover
+    // cannot launch a second install against the same backend.
+    try {
+      const result = await api.installAgent(name);
+      if (result.ok) {
+        showToast(t('backendLifecycle.upgradeSuccess'), 'success');
+        const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
+        if (installedPath) {
+          setAgents((prev) => ({ ...prev, [name]: { ...prev[name], cli_path: installedPath } }));
+        }
+        setChipRefresh((current) => ({ ...current, [name]: (current[name] || 0) + 1 }));
+        await detect(name, installedPath || agents[name]?.cli_path || name);
+      } else {
+        // A failed upgrade leaves the pill on `update` with no probe in flight, so
+        // the visuals-driven release never fires; settle the lock here instead of
+        // stranding the button disabled until a remount.
+        releaseUpgradeLock(name);
+        showToast(result.message || t('backendLifecycle.upgradeFailed'), 'error');
+      }
+    } catch (cause) {
+      releaseUpgradeLock(name);
+      showToast(String(cause), 'error');
+    } finally {
+      setRefreshingAgents((current) => ({ ...current, [name]: false }));
+    }
+  };
+
   const installAgent = async (name: string) => {
     if (pendingInstalls.current.has(name) || (isPage && isAnyInstalling)) return;
     pendingInstalls.current.add(name);
@@ -304,7 +372,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const opencodeAgent = agents['opencode'];
   const readyBackends = ASSISTANT_ORDER.filter((name) => agents[name].enabled && agents[name].status === 'ok'
     && !installingAgents[name] && !detectingAgents[name] && !connectionPending[name]
-    && !pendingWrites[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
+    && !pendingWrites[name] && !refreshingAgents[name] && !connectionErrors[name] && connections[name]?.entry_eligible);
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled) : readyBackends.length > 0;
   const handlePrimaryAction = async () => {
     if (entering) return;
@@ -550,14 +618,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name)}
-            configuringDisabled={syncing || pendingWrites[name] || !agent.enabled || agent.status !== 'ok'}
-            enabledControl={<label className="flex items-center gap-2 text-xs text-muted">
-              <input type="checkbox" className="size-3.5 accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                checked={agent.enabled} onChange={(event) => toggle(name, event.target.checked)} />
-              {t('onboarding.setup.enabled')}
-            </label>}
+            configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name] || !agent.enabled || agent.status !== 'ok'}
+            enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
+              label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
+              onClick={() => toggle(name, !agent.enabled)} />}
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={agent.status || 'unknown'}
               readyLabel={t('onboarding.setup.installed')}
+              refreshKey={chipRefresh[name]}
+              externallyBusy={!!refreshingAgents[name]}
+              onVisual={(visual) => setVisuals((current) => (current[name] === visual ? current : { ...current, [name]: visual }))}
               onOperationChange={(pending) => {
                 setPendingWrites((current) => ({ ...current, [name]: pending }));
                 if (!pending) void refreshConnection(name);
@@ -567,6 +636,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                 setAgents((previous) => ({ ...previous, [name]: { ...previous[name], cli_path: installedPath } }));
                 await detect(name, installedPath);
               }} />}
+            upgrade={agent.status === 'ok' && (visuals[name] === 'update' || visuals[name] === 'updating' || refreshingAgents[name]) ? (
+              <Button type="button" variant="secondary" className="onboarding-life-action"
+                onClick={() => void upgradeAgent(name)}
+                disabled={refreshingAgents[name] || !!upgradeLocks[name] || visuals[name] === 'updating' || !!installingAgents[name]}>
+                {refreshingAgents[name] || visuals[name] === 'updating'
+                  ? <RefreshCw size={14} className="motion-safe:animate-spin" />
+                  : <ArrowUpToLine size={14} />}
+                {t(refreshingAgents[name] || visuals[name] === 'updating'
+                  ? 'backendLifecycle.upgrading'
+                  : 'backendLifecycle.upgradeNow')}
+              </Button>
+            ) : undefined}
           />;
         })}
         </div>

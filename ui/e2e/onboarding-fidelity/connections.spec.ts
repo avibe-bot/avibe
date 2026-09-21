@@ -387,9 +387,28 @@ for (const viewport of [{ width: 320, height: 568, tight: false }, { width: 390,
     const denied = await serveProduct(page);
     await authFixtures(page);
     const reads = await switchableReads(page);
+    // Hold the card's own connection reads behind a gate the dialog's fixtures do
+    // not own, so the setup can be measured while a read is genuinely in flight.
+    let releaseConn = () => {};
+    const connGate = new Promise<void>((resolve) => { releaseConn = resolve; });
+    await page.route('**/api/backend/*/connection', async (route) => {
+      await connGate;
+      return route.fallback();
+    });
     await page.setViewportSize(viewport);
     await openOnboarding(page);
     await openSetup(page, 'en');
+    // An in-flight connection read must not re-lay the card out: it used to add a
+    // status line under the methods, so the card grew while the read settled and
+    // shrank when it landed, moving everything under the person's pointer. Pending
+    // now spins the method rows in place and disables them, at a fixed card height.
+    const cardHeights = () => page.locator('.onboarding-assistant')
+      .evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().height * 10) / 10));
+    const pendingHeights = await cardHeights();
+    await expect(page.locator('.onboarding-assistant-actions button').first()).toBeDisabled();
+    releaseConn();
+    await expect(page.locator('.onboarding-assistant-actions button').first()).toBeEnabled();
+    expect(await cardHeights()).toEqual(pendingHeights);
     const dialog = page.getByRole('dialog');
     // Where the frame owns the scroll, two things about the comparison change and only
     // two. The reader's own scroll position is theirs, not the layout's — reaching the
