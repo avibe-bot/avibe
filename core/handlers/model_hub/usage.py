@@ -95,8 +95,9 @@ USAGE_COUNTER_CEILING: Final = 2**53 - 1
 # takes a corrupt file — a window spans at most `USAGE_RETENTION_DAYS` days of
 # real calls.
 USAGE_PUBLISHED_COUNT_BOUND: Final = USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
-# Anything older than every instant this ledger can hold, so a row that never
-# recorded one sorts as the least recently metered.
+# Anything older than every instant this ledger can hold, so a row whose recency
+# cannot be read — it recorded no instant, or recorded one that has not happened —
+# sorts as the least recently metered.
 _OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
 
 _COUNTER_KEYS: Final = (
@@ -362,16 +363,42 @@ def _keyed_identities(
     return sources, models
 
 
-def _recency(row: dict) -> tuple[str, datetime]:
+def _recency(row: dict, ceiling: datetime) -> tuple[str, datetime]:
     """Order rows oldest-metered first, so the bound evicts what costs least.
 
     Ordering by key instead would evict by spelling: an early-sorting model would
     be recreated and evicted again on every write while later-sorting stale rows
     survived, so its usage could never accumulate. Instants are compared as points
     in time — text order is not time order once two rows carry different offsets.
+
+    An instant later than `ceiling` is not a recency at all. Nothing was metered
+    after the reading the caller just took, so such a row is not the set's most
+    recently used one — it is one whose recency cannot be read, which is the case
+    `_OLDEST_INSTANT` already answers for a row that recorded no instant. It gets
+    the same answer, and not because a corrupt row deserves to lose: a row this
+    ordering cannot place is the only row it can evict without discarding usage it
+    can account for.
+
+    Bounding it to `ceiling` instead is not enough, which is worth stating because
+    it is the obvious remedy. That makes the row as recent as the reading, so it
+    still outranks every row metered before it and still evicts real usage; it
+    narrows the lie without changing who pays for it. Placing the bound here at all
+    — rather than leaving it to whoever assembled the rows — is what stops this from
+    recurring: `_retained` keeps a future instant out of the file, and each time
+    that was the only place it happened, the report path ordered by the raw value.
+
+    The day is a different question and is deliberately not answered here. A row
+    dated after today reports nothing to anybody, so it does not belong in the set
+    at all; ranking it as though it were today's would still let it evict a real
+    row. Membership is each caller's own filter — a retention window on the way in,
+    the requested window on the way out — and the one caller that had neither is the
+    defect this ordering keeps being handed.
     """
 
-    return (row["day"], _instant(row["last_metered_at"]) or _OLDEST_INSTANT)
+    metered = _instant(row["last_metered_at"])
+    if metered is None or metered > ceiling:
+        return (row["day"], _OLDEST_INSTANT)
+    return (row["day"], metered)
 
 
 def _row_key(row: dict) -> tuple[str, str, str]:
@@ -446,7 +473,7 @@ class BoundedUsageLedger:
         self._now = now
         self._lock = threading.RLock()
 
-    def _within_capacity(self, rows: list[dict]) -> list[dict]:
+    def _within_capacity(self, rows: list[dict], *, measured: datetime) -> list[dict]:
         """Return at most `max_rows` of these rows, evicting the least recently metered.
 
         `_recency` orders by day first, so this may only be handed rows that are
@@ -460,11 +487,18 @@ class BoundedUsageLedger:
         placed inside the ledger's own day window; `window` calls it on rows it
         has already filtered to the requested one. Both keep the same survivors
         in the same order.
+
+        `measured` is what those two filters cannot supply: the day they bound is
+        only the first half of the order, and an instant inside today can still be
+        one no clock has reached. It is the reading each caller already took for its
+        own window, so the eviction and the placement answer to one clock — and on
+        the write path it changes nothing, because `_retained` has already brought
+        every instant back under it.
         """
 
         if len(rows) <= self.max_rows:
             return rows
-        return sorted(rows, key=_recency)[-self.max_rows :]
+        return sorted(rows, key=lambda row: _recency(row, measured))[-self.max_rows :]
 
     def _read(self) -> list[dict]:
         if not self.path.exists():
@@ -525,7 +559,7 @@ class BoundedUsageLedger:
             )
         return sorted(held, key=_row_key)
 
-    def _write(self, rows: list[dict]) -> None:
+    def _write(self, rows: list[dict], *, measured: datetime) -> None:
         """Persist the rows the file can hold, at both of the capacities it has.
 
         `max_rows` is one, and `_within_capacity` is where it is applied for this
@@ -556,7 +590,7 @@ class BoundedUsageLedger:
                 self.path,
                 _row_key(row),
             )
-        retained = self._within_capacity(holdable)
+        retained = self._within_capacity(holdable, measured=measured)
         write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
@@ -658,7 +692,7 @@ class BoundedUsageLedger:
             if not folded:
                 return
             retained = self._retained(list(rows.values()), persisted_at)
-            self._write(retained)
+            self._write(retained, measured=persisted_at)
 
     def _retained(self, rows: list[dict], measured: datetime) -> list[dict]:
         """Keep the rows this ledger's own clock can place, bounded at both edges.
@@ -714,7 +748,7 @@ class BoundedUsageLedger:
         # all means reading a file this ledger did not write. That is worth saying
         # once, unlike eviction on the write path, which is retention working as
         # designed and happens constantly.
-        held = self._within_capacity(placed)
+        held = self._within_capacity(placed, measured=_aware(now))
         if len(held) < len(placed):
             logger.warning(
                 "Model Hub usage ledger %s held %d reportable row(s) over its "

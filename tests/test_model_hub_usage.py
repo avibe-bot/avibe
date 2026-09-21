@@ -46,6 +46,7 @@ from core.handlers.model_hub.stream_wire import (
 )
 from core.handlers.model_hub.usage import (
     USAGE_COUNTER_CEILING,
+    USAGE_DEFAULT_WINDOW_DAYS,
     USAGE_MAX_ROWS,
     USAGE_PUBLISHED_COUNT_BOUND,
     USAGE_RETENTION_DAYS,
@@ -630,6 +631,10 @@ def test_the_row_cap_holds_when_reporting_a_file_that_overflows_it(
     The bound belongs on the reportable set rather than on the parse — see
     `test_the_row_cap_never_evicts_a_reportable_row_for_a_future_dated_one` for
     what applying it to raw rows costs.
+
+    The stamps here are all in the past, which is what distinguishes this from
+    `test_the_row_cap_ranks_an_unmeasurable_instant_as_the_least_recent`: the
+    ordering can read every one of them, so it evicts by age.
     """
 
     path = tmp_path / "state" / "usage.json"
@@ -643,7 +648,7 @@ def test_the_row_cap_holds_when_reporting_a_file_that_overflows_it(
             "input_tokens": 1,
             "cached_input_tokens": 0,
             "output_tokens": 0,
-            "last_metered_at": (NOW + timedelta(seconds=index)).isoformat(),
+            "last_metered_at": (NOW - timedelta(seconds=5 - index)).isoformat(),
         }
         for index in range(5)
     ]
@@ -711,6 +716,95 @@ def test_the_row_cap_never_evicts_a_reportable_row_for_a_future_dated_one(
     # The real rows are the only reportable ones, so they are the ones kept.
     assert [row["source_id"] for row in ledger.window(days=30, now=NOW)] == ["src_real"] * 3
     assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 300
+
+
+def test_the_row_cap_ranks_an_unmeasurable_instant_as_the_least_recent(
+    tmp_path: Path,
+) -> None:
+    """Review 5267204231: a future instant inside today survives the date filter.
+
+    The date filter closed the future-*day* case; the second half of `_recency` is
+    the instant, and a stamp later than the reading passes that filter untouched.
+    A clock corrected backwards leaves exactly this behind, and the rows it leaves
+    then outranked every real one and evicted live usage.
+
+    Bounding the instant to the reading is the obvious remedy and is not enough:
+    it makes those rows as recent as the reading, so they still outrank a row
+    metered a minute earlier. Both halves are asserted here — the survivors, and
+    the fact that a clamp would have kept the wrong ones.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    today = local_usage_day(NOW).isoformat()
+    rows = [
+        {
+            "day": today,
+            "source_id": "src_future",
+            "model_id": f"model-{ahead}",
+            "requests": 1,
+            "input_tokens": 5,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "last_metered_at": (NOW + timedelta(hours=ahead)).isoformat(),
+        }
+        for ahead in (1, 2, 3)
+    ] + [
+        {
+            "day": today,
+            "source_id": "src_real",
+            "model_id": f"model-{index}",
+            "requests": 1,
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            # An hour old: still the most recent usage anyone metered, and still
+            # older than what a clamp to `now` would hand the future rows.
+            "last_metered_at": (NOW - timedelta(hours=1)).isoformat(),
+        }
+        for index in range(3)
+    ]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+
+    assert [row["source_id"] for row in ledger.window(days=30, now=NOW)] == ["src_real"] * 3
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 300
+
+
+def test_an_unmeasurable_instant_costs_a_row_nothing_while_there_is_room(
+    tmp_path: Path,
+) -> None:
+    """Ranking last is an eviction order, not a verdict on the row.
+
+    Nothing about a stamp decides whether a row is reported: the day does that.
+    So a future-stamped row inside the window is published like any other until
+    the file is over capacity, and the counters it carries are its own.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-a",
+                    "requests": 1,
+                    "input_tokens": 42,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "last_metered_at": (NOW + timedelta(days=9)).isoformat(),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    ledger = BoundedUsageLedger(path, max_rows=3)
+
+    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == 42
 
 
 def test_a_merge_cannot_lift_a_published_count_over_the_declared_maximum(
@@ -794,6 +888,102 @@ def test_no_file_can_make_a_published_count_exceed_the_declared_maximum(
     # Tight, not merely safe: the worst admissible file reaches the bound exactly,
     # so the contract declares no range the producer cannot occupy.
     assert USAGE_PUBLISHED_COUNT_BOUND == USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
+
+
+def test_no_file_can_put_a_published_summary_outside_its_own_contract(
+    tmp_path: Path,
+) -> None:
+    """Every published guarantee, asserted against one deliberately hostile file.
+
+    Five rounds of review found the same shape five times: an invariant the write
+    path enforces that the report path does not mirror. Each fix closed the door it
+    was found at, and the next one was found at a door nobody had listed. Listing
+    the doors is the part that kept failing, so this asserts the guarantees instead
+    — the properties `usage-summary.schema.json` and the UI depend on — over a file
+    carrying every corruption at once, and over more reportable rows than the
+    capacity can hold, so the eviction runs rather than being skipped.
+    """
+
+    path = tmp_path / "state" / "usage.json"
+    path.parent.mkdir(parents=True)
+    today = local_usage_day(NOW)
+    hostile: list[object] = []
+    for index in range(USAGE_MAX_ROWS * 2):
+        # Days on both sides of both edges: three ahead of today, thirty inside the
+        # window, three behind it. Readable stamps on the first half, stamps no
+        # clock has reached on the second.
+        readable = index < USAGE_MAX_ROWS // 2
+        hostile.append(
+            {
+                "day": (today - timedelta(days=(index % 36) - 3)).isoformat(),
+                "source_id": f"src_{'past' if readable else 'ahead'}_{index % 7}",
+                "model_id": f"model_{index % 11}",
+                "requests": index,
+                "token_reports": index * 3,  # breaks its subset
+                "input_tokens": USAGE_COUNTER_CEILING - index,
+                "cached_input_tokens": USAGE_COUNTER_CEILING,  # breaks its subset
+                "output_tokens": -index,  # not a count
+                "last_metered_at": (
+                    NOW - timedelta(hours=index + 1)
+                    if readable
+                    else NOW + timedelta(hours=index)
+                ).isoformat(),
+            }
+        )
+    # Duplicate keys, so the merge builds counters no row in the file carried.
+    # Taken from the unreadable half, because a merged row past the ceiling is
+    # dropped on read and the readable family is what the eviction is asserted on.
+    hostile.extend(hostile[USAGE_MAX_ROWS : USAGE_MAX_ROWS + 60])
+    hostile.extend(["not a row", None, {"day": "2026-W34-2", "source_id": "s", "model_id": "m"}])
+    path.write_text(json.dumps(hostile), encoding="utf-8")
+
+    ledger = BoundedUsageLedger(path)
+    rows = ledger.window(days=USAGE_DEFAULT_WINDOW_DAYS, now=NOW)
+    report = ledger.summary(days=USAGE_DEFAULT_WINDOW_DAYS, now=NOW)
+
+    assert len(rows) == USAGE_MAX_ROWS  # the capacity binds, so eviction ran
+    assert all(report["from_day"] <= row["day"] <= report["to_day"] for row in rows)
+
+    # Nothing whose recency the report can read loses its slot to something it
+    # cannot read — the property the last two rounds of review both came back to.
+    # Within a day, because the day is the first half of the order and evicting the
+    # oldest one first is what retention is: a recent row outranks an older one
+    # whatever either claims about the hour.
+    survivors = {(row["day"], row["source_id"], row["model_id"]) for row in rows}
+    readable = {
+        (row["day"], row["source_id"], row["model_id"])
+        for row in hostile[: USAGE_MAX_ROWS // 2]
+        if report["from_day"] <= row["day"] <= report["to_day"]
+    }
+    assert readable
+    outbid = {day for day, _, _ in readable - survivors}
+    assert not [row for row in rows if row["day"] in outbid and "ahead" in row["source_id"]]
+
+    counters = (
+        "requests",
+        "token_reports",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+    )
+    buckets = [report["totals"], *report["days"]]
+    for source in report["sources"]:
+        buckets.append(source)
+        buckets.extend(source["models"])
+    for bucket in buckets:
+        for key in counters:
+            assert 0 <= bucket[key] <= USAGE_PUBLISHED_COUNT_BOUND
+        assert bucket["cached_input_tokens"] <= bucket["input_tokens"]
+        assert bucket["token_reports"] <= bucket["requests"]
+
+    # The three groupings are three views of one set, so they must agree.
+    for key in counters:
+        assert sum(day[key] for day in report["days"]) == report["totals"][key]
+        assert sum(source[key] for source in report["sources"]) == report["totals"][key]
+        assert (
+            sum(model[key] for source in report["sources"] for model in source["models"])
+            == report["totals"][key]
+        )
 
 
 def test_the_row_cap_evicts_the_least_recently_metered_row(tmp_path: Path) -> None:
