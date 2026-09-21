@@ -2351,7 +2351,7 @@ export const ChatPage: React.FC = () => {
         // queue intact — keep Stop visible so the user can still interrupt it
         // (Codex P2). Other failures mean no turn is running → clear working.
         if (res.code !== 'stop_failed') setWorking(false);
-        setError(res.detail ? String(res.detail) : t('chat.stopFailed'));
+        setError(res.detail ? String(res.detail) : t('chat.queue.sendFailed'));
       } else if (res?.status === 'queued') {
         setError(t(res.reason === 'attachments_unavailable'
           ? 'chat.queue.attachmentsUnavailable'
@@ -2366,12 +2366,20 @@ export const ChatPage: React.FC = () => {
         // batch was flushed.
       }
       await refreshQueue(isCurrentRequest);
-    } catch (err) {
+    } catch {
       // The same ownership guard applies to failures: an older request must not
       // clear the new chat's working state or surface a stale error.
       if (isCurrentRequest()) {
         setWorking(false);
-        setError(errorMessage(err) ?? String(err));
+        // The server may have settled or retired the row even when this
+        // request failed at the transport boundary. Re-read the authoritative
+        // queue so an old browser snapshot does not remain visible forever.
+        await refreshQueue(isCurrentRequest);
+        // Do not expose transport/backend exception text here. It is not
+        // actionable for the user and used to be rendered as "couldn't
+        // contact the agent", even when the original queued Delivery was
+        // still safely retained for retry.
+        setError(t('chat.queue.sendFailed'));
       }
     } finally {
       if (isCurrentRequest()) {

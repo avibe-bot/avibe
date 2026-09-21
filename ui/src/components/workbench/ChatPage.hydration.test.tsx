@@ -296,6 +296,65 @@ describe('ChatPage transcript hydration', () => {
     expect(mocks.api.cancelSession).not.toHaveBeenCalled();
   });
 
+  it('refreshes a stale queue snapshot after send-now transport failure', async () => {
+    const queued = {
+      ...queuedMessage('stale-queued-row', 'stale queued row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [queued],
+      turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [] });
+    mocks.api.sendQueuedNow.mockRejectedValue(new Error('socket unavailable'));
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    const button = await screen.findByRole('button', { name: 'chat.queue.sendNow' });
+    expect(screen.getByText(queued.text)).toBeTruthy();
+    fireEvent.click(button);
+
+    await screen.findByText('chat.queue.sendFailed');
+    await waitFor(() => expect(screen.queryByText(queued.text)).toBeNull());
+    expect(mocks.api.listSessionQueue).toHaveBeenCalledWith('session-new', { cache: false });
+    expect(screen.queryByText('chat.stopFailed')).toBeNull();
+  });
+
+  it('does not present send-now refusal as a stop failure', async () => {
+    const queued = {
+      ...queuedMessage('refused-queued-row', 'refused queued row'),
+      state: 'queued' as const,
+    };
+    const running = { ...idleTurnState, foreground: 'running', in_flight: true };
+    mocks.api.getSessionBootstrap.mockResolvedValue({
+      ...bootstrapPayload('session-new'),
+      queued: [queued],
+      turn_state: running,
+    });
+    mocks.api.getTurnState.mockResolvedValue(running);
+    mocks.api.listSessionQueue.mockResolvedValue({ queued: [queued] });
+    mocks.api.sendQueuedNow.mockResolvedValue({ ok: false, code: 'stop_failed' });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-new']}>
+        <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'chat.queue.sendNow' }));
+
+    await screen.findByText('chat.queue.sendFailed');
+    expect(screen.queryByText('chat.stopFailed')).toBeNull();
+    expect(screen.getByText(queued.text)).toBeTruthy();
+  });
+
   it.each(['accepted', 'queued'])('restores a confirming image on reload and follows $status settlement', async (settlement) => {
     const image = {
       ...queuedMessage('queued-image', ''),

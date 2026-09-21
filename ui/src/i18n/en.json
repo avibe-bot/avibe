@@ -4337,6 +4337,7 @@
       "sendNow": "Send now",
       "sendingNow": "Sending…",
       "confirmingNow": "Send status not confirmed",
+      "sendFailed": "Couldn't send this message right now. Your original message is still in the queue; please try again.",
       "sendDeferred": "Couldn't send into the current turn. Your message is still queued.",
       "attachmentsUnavailable": "An attachment is no longer available. Your message is still queued; upload the attachment again to resend it.",
       "sendReconciling": "We couldn't confirm whether this message was sent. It is kept here, and Avibe won't send it again. Refresh to check the latest status.",
