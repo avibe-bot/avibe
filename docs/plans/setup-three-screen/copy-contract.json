@@ -1,7 +1,7 @@
 {
   "_meta": {
     "contract": "C1 — setup three-screen copy",
-    "status": "frozen for lanes L1/L2/L3 at PR0. A lane adds only the keys it owns, exactly as written here; a deviation needs orchestrator sign-off before the edit.",
+    "status": "PR0 interface proposal. Migration keys under _provisional_copy are one coherent takeover alternative, awaiting owner D10; they are not shipping authorization. Original handoff remains unchanged in its source file.",
     "source": "docs/plans/2026-09-21-setup-three-screen-handoff.md §4/§5/§8, reconciled against the strings already shipped on master 31c4e831b.",
     "ownership": {
       "onboarding.flow.*": "L1",
@@ -13,8 +13,9 @@
       "PR0 adds no key to ui/src/i18n/*.json. Each lane lands the keys it owns together with the component that references them, because keyCoverage.test.ts reads the literal keys out of the app source.",
       "Every string that interpolates {{count}} ships a complete _one/_other family in BOTH bundles; zh repeats the same value so locale parity stays a plain set equality. This is the rule settings.models already enforces by test (copyAgreement.test.ts) and the class it exists to prevent.",
       "{{names}} is a joined list, so it may never be the subject of a singular verb in English.",
-      "Setup says 导入 / import for copying detected API keys into Model Hub. Settings keeps its shipped 迁移 / migrate vocabulary: settings.models is covered by total-scope copy redlines (copyAgreement.test.ts, supplyCopyRedline.test.ts), and renaming it is a separate product-voice decision, not a side effect of this round.",
-      "No string in this contract is a credential example. The prototype's sk-demo-example placeholder and its 交互演示，请勿输入真实凭据 / 正在保存模拟配置… lines are preview-only and must not ship (handoff §15)."
+      "Orchestrator D8 allocates setup vocabulary separately from Settings. D10 must adopt setup takeover behavior before _provisional_copy ships; no copy-only or unchanged-native-state claims may accompany migration_apply.",
+      "No string in this contract is a credential example. The prototype's sk-demo-example placeholder and its 交互演示，请勿输入真实凭据 / 正在保存模拟配置… lines are preview-only and must not ship (handoff §15).",
+      "Model-ranked route rows use exact source/upstream-model pairs. C6 specifies displayed Agent/menu-model targets, backend subsets, divergent hydration and per-target readback. Shared does not mean every model is eligible for every assistant."
     ]
   },
   "_changed_existing": [
@@ -74,19 +75,58 @@
     }
   ],
   "_reused_existing": [
-    { "key": "common.cancel", "note": "add-dialog footer cancel" },
-    { "key": "common.retry", "note": "add-dialog retry, gateway runtime retry, import failure retry" },
-    { "key": "common.loading", "note": "generic pending reads" },
-    { "key": "onboarding.setup.notInstalled", "note": "screen-3 pill 未安装 / Not installed already ships" },
-    { "key": "onboarding.setup.enableNamed", "note": "screen-3 identity Switch label" },
-    { "key": "onboarding.story.caption", "note": "回路字幕 规划 · 开发 · 测试 · 交付 already matches handoff §8" },
-    { "key": "settings.models.importNotice.found_one / _other", "note": "capsule discovery sentence already matches handoff §8 exactly (发现 {{count}} 个可导入模型网关的 API Key)" },
-    { "key": "settings.models.importNotice.help", "note": "capsule help link 什么是模型网关？ / What is Model Hub?" },
-    { "key": "settings.models.importNotice.dismiss", "note": "capsule X aria-label" },
-    { "key": "settings.models.migration.blocked.*", "note": "per-item block reasons inside the import dialog; the setup scope changes the dialog's own chrome copy, not these explanations" },
-    { "key": "settings.models.migration.errors.*", "note": "apply-failure explanations, same rule" },
-    { "key": "settings.models.migration.notes.*", "note": "row secondary lines such as 含自定义 Base URL" },
-    { "key": "settings.models.migration.source.*", "note": "row origin lines such as Codex 配置" }
+    {
+      "key": "common.cancel",
+      "note": "add-dialog footer cancel"
+    },
+    {
+      "key": "common.retry",
+      "note": "add-dialog retry, gateway runtime retry, import failure retry"
+    },
+    {
+      "key": "common.loading",
+      "note": "generic pending reads"
+    },
+    {
+      "key": "onboarding.setup.notInstalled",
+      "note": "screen-3 pill 未安装 / Not installed already ships"
+    },
+    {
+      "key": "onboarding.setup.enableNamed",
+      "note": "screen-3 identity Switch label"
+    },
+    {
+      "key": "onboarding.story.caption",
+      "note": "回路字幕 规划 · 开发 · 测试 · 交付 already matches handoff §8"
+    },
+    {
+      "key": "settings.models.importNotice.found_one / _other",
+      "note": "capsule copy reused only with C6 complete-group/key-only unblocked count; a detected blocked key cannot be advertised as importable"
+    },
+    {
+      "key": "settings.models.importNotice.help",
+      "note": "capsule help link 什么是模型网关？ / What is Model Hub?"
+    },
+    {
+      "key": "settings.models.importNotice.dismiss",
+      "note": "capsule X aria-label"
+    },
+    {
+      "key": "settings.models.migration.blocked.*",
+      "note": "per-item block reasons inside the import dialog; the setup scope changes the dialog's own chrome copy, not these explanations"
+    },
+    {
+      "key": "settings.models.migration.errors.*",
+      "note": "apply-failure explanations, same rule"
+    },
+    {
+      "key": "settings.models.migration.notes.*",
+      "note": "row secondary lines such as 含自定义 Base URL"
+    },
+    {
+      "key": "settings.models.migration.source.*",
+      "note": "row origin lines such as Codex 配置"
+    }
   ],
   "bundle": {
     "zh": {
@@ -118,14 +158,14 @@
           "summaryNone": "未选择提供商",
           "summarySelected_one": "已选 {{count}} 个提供商：{{names}}",
           "summarySelected_other": "已选 {{count}} 个提供商：{{names}}",
-          "summarySelectedNote": "仅复制，保留原配置",
+          "summarySelectedNote": "确认迁移后，由模型网关管理所选助手的认证。",
           "summaryAdded_one": "已添加 {{count}} 个提供商：{{names}}",
           "summaryAdded_other": "已添加 {{count}} 个提供商：{{names}}",
           "summaryError": "连接未完成，请检查配置后重试。",
-          "actionImport_one": "导入 {{count}} 项并继续",
-          "actionImport_other": "导入 {{count}} 项并继续",
-          "actionRetryImport_one": "重试导入 {{count}} 项并继续",
-          "actionRetryImport_other": "重试导入 {{count}} 项并继续",
+          "actionImport_one": "查看 {{count}} 项并继续",
+          "actionImport_other": "查看 {{count}} 项并继续",
+          "actionRetryImport_one": "查看 {{count}} 项迁移状态",
+          "actionRetryImport_other": "查看 {{count}} 项迁移状态",
           "actionContinue": "继续，选择 AI 助手",
           "actionAdd": "添加订阅或 API Key",
           "actionConnecting": "正在连接…",
@@ -133,12 +173,12 @@
           "addTitle": "添加订阅或 API Key",
           "addTitleMore": "添加更多模型提供商",
           "addDescription": "添加一个来源即可开始，由模型网关统一路由。",
-          "addDescriptionMore": "选择已检测到的配置即可添加，无需重新填写。",
+          "addDescriptionMore": "查看检测到的配置，确认后迁移，无需重新填写。",
           "addMethodsLabel": "添加方式",
           "addMethodDetected": "已检测到",
           "addMethodSubscription": "订阅",
           "addMethodApiKey": "API Key",
-          "addDetectedNote": "选择即可添加，无需重新填写；原有配置会保留。",
+          "addDetectedNote": "查看全部关联配置并确认后开始迁移。其他无关设置会保留。",
           "addDetectedGroup": "其余已检测到的配置",
           "addDetectedSelectNamed": "选择 {{name}} 的已有配置",
           "addDetectedAdded": "已添加",
@@ -147,34 +187,36 @@
           "addKeyLabelNamed": "{{name}} API Key",
           "addMoreProviders": "更多服务商",
           "addFooterAddKey": "添加",
-          "addFooterAdd_one": "添加选中的 {{count}} 项",
-          "addFooterAdd_other": "添加选中的 {{count}} 项",
+          "addFooterAdd_one": "查看选中的 {{count}} 项",
+          "addFooterAdd_other": "查看选中的 {{count}} 项",
           "addFooterSignInNamed": "前往 {{name}} 登录",
           "addFooterAdding": "添加中…",
           "addProgressSaving": "正在保存配置…",
           "addProgressChecking": "正在检查模型连接…",
           "addProgressWaitingAuth": "等待授权完成…",
           "addErrorPreserved": "连接未完成，输入已保留，请重试。",
-          "addErrorDetectedPreserved": "本次未添加任何配置，选择已保留，请重试。"
+          "addErrorDetectedPreserved": "操作未确认完成，选择已保留。请先检查当前状态，再继续恢复。"
         },
         "import": {
-          "title": "导入 API Key 到模型网关",
-          "description": "复制已有 API Key，方便在模型网关统一管理和使用，无需重新填写。仅导入你选中的项，原有配置会保留。",
-          "review": "查看并导入",
-          "helpBody": "模型网关集中管理 API Key 和模型连接，为 AI 助手提供统一的模型入口。导入只会复制你选中的 API Key，原有配置会保留。",
-          "action_one": "导入选中的 {{count}} 项",
-          "action_other": "导入选中的 {{count}} 项",
-          "scopeNote": "仅导入 API Key，不包含订阅登录凭据。相同来源不会重复导入。",
-          "progress_one": "正在导入 {{count}} 个 API Key…",
-          "progress_other": "正在导入 {{count}} 个 API Key…",
-          "progressDetail": "正在将选中的配置复制到模型网关",
-          "done_one": "已导入 {{count}} 个 API Key",
-          "done_other": "已导入 {{count}} 个 API Key",
-          "doneDetail": "原有配置已保留。助手连接状态不变。",
-          "remaining_one": "还有 {{count}} 项未导入，可随时继续",
-          "remaining_other": "还有 {{count}} 项未导入，可随时继续",
+          "title": "迁移到模型网关",
+          "description": "迁移后，CLI的认证信息将完全交由模型网关管理",
+          "review": "查看并迁移",
+          "helpBody": "模型网关统一管理认证和模型连接。迁移会清理已替代的原生认证，并将关联助手切换到模型网关；其他无关设置会保留。",
+          "action_one": "查看选中的 {{count}} 项",
+          "action_other": "查看选中的 {{count}} 项",
+          "scopeNote": "此入口仅处理完整的 API Key 组。涉及订阅登录或阻塞项的关联组不可在此接管，请前往设置检查。",
+          "progress_one": "正在迁移 {{count}} 项配置…",
+          "progress_other": "正在迁移 {{count}} 项配置…",
+          "progressDetail": "正在迁移认证并更新关联助手的连接",
+          "done_one": "已迁移 {{count}} 项配置",
+          "done_other": "已迁移 {{count}} 项配置",
+          "doneDetail": "迁移和原生认证清理已完成。请确认助手的模型路由。",
+          "remaining_one": "还有 {{count}} 项需要查看，可随时继续",
+          "remaining_other": "还有 {{count}} 项需要查看，可随时继续",
           "remainingAction": "继续选择",
-          "done": "完成"
+          "done": "完成",
+          "confirm": "开始迁移",
+          "notNow": "暂不迁移"
         },
         "setup": {
           "pillEnabled": "已启用",
@@ -186,19 +228,20 @@
           "actionInstalling": "正在安装…",
           "actionUpdate": "立即升级",
           "defaultModel": "默认模型",
-          "defaultModelNamed": "{{name}} 的默认模型，调整共享路由",
+          "defaultModelNamed": "{{name}} 的模型路由，查看并调整顺序",
           "noteInstallNamed": "安装 {{name}}，使用已添加的模型",
-          "noteEnabled": "使用模型网关的默认路由",
+          "noteEnabled": "已启用，模型路由就绪后即可使用",
           "noteInstalledNotEnabled": "启用后即可使用已添加的模型",
           "enter": "进入工作台",
-          "disabledNotice": "已停用，已有配置会保留"
+          "disabledNotice": "已停用，已有配置会保留",
+          "configureRoute": "配置模型路由"
         },
         "route": {
           "title": "默认模型路由",
-          "description": "所有已启用的助手共用。优先使用首选模型，不可用时按顺序尝试备用模型。",
+          "description": "为下列助手调整共享模型顺序。各助手按自己的模型列表依次尝试；其他路由保持不变。",
           "preferred": "首选",
           "backup": "备用 {{index}}",
-          "singleNote": "当前模型已设为首选，无需额外配置。添加更多来源后可设置备用顺序。",
+          "singleNote": "此路由只有一个模型。可添加来源，再选择备用模型。",
           "addSource": "添加模型来源",
           "done": "完成",
           "moveUpNamed": "上移 {{name}}",
@@ -235,14 +278,14 @@
           "summaryNone": "No provider selected",
           "summarySelected_one": "{{count}} provider selected: {{names}}",
           "summarySelected_other": "{{count}} providers selected: {{names}}",
-          "summarySelectedNote": "Copies only; your original configuration stays",
+          "summarySelectedNote": "After migration is confirmed, Model Hub manages authentication for the selected assistants.",
           "summaryAdded_one": "{{count}} provider added: {{names}}",
           "summaryAdded_other": "{{count}} providers added: {{names}}",
           "summaryError": "Connection failed. Check your configuration and retry.",
-          "actionImport_one": "Import {{count}} and continue",
-          "actionImport_other": "Import {{count}} and continue",
-          "actionRetryImport_one": "Retry importing {{count}}",
-          "actionRetryImport_other": "Retry importing {{count}}",
+          "actionImport_one": "Review {{count}} and continue",
+          "actionImport_other": "Review {{count}} and continue",
+          "actionRetryImport_one": "Review migration status for {{count}}",
+          "actionRetryImport_other": "Review migration status for {{count}}",
           "actionContinue": "Continue to assistants",
           "actionAdd": "Add subscription or API Key",
           "actionConnecting": "Connecting…",
@@ -250,12 +293,12 @@
           "addTitle": "Add subscription or API Key",
           "addTitleMore": "Add more model providers",
           "addDescription": "Add one source to get started. Model Hub handles routing.",
-          "addDescriptionMore": "Select detected configurations to add without retyping.",
+          "addDescriptionMore": "Review detected configurations and confirm migration without retyping.",
           "addMethodsLabel": "Add method",
           "addMethodDetected": "Detected",
           "addMethodSubscription": "Subscription",
           "addMethodApiKey": "API Key",
-          "addDetectedNote": "Select to add without retyping. Your original configuration stays intact.",
+          "addDetectedNote": "Review all linked configurations and confirm to start migration. Unrelated settings are preserved.",
           "addDetectedGroup": "Other detected configurations",
           "addDetectedSelectNamed": "Select existing {{name}} configuration",
           "addDetectedAdded": "Added",
@@ -264,34 +307,36 @@
           "addKeyLabelNamed": "{{name}} API Key",
           "addMoreProviders": "More providers",
           "addFooterAddKey": "Add",
-          "addFooterAdd_one": "Add {{count}} selected",
-          "addFooterAdd_other": "Add {{count}} selected",
+          "addFooterAdd_one": "Review {{count}} selected",
+          "addFooterAdd_other": "Review {{count}} selected",
           "addFooterSignInNamed": "Sign in with {{name}}",
           "addFooterAdding": "Adding…",
           "addProgressSaving": "Saving configuration…",
           "addProgressChecking": "Checking the model connection…",
           "addProgressWaitingAuth": "Waiting for authorization…",
           "addErrorPreserved": "Connection failed. Your entries are preserved. Please retry.",
-          "addErrorDetectedPreserved": "No configurations were added. Your selection is preserved. Please retry."
+          "addErrorDetectedPreserved": "Completion is unconfirmed. Your selection is preserved. Check the current state before continuing recovery."
         },
         "import": {
-          "title": "Import API keys to Model Hub",
-          "description": "Copy the API keys already on this machine into Model Hub so one place manages them, without retyping. Only your selected items are imported, and your original configuration stays.",
-          "review": "Review and import",
-          "helpBody": "Model Hub manages API keys and model connections in one place and gives your AI assistants a single model entry point. Importing copies only the API keys you select; your original configuration stays.",
-          "action_one": "Import {{count}} selected",
-          "action_other": "Import {{count}} selected",
-          "scopeNote": "Imports API keys only, never subscription sign-ins. The same source is not imported twice.",
-          "progress_one": "Importing {{count}} API key…",
-          "progress_other": "Importing {{count}} API keys…",
-          "progressDetail": "Copying the selected configuration into Model Hub",
-          "done_one": "Imported {{count}} API key",
-          "done_other": "Imported {{count}} API keys",
-          "doneDetail": "Your original configuration stays. Assistant connections are unchanged.",
-          "remaining_one": "{{count}} item is not imported yet. Continue any time.",
-          "remaining_other": "{{count}} items are not imported yet. Continue any time.",
+          "title": "Migrate to Model Hub",
+          "description": "After migration, CLI authentication will be managed entirely by Model Hub.",
+          "review": "Review migration",
+          "helpBody": "Model Hub manages authentication and model connections. Migration removes replaced native authentication and switches linked assistants to Model Hub; unrelated settings are preserved.",
+          "action_one": "Review {{count}} selected",
+          "action_other": "Review {{count}} selected",
+          "scopeNote": "This entry handles complete API-key groups only. Linked groups with subscription sign-ins or blockers cannot be taken over here; review them in Settings.",
+          "progress_one": "Migrating {{count}} configuration item…",
+          "progress_other": "Migrating {{count}} configuration items…",
+          "progressDetail": "Migrating authentication and updating linked assistant connections",
+          "done_one": "Migrated {{count}} configuration item",
+          "done_other": "Migrated {{count}} configuration items",
+          "doneDetail": "Migration and native authentication cleanup are complete. Check the assistants’ model routes.",
+          "remaining_one": "{{count}} item needs review. Continue any time.",
+          "remaining_other": "{{count}} items need review. Continue any time.",
           "remainingAction": "Review remaining",
-          "done": "Done"
+          "done": "Done",
+          "confirm": "Start migration",
+          "notNow": "Not now"
         },
         "setup": {
           "pillEnabled": "Enabled",
@@ -303,19 +348,20 @@
           "actionInstalling": "Installing…",
           "actionUpdate": "Update now",
           "defaultModel": "Default model",
-          "defaultModelNamed": "Default model for {{name}}, edit the shared route",
+          "defaultModelNamed": "Model route for {{name}}, review and reorder",
           "noteInstallNamed": "Install {{name}} to use the models you added",
-          "noteEnabled": "Uses the default Model Hub route",
+          "noteEnabled": "Enabled. Ready to work once its model route is ready.",
           "noteInstalledNotEnabled": "Enable to use the models you added",
           "enter": "Open workspace",
-          "disabledNotice": "Disabled. Your saved configuration stays."
+          "disabledNotice": "Disabled. Your saved configuration stays.",
+          "configureRoute": "Configure model route"
         },
         "route": {
           "title": "Default model route",
-          "description": "Shared by all enabled assistants. Use the preferred model first, then try backups in order if unavailable.",
+          "description": "Set a shared model order for the assistants shown below. Each tries its own model subset in that order; other routes stay unchanged.",
           "preferred": "Preferred",
           "backup": "Backup {{index}}",
-          "singleNote": "Your model is already the preferred choice. Add another source to set a backup order.",
+          "singleNote": "This route has one model. Add a source, then select a backup model.",
           "addSource": "Add model source",
           "done": "Done",
           "moveUpNamed": "Move {{name}} up",
@@ -323,5 +369,43 @@
         }
       }
     }
+  },
+  "_provisional_copy": {
+    "decision": "D10: recommended complete-group takeover; owner choice still required before setup migration ships. The literal copy alternative also needs native coexistence/Hub admission design.",
+    "keys": [
+      "onboarding.providers.summarySelectedNote",
+      "onboarding.providers.addDetectedNote",
+      "onboarding.providers.addErrorDetectedPreserved",
+      "onboarding.import.description",
+      "onboarding.import.helpBody",
+      "onboarding.import.scopeNote",
+      "onboarding.import.progress_one",
+      "onboarding.import.progress_other",
+      "onboarding.import.progressDetail",
+      "onboarding.import.done_one",
+      "onboarding.import.done_other",
+      "onboarding.import.doneDetail",
+      "onboarding.providers.addDescriptionMore",
+      "onboarding.providers.actionImport_one",
+      "onboarding.providers.actionImport_other",
+      "onboarding.providers.actionRetryImport_one",
+      "onboarding.providers.actionRetryImport_other",
+      "onboarding.providers.addFooterAdd_one",
+      "onboarding.providers.addFooterAdd_other",
+      "onboarding.import.title",
+      "onboarding.import.review",
+      "onboarding.import.confirm",
+      "onboarding.import.notNow",
+      "onboarding.import.action_one",
+      "onboarding.import.action_other",
+      "onboarding.import.remaining_one",
+      "onboarding.import.remaining_other"
+    ],
+    "behavior": [
+      "Cards, Detected tab and primary action open one complete-group review; selection or runtime start never applies credentials. Only Start migration confirms; Not now keeps native authentication and mode unchanged.",
+      "Show exact approved consequence sentence from model-hub-native-takeover.md. Preserve unrelated settings; apply owns credential cleanup and Hub mode/placement together.",
+      "Setup remains API-key-only: show but block whole groups containing OAuth or non-importable rows. Counts are migration items, not inferred keys or Sources.",
+      "Unknown or failed apply requires readback/recovery before retry; no blanket atomic rollback, copy-only or unchanged-assistant-connections promise."
+    ]
   }
 }

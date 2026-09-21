@@ -1,7 +1,8 @@
-// The contract's own invariants, held before any lane builds against them. These are the
-// two decisions a screen cannot make locally without the flow disagreeing with itself:
-// which screens run, and where Back goes from each of them.
-import { describe, expect, it } from 'vitest';
+// @vitest-environment jsdom
+// Contract consumers live only in this test; PR0 introduces no feature shell.
+import { createElement, useState } from 'react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   INITIAL_SETUP_FLOW_STATE,
@@ -11,7 +12,12 @@ import {
   setupNavigationReady,
   setupScreenSequence,
   type SetupCapability,
+  type SetupFlowState,
+  type SetupScreenId,
+  type SetupScreenProps,
 } from './setupFlow';
+
+afterEach(cleanup);
 
 const CAPABILITIES: readonly SetupCapability[] = ['pending', 'enabled', 'disabled'];
 
@@ -71,11 +77,75 @@ describe('setup back target', () => {
 describe('shell-owned flow state', () => {
   it('starts with nothing selected, imported, added or ordered, and no dirty draft', () => {
     expect(INITIAL_SETUP_FLOW_STATE).toEqual({
-      providerSelection: [],
+      providerSelection: { scan: null, selectedBackends: [] },
       importedCount: 0,
       addedThroughMore: [],
       routeOrder: [],
       routeOrderDirty: false,
     });
+  });
+
+  it('carries screen updates through navigation and composes a late functional update with newer state', async () => {
+    let finishImport: (() => void) | undefined;
+    const pendingImport = new Promise<void>((resolve) => { finishImport = resolve; });
+    const draft = [
+      { source_id: '来源-一', model_id: '模型-首选' },
+      { source_id: '来源-一', model_id: '模型-备用' },
+    ];
+    const selection: SetupFlowState['providerSelection'] = {
+      scan: { items: [
+        { id: 'key-a', backend: 'opencode', kind: 'opencode_provider', masked_detail: 'fixture…0001', proposed_action: 'import', selected: true },
+        { id: 'key-b', backend: 'opencode', kind: 'opencode_provider', masked_detail: 'fixture…0002', proposed_action: 'import', selected: true },
+      ] },
+      selectedBackends: ['opencode'],
+    };
+    const ProviderScreen = ({ active, flowState, setFlowState, onNavigate }: SetupScreenProps) =>
+      createElement('section', { hidden: !active, inert: !active, 'data-testid': 'providers' },
+        createElement('output', null, JSON.stringify(flowState)),
+        createElement('button', { onClick: () => {
+          setFlowState((previous) => ({ ...previous, providerSelection: selection }));
+          // Deliberately settle after another screen has edited the draft.
+          void pendingImport.then(() => setFlowState((previous) => ({
+            ...previous, importedCount: previous.importedCount + 2,
+            providerSelection: { scan: null, selectedBackends: [] },
+          })));
+          onNavigate('assistants');
+        } }, 'Start fixture import'),
+        createElement('button', { onClick: () => {
+          setFlowState((previous) => ({ ...previous, addedThroughMore: ['新增来源'] }));
+          onNavigate('assistants');
+        } }, 'Add fixture source'));
+    const AssistantScreen = ({ active, flowState, setFlowState, onNavigate }: SetupScreenProps) =>
+      createElement('section', { hidden: !active, inert: !active, 'data-testid': 'assistants' },
+        createElement('output', null, JSON.stringify(flowState)),
+        createElement('button', { onClick: () => {
+          setFlowState((previous) => ({ ...previous, routeOrder: draft, routeOrderDirty: true }));
+          onNavigate('providers');
+        } }, 'Edit fixture route'));
+    const Shell = () => {
+      const [current, setCurrent] = useState<SetupScreenId>('providers');
+      const [flowState, setFlowState] = useState(INITIAL_SETUP_FLOW_STATE);
+      const common: Omit<SetupScreenProps, 'active'> = {
+        flowState, setFlowState, handoff: false, onNavigate: setCurrent, onActionChange: () => {},
+      };
+      return createElement('main', null,
+        createElement(ProviderScreen, { ...common, active: current === 'providers' }),
+        createElement(AssistantScreen, { ...common, active: current === 'assistants' }));
+    };
+    render(createElement(Shell));
+    const read = (id: string): SetupFlowState => JSON.parse(within(screen.getByTestId(id)).getByRole('status').textContent!);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start fixture import' }));
+    expect(read('assistants').providerSelection).toEqual(selection);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit fixture route' }));
+    expect(read('providers')).toMatchObject({ providerSelection: selection, routeOrder: draft, routeOrderDirty: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Add fixture source' }));
+    await act(async () => { finishImport!(); await pendingImport; });
+    expect(read('assistants')).toEqual({
+      providerSelection: { scan: null, selectedBackends: [] }, importedCount: 2,
+      addedThroughMore: ['新增来源'], routeOrder: draft, routeOrderDirty: true,
+    });
+    expect((screen.getByTestId('providers') as HTMLElement).hidden).toBe(true);
+    expect(screen.getByTestId('providers').hasAttribute('inert')).toBe(true);
   });
 });

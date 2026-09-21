@@ -1,7 +1,7 @@
 /**
  * C2 — the setup flow's interface contract.
  *
- * Frozen on `master` before the three-screen lanes fork, so a lane reads one shared
+ * Proposed for `master` before the three-screen lanes fork, so a lane reads one shared
  * declaration instead of transcribing a shape out of a plan document. Everything here is
  * cross-lane by construction: the shell (L1) renders it, the providers screen (L2) and the
  * assistants screen (L3) implement against it. A deviation needs orchestrator sign-off
@@ -12,7 +12,9 @@
  * in `docs/plans/setup-three-screen/contracts.md`. Copy lives in
  * `docs/plans/setup-three-screen/copy-contract.json` (C1).
  */
+import type { Dispatch, SetStateAction } from 'react';
 import type { TranslationKey } from '@/i18n/types';
+import type { AgentBackend, MigrationScan, RouteHop } from '../settings/models/types';
 
 /** The flow's order. A screen id, not an index: `Wizard.tsx` used to hold `'welcome' |
  *  'agents'`, and an index-based step cannot survive a screen being added or skipped. */
@@ -58,14 +60,29 @@ export type SetupScreenHandle = {
 };
 
 export type SetupScreenProps = {
-  /** This screen is the current one. An inactive screen stays mounted but is `hidden` and
-   *  `inert`, which is what makes back-navigation preserve its state without each screen
-   *  having to remember anything. */
+  /** Mounted does not mean active: hidden/inert screens retain drafts but must not start
+   *  mutations, poll, claim actions, navigate or run authorization effects (C2). */
   active: boolean;
   handoff: SetupHandoffTarget | false;
+  flowState: SetupFlowState;
+  /** Pass the shell's React setter. Screens use functional updates to preserve changes
+   *  made by other screens while an asynchronous operation was pending. */
+  setFlowState: Dispatch<SetStateAction<SetupFlowState>>;
+  /** Bound to this screen by the shell; ignore publications from an inactive screen or
+   *  an obsolete activation. Only the active screen's handle may receive a click. */
   onActionChange: (action: SetupAction) => void;
   /** Request a screen change. The shell decides whether to play a handoff. */
   onNavigate: (screen: SetupScreenId) => void;
+};
+
+/** One scan snapshot plus whole-backend consent. The full scan is needed to expand
+ *  required_backends transitively and expose blockers; never store only visible keys.
+ *  selectedBackends is the union of complete, unblocked consent groups (C6), not a
+ *  per-row selection. L2 must adapt the existing MigrationDialog owner to this controlled
+ *  state before using it in setup; its shipped props do not yet accept this shape. */
+export type SetupProviderSelection = {
+  scan: MigrationScan | null;
+  selectedBackends: AgentBackend[];
 };
 
 /**
@@ -75,35 +92,30 @@ export type SetupScreenProps = {
  * installed CLIs, enabled backends, persisted sources — is read, never mirrored here.
  */
 export type SetupFlowState = {
-  /** Migration item ids ticked for the next import batch. Emptied by a successful apply. */
-  providerSelection: string[];
-  /** Cumulative keys imported by THIS flow, which is what the completion line reports. */
+  /** Ephemeral scan/consent draft. Replace on a fresh scan and reconcile whole groups;
+   *  clear confirmed groups after apply. No credential material lives in this state. */
+  providerSelection: SetupProviderSelection;
+  /** Cumulative confirmed `MigrationApplyResult.applied`, counted once per submitted
+   *  batch. It counts migration items, not necessarily keys or created sources (C6). */
   importedCount: number;
   /** Source ids added through the "Add more" card, which is what its badge counts. */
   addedThroughMore: string[];
-  /** The route dialog's working PREFERENCE, as source ids, preferred first. Hydrated by
-   *  MERGING every enabled backend's persisted order — the backend that will run establishes
-   *  precedence, and ids found only on the others are appended in their own persisted order —
-   *  because a write replaces that backend's enabled subset, so a preference missing a source
-   *  another backend relies on would silently disable its supply. Empty means "not derived
-   *  yet", never "no route".
-   *
-   *  Hydrate only before the first edit or while `routeOrderDirty` is false, and reconcile
-   *  after a confirmed write. A dirty draft survives screen navigation — that is the reason
-   *  this state lives in the shell — so leaving through the dialog's "add model source" exit
-   *  and coming back must not throw the user's ordering away.
-   *
-   *  It is not an entry-gate input: C4 reads the server, because a gate resting on client
-   *  draft state would block an installation that already has valid persisted routes. Nor is
-   *  it what gets written verbatim — see C6 for the per-backend projection and its owner. */
-  routeOrder: string[];
+  /** Model-ranked working draft: each row identifies BOTH source and upstream model.
+   *  This is not a putAgentSources payload. C6/D4/D9 specify explicit Agent/menu-model
+   *  targets and projection through each target's reviewed exact-hop membership. The
+   *  shared mounted route owner retains target baselines and pending write receipts;
+   *  this list alone cannot reconstruct them or justify a source-priority write.
+   *  Hydrate only while clean; a dirty draft survives navigation and is cleared only
+   *  after every intended write is read back. Empty means no hydrated draft, not no
+   *  server route. C4 never gates entry on this client draft. */
+  routeOrder: RouteHop[];
   /** Whether `routeOrder` holds an edit the server has not confirmed. Decides if a re-entry
-   *  may hydrate; a confirmed write clears it. */
+   *  may hydrate; all intended writes must be confirmed before clearing it. */
   routeOrderDirty: boolean;
 };
 
 export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
-  providerSelection: [],
+  providerSelection: { scan: null, selectedBackends: [] },
   importedCount: 0,
   addedThroughMore: [],
   routeOrder: [],
@@ -118,9 +130,10 @@ export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
  * turned Model Hub off, never a request that failed. `useModelHubCapability()` catches its
  * own error and resolves to `false`, so it cannot distinguish the two and is NOT a safe
  * producer here; derive the value from the config the Wizard has already loaded
- * (`modelHubEnabledFromConfig`, the same projection `readOpencodeSetupRoutes` uses), which is
- * authoritative because the shell does not render without a successful config read. Anything
- * less stays `pending`, and `setupNavigationReady` keeps the user on the introduction until it
+ * (`modelHubEnabledFromConfig`, after verifying capabilities.model_hub.enabled is a boolean;
+ * that helper also returns false for missing fields). This is the same projection
+ * `readOpencodeSetupRoutes` uses; a successful config read plus the explicit boolean supplies
+ * the authority. Anything less stays `pending`, and `setupNavigationReady` keeps the user on the introduction until it
  * settles.
  */
 export type SetupCapability = 'pending' | 'enabled' | 'disabled';
