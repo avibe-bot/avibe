@@ -6374,6 +6374,7 @@ class ModelHubService:
                 previous = self.store.load()
                 updated = self._clone_config(previous)
                 updated.enabled = True
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
             await self._prepare_engine_for_demand()
             status = await self._engine_call(self.adapter.start())
@@ -6403,6 +6404,7 @@ class ModelHubService:
                     raise ModelHubError("runtime_busy", status=409)
                 updated = self._clone_config(previous)
                 updated.enabled = False
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
                 return _runtime_payload(status, enabled=False)
 

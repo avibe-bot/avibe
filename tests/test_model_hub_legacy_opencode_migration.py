@@ -42,7 +42,7 @@ def _write(tmp_path, payload):
 
 
 def _assert_migrated(path, original):
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
     assert loaded.load_warnings == ()
     assert loaded.recovered_sections == ()
     assert loaded.model_hub.enabled is True
@@ -217,7 +217,7 @@ def test_legacy_opencode_migration_requires_backup_before_persist(monkeypatch, t
     path, original = _write(tmp_path, payload)
     monkeypatch.setattr(v2_config, "_backup_config_file", lambda *args, **kwargs: None)
 
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
 
     assert loaded.model_hub.enabled is True
     assert "could not be backed up" in " ".join(loaded.load_warnings)
@@ -241,7 +241,7 @@ def test_legacy_opencode_migration_does_not_replace_concurrent_save(monkeypatch,
 
     monkeypatch.setattr(v2_config, "_write_config_payload_if_unchanged", concurrent_write)
 
-    loaded = V2Config.load(config_path=path)
+    loaded = V2Config.load(config_path=path, persist_migrations=True)
 
     assert loaded.show_duration is False
     assert "before replacement" in " ".join(loaded.load_warnings)
