@@ -2915,33 +2915,53 @@ def _discovered_models(
     models = payload.get("models")
     if not isinstance(models, list):
         return ()
-    result: list[DiscoveredModel] = []
-    seen: set[str] = set()
+    coalesced: dict[str, tuple[str, ...] | None] = {}
+    # Which spellings the engine used for each name, so a row it listed twice
+    # under one name stays distinguishable from two rows that became one here.
+    spellings: dict[str, set[str]] = {}
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
         if not isinstance(value, str) or not value:
             continue
+        answered = value
         # This is the one place an address enters the product: the engine answers
         # with the name it addresses this credential by. It is removed here, at
         # that boundary, rather than by every later reader of the inventory — and
         # only the address of the credential being discovered, so a model whose
         # own name is spelled like one is left as upstream named it.
         value = model_id_without_credential_address(value, prefix)
-        if not value or value in seen:
+        if not value:
             continue
-        seen.add(value)
         supported_parameters = None
         if isinstance(item, dict) and isinstance(item.get("supported_parameters"), list):
             parameters = item["supported_parameters"]
             if all(isinstance(parameter, str) and parameter for parameter in parameters):
                 supported_parameters = tuple(dict.fromkeys(parameters))
-        result.append(
-            DiscoveredModel(
-                id=value,
-                supported_parameters=supported_parameters,
-            )
-        )
-    return tuple(result)
+        if value not in coalesced:
+            coalesced[value] = supported_parameters
+            spellings[value] = {answered}
+            continue
+        if answered in spellings[value]:
+            # The engine listed one name twice and said different things about
+            # it. That is the engine contradicting itself and the first answer
+            # has always been the one kept.
+            continue
+        # Two names the engine kept apart, landing on one only because the
+        # address came off. The inventory holds one row per name, so the rows
+        # are coalesced rather than the later one dropped: this merge is ours,
+        # and nothing the engine said may be lost to the order it said it in.
+        spellings[value].add(answered)
+        held = coalesced[value]
+        if supported_parameters is None:
+            continue
+        if held is None:
+            coalesced[value] = supported_parameters
+            continue
+        coalesced[value] = tuple(dict.fromkeys(held + supported_parameters))
+    return tuple(
+        DiscoveredModel(id=model_id, supported_parameters=parameters)
+        for model_id, parameters in coalesced.items()
+    )
 
 
 _adapter: CLIProxyEngineAdapter | None = None

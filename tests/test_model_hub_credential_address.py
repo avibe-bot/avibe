@@ -9,9 +9,12 @@ file an earlier release wrote with one still loads.
 
 The address is removed where its owner is known, so what gets removed is a
 credential's own address and never a name that merely looks like one. Discovery
-knows the credential it is discovering, an engine record names the prefix it is
-addressed by, and a config file — which records no prefix at all — is repaired
-once on load, for the rows discovery produced, by the minted spelling.
+knows the credential it is discovering and an engine record names the prefix it
+is addressed by. A config file names no prefix, so the config layer renames
+nothing: it stores the name it is given, and a file an earlier release addressed
+is repaired by the runtime, which holds the credential and can move an id in
+every place it is a join key at once. See
+``docs/plans/model-hub-credential-address-repair.md``.
 """
 
 import copy
@@ -116,6 +119,70 @@ def test_discovery_drops_the_address_the_engine_answers_with() -> None:
 
     assert [model.id for model in models] == ["gpt-5.5", "gpt-6-astra"]
     assert models[0].supported_parameters == ("reasoning",)
+
+
+def test_discovery_coalesces_two_rows_the_engine_answers_for_one_model() -> None:
+    """Removing an address can land two of the engine's rows on one name.
+
+    The inventory holds one row per name, so the rows are coalesced rather than
+    the later one dropped. What the engine reported about a model may not depend
+    on which position it reported it in — and the inventory writer refuses a
+    duplicate outright, so dropping one silently is not an option either.
+    """
+
+    models = _discovered_models(
+        {
+            "models": [
+                {"id": f"{ADDRESS}/gpt-5.5", "supported_parameters": ["reasoning"]},
+                {"id": "gpt-5.5", "supported_parameters": ["tools", "reasoning"]},
+            ]
+        },
+        ADDRESS,
+    )
+
+    assert [model.id for model in models] == ["gpt-5.5"]
+    assert models[0].supported_parameters == ("reasoning", "tools")
+
+
+def test_discovery_keeps_metadata_only_a_later_row_carries() -> None:
+    """Order decides nothing: the row that knew something is the one believed."""
+
+    models = _discovered_models(
+        {
+            "models": [
+                {"id": f"{ADDRESS}/gpt-5.5"},
+                {"id": "gpt-5.5", "supported_parameters": ["reasoning"]},
+            ]
+        },
+        ADDRESS,
+    )
+
+    assert [(model.id, model.supported_parameters) for model in models] == [
+        ("gpt-5.5", ("reasoning",))
+    ]
+
+
+def test_discovery_leaves_a_name_the_engine_listed_twice_to_its_first_answer() -> None:
+    """Coalescing is for the merge this boundary makes, not for the engine's own.
+
+    One spelling listed twice is the engine contradicting itself, and the first
+    answer has always been the one kept. Removing an address does not change
+    that; it only means two names the engine kept apart can now meet.
+    """
+
+    models = _discovered_models(
+        {
+            "models": [
+                {"id": "gpt-5.5", "supported_parameters": ["reasoning"]},
+                {"id": "gpt-5.5", "supported_parameters": ["tools"]},
+            ]
+        },
+        ADDRESS,
+    )
+
+    assert [(model.id, model.supported_parameters) for model in models] == [
+        ("gpt-5.5", ("reasoning",))
+    ]
 
 
 def test_discovery_keeps_a_name_it_cannot_prove_is_an_address() -> None:
@@ -251,115 +318,32 @@ def _config_payload(models: list[dict], hops: list[dict] | None = None) -> dict:
     return payload
 
 
-def _load(tmp_path, payload: dict) -> V2Config:
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    return V2Config.load(config_path=config_path)
+def test_the_config_layer_stores_the_name_it_is_given(tmp_path) -> None:
+    """Config renames nothing — not what a caller sends, not what a file holds.
 
+    A config file names no prefix, so this layer cannot prove which segment of a
+    model id addresses a credential; it would have to guess from the spelling,
+    and a guess renames an upstream identity that happens to be spelled like
+    one. An id is also the join key across the inventory, route hops, route
+    keys, the backend menus, and the engine records — so renaming one from here
+    moves it in a single place and leaves every other naming something gone.
 
-def test_a_file_an_earlier_release_addressed_loads_without_the_address(tmp_path) -> None:
-    """One repair on load, for a file written before discovery stopped storing one."""
-
-    loaded = _load(
-        tmp_path,
-        _config_payload(
-            [_model_payload(f"{ADDRESS}/gpt-5.5"), _model_payload(f"{ADDRESS}/gpt-6-astra")],
-            [{"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}],
-        ),
-    )
-
-    assert loaded.load_warnings == ()
-    assert [model.id for model in loaded.model_hub.sources[0].models] == ["gpt-5.5", "gpt-6-astra"]
-    hops = loaded.model_hub.agents["claude"].routes["claude-opus-4-6"].hops
-    assert [hop.model_id for hop in hops] == ["gpt-5.5"]
-
-
-def test_a_model_a_person_added_keeps_the_name_they_gave_it(tmp_path) -> None:
-    """Only discovery could have stored an address, so only its rows are repaired.
-
-    A hand-added model spelled like an address is a name someone chose. Renaming
-    it would point the row at a model the source may not serve at all.
+    Repair belongs where both are answerable: the runtime holds the credential,
+    and the service writes every one of those collections together. Until then
+    an addressed row loads exactly as written, and one refresh of its Source
+    replaces it.
     """
-
-    loaded = _load(tmp_path, _config_payload([_model_payload(f"{ADDRESS}/gpt-5.5", "manual")]))
-
-    assert [model.id for model in loaded.model_hub.sources[0].models] == [f"{ADDRESS}/gpt-5.5"]
-
-
-def test_a_repaired_row_yields_to_the_manual_row_already_holding_its_name(tmp_path) -> None:
-    """The shape left behind by working around this bug by hand.
-
-    Both rows name one model once the address is gone. The manual row is the one
-    a person made — it carries their display name and their provenance — and the
-    discovered row adds no identity the surviving row does not already have.
-    """
-
-    loaded = _load(
-        tmp_path,
-        _config_payload(
-            [
-                _model_payload(f"{ADDRESS}/gpt-5.5"),
-                _model_payload("gpt-5.5", "manual", display_name="Added by hand"),
-            ]
-        ),
-    )
-
-    assert loaded.load_warnings == ()
-    models = loaded.model_hub.sources[0].models
-    assert [(model.id, model.provenance, model.display_name) for model in models] == [
-        ("gpt-5.5", "manual", "Added by hand")
-    ]
-
-
-def test_two_spellings_of_one_hop_collapse_onto_the_model_they_now_name(tmp_path) -> None:
-    loaded = _load(
-        tmp_path,
-        _config_payload(
-            [_model_payload(f"{ADDRESS}/gpt-5.5"), _model_payload("gpt-5.5")],
-            [
-                {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"},
-                {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
-            ],
-        ),
-    )
-
-    assert loaded.load_warnings == ()
-    assert [model.id for model in loaded.model_hub.sources[0].models] == ["gpt-5.5"]
-    hops = loaded.model_hub.agents["claude"].routes["claude-opus-4-6"].hops
-    assert [(hop.source_id, hop.model_id) for hop in hops] == [(SOURCE_ID, "gpt-5.5")]
-
-
-def test_a_hop_this_repair_did_not_rename_is_left_where_it_points(tmp_path) -> None:
-    """A hop follows its source's rows; it is never redirected on its own.
-
-    Nothing in the file shows this hop meant ``gpt-5.5``: the source holds no row
-    that was renamed to it. Rewriting the hop anyway would move a route to a
-    model on a guess, so the hop stays and the ordinary unavailable-target path
-    reports it.
-    """
-
-    loaded = _load(
-        tmp_path,
-        _config_payload(
-            [_model_payload(f"{ADDRESS}/gpt-6-astra")],
-            [{"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}],
-        ),
-    )
-
-    assert [model.id for model in loaded.model_hub.sources[0].models] == ["gpt-6-astra"]
-    hops = loaded.model_hub.agents["claude"].routes["claude-opus-4-6"].hops
-    assert [(hop.source_id, hop.model_id) for hop in hops] == [(SOURCE_ID, f"{ADDRESS}/gpt-5.5")]
-
-
-def test_a_file_carrying_no_address_is_not_rewritten(tmp_path) -> None:
-    """The repair is a repair: a file with nothing to fix is left byte for byte."""
 
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             _config_payload(
-                [_model_payload("gpt-5.5"), _model_payload("x-ai/grok-4.6-latest")],
-                [{"source_id": SOURCE_ID, "model_id": "x-ai/grok-4.6-latest"}],
+                [
+                    _model_payload(f"{ADDRESS}/gpt-5.5"),
+                    _model_payload(f"{ADDRESS}/gpt-6-astra", "manual"),
+                    _model_payload("x-ai/grok-4.6-latest"),
+                ],
+                [{"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}],
             ),
             ensure_ascii=False,
         ),
@@ -369,40 +353,12 @@ def test_a_file_carrying_no_address_is_not_rewritten(tmp_path) -> None:
 
     loaded = V2Config.load(config_path=config_path)
 
+    assert loaded.load_warnings == ()
     assert config_path.read_bytes() == original
     assert [model.id for model in loaded.model_hub.sources[0].models] == [
-        "gpt-5.5",
+        f"{ADDRESS}/gpt-5.5",
+        f"{ADDRESS}/gpt-6-astra",
         "x-ai/grok-4.6-latest",
     ]
-
-
-def test_a_repaired_config_serializes_to_one_this_product_loads_again(tmp_path) -> None:
-    """The terminal property: repairing may not produce a file that will not load.
-
-    Collapsing two spellings into one identity is where that could break — write
-    the surviving name twice and the next load refuses the file it just wrote.
-    """
-
-    loaded = _load(
-        tmp_path,
-        _config_payload(
-            [_model_payload(f"{ADDRESS}/gpt-5.5"), _model_payload("gpt-5.5")],
-            [
-                {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"},
-                {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
-            ],
-        ),
-    )
-    rewritten = tmp_path / "rewritten.json"
-    rewritten.write_text(
-        json.dumps(
-            api.config_to_payload(loaded, include_secrets=True, include_internal=True),
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    reloaded = V2Config.load(config_path=rewritten)
-
-    assert reloaded.load_warnings == ()
-    assert reloaded.model_hub.to_payload() == loaded.model_hub.to_payload()
+    hops = loaded.model_hub.agents["claude"].routes["claude-opus-4-6"].hops
+    assert [(hop.source_id, hop.model_id) for hop in hops] == [(SOURCE_ID, f"{ADDRESS}/gpt-5.5")]
