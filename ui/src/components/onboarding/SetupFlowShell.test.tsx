@@ -24,9 +24,11 @@ function Screen({ id, ref, ...props }: SetupScreenProps & { id: SetupScreenId; r
   useImperativeHandle(ref, () => ({ activate: () => props.onNavigate(id === 'intro' ? 'providers' : 'assistants') }));
   return <><h1 tabIndex={-1}>{id}</h1><input aria-label={`${id} draft`} value={value} onChange={(event) => setValue(event.target.value)} /></>;
 }
-const show = (capability: SetupScreenProps['capability'] = 'enabled', gatewayEnabled: boolean | null = true) =>
+const show = (capability: SetupScreenProps['capability'] = 'enabled', gatewayEnabled: boolean | null = true,
+  extra: { navigationLocked?: boolean; onRetrySetup?: () => void } = {}) =>
   <I18nextProvider i18n={i18n}><SetupFlowShell sequence={SETUP_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
-    onRetrySetup={vi.fn()} runtimeRead={loadingRegion()} renderScreen={(id, props, ref) => <Screen {...props} id={id} ref={ref} />} /></I18nextProvider>;
+    onRetrySetup={extra.onRetrySetup ?? vi.fn()} navigationLocked={extra.navigationLocked} runtimeRead={loadingRegion()}
+    renderScreen={(id, props, ref) => <Screen {...props} id={id} ref={ref} />} /></I18nextProvider>;
 beforeEach(() => {
   savedFeeds.length = 0;
   vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
@@ -42,6 +44,35 @@ it('derives the interim and complete journey from a static registry alone', () =
 it.each(['pending', 'disabled', 'enabled'] as const)('policy %s never removes a registered screen', (capability) => {
   const { container } = render(show(capability, false));
   expect([...container.querySelectorAll('[data-setup-screen-root]')].map((node) => node.getAttribute('data-setup-screen-root'))).toEqual(SETUP_SCREENS);
+});
+// XpVU: a recovery holds the journey by holding the pair. A screen's own `onNavigate`
+// reaches the same journey without touching either button, so the hold lives there too.
+it('a held journey refuses the screen own navigate, not only the buttons', () => {
+  const { container, rerender } = render(show('enabled', true, { navigationLocked: true }));
+  const current = () => container.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
+  expect(screen.getByRole('button', { name: 'Get started' }).hasAttribute('disabled')).toBe(true);
+  // Held, not busy: nothing is running, so nothing spins. The spinner carries Tailwind's
+  // `motion-safe:` variant, so the token in the DOM is the whole `motion-safe:animate-spin`
+  // — feeding a genuinely busy action proves this selector can find one, which is what
+  // makes its absence above an answer about the shell rather than about the query.
+  const spinners = () => container.querySelectorAll('.onboarding-primary-action [class~="motion-safe:animate-spin"]').length;
+  const feed = (busy: boolean) => act(() => savedFeeds[0].onActionChange({ labelKey: 'onboarding.welcome.getStarted', disabled: false, busy, icon: 'none' }));
+  expect(spinners()).toBe(0);
+  feed(true); expect(spinners()).toBe(1);
+  feed(false); expect(spinners()).toBe(0);
+  act(() => savedFeeds[0].onNavigate('providers'));
+  expect(current()).toBe('intro');
+  rerender(show('enabled', true, { navigationLocked: false }));
+  act(() => savedFeeds[0].onNavigate('providers'));
+  expect(current()).toBe('providers');
+});
+it('a held journey does not hand the shared primary to the config retry either', () => {
+  const onRetrySetup = vi.fn();
+  render(show('disabled', false, { navigationLocked: true, onRetrySetup }));
+  const primary = screen.getByRole('button', { name: en.common.retry });
+  expect(primary.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(primary);
+  expect(onRetrySetup).not.toHaveBeenCalled();
 });
 it('keeps drafts and DOM identity, focuses each heading, and rejects old activation callbacks', async () => {
   const { container } = render(show());

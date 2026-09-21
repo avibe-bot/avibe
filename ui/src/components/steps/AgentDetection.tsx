@@ -55,6 +55,29 @@ type AgentState = {
   status?: 'unknown' | 'ok' | 'missing';
 };
 
+/**
+ * The verdict of the latest settled enable write, and the intent that earned it.
+ *
+ * A write can finish with nobody reading the screen, and two reads can start at once
+ * when the screen comes back. The intent is what makes the verdict answerable: only a
+ * read asking the same question may report it, so a stale read can neither spend it
+ * nor throw it away.
+ */
+type EnableReceipt = { intent: number; message: string };
+
+/**
+ * Whether this read answers for the outstanding verdict, or only reports it.
+ *
+ * Only an operation that succeeded at the same thing the verdict is about may spend
+ * it: the card's own Retry, a provider connection that went through, an install that
+ * worked. A dialog mounting, closing or being cancelled, a write-state notification
+ * saying nothing is pending, an install or a read that failed — those are the
+ * lifecycle talking, not an answer, and an apply failure the person has not dealt
+ * with yet must still be there afterwards. An ordinary activation, detect or chip
+ * refresh reports the verdict rather than replacing it with silence.
+ */
+type ConnectionRefresh = { acknowledge?: boolean };
+
 const DEFAULT_AGENTS = DEFAULT_AGENT_STATE as Record<string, AgentState>;
 
 // Backends with a dedicated provider config body (rendered in the wizard
@@ -116,8 +139,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const enableQueue = useRef(Promise.resolve());
   const enableIntent = useRef<Partial<Record<RuntimeBackendId, number>>>({});
   const pendingEnable = useRef<Partial<Record<RuntimeBackendId, number>>>({});
-  // What a settled write still owes a screen the person had already left, paid on return.
-  const enableReceipt = useRef<Partial<Record<RuntimeBackendId, string>>>({});
+  // What the latest settled write still owes this screen, held until someone who can
+  // answer for it reports it — see EnableReceipt.
+  const enableReceipt = useRef<Partial<Record<RuntimeBackendId, EnableReceipt>>>({});
   // One provider modal/reconciliation at a time; Configure and navigation stay
   // disabled until persisted fields and the subsequent detection reach agents.
   const [syncing, setSyncing] = useState(false);
@@ -138,40 +162,56 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const detectionTokens = useRef<Record<string, number>>({});
   const isMissing = (agent: AgentState) => agent.status === 'missing';
 
-  const refreshConnection = useCallback(async (name: RuntimeBackendId, receiptError = '') => {
+  const refreshConnection = useCallback(async (name: RuntimeBackendId, { acknowledge = false }: ConnectionRefresh = {}) => {
     if (!activeRef.current || pendingEnable.current[name] !== undefined) return;
     const epoch = activation.current;
     const intent = enableIntent.current[name];
     const token = (connectionTokens.current[name] || 0) + 1;
     connectionTokens.current[name] = token;
+    // Read the verdict, don't take it. Starting is not accepting: this read may turn
+    // out to be stale, and it may be answering a different intent entirely — either
+    // way the verdict has to still be there for the read that can report it.
+    const receipt = enableReceipt.current[name];
+    const owed = receipt && receipt.intent === intent ? receipt : undefined;
+    const owns = () => epoch === activation.current && connectionTokens.current[name] === token && enableIntent.current[name] === intent;
     setConnectionPending((current) => ({ ...current, [name]: true }));
-    setConnectionErrors((current) => ({ ...current, [name]: receiptError }));
+    // Nothing owed means nothing to say about the write, which is not the same as
+    // saying it went fine: an ordinary refresh leaves a reported failure standing.
+    if (owed) setConnectionErrors((current) => ({ ...current, [name]: owed.message }));
     try {
       const result = await api.getBackendConnection(name);
-      if (epoch !== activation.current || connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (!owns()) return;
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
       setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      // Spending the verdict takes all three: this read still owns the screen, the
+      // caller is an operation that actually answers for it, and the verdict in hand
+      // is the one that was there when the read began. A newer write that landed
+      // meanwhile is still owed to whoever reads next.
+      const retire = acknowledge && owed && enableReceipt.current[name] === owed;
+      if (retire) delete enableReceipt.current[name];
+      setConnectionErrors((current) => ({ ...current, [name]: retire ? '' : owed?.message || '' }));
     } catch (error) {
-      if (epoch !== activation.current || connectionTokens.current[name] !== token || enableIntent.current[name] !== intent) return;
+      if (!owns()) return;
       setConnections((current) => ({ ...current, [name]: undefined }));
-      setConnectionErrors((current) => ({ ...current, [name]: String(error) }));
+      // A read that also failed does not get to bury what the write reported, and it
+      // answers for nothing: the apply failure is the original evidence, it is the one
+      // the person can act on, and it stays owed until something actually settles it.
+      setConnectionErrors((current) => ({ ...current, [name]: owed?.message || String(error) }));
     } finally {
       if (connectionTokens.current[name] === token) setConnectionPending((current) => ({ ...current, [name]: false }));
     }
   }, [api, t]);
   // Being read again is one event with one owner, however it arrives: the shell
   // activates this screen, or the route surface it sits on comes back. In the shell both
-  // happen in the same commit, so two effects would mean two refreshes — and the second,
-  // knowing nothing of the first, would wipe the write receipt it had just reported.
+  // happen in the same commit, so two effects would mean two refreshes — and neither of
+  // them consumes the write verdict, so whichever one wins still reports it.
   useEffect(() => {
     const leftSurface = previousRouteSurfaceActive.current && !routeSurfaceActive;
     previousRouteSurfaceActive.current = routeSurfaceActive;
     // Returning also collects what a write settled while there was nobody to tell.
     if (!isPage && active && !leftSurface) for (const name of ASSISTANT_ORDER) {
-      const receipt = enableReceipt.current[name];
-      delete enableReceipt.current[name];
-      void refreshConnection(name, receipt);
+      void refreshConnection(name);
     }
     // Leaving drops in-flight READS only. A queued enable intent is a write the person
     // already asked for; invalidating it here would strand `pendingEnable` behind a
@@ -301,13 +341,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       } catch (error) { receiptError = String(error); }
       if (enableIntent.current[backend] !== intent) return;
       delete pendingEnable.current[backend];
-      // The write is finished either way, but a screen the person has left may neither
-      // read nor publish. Hold its receipt rather than spend it on nobody: the return
-      // refresh reports what this write actually did instead of losing it.
-      if (!activeRef.current) { enableReceipt.current[backend] = receiptError; return; }
+      // Record the verdict before anyone is asked to read it, whether or not there is
+      // anybody to tell. Two reads can start at once when the screen comes back, and
+      // the one that loses the race used to take the message with it.
+      enableReceipt.current[backend] = { intent, message: receiptError };
+      // A screen the person has left may neither read nor publish; the verdict waits.
+      if (!activeRef.current) return;
       // This uncached projection reads persisted enabled even after a rejected
       // write. Apply failure cannot roll back config that was already committed.
-      await refreshConnection(backend, receiptError);
+      await refreshConnection(backend);
     });
   };
 
@@ -373,8 +415,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setInstallResults((prev) => ({ ...prev, [name]: { ok: false, message: '', output: null } }));
     setExpandedOutputs((prev) => ({ ...prev, [name]: false }));
 
+    let installed = false;
     try {
       const result = await api.installAgent(name);
+      installed = result.ok;
       const installedPath = typeof result.path === 'string' && result.path ? result.path : null;
       setInstallResults((prev) => ({
         ...prev,
@@ -397,7 +441,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     } finally {
       pendingInstalls.current.delete(name);
       setInstallingAgents((prev) => ({ ...prev, [name]: false }));
-      if (!isPage) void refreshConnection(name as RuntimeBackendId);
+      // An install that failed reports its own failure and answers for nothing else;
+      // only one that worked replaces what the enable write had to say.
+      if (!isPage) void refreshConnection(name as RuntimeBackendId, { acknowledge: installed });
     }
   };
 
@@ -438,11 +484,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       disabled: !canContinue || actionBusy || recoveryOpen, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
   }, [active, onActionChange, entering, canContinue, actionBusy, recoveryOpen]);
 
-  // The readiness caption belongs under the action it explains, and in the shell that
-  // action is the shared pair the screen no longer draws. Kept inside the screen it
-  // either pushes the anchor as it grows or has to be lifted out of flow over the
-  // footer, where it covers the very button it describes; so the shell reserves a slot
-  // after the pair and the active screen portals its caption into that slot instead.
+  // What sits under the shared pair in the shell: the readiness caption, the OpenCode
+  // permission callout and the completion recovery. All three are ancillary to the
+  // action and all three grow — a permission error carries a full diagnostic, a
+  // recovery is a form. Kept inside the screen they push the anchor the two steps
+  // share; lifted out of flow they cover the very buttons they explain. So the shell
+  // reserves a slot after the pair and the active screen portals them into it.
   const setupRoot = useRef<HTMLDivElement>(null);
   const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -463,10 +510,22 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         </p>
         {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={entering} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
   </>);
+  // Hosted in one place so the order under the pair is the same every time, and so the
+  // standalone host keeps the arrangement it already had.
+  const permissionNode = <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
+    permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
+    // Granting permission succeeds at permission. It says nothing about whether
+    // enabling the backend was persisted, so it reads the connection without
+    // spending a verdict that is about something else.
+    onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />;
   // A portal leaves the screen root, and with it the `inert` the shell puts on a screen
-  // nobody is reading, so the caption has to answer to the same activity itself.
-  const hintNode = onActionChange
-    ? (active && routeSurfaceActive && actionAside ? createPortal(<div className="onboarding-setup-hint">{hintInner}</div>, actionAside) : null)
+  // nobody is reading, so what it carries has to answer to the same activity itself.
+  const asideNode = onActionChange
+    ? (active && routeSurfaceActive && actionAside ? createPortal(<>
+        <div className="onboarding-setup-hint">{hintInner}</div>
+        {permissionNode}
+        {completionRecovery}
+      </>, actionAside) : null)
     : (
       <div className="onboarding-setup-footer">
         <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
@@ -641,14 +700,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       const name = providerModal.backend;
       setProviderModal(null);
       void syncBackendFromConfig(name);
+      // Closing is how the dialog leaves, not a result. Cancelled without writing
+      // anything, it has answered for nothing the enable failure was about.
       void refreshConnection(name);
     }}
     onWriteState={(pending) => {
       const name = providerModal.backend;
       setPendingWrites((current) => ({ ...current, [name]: pending }));
+      // "Nothing is pending" is the same notification whether a write succeeded,
+      // failed or never happened; `onConnected` is the one that means it worked.
       if (!pending) void refreshConnection(name);
     }}
-    onConnected={async () => { await refreshConnection(providerModal.backend); }} />;
+    onConnected={async () => { await refreshConnection(providerModal.backend, { acknowledge: true }); }} />;
 
   if (isPage) {
     return (
@@ -709,7 +772,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
                 : undefined}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
-            onRefreshConnection={() => void refreshConnection(name)}
+            onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
             configuringDisabled={syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name] || !agent.enabled || agent.status !== 'ok'}
             enabledControl={<ToggleSwitch variant="onboarding" enabled={agent.enabled}
               label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
@@ -744,18 +807,22 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         })}
         </div>
       </div>
-      <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
-        permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
-        onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />
+      {!onActionChange && permissionNode}
       {/* Wizard-only: the offer to take over API keys already on this machine.
           Settings → Backends reaches the same migration through
           BackendSupplyModeCard, with its broader scope intact. Self-hides when
-          there is nothing importable or the gateway isn't reachable. */}
-      {visited && modelHubEnabled === true && <ImportKeysNotice />}
+          there is nothing importable or the gateway isn't reachable — which is
+          why the slot around it is rendered either way: the stage keeps the
+          capsule's height while the read is still out, when it turns out there
+          is nothing to offer, and after the offer is refused, so none of the
+          three can move the action below it. */}
+      <div className="onboarding-import-slot">
+        {visited && modelHubEnabled === true && <ImportKeysNotice />}
+      </div>
       </div>
       {providerDialog}
-      {completionRecovery}
-      {hintNode}
+      {!onActionChange && completionRecovery}
+      {asideNode}
     </div>
   );
 };

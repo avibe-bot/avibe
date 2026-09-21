@@ -1100,7 +1100,7 @@ for (const width of [1200, 390]) {
 test('saved Slack recovery narrow uses the existing form only after explicit repair', async ({ page }, info) => {
   const denied = await serveProduct(page); await authFixtures(page);
   let manifests = 0;
-  await page.route('**/api/config', (route) => route.fulfill({ json: { capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, platforms: { enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }], slack: { has_app_token: true, bot_token: '' }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } } }));
+  await page.route('**/api/config', (route) => route.fulfill({ json: { version: 'v2', setup_completed: false, runtime: {}, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, platforms: { primary: 'slack', enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }], slack: { has_app_token: true, bot_token: '' }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } } }));
   await page.route('**/api/backend/claude/connection', (route) => route.fulfill({ json: { ok: true, backend: 'claude', ready: true, entry_eligible: true, enabled: true, installed: true, application: 'applied', auth: 'api_key' } }));
   await page.route('**/api/slack/manifest', (route) => { manifests++; return route.fulfill({ json: { ok: true, manifest: '{}' } }); });
   await page.setViewportSize({ width: 390, height: 640 });

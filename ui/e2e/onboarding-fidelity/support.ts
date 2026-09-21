@@ -33,10 +33,17 @@ export const VIEWPORTS = [
 
 export const size = ({ width, height }: { width: number; height: number }) => `${width}x${height}`;
 
+// A complete v2 envelope. Setup validates the config it acts on rather than reading
+// fields out of whatever arrives, so a fixture missing `version`, `setup_completed`,
+// `platforms.primary` or `runtime` is an UNREAD prerequisite — which is exactly the
+// blocked state these captures are not about.
 const CONFIG = {
+  version: 'v2',
+  setup_completed: false,
   capabilities: { model_hub: { enabled: true } },
   model_hub: { enabled: true },
-  platforms: { enabled: [] },
+  platforms: { primary: 'slack', enabled: [] },
+  runtime: {},
   agents: {
     claude: { enabled: true, cli_path: 'claude' },
     codex: { enabled: true, cli_path: 'codex' },

@@ -4,9 +4,11 @@ import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Welcome } from '../steps/Welcome';
+import { SetupFlowShell } from '../Wizard';
+import { loadingRegion } from '../settings/models/regionRead';
 import { useRef, useState, type ComponentProps } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { SetupAction, SetupScreenHandle } from './setupFlow';
+import { SETUP_SCREENS, type SetupAction, type SetupScreenHandle } from './setupFlow';
 import { CollaborationStory } from './CollaborationStory';
 import { AccessTiles } from './AccessTiles';
 import en from '../../i18n/en.json';
@@ -87,6 +89,29 @@ describe('Welcome', () => {
     expect(screen.getByText('Probe unavailable')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
+  });
+  // XpVZ/B: in the shell the failure must land in the slot AFTER the shared pair. Left
+  // in the screen it sits before the footer, and a long diagnostic there moves the
+  // anchor Welcome and the setup screen are supposed to share.
+  it('hands a failed detection to the slot below the shared pair instead of the screen', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    mocks.api.detectCli.mockRejectedValue(new Error('Probe unavailable'));
+    const { container } = render(wrap(<SetupFlowShell sequence={SETUP_SCREENS} capability="enabled" gatewayEnabled
+      onRetrySetup={vi.fn()} runtimeRead={loadingRegion()}
+      renderScreen={(id, { active, onActionChange }, ref) => (id === 'intro'
+        ? <Welcome active={active} onActionChange={onActionChange} ref={ref} onNext={vi.fn()} />
+        : <h1 tabIndex={-1}>{id}</h1>)} />));
+    fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
+    const alert = await screen.findByRole('alert');
+    const aside = container.querySelector('[data-setup-action-aside]') as HTMLElement;
+    const footer = container.querySelector('.onboarding-setup-footer') as HTMLElement;
+    expect(aside.contains(alert)).toBe(true);
+    expect(container.querySelector('[data-setup-screen-root="intro"]')!.contains(alert)).toBe(false);
+    // Order, not just ownership: only content after the footer is content the anchor
+    // cannot feel.
+    expect(footer.compareDocumentPosition(aside) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' }).closest('.onboarding-primary-action')).toBeTruthy();
   });
   it('renders the approved Chinese copy and keeps the entry block mounted, hidden and inert', async () => {
     await i18n.changeLanguage('zh');

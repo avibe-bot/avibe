@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
@@ -12,7 +13,7 @@ import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { SetupAction } from './setupFlow';
 
 const mock = vi.hoisted(() => ({ api: {
-  detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(),
+  detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
 } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
@@ -25,6 +26,13 @@ const LocationProbe = () => <span data-testid="location">{useLocation().pathname
 const wrap = (node: React.ReactNode, active = true) => <MemoryRouter><I18nextProvider i18n={i18n}><RouteSurfaceActiveContext.Provider value={active}>{node}</RouteSurfaceActiveContext.Provider><LocationProbe /></I18nextProvider></MemoryRouter>;
 const data = () => ({ __onboardingDetected: true, agents: Object.fromEntries(['claude', 'codex', 'opencode'].map((name) => [name, { enabled: true, cli_path: name, status: 'missing' }])) });
 const row = (name: string) => within(screen.getByLabelText(name));
+// The shell's own adapter: every screen stays mounted, Back is a deactivation rather
+// than an unmount, and the screen publishes its action instead of drawing one. The
+// cases below go through that adapter because the retained-screen bugs only exist there.
+const next = vi.fn();
+const shown = (saved: ReturnType<typeof data>, active: boolean, onActionChange: (action: SetupAction) => void) =>
+  wrap(<AgentDetection data={saved} active={active} onActionChange={onActionChange} onNext={next} />, active);
+const configureAction = () => row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ });
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getConfig.mockResolvedValue(data());
@@ -234,14 +242,6 @@ describe('assistant installation presentation', () => {
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
     expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
   });
-  // The shell's own adapter: every screen stays mounted, Back is a deactivation rather
-  // than an unmount, and the screen publishes its action instead of drawing one. These
-  // three go through that adapter because the retained-screen bugs only exist there.
-  const next = vi.fn();
-  const shown = (saved: ReturnType<typeof data>, active: boolean, onActionChange: (action: SetupAction) => void) =>
-    wrap(<AgentDetection data={saved} active={active} onActionChange={onActionChange} onNext={next} />, active);
-  const configureAction = () => row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ });
-
   it('settles an enable write that lands while the screen is away, and reads nothing from hiding', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
     // The persisted value the uncached projection would report, moved by the write.
@@ -401,6 +401,191 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     await act(async () => on.resolve({ agents: { claude: { enabled: true } } }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false));
     expect(checkedOf(checkbox)).toBe(true); expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2);
+  });
+  // XpVM: what a settled write decided is owed to this screen until somebody who can
+  // answer for it reports it. A read starting is not that somebody.
+  const failedToggle = async (checkbox: HTMLElement) => {
+    mock.api.mutateConfig.mockRejectedValue(new Error('fixture persist failure'));
+    fireEvent.click(checkbox);
+    expect((await row('Claude Code').findByRole('alert')).textContent).toContain('fixture persist failure');
+  };
+  const cardAlert = () => row('Claude Code').queryByRole('alert')?.textContent ?? null;
+  it('a read that started before the write cannot clear the verdict it never saw', async () => {
+    const checkbox = mountReady();
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    const early = pending<ReturnType<typeof stateFor>>();
+    mock.api.getBackendConnection.mockImplementation((name) => name === 'claude' ? early.promise : Promise.resolve(stateFor(name)));
+    fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude'));
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    await failedToggle(checkbox);
+    await act(async () => early.resolve(stateFor('claude')));
+    expect(cardAlert()).toContain('fixture persist failure');
+  });
+  it('competing refreshes settling in reverse order each still report the write verdict', async () => {
+    const checkbox = mountReady();
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    const slow = pending<ReturnType<typeof stateFor>>();
+    let reads = 0;
+    mock.api.getBackendConnection.mockImplementation((name) => {
+      if (name !== 'claude') return Promise.resolve(stateFor(name));
+      reads += 1;
+      return reads === 1 ? slow.promise : Promise.resolve(stateFor(name));
+    });
+    await failedToggle(checkbox);
+    await waitFor(() => expect(reads).toBe(1));
+    // A second ordinary refresh overtakes the first and answers for the same write.
+    fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(cardAlert()).toContain('fixture persist failure');
+    await act(async () => slow.resolve(stateFor('claude')));
+    expect(cardAlert()).toContain('fixture persist failure');
+    // Reported, not latched: the card is still offering the retry that answers it.
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Retry' }).hasAttribute('disabled')).toBe(false));
+  });
+  it('only an acknowledged refresh retires the verdict', async () => {
+    const checkbox = mountReady();
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    await failedToggle(checkbox);
+    const rescan = () => fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
+    const probes = () => mock.api.detectCli.mock.calls.length;
+    let seen = probes(); rescan();
+    await waitFor(() => expect(probes()).toBeGreaterThan(seen));
+    expect(cardAlert()).toContain('fixture persist failure');
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(cardAlert()).toBeNull());
+    // Retired for good: an ordinary refresh afterwards does not bring it back.
+    seen = probes(); rescan();
+    await waitFor(() => expect(probes()).toBeGreaterThan(seen));
+    expect(cardAlert()).toBeNull();
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+  });
+  // Lifecycle is not an answer. A dialog that only opened, a write that failed and
+  // said so by reporting nothing pending, a read that failed, an acknowledgement that
+  // lost the screen — each of these used to make an unresolved apply failure
+  // disappear. They run through the shell adapter, which is the host the wizard uses.
+  const owedInShell = async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    mock.api.getConfig.mockResolvedValue(saved);
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    const publish = vi.fn();
+    const view = render(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    await failedToggle(row('Claude Code').getByRole('switch') as HTMLElement);
+    await waitFor(() => expect(configureAction().hasAttribute('disabled')).toBe(false));
+    return { view, publish, saved };
+  };
+  const retryLink = () => row('Claude Code').getByRole('button', { name: 'Retry' });
+  it('a provider dialog that only opened and closed answers for nothing', async () => {
+    await owedInShell();
+    fireEvent.click(row('Claude Code').getByRole('button', { name: /Add subscription/ }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // Closing re-reads persisted config and the connection. Neither of them connected
+    // anything, so the failure the person still has to deal with is still there.
+    await waitFor(() => expect(configureAction().hasAttribute('disabled')).toBe(false));
+    expect(cardAlert()).toContain('fixture persist failure');
+    expect(retryLink().hasAttribute('disabled')).toBe(false);
+  });
+  it('a provider write that failed reports nothing pending, which answers for nothing', async () => {
+    await owedInShell();
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Add API Key' }));
+    const dialog = await screen.findByRole('dialog');
+    const secret = await waitFor(() => dialog.querySelector('input[type="password"]') as HTMLInputElement);
+    fireEvent.change(secret, { target: { value: 'sk-ant-fixture' } });
+    mock.api.saveClaudeAuth.mockResolvedValue({ ok: false, message: 'fixture provider failure' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save and connect' }));
+    await waitFor(() => expect(within(dialog).getByRole('alert').textContent).toContain('fixture provider failure'));
+    await act(async () => {});
+    // The card sits behind an open modal here, so its line is read from the document
+    // rather than from the accessibility tree the dialog has taken over.
+    expect(screen.getByLabelText('Claude Code').querySelector('.onboarding-assistant-error')?.textContent).toContain('fixture persist failure');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(configureAction().hasAttribute('disabled')).toBe(false));
+    expect(cardAlert()).toContain('fixture persist failure');
+  });
+  it('an acknowledgement that lost the screen cannot clear what it no longer owns', async () => {
+    const { view, publish, saved } = await owedInShell();
+    const slow = pending<ReturnType<typeof stateFor>>();
+    let reads = 0;
+    mock.api.getBackendConnection.mockImplementation((name) => {
+      if (name !== 'claude') return Promise.resolve(stateFor(name));
+      reads += 1;
+      return reads === 1 ? slow.promise : Promise.resolve(stateFor(name));
+    });
+    // Retry is the one caller here that may spend the verdict — until the person
+    // leaves the screen under it and comes back to a different activation.
+    fireEvent.click(retryLink());
+    await waitFor(() => expect(reads).toBe(1));
+    view.rerender(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    await waitFor(() => expect(reads).toBeGreaterThan(1));
+    await act(async () => slow.resolve(stateFor('claude')));
+    expect(cardAlert()).toContain('fixture persist failure');
+    // And ordinary recovery still works: a Retry that does own the screen retires it.
+    fireEvent.click(retryLink());
+    await waitFor(() => expect(cardAlert()).toBeNull());
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+  });
+  it('an explicit Retry whose read failed keeps the verdict it could not answer', async () => {
+    const { view, publish, saved } = await owedInShell();
+    let reads = 0;
+    mock.api.getBackendConnection.mockImplementation((name) => {
+      if (name === 'claude') reads += 1;
+      return Promise.reject(new Error('fixture read failure'));
+    });
+    fireEvent.click(retryLink());
+    await waitFor(() => expect(reads).toBe(1));
+    await act(async () => {});
+    expect(cardAlert()).toContain('fixture persist failure');
+    expect(cardAlert()).not.toContain('fixture read failure');
+    // Still owed, and a healthy ordinary read on return proves it: had the failed
+    // acknowledgement spent it, that read would have had nothing to report.
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    view.rerender(shown(saved, false, publish));
+    view.rerender(shown(saved, true, publish));
+    await waitFor(() => expect(configureAction().hasAttribute('disabled')).toBe(false));
+    expect(cardAlert()).toContain('fixture persist failure');
+    fireEvent.click(retryLink());
+    await waitFor(() => expect(cardAlert()).toBeNull());
+  });
+  it('a read that also failed does not bury what the write reported', async () => {
+    const checkbox = mountReady();
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    mock.api.getBackendConnection.mockRejectedValue(new Error('fixture read failure'));
+    await failedToggle(checkbox);
+    expect(cardAlert()).not.toContain('fixture read failure');
+  });
+  it('a successful read still reports the write that failed under it', async () => {
+    const checkbox = mountReady();
+    await row('Claude Code').findByRole('button', { name: 'API Key connected' });
+    await failedToggle(checkbox);
+    // The projection is healthy and says enabled; the apply underneath it was not.
+    expect(checkedOf(checkbox)).toBe(true);
+    expect(cardAlert()).toContain('fixture persist failure');
+  });
+  it('a StrictMode replay of the return neither loses nor doubles the verdict', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
+    const publish = vi.fn();
+    const strict = (active: boolean) => <StrictMode>{wrap(<AgentDetection data={saved} active={active} onActionChange={publish} onNext={vi.fn()} />, active)}</StrictMode>;
+    const view = render(strict(false));
+    view.rerender(strict(true));
+    const checkbox = () => row('Claude Code').getByRole('switch');
+    await waitFor(() => expect(checkedOf(checkbox())).toBe(true));
+    let failWrite!: (reason: Error) => void;
+    mock.api.mutateConfig.mockImplementation(() => new Promise((_resolve, reject) => { failWrite = reject; }));
+    fireEvent.click(checkbox());
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+    view.rerender(strict(false));
+    await act(async () => { failWrite(new Error('fixture persist failure')); });
+    view.rerender(strict(true));
+    await waitFor(() => expect(cardAlert()).toContain('fixture persist failure'));
+    expect(row('Claude Code').getAllByRole('alert')).toHaveLength(1);
+    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
   });
   it('delayed modal config cannot undo a newer authoritative enablement result', async () => {
     const checkbox = mountReady(); await row('Claude Code').findByRole('button', { name: 'API Key connected' });

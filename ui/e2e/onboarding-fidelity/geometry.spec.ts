@@ -219,9 +219,11 @@ test.describe('desktop reference geometry', () => {
 
   /**
    * The reference stacks both steps with one rhythm — heading, 20, stage, 20, action — and
-   * reserves the stage at the card plus 64 in both. That reservation is the whole reason
-   * the two steps' buttons land on the same coordinates, so it is measured directly rather
-   * than inferred from the two steps agreeing.
+   * draws the story's diagram as its card plus 64. That diagram box is the design's own
+   * number and is measured directly; the stage around it is the reservation both steps
+   * spend, which is the diagram wherever the connection's card fits its frame and more
+   * where that card's sentence wraps to the two lines it is clamped to. So the design is
+   * asserted on the box the design draws, and the stage is asserted to hold it.
    */
   test('the welcome spends its column on the reference rhythm', async ({ page }) => {
     const denied = await serveProduct(page);
@@ -239,7 +241,10 @@ test.describe('desktop reference geometry', () => {
     expect(round(headingGap)).toBe(15);
     expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
     expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
-    expect(stage.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
+    const diagram = await box(page, '.onboarding-collaboration');
+    expect(diagram.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
+    expect(diagram.y).toBeCloseTo(stage.y, 1);
+    expect(stage.height).toBeGreaterThanOrEqual(diagram.height - 0.5);
 
     // The entry block is collapsed throughout setup (owner handoff, design boards and
     // prototype agree), so the rhythm under the action ends at the reserved back row.
@@ -521,11 +526,45 @@ test('setup keeps the entry block mounted, hidden and inert, and the anchor inde
   }
 });
 
+/**
+ * The tiers the anchor is held across. One list, because every fence below walks the
+ * same journey in a different state and "the same six tiers" has to mean one thing.
+ */
+const ANCHOR_TIERS = [
+  { width: 1920, height: 1080 }, { width: 1366, height: 768 }, { width: 1200, height: 800 },
+  { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 },
+] as const;
+
+/** The pair's real rects, measured whether or not the back row is drawn: it reserves its
+ *  box through `visibility` on the first screen, so filtering for visibility would drop
+ *  exactly the measurement that proves the reservation. */
+const pair = (page: Page) => page.evaluate(() => {
+  const read = (selector: string) => {
+    const rect = document.querySelector(selector)!.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  };
+  return { primary: read('.onboarding-primary-action'), back: read('.onboarding-back-action') };
+});
+
+/** The height of the stage the pair currently sits under — every screen keeps one. */
+const stageHeight = (page: Page) => page.evaluate(() => {
+  const stage = [...document.querySelectorAll('.onboarding-stage')].find((node) => node.getBoundingClientRect().height);
+  return stage ? stage.getBoundingClientRect().height : 0;
+});
+
+type Pair = Awaited<ReturnType<typeof pair>>;
+
+const expectSamePair = async (page: Page, before: Pair) => {
+  await toTop(page);
+  const after = await pair(page);
+  for (const key of ['x', 'y', 'width', 'height'] as const) {
+    expect(round(after.primary[key])).toBeCloseTo(round(before.primary[key]), 1);
+    expect(round(after.back[key])).toBeCloseTo(round(before.back[key]), 1);
+  }
+};
+
 test.describe('shared action anchor', () => {
-  for (const viewport of [
-    { width: 1920, height: 1080 }, { width: 1366, height: 768 }, { width: 1200, height: 800 },
-    { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 568 },
-  ]) {
+  for (const viewport of ANCHOR_TIERS) {
     for (const lang of ['en', 'zh'] as const) {
       test(`${size(viewport)} ${lang} keeps one action pair across every registered screen`, async ({ page }) => {
         await page.setViewportSize(viewport);
@@ -587,6 +626,289 @@ test.describe('shared action anchor', () => {
 });
 
 /**
+ * The anchor fence above walks a journey where nothing goes wrong, and everything the
+ * shell's post-action slot exists for appears only when something does: a detection that
+ * failed, a permission write that was refused, a completion that found a saved platform
+ * it cannot use. All three carry a server's own sentence, so all three GROW — and each of
+ * them used to be drawn inside the screen, above the footer, which is the one place in
+ * this layout where content can drag the anchor. So the same tiers are walked again with
+ * those states actually produced rather than mocked into place.
+ */
+const LONG_DETAIL = `probe exited 1: ${'the cli-detect subprocess reported an unreadable execution environment; '.repeat(3)}see the service log for the full trace`;
+const LONG_PERMISSION = `opencode.json could not be written: ${'the configuration directory is owned by another user and the write was refused; '.repeat(2)}resolve the ownership and try again`;
+
+/** The toast container, which is `fixed` and therefore a different surface with its own
+ *  placement. It is dismissed before any pointer question is asked, so the answer is
+ *  about the setup layout rather than about a transient global overlay. */
+const clearToasts = async (page: Page) => {
+  await page.clock.runFor(3100);
+  await expect(page.locator('div.fixed.right-4.z-50 > div')).toHaveCount(0);
+};
+
+/** The path probe, with a switch on it. A 500 carrying the server's sentence is the shape
+ *  this endpoint really fails with, and the same sentence for all three binaries is what
+ *  the toast layer coalesces — one overlay to spend, not three. */
+async function switchableDetect(page: Page) {
+  let failing = true;
+  await page.route('**/api/cli/detect**', (route) => {
+    if (failing) return route.fulfill({ status: 500, json: { error: LONG_DETAIL } });
+    const binary = new URL(route.request().url()).searchParams.get('binary') ?? '';
+    return route.fulfill({ json: { found: true, path: `/fixture/bin/${binary.split('/').pop()}` } });
+  });
+  return { recover: () => { failing = false; } };
+}
+
+/** OpenCode's permission write, held open so the callout's loading, refusal and success
+ *  are three observable moments rather than one settled render. */
+async function deferredPermission(page: Page) {
+  const waiting: (() => void)[] = [];
+  let failing = true;
+  await page.route('**/api/opencode/permission-status', (route) =>
+    route.fulfill({ json: { ok: true, permission_allowed: false, config_path: '/fixture/opencode.json' } }));
+  await page.route('**/api/opencode/setup-permission', async (route) => {
+    await new Promise<void>((resolve) => { waiting.push(resolve); });
+    return route.fulfill({ json: failing
+      ? { ok: false, message: LONG_PERMISSION, config_path: '/fixture/opencode.json' }
+      : { ok: true, message: 'Allowed', config_path: '/fixture/opencode.json' } });
+  });
+  return {
+    settle: async () => { await expect.poll(() => waiting.length).toBeGreaterThan(0); waiting.shift()!(); },
+    succeed: () => { failing = false; },
+  };
+}
+
+test.describe('post-action aside', () => {
+  for (const viewport of ANCHOR_TIERS) {
+    for (const lang of ['en', 'zh'] as const) {
+      test(`${size(viewport)} ${lang} explains a failed detection below the pair and retries from it`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        const detect = await switchableDetect(page);
+        await openOnboarding(page, { lang });
+        await toTop(page);
+        const before = await pair(page);
+
+        await page.locator('.onboarding-primary-action').click();
+        const alert = page.locator('.onboarding-action-aside [role="alert"]');
+        await expect(alert).toContainText(lang === 'zh' ? '未能检测助手' : 'Could not check your assistants');
+        // In the shell's slot after the footer, not in the screen above it.
+        await expect(page.locator('[data-setup-screen-root="intro"] [role="alert"]')).toHaveCount(0);
+        // The same sentence also reaches the global toast layer. Spend it now so every
+        // question below is about the slot rather than about a transient overlay.
+        await clearToasts(page);
+        await expectSamePair(page, before);
+
+        // Expanding the diagnostic is the growth the old placement could not absorb.
+        const aside = page.locator('.onboarding-action-aside');
+        const closed = (await box(page, '.onboarding-action-aside')).height;
+        await aside.getByText(lang === 'zh' ? '查看详情' : 'View details').click();
+        await expect(aside.locator('details')).toContainText(LONG_DETAIL);
+        expect((await box(page, '.onboarding-action-aside')).height).toBeGreaterThan(closed);
+        await expectSamePair(page, before);
+        // Grown, and still not over the button it explains.
+        expect((await box(page, '.onboarding-action-aside')).y)
+          .toBeGreaterThanOrEqual(before.primary.y + before.primary.height - 1);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+
+        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+
+        // The last word on reachability is a real click, which Playwright refuses to
+        // deliver when anything else would receive it. The primary now says Retry.
+        detect.recover();
+        await expect(page.locator('.onboarding-primary-action')).toContainText(lang === 'zh' ? '重试' : 'Retry');
+        await page.locator('.onboarding-primary-action').click();
+        await page.clock.runFor(950);
+        const sequence = (await page.locator('[data-setup-sequence]').getAttribute('data-setup-sequence'))!.split(' ');
+        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence[1]);
+        await expect(page.locator('.onboarding-action-aside [role="alert"]')).toHaveCount(0);
+        expect(denied).toEqual([]);
+      });
+
+      test(`${size(viewport)} ${lang} holds a refused permission write and the import offer under the pair`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        await serveModelHub(page);
+        const permission = await deferredPermission(page);
+        await openOnboarding(page, { lang });
+        // The fence starts one screen earlier than the state it is about. The reservation
+        // claims the pair is in the same place on the introduction as on a connection step
+        // carrying the offer and the refused permission write at once, so the introduction's
+        // pair is what every box below is compared against — not the first setup render.
+        await toTop(page);
+        const before = await pair(page);
+        await openSetup(page, lang);
+
+        // Co-presence: the capsule keeps its reserved slot in the stage, the permission
+        // callout is in the slot after the pair. Two asides, one anchor.
+        const notice = page.locator('.onboarding-import-notice');
+        const callout = page.locator('.onboarding-action-aside').getByText(
+          lang === 'zh' ? '不设置时 OpenCode' : 'Without this, OpenCode');
+        await expect(notice).toBeVisible();
+        await expect(callout).toBeVisible();
+        await expectSamePair(page, before);
+        expect((await box(page, '.onboarding-import-notice')).y).toBeLessThan(before.primary.y);
+
+        // A write that has not answered yet: the callout says so and nothing moves.
+        const setup = page.locator('.onboarding-action-aside').getByRole('button', {
+          name: lang === 'zh' ? '在 opencode.json 写入 allow' : 'Allow tool calls in opencode.json' });
+        await setup.scrollIntoViewIfNeeded();
+        await setup.click();
+        await expect(setup).toBeDisabled();
+        await expectSamePair(page, before);
+
+        await permission.settle();
+        await expect(page.locator('.onboarding-action-aside').getByText(LONG_PERMISSION)).toBeVisible();
+        await expectSamePair(page, before);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+        await clearToasts(page);
+        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
+
+        // Granted, the callout is not a cleared message but an absent one.
+        permission.succeed();
+        await setup.click();
+        await permission.settle();
+        await expect(page.locator('.onboarding-action-aside').getByText(LONG_PERMISSION)).toHaveCount(0);
+        await expect(callout).toHaveCount(0);
+        await expectSamePair(page, before);
+        await clearToasts(page);
+
+        // Refusing the offer is the stage's event, not the slot's: the capsule lives in
+        // the stage and the callout in the aside, so dismissing one may not disturb the
+        // other or the pair's own box. Nor may it move the pair at all — the capsule's
+        // place in the stage is reserved whether or not the capsule is in it, and the
+        // stage is floored at the taller of the two steps' cards, so a card that wraps
+        // past `--ob-card-h` no longer spends the offer's band on its way down.
+        const stageBefore = await stageHeight(page);
+        const slotBefore = await box(page, '.onboarding-import-slot');
+        await page.getByRole('button', { name: lang === 'zh' ? '关闭导入提示' : 'Dismiss import notice' }).click();
+        await expect(notice).toHaveCount(0);
+        await expectSamePair(page, before);
+        // The slot is what makes that true: refusing empties it, it does not remove it.
+        const slotAfter = await box(page, '.onboarding-import-slot');
+        expect(round(slotAfter.height)).toBe(round(slotBefore.height));
+        expect(round(slotAfter.y)).toBe(round(slotBefore.y));
+        expect(await stageHeight(page)).toBeCloseTo(stageBefore, 1);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
+
+        // A portal escapes `inert`, so leaving the screen has to empty the slot rather
+        // than leave reachable content behind a hidden screen.
+        await page.locator('.onboarding-back-action').click();
+        await page.clock.runFor(950);
+        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', 'intro');
+        expect(await page.locator('.onboarding-action-aside').evaluate((node) => ({
+          children: node.childElementCount,
+          focusable: node.querySelectorAll('a[href], button, input, select, textarea, [tabindex]').length,
+        }))).toEqual({ children: 0, focusable: 0 });
+        // Back is the other half of the cross-screen claim: the introduction the pair
+        // returns to is the one it started on, after the step it came from had spent an
+        // offer, a refusal and a permission write.
+        await expectSamePair(page, before);
+
+        // And re-entering is not a third position. The offer stays refused, so this is
+        // the step at its shortest — the reading the reservation exists for. The clock
+        // here is frozen and only a test moves it, so the handoff is nudged until the
+        // screen has arrived rather than once, which races the click's own commit.
+        await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
+        await expect.poll(async () => {
+          await page.clock.runFor(950);
+          return page.locator('[data-setup-sequence]').getAttribute('data-setup-screen');
+        }).toBe('assistants');
+        await page.locator('.onboarding-assistants').waitFor();
+        await expect(notice).toHaveCount(0);
+        await expectSamePair(page, before);
+        const slotAgain = await box(page, '.onboarding-import-slot');
+        expect(round(slotAgain.height)).toBe(round(slotBefore.height));
+        expect(round(slotAgain.y)).toBe(round(slotBefore.y));
+        expect(await stageHeight(page)).toBeCloseTo(stageBefore, 1);
+        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
+        expect(denied).toEqual([]);
+      });
+    }
+  }
+});
+
+/**
+ * The completion recovery is the largest thing the slot ever carries — a whole form,
+ * opened by the action it sits under, on the tiers with the least room for it. While it
+ * owns the journey the pair is held, which is a state the pair has to survive without
+ * moving, and cancelling has to give both the journey and the slot back.
+ */
+test.describe('completion recovery in the slot', () => {
+  for (const viewport of [{ width: 390, height: 640 }, { width: 320, height: 568 }]) {
+    for (const lang of ['en', 'zh'] as const) {
+      test(`${size(viewport)} ${lang} opens the repair under the held pair and gives it back on cancel`, async ({ page }, info) => {
+        await page.setViewportSize(viewport);
+        const denied = await serveProduct(page);
+        let manifests = 0;
+        // A saved platform whose required credential is gone: the shape that makes
+        // completion stop and hand the slot a form instead of entering the workspace.
+        await page.route('**/api/config', (route) => route.fulfill({ json: {
+          version: 'v2', setup_completed: false, runtime: {},
+          capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true },
+          platforms: { primary: 'slack', enabled: ['slack'] },
+          platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }],
+          slack: { has_app_token: true, bot_token: '' },
+          agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } },
+        } }));
+        await page.route('**/api/backend/claude/connection', (route) => route.fulfill({ json: {
+          ok: true, backend: 'claude', ready: true, entry_eligible: true,
+          enabled: true, installed: true, application: 'applied', auth: 'api_key' } }));
+        await page.route('**/api/slack/manifest', (route) => { manifests++; return route.fulfill({ json: { ok: true, manifest: '{}' } }); });
+        await openOnboarding(page, { lang });
+        await openSetup(page, lang);
+        await toTop(page);
+        const before = await pair(page);
+
+        await page.locator('.onboarding-primary-action').click();
+        const recovery = page.getByRole('region', { name: lang === 'zh' ? '修复已保存的消息配置' : 'Repair saved messaging configuration' });
+        await expect(recovery).toBeVisible();
+        expect(await recovery.evaluate((node) => !!node.closest('[data-setup-action-aside]'))).toBe(true);
+        await expectSamePair(page, before);
+        // Held, not busy: the journey is refused while the form owns it, and refusing is
+        // not the same as pretending something is running.
+        await expect(page.locator('.onboarding-primary-action')).toBeDisabled();
+        await expect(page.locator('.onboarding-back-action')).toBeDisabled();
+        // The spinner carries Tailwind's `motion-safe:` variant, so the token in the DOM
+        // is the whole `motion-safe:animate-spin`; a bare `.animate-spin` finds nothing
+        // here whatever the footer renders.
+        expect(await page.locator('.onboarding-primary-action [class~="motion-safe:animate-spin"]').count()).toBe(0);
+        expect(manifests).toBe(0);
+
+        // Expanding it into the real form is the growth these two tiers have least room
+        // for, and its own controls still have to be reachable rather than merely present.
+        await recovery.getByRole('button', { name: lang === 'zh' ? '修复已保存的消息配置' : 'Repair saved messaging configuration' }).click();
+        await expect.poll(() => manifests).toBe(1);
+        // Exact: the Slack step headers inside the form spell "Slack 应用" / "Slack app".
+        const apply = recovery.getByRole('button', { name: lang === 'zh' ? '应用' : 'Apply', exact: true });
+        await apply.scrollIntoViewIfNeeded();
+        await expect(apply).toBeInViewport();
+        expect(await recovery.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
+        await expectSamePair(page, before);
+        await settleEffects(page);
+        await recovery.screenshot({ path: info.outputPath(`recovery-slot-${size(viewport)}-${lang}.png`) });
+
+        // Cancel is a real click, and it gives back both the slot and the journey.
+        const cancel = recovery.getByRole('button', { name: lang === 'zh' ? '取消' : 'Cancel' });
+        await cancel.scrollIntoViewIfNeeded();
+        await cancel.click();
+        await expect(recovery).toHaveCount(0);
+        await expectSamePair(page, before);
+        await expect(page.locator('.onboarding-primary-action')).toBeEnabled();
+        await expect(page.locator('.onboarding-back-action')).toBeEnabled();
+        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
+        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
+        expect(denied).toEqual([]);
+      });
+    }
+  }
+});
+
+/**
  * The import offer. Everything about WHICH keys it counts is a component-level rule and is
  * tested there; what only a browser can show is that the capsule is an aside rather than a
  * banner, that refusing it does not move the button underneath, and that its help text can
@@ -606,23 +928,36 @@ test.describe('import capsule', () => {
     await expect(notice).toHaveText(/发现 3 个可导入模型网关的 API Key/);
 
     const capsule = await box(page, '.onboarding-import-notice');
+    const slot = await box(page, '.onboarding-import-slot');
     const cards = await box(page, '.onboarding-assistants');
+    const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
     expect(round(capsule.height)).toBe(44);
     // Content width, centred under the cards — not a full-width banner.
     expect(capsule.width).toBeLessThan(cards.width);
     expect(capsule.x + capsule.width / 2).toBeCloseTo(cards.x + cards.width / 2, 0);
     expect(capsule.y - (cards.y + cards.height)).toBeCloseTo(20, 0);
-    expect(action.y - (capsule.y + capsule.height)).toBeCloseTo(20, 0);
+    // It sits at the top of its own slot, and the slot is the offer's reserved place in
+    // the stage rather than a box drawn around whatever arrived: a reservation that has
+    // to hold the other language's wrapped card leaves its slack under the composition,
+    // which is where the action's own 20 is measured from.
+    expect(capsule.y).toBeCloseTo(slot.y, 0);
+    expect(slot.height).toBeGreaterThanOrEqual(capsule.height - 0.5);
+    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
     expect(await page.locator('.onboarding-import-notice').evaluate((node) => getComputedStyle(node).boxShadow)).toBe('none');
 
     await settleEffects(page);
     await page.screenshot({ path: info.outputPath('import-capsule-1200x800-dark-zh.png') });
 
-    // The layout space is reserved, so refusing the offer moves nothing.
+    // The layout space is reserved, so refusing the offer moves nothing: the slot keeps
+    // the height the capsule had, and the stage and the action keep theirs.
     await page.getByRole('button', { name: '关闭导入提示' }).click();
     await expect(notice).toHaveCount(0);
+    const emptySlot = await box(page, '.onboarding-import-slot');
     const after = await box(page, '.onboarding-primary-action');
+    expect(round(emptySlot.height)).toBe(round(slot.height));
+    expect(round(emptySlot.y)).toBe(round(slot.y));
+    expect(round((await box(page, '.onboarding-stage')).height)).toBe(round(stage.height));
     expect(round(after.y)).toBe(round(action.y));
     expect(round(after.x)).toBe(round(action.x));
     expect(denied).toEqual([]);

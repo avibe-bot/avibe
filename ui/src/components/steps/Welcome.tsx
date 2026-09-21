@@ -1,9 +1,11 @@
-import { useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from 'react';
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../context/ApiContext';
 import { CollaborationStory } from '../onboarding/CollaborationStory';
 import { ASSISTANT_ORDER } from '../onboarding/collaborationTimeline';
 import { DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import type { SetupAction, SetupScreenHandle } from '../onboarding/setupFlow';
 import '../onboarding/onboarding.css';
 
@@ -18,6 +20,7 @@ interface WelcomeProps {
 export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomeProps) {
   const { t } = useTranslation();
   const api = useApi();
+  const routeSurfaceActive = useRouteSurfaceActive();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = useRef(false);
@@ -45,8 +48,23 @@ export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomePr
       setPending(false);
     }
   };
+  // The failure explains the action, so it belongs under it — and in the shell that
+  // action is the shared pair this screen no longer draws. Left in the screen, a long
+  // diagnostic (or an opened `details`) grows the content above the footer and drags
+  // the anchor the two steps share, so the shell's slot after the pair takes it.
+  const setupRoot = useRef<HTMLDivElement>(null);
+  const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setActionAside(setupRoot.current?.closest('.onboarding-step')?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null);
+  }, [onActionChange]);
+  const errorNode = error ? (
+    <div role="alert" className="text-center text-sm text-destructive-ink">
+      <p>{t('onboarding.welcome.detectionFailed')}</p>
+      <details className="mt-2 max-w-xl break-words"><summary>{t('onboarding.details')}</summary>{error}</details>
+    </div>
+  ) : null;
   return (
-    <div className="onboarding-welcome">
+    <div className="onboarding-welcome" ref={setupRoot}>
       <header className="onboarding-heading">
         <h1 tabIndex={-1}>{t('onboarding.welcome.title')}</h1>
         <p>{t('onboarding.welcome.subtitle')}</p>
@@ -56,10 +74,12 @@ export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomePr
       <div className="onboarding-stage">
         <CollaborationStory active={active} />
       </div>
-      {error && <div role="alert" className="text-center text-sm text-destructive-ink">
-        <p>{t('onboarding.welcome.detectionFailed')}</p>
-        <details className="mt-2 max-w-xl break-words"><summary>{t('onboarding.details')}</summary>{error}</details>
-      </div>}
+      {/* A portal leaves the screen root, and with it the `inert` the shell puts on a
+          screen nobody is reading, so the alert answers to the same activity itself.
+          Without a shell slot — the standalone host — it stays where it always was. */}
+      {errorNode && (active && routeSurfaceActive && actionAside
+        ? createPortal(<div className="onboarding-setup-hint">{errorNode}</div>, actionAside)
+        : errorNode)}
     </div>
   );
 }
