@@ -17,12 +17,17 @@ every place it is a join key at once. See
 ``docs/plans/model-hub-credential-address-repair.md``.
 """
 
+import asyncio
 import copy
 import json
 
 import pytest
 
-from config.v2_config import V2Config
+from config.v2_config import ModelHubConfig, V2Config
+from core.handlers.model_hub.address_repair import (
+    payload_carries_credential_address,
+    repair_credential_addresses,
+)
 from core.handlers.model_hub.identifiers import (
     model_id_without_credential_address,
     normalized_model_id,
@@ -31,7 +36,8 @@ from core.handlers.model_hub.identifiers import (
 from core.services.settings import default_config
 from vibe import api
 from core.handlers.model_hub.adapter import SourceBinding
-from vibe.model_hub_runtime.adapter import _discovered_models
+from tests.test_model_hub_api import FakeAdapter, _service
+from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter, _discovered_models
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, SourceRecord
 
 ADDRESS = "avibe-dc0395516c77a0ee4e62e01e"
@@ -437,3 +443,447 @@ def test_the_config_layer_stores_the_name_it_is_given(tmp_path) -> None:
     ]
     hops = loaded.model_hub.agents["claude"].routes["claude-opus-4-6"].hops
     assert [(hop.source_id, hop.model_id) for hop in hops] == [(SOURCE_ID, f"{ADDRESS}/gpt-5.5")]
+
+
+# --- The repair for files an earlier release already addressed -------------
+#
+# Config stores the name it is given, so the repair belongs where both halves
+# of it are answerable at once: the runtime can prove which address belongs to
+# which Source, and the whole config is in hand, so every collection keyed by a
+# model id moves together. These tests hold that boundary.
+
+
+def _agent_payload(
+    *,
+    routes: dict | None = None,
+    models: list[dict] | None = None,
+    removed: list[str] | None = None,
+    checked: list[str] | None = None,
+) -> dict:
+    agent: dict = {
+        "backend": "claude",
+        "mode": "hub",
+        "menu_kind": "fixed",
+        "sources": {"order": [SOURCE_ID]},
+        "routes": routes if routes is not None else {},
+        "models": models if models is not None else [],
+        "removed_model_ids": removed if removed is not None else [],
+    }
+    if checked is not None:
+        agent["menu"] = {"view": "featured", "checked": list(checked)}
+    return agent
+
+
+def _hub_payload(
+    models: list[dict],
+    agent: dict | None = None,
+    *,
+    source_id: str = SOURCE_ID,
+) -> dict:
+    return {
+        "sources": [
+            {
+                "id": source_id,
+                "credential_ref": "cred_fixture123",
+                "models": copy.deepcopy(models),
+            }
+        ],
+        "agents": {"claude": agent if agent is not None else _agent_payload()},
+    }
+
+
+def test_the_repair_moves_an_id_in_every_place_it_is_a_join_key() -> None:
+    """One rename, or none. A half-moved id names a model nothing can serve.
+
+    The inventory row is only the first of six collections that key on a model
+    id. Rename it alone and the route pointing at it, the route key the Agent
+    resolves, the menu row the user sees, the checked entry, and the
+    hidden-model list all keep naming something that no longer exists.
+    """
+
+    payload = _hub_payload(
+        [_model_payload(f"{ADDRESS}/gpt-5.5"), _model_payload("x-ai/grok-4.6-latest")],
+        _agent_payload(
+            routes={
+                f"{ADDRESS}/gpt-5.5": {
+                    "hops": [{"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}]
+                }
+            },
+            models=[{"id": f"{ADDRESS}/gpt-5.5", "origin": "provider"}],
+            removed=[f"{ADDRESS}/gpt-6-astra"],
+            checked=[f"{ADDRESS}/gpt-5.5", "x-ai/grok-4.6-latest"],
+        ),
+    )
+
+    repair = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    assert repair.changed
+    agent = repair.payload["agents"]["claude"]
+    assert [model["id"] for model in repair.payload["sources"][0]["models"]] == [
+        "gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+    assert list(agent["routes"]) == ["gpt-5.5"]
+    assert agent["routes"]["gpt-5.5"]["hops"] == [
+        {"source_id": SOURCE_ID, "model_id": "gpt-5.5"}
+    ]
+    assert [model["id"] for model in agent["models"]] == ["gpt-5.5"]
+    assert agent["removed_model_ids"] == ["gpt-6-astra"]
+    assert agent["menu"]["checked"] == ["gpt-5.5", "x-ai/grok-4.6-latest"]
+    assert (repair.models, repair.hops, repair.routes, repair.menu_entries) == (1, 1, 1, 3)
+
+
+def test_the_repair_renames_nothing_it_cannot_prove_is_an_address() -> None:
+    """Only an address this installation minted for this Source comes off.
+
+    Without the proof, the only thing left to go on is the spelling — and a
+    leading segment that merely looks minted belongs to whoever named the model.
+    A Source whose credential could not be read is therefore left exactly as the
+    previous release left it, which is a state the product already tolerates.
+    """
+
+    models = [
+        _model_payload(f"{OTHER_ADDRESS}/gpt-5.5"),
+        _model_payload("x-ai/grok-4.6-latest"),
+        _model_payload("accounts/fireworks/models/mixtral"),
+    ]
+    payload = _hub_payload(models)
+
+    unprovable = repair_credential_addresses(payload, {})
+    foreign = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    assert not unprovable.changed
+    assert not foreign.changed
+    for result in (unprovable, foreign):
+        assert [model["id"] for model in result.payload["sources"][0]["models"]] == [
+            f"{OTHER_ADDRESS}/gpt-5.5",
+            "x-ai/grok-4.6-latest",
+            "accounts/fireworks/models/mixtral",
+        ]
+
+
+def test_the_repair_keeps_the_row_the_product_has_been_using() -> None:
+    """A repaired row landing on a name already held gives way to the holder.
+
+    Both name one model. The row already spelled bare is the one the tab lists
+    and the ledger meters, and the repaired one carries nothing it does not.
+    """
+
+    payload = _hub_payload(
+        [
+            _model_payload("gpt-5.5", display_name="Kept"),
+            _model_payload(f"{ADDRESS}/gpt-5.5", display_name="Dropped"),
+            _model_payload(f"{ADDRESS}/{ADDRESS}/gpt-5.5", display_name="Also dropped"),
+        ]
+    )
+
+    repair = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    assert [
+        (model["id"], model["display_name"])
+        for model in repair.payload["sources"][0]["models"]
+    ] == [("gpt-5.5", "Kept")]
+    assert repair.models == 2
+
+
+def test_the_repair_keeps_the_first_of_two_rows_that_meet_only_here() -> None:
+    """With no bare row to defer to, first wins — discovery's own policy."""
+
+    payload = _hub_payload(
+        [
+            _model_payload(f"{ADDRESS}/gpt-5.5", display_name="First"),
+            _model_payload(f"{ADDRESS}/{ADDRESS}/gpt-5.5", display_name="Second"),
+        ]
+    )
+
+    repair = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    assert [
+        (model["id"], model["display_name"])
+        for model in repair.payload["sources"][0]["models"]
+    ] == [("gpt-5.5", "First")]
+
+
+def test_the_repair_merges_two_routes_that_meet_on_one_model() -> None:
+    """Two keys, one model. The bare one is what the Agent already resolves.
+
+    So it stays the route, in its own hop order, and gains only the hops the
+    addressed key reached that it did not. A route dict cannot hold the same key
+    twice, and a hop list cannot hold the same pair twice, so both collapse here
+    or the repaired config does not load.
+    """
+
+    payload = _hub_payload(
+        [_model_payload("gpt-5.5")],
+        _agent_payload(
+            routes={
+                f"{ADDRESS}/gpt-5.5": {
+                    "hops": [
+                        {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"},
+                        {"source_id": "src_backup", "model_id": "gpt-5.5-mini"},
+                    ]
+                },
+                "gpt-5.5": {"hops": [{"source_id": SOURCE_ID, "model_id": "gpt-5.5"}]},
+            },
+        ),
+    )
+
+    repair = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    assert list(repair.payload["agents"]["claude"]["routes"]) == ["gpt-5.5"]
+    assert repair.payload["agents"]["claude"]["routes"]["gpt-5.5"]["hops"] == [
+        {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
+        {"source_id": "src_backup", "model_id": "gpt-5.5-mini"},
+    ]
+
+
+def test_the_repair_unwraps_a_hop_against_the_source_that_hop_names() -> None:
+    """A hop says which Source it reaches, so it is checked against that one.
+
+    A chain crosses Sources, and each Source has its own address. Reading a hop
+    against the wrong one would either miss the address it does carry or strip a
+    name that only looks addressed.
+    """
+
+    payload = _hub_payload(
+        [_model_payload("gpt-5.5")],
+        _agent_payload(
+            routes={
+                "gpt-5.5": {
+                    "hops": [
+                        {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"},
+                        {"source_id": "src_backup", "model_id": f"{ADDRESS}/gpt-5.5"},
+                        {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
+                    ]
+                }
+            },
+        ),
+    )
+
+    repair = repair_credential_addresses(payload, {SOURCE_ID: ADDRESS})
+
+    # The first hop is repaired; the second names a Source this address does not
+    # belong to and is left alone; the third then collides with the first and is
+    # dropped, because a route cannot list one pair twice.
+    assert repair.payload["agents"]["claude"]["routes"]["gpt-5.5"]["hops"] == [
+        {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
+        {"source_id": "src_backup", "model_id": f"{ADDRESS}/gpt-5.5"},
+    ]
+    assert repair.hops == 1
+
+
+def test_a_repaired_config_still_loads() -> None:
+    """The terminal property: whatever the repair writes must parse again.
+
+    Every collection it touches is uniqueness-checked on load, so a rename that
+    creates a collision it does not absorb turns a loadable file into one that
+    fails config load — strictly worse than the addressed id it set out to fix.
+    """
+
+    hub = _hub_payload(
+        [
+            _model_payload("gpt-5.5"),
+            _model_payload(f"{ADDRESS}/gpt-5.5"),
+            _model_payload(f"{ADDRESS}/gpt-6-astra", "manual"),
+        ],
+        _agent_payload(
+            routes={
+                f"{ADDRESS}/gpt-5.5": {
+                    "hops": [
+                        {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"},
+                        {"source_id": SOURCE_ID, "model_id": "gpt-5.5"},
+                    ]
+                },
+                "gpt-5.5": {"hops": []},
+            },
+            models=[
+                {"id": "gpt-5.5", "origin": "provider"},
+                {"id": f"{ADDRESS}/gpt-5.5", "origin": "provider"},
+            ],
+            removed=[f"{ADDRESS}/gpt-6-astra", "gpt-6-astra"],
+        ),
+    )
+    hub["sources"][0].update(
+        {
+            "kind": "api_key",
+            "vendor": "openai",
+            "display_name": "Fixture",
+            "protocol": "openai_responses",
+            "base_url": None,
+            "supply_channel": "hub",
+            "billing": "metered",
+            "state": {"status": "standby"},
+        }
+    )
+
+    repair = repair_credential_addresses(hub, {SOURCE_ID: ADDRESS})
+    reloaded = ModelHubConfig.from_payload(repair.payload)
+
+    assert repair.changed
+    assert [model.id for model in reloaded.sources[0].models] == ["gpt-5.5", "gpt-6-astra"]
+    agent = reloaded.agents["claude"]
+    assert list(agent.routes) == ["gpt-5.5"]
+    assert [(hop.source_id, hop.model_id) for hop in agent.routes["gpt-5.5"].hops] == [
+        (SOURCE_ID, "gpt-5.5")
+    ]
+    assert [model.id for model in agent.models] == ["gpt-5.5"]
+    assert agent.removed_model_ids == ["gpt-6-astra"]
+    assert not payload_carries_credential_address(repair.payload)
+
+
+@pytest.mark.parametrize(
+    ("hub", "carries"),
+    [
+        (_hub_payload([_model_payload(f"{ADDRESS}/gpt-5.5")]), True),
+        (_hub_payload([_model_payload("x-ai/grok-4.6-latest")]), False),
+        (
+            _hub_payload(
+                [_model_payload("gpt-5.5")],
+                _agent_payload(checked=[f"{OTHER_ADDRESS}/gpt-5.5"]),
+            ),
+            True,
+        ),
+        (
+            _hub_payload(
+                [_model_payload("gpt-5.5")],
+                _agent_payload(removed=[f"{ADDRESS}/gpt-6-astra"]),
+            ),
+            True,
+        ),
+        (
+            _hub_payload(
+                [_model_payload("gpt-5.5")],
+                _agent_payload(
+                    routes={
+                        "gpt-5.5": {
+                            "hops": [
+                                {"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}
+                            ]
+                        }
+                    }
+                ),
+            ),
+            True,
+        ),
+        ({}, False),
+    ],
+)
+def test_the_precheck_sees_every_collection_the_repair_would_rewrite(
+    hub: dict,
+    carries: bool,
+) -> None:
+    """A repair costs a credential read per Source; this decides whether to pay.
+
+    It answers from the minted shape, which is exactly what a rename may not do
+    — so it may only ever say "look closer", never "rename this". A collection
+    it cannot see is one whose addressed id is never noticed at all, so it walks
+    the same list the repair does.
+    """
+
+    assert payload_carries_credential_address(hub) is carries
+
+
+def test_custody_is_what_proves_an_address(tmp_path) -> None:
+    """The one answer that turns a spelling into a fact.
+
+    Custody mints the address and is the only place it is written down. A
+    credential it has no record of yields nothing, which is the honest answer:
+    a caller that cannot prove ownership must leave the id alone.
+    """
+
+    store, credential_ref = _bound_store(tmp_path)
+    adapter = CLIProxyEngineAdapter.__new__(CLIProxyEngineAdapter)
+    adapter.state_store = store
+
+    address = asyncio.run(adapter.credential_address(credential_ref))
+
+    assert address == store.credential_metadata(credential_ref)["prefix"]
+    assert asyncio.run(adapter.credential_address("cred_absent0000")) is None
+
+
+class _AddressingAdapter(FakeAdapter):
+    """An engine that knows which address belongs to which credential."""
+
+    def __init__(self, addresses: dict[str, str]):
+        super().__init__()
+        self.addresses = addresses
+
+    async def credential_address(self, credential_ref):
+        return self.addresses.get(credential_ref)
+
+
+def _addressed_service(tmp_path, addresses: dict[str, str]):
+    service, store, adapter = _service(tmp_path, _AddressingAdapter(addresses))
+    hub = _hub_payload(
+        [_model_payload(f"{ADDRESS}/gpt-5.5"), _model_payload("x-ai/grok-4.6-latest")],
+        _agent_payload(
+            routes={
+                f"{ADDRESS}/gpt-5.5": {
+                    "hops": [{"source_id": SOURCE_ID, "model_id": f"{ADDRESS}/gpt-5.5"}]
+                }
+            },
+            models=[{"id": f"{ADDRESS}/gpt-5.5", "origin": "provider"}],
+        ),
+    )
+    hub["sources"][0].update(
+        {
+            "kind": "api_key",
+            "vendor": "openai",
+            "display_name": "Fixture",
+            "protocol": "openai_responses",
+            "base_url": None,
+            "supply_channel": "hub",
+            "billing": "metered",
+            "state": {"status": "standby"},
+        }
+    )
+    store.config = ModelHubConfig.from_payload(hub)
+    return service, store, adapter
+
+
+def test_the_runtime_repairs_a_stored_address_before_the_engine_sees_it(tmp_path) -> None:
+    """An older release's file is healed on the way to the engine, and stays healed.
+
+    This is the seam because it is the only one where both halves are in hand:
+    the engine can prove the address, and the whole config is loaded, so every
+    collection keyed by that id moves in one write. The engine is then sent the
+    repaired projection, so it never sees the addressed spelling and never gets
+    a second address composed onto one — which is the failure this fixes.
+    """
+
+    service, store, adapter = _addressed_service(tmp_path, {"cred_fixture123": ADDRESS})
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        "gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+    agent = store.config.agents["claude"]
+    assert list(agent.routes) == ["gpt-5.5"]
+    assert [(hop.source_id, hop.model_id) for hop in agent.routes["gpt-5.5"].hops] == [
+        (SOURCE_ID, "gpt-5.5")
+    ]
+    assert [model.id for model in agent.models] == ["gpt-5.5"]
+    assert adapter.synced[-1][0].model_ids == ("gpt-5.5", "x-ai/grok-4.6-latest")
+
+
+def test_the_runtime_leaves_an_id_alone_when_the_address_is_unprovable(tmp_path) -> None:
+    """No proof, no rename — the file is left exactly as the last release left it.
+
+    An engine that cannot answer for the credential is the ordinary case during
+    recovery, and a Source whose address is unknown is one whose ids cannot be
+    told apart from a vendor's own slashed name. Guessing there would rename a
+    model that was never addressed, so the repair declines and the startup it
+    runs inside carries on.
+    """
+
+    service, store, adapter = _addressed_service(tmp_path, {})
+
+    asyncio.run(service._prepare_engine_for_demand())
+
+    assert [model.id for model in store.config.sources[0].models] == [
+        f"{ADDRESS}/gpt-5.5",
+        "x-ai/grok-4.6-latest",
+    ]
+    assert list(store.config.agents["claude"].routes) == [f"{ADDRESS}/gpt-5.5"]

@@ -23,8 +23,10 @@ PR #2099 closed the boundary the address enters through:
 - **Engine state records** (`vibe/model_hub_runtime/state.py`) heal against their
   own `SourceRecord.prefix`, re-keying `model_reasoning_efforts` with the ids.
 
-What remains is **files already written**. This document is the design for
-repairing those.
+What remained was **files already written**. This document is the design for
+repairing those, and the repair ships in the same PR: the sections below are
+what was built, with the two places the implementation diverged from the first
+draft called out where they occur.
 
 ## Why the config layer is the wrong place
 
@@ -51,50 +53,68 @@ two reasons that are both structural, not fixable by a better heuristic:
 So the repair needs both halves that the config layer lacks: the credential
 (to prove the prefix) and the service (to move every position together).
 
-## Functional relief that already exists
+## What refresh already covers
 
-An affected user is not stuck waiting for this. Once #2099 lands, one **refresh
-models** on the Source re-discovers through the fixed boundary and
+One **refresh models** on the Source re-discovers through the fixed boundary and
 `_apply_discovered_models` (`service.py:1904`) replaces the inventory rows with
 bare-named ones. What refresh does not do is move a route hop or a route key
 that already points at an addressed spelling — those are the positions this
-repair owns.
+repair owns, and it owns them without the user having to know to click anything.
 
 ## Design
 
 ### Where it runs
 
-A service-level repair, invoked once per Source from the runtime, not a
-config-load rewrite. Shape:
+A service-level repair over the whole config, not a config-load rewrite and not
+a per-Source call. Three pieces:
 
-```
-ModelHubService.repair_credential_addresses(source_id) -> RepairOutcome
-```
+- `EngineAdapter.credential_address(credential_ref)`
+  (`vibe/model_hub_runtime/adapter.py`) answers the address custody minted for
+  one credential, read from `credential_metadata_if_present(...)["prefix"]` —
+  the same field discovery compares against. `None` when custody has no record,
+  which is the honest answer and means the caller must leave the id alone.
+- `core/handlers/model_hub/address_repair.py` is pure: given a `model_hub`
+  payload and `{source_id: proven_address}`, it returns the repaired payload and
+  the counts. It resolves nothing and writes nothing.
+- `ModelHubService._repair_credential_addresses` joins the two under the
+  mutation lock and persists through `_commit_synced`, the same projection owner
+  every other mutation uses, so the engine is reconciled with what was written.
 
-The runtime resolves the owning prefix through the existing
-`credential_metadata(...)["prefix"]`, exactly as discovery does, and hands the
-service a **proven** prefix. A Source whose credential no longer resolves is
-skipped and reported — never guessed at.
+**Divergence from the first draft.** The draft had the repair take a
+`source_id`. It takes none: a route key, a menu row, a hidden-model entry and a
+checked entry record no Source, so a per-Source repair cannot reach them without
+guessing. Resolving every Source's address first and then rewriting once removes
+the guess — an address names exactly one credential and a credential binds to
+exactly one Source, so an id carrying a proven address came from that Source
+whatever collection it sits in.
 
 ### What it rewrites, in one transaction
 
-Given `(source_id, prefix)`, build the rename map from the source's own rows —
-`{stored_id: model_id_without_credential_address(stored_id, prefix)}`, keeping
-only entries that actually changed — then apply it to every position in one
-config write:
+The addresses are proven first; then every position is rewritten in one config
+write:
 
 | Position | Rule |
 | --- | --- |
 | `source.models[].id` | Renamed. A row landing on a name another row already holds is dropped; the holder keeps its display name, reasoning efforts, and provenance. |
 | `source.models[].reasoning_efforts` and the engine record's `model_reasoning_efforts` | Follow their row. |
-| Route **hops** (`hop.source_id == source_id`) | Renamed only where the map has the spelling. Two hops collapsing onto one pair are merged; a route left with zero hops keeps its key and reports the ordinary unavailable-target path. |
-| Route **keys** (menu ids a route is keyed by) | Renamed only when the key matches a renamed id *and* no route already exists under the bare name; otherwise the routes are merged hop-wise, bare-name-first. |
-| Backend menu rows (`ModelHubBackendModelConfig`) | Renamed only for rows whose origin is `provider` (the origin `agent_model_candidates` produces from inventory) and whose id matches a renamed id. `builtin` / `models_dev` / `manual` rows are never touched. |
+| Route **hops** | Unwrapped against the address of the Source the hop itself names, since a chain crosses Sources and each has its own address. Two hops collapsing onto one `(source_id, model_id)` pair are merged; a route left with zero hops keeps its key and reports the ordinary unavailable-target path. |
+| Route **keys** (menu ids a route is keyed by) | Unwrapped against any proven address. Where that lands on a key another route already holds, the two merge hop-wise behind the key already spelled bare — whichever order the dict happened to list them in. |
+| Backend menu rows (`ModelHubBackendModelConfig`) | Renamed when the id carries *any* proven address. **Divergence from the first draft**, which restricted this to `provider`-origin rows: the proof is the address, not the origin. A `builtin` or `models_dev` id is never addressed, so the restriction excluded nothing real, and it would have left a `manual` row the user pasted an addressed name into broken forever. |
 | `removed_model_ids` | Renamed, so a model the user hid stays hidden. |
+| `menu.checked` (opencode) | Renamed, so a model the user ticked stays ticked. |
 | Usage ledger keys | **Not** rewritten. See below. |
 
 Everything is computed first and written once, so a partial rename cannot be
 persisted.
+
+Every one of these collections is uniqueness-checked on load, so a rename that
+creates a collision it does not absorb would turn a loadable file into one that
+fails config load — strictly worse than the addressed id it set out to fix. Two
+rules settle every collision: a repaired entry landing on a name already spelled
+bare gives way to the holder (the row the product has been listing, metering and
+resolving against, which names nothing the repaired one does not); and among two
+repaired entries meeting only because the address came off, the first wins,
+which is discovery's own policy.
 
 ### The ledger is deliberately excluded
 
@@ -113,39 +133,55 @@ orphans it and a ledger re-key joins this design.
 
 ### When it is triggered
 
-Preference order, cheapest first:
+`ModelHubService._prepare_engine_for_demand`, the single path every demand for
+the engine passes through — startup recovery (`recover_runtime_intent`), a
+source probe, and an invocation all reach it. An installation upgrading into
+this release is therefore repaired the first time it needs a model, without a
+config-load migration and without a one-shot script.
 
-1. **On Source refresh / reachability check** — the runtime already holds the
-   credential there, so the repair costs one extra config write and only on a
-   Source that actually has addressed rows.
-2. **On engine start, per bound Source** — covers a user who never clicks
-   refresh. Guarded by a fast "does any row carry the minted shape" pre-check so
-   the common case does no work.
-
-Not a config-load migration, and not a one-shot script: it must run where the
-credential is resolvable.
+`payload_carries_credential_address` gates it: a cheap walk of the same
+collections the repair rewrites, matching the minted shape. It decides only
+whether to pay for the credential reads — it never renames anything on its own
+say-so, which is the distinction that makes the shape safe to use here and not
+at the config layer.
 
 ### Reporting
 
-The outcome is reported, not silent: the number of rows, hops, keys, and menu
-rows moved, per Source, in the runtime log, and a Source whose credential could
-not be resolved is named so the user can reconnect it.
+One log line with the counts moved — source models, route hops, routes, agent
+menu entries. A Source whose credential cannot be resolved is logged at debug
+and skipped whole; its unreachable credential is already surfaced through the
+Source's own state, and the repair declining to touch it leaves exactly the
+state the previous release was in.
 
-## Validation plan
+The whole repair is best effort: a failure is logged and the demand continues.
+An id left alone is a state the product already tolerates, and the next demand
+tries again.
 
-- Unit: rename map built from a proven prefix; foreign address left alone;
-  upstream slashes (`x-ai/grok-4.6-latest`, `anthropic/claude-sonnet-4`,
-  `accounts/fireworks/models/…`) left alone; row-collision precedence; hop
-  merge; route-key merge; menu row renamed only for `provider` origin;
-  `removed_model_ids` followed.
-- Property: a repaired config must serialize to one this product loads again —
-  the failure mode is writing a surviving name twice and refusing the file on
-  the next load.
-- Integration: a source whose credential does not resolve is skipped whole, and
-  its config bytes are unchanged.
-- Regression (local Incus only): load a snapshot of an affected `config.json` +
-  `sources.json`, refresh the Source, and confirm the six subscription models
-  become selectable and invocable end to end.
+## Validation
+
+`tests/test_model_hub_credential_address.py`:
+
+- every collection moves together for one id — inventory, hops, route key, menu
+  row, `removed_model_ids`, `menu.checked`;
+- nothing is renamed without proof: an unresolvable Source and a foreign minted
+  address both leave the file alone, alongside the upstream slashes
+  (`x-ai/grok-4.6-latest`, `accounts/fireworks/models/…`);
+- collision precedence both ways — the bare row keeps its place, and two
+  repaired rows meeting here resolve first-wins;
+- two routes meeting on one model merge hop-wise behind the bare key, and a hop
+  is unwrapped against the address of the Source *that hop names*, not the
+  Source whose row it sits under;
+- the terminal property: a repaired config parses again, with no addressed id
+  left anywhere the pre-check can see;
+- custody is what proves an address — the runtime adapter answers the minted
+  prefix for a bound credential and `None` for one it has no record of;
+- end to end through `_prepare_engine_for_demand`: the stored file is repaired
+  and the engine is sent the bare names, and with no provable address the file
+  is left byte-for-byte as the previous release left it.
+
+Still to do before close-out: a local Incus regression on a snapshot of an
+affected `config.json` + `sources.json`, confirming the subscription models
+become selectable and invocable end to end.
 
 ## Out of scope
 

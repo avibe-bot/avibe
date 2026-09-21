@@ -70,6 +70,10 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
+from .address_repair import (
+    payload_carries_credential_address,
+    repair_credential_addresses,
+)
 from .async_owner import await_owned_task
 from .catalog_admission import (
     admissible_backend_model,
@@ -1199,6 +1203,73 @@ class ModelHubService:
             raise ModelHubError("source_create_in_progress", status=409)
         self._source_create_nonces.add(client_nonce)
 
+    async def _repair_credential_addresses(self) -> None:
+        """Take a credential's address out of ids an older release stored.
+
+        Discovery no longer writes one, but a file written before it stopped
+        can still hold an addressed id, and composition then addresses it a
+        second time — the model the user picked resolves to nothing. Every
+        demand for the engine passes here, so an installation upgrading into
+        this release is repaired the first time it needs a model.
+
+        This is the seam because it is the only one where both halves are in
+        hand. The engine state store can prove which address belongs to which
+        Source, so nothing is renamed on the strength of how it is spelled; and
+        the whole config is loaded, so every collection keyed by a model id
+        moves in one write instead of half the joins being left naming
+        something gone. Persisting goes through the same projection owner as
+        any other mutation, so the engine is reconciled with what was written.
+
+        Best effort by design: an id left alone is exactly the state the
+        previous release was already in, which is not worth failing a demand
+        over. The next demand tries again.
+        """
+
+        async with self._mutation_lock:
+            config = self.store.load()
+            payload = config.to_payload()
+            if not payload_carries_credential_address(payload):
+                return
+            addresses: dict[str, str] = {}
+            for source in config.sources:
+                if not source.credential_ref:
+                    continue
+                try:
+                    address = await self.adapter.credential_address(
+                        source.credential_ref
+                    )
+                except Exception:
+                    # An address that cannot be read proves nothing about this
+                    # Source's ids, and a guess is what this design avoids.
+                    logger.debug(
+                        "model hub: no provable address for source %s", source.id
+                    )
+                    continue
+                if address:
+                    addresses[source.id] = address
+            try:
+                repair = repair_credential_addresses(payload, addresses)
+                if not repair.changed:
+                    return
+                await self._commit_synced(
+                    config,
+                    ModelHubConfig.from_payload(repair.payload),
+                )
+            except Exception:
+                logger.warning(
+                    "model hub: could not repair stored credential addresses",
+                    exc_info=True,
+                )
+                return
+        logger.info(
+            "model hub: removed credential addresses from stored ids "
+            "(%d source models, %d route hops, %d routes, %d agent menu entries)",
+            repair.models,
+            repair.hops,
+            repair.routes,
+            repair.menu_entries,
+        )
+
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
         has_hub_sources = any(
@@ -1321,6 +1392,7 @@ class ModelHubService:
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
             await self._ensure_runtime_dependency()
+            await self._repair_credential_addresses()
             if already_synced:
                 self._engine_preparation_failed = False
                 return

@@ -1920,6 +1920,14 @@ class CLIProxyEngineAdapter:
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
 
+    async def credential_address(self, credential_ref: str) -> str | None:
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata_if_present,
+            credential_ref,
+        )
+        prefix = (metadata or {}).get("prefix")
+        return prefix if isinstance(prefix, str) and prefix else None
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,

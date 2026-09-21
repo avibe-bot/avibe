@@ -528,6 +528,20 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def credential_address(self, credential_ref: str) -> str | None:
+        """Report the address outbound calls reach this credential through.
+
+        The engine addresses a credential through the model field and no other,
+        so a call spells ``<address>/<model>``. Custody mints that address and
+        is the only place it is recorded, which makes this the one answer that
+        can *prove* an id an older release stored carries one — as opposed to
+        guessing from its shape and renaming a vendor's own model.
+
+        None when the credential records no address, including when it is gone.
+        A caller that cannot prove ownership must leave the id alone.
+        """
+        ...
+
     async def retarget_api_key_credential(
         self,
         credential_ref: str,
