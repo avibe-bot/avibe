@@ -349,8 +349,33 @@ D1 (#2065, merged) ──► PR0 contracts ──┬─► PR1 shell+intro+motio
   on the second merger.
 - **Handoff correctness across tiers.** The snapshot reads live DOM class names owned by
   another lane; C3 makes those names a contract and `geometry.spec.ts` fails when they move.
-- **Engine not installed on first run.** Screen 2 assumes a gateway that a fresh machine
-  may not have. D3 decides whether onboarding installs it.
+- **Engine not installed on first run.** Screen 2 assumes a gateway that a fresh machine may
+  not have. D3 adopts the automatic path and C6's gateway-engine row names the shipped
+  helper that performs it, so the remaining risk is a host whose manifest resolution is
+  `unsupported`, which surfaces as a failure rather than a retry loop.
+
+### 9.1 Review-loop record
+
+PR0 tripped the circuit breaker in `AGENTS.md`: one root-cause class — Model Hub behavior
+asserted in a contract from type signatures rather than from the shipped implementation —
+appeared on two reviewed heads. `d9c62aa2` carried one P1 of that class (a shared route
+order written verbatim to every backend, which `invalid_source_order` rejects); `cf3b47e8`
+carried four more (Direct-mode eligibility read before the mode switch, an install helper
+that never starts the engine, three uncorrelated readiness checks, and a route preference
+with no producer). Per the standard, patching stopped and the class was diagnosed instead.
+
+Scope decision (orchestrator, 2026-09-21): C4 and C6 stop restating shipped semantics and
+name the shipped owner of each behavior — `gatewayAdoption.resumeGatewayAdoption`,
+`runtimeLifecycle.resumeInstallAndStartRuntime`, `eligibility.eligibilityOf`,
+`SourceOrderDrawer.save`, `BackendSupplyModeCard.setMode`, `readOpencodeSetupRoutes`'
+runnable-hop read — and prescribe only what setup genuinely adds: the shared-preference
+projection, the hydration rule, the correlated gate, the setup copy scope. The alternative,
+stripping the behavioral detail and letting each lane rediscover it in code, was rejected:
+these findings are precisely the traps a lane would otherwise hit late, and two lanes would
+not rediscover the same answer. The standing rule for L1–L4 is that a contract row describing
+shipped behavior cites its owner module and says "reuse unchanged" instead of paraphrasing
+it, and that any new behavioral claim is read out of the implementation before it is written
+into a contract.
 
 ## 10. Decisions
 

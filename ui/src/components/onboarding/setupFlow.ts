@@ -81,11 +81,17 @@ export type SetupFlowState = {
   importedCount: number;
   /** Source ids added through the "Add more" card, which is what its badge counts. */
   addedThroughMore: string[];
-  /** The one shared default-route PREFERENCE, as source ids, preferred first. This is not
-   *  what gets written: `AgentSupply.sources.order` is each backend's own eligible subset,
-   *  so a write projects this list through `eligibilityOf` per backend and skips a backend
-   *  whose projection is empty rather than sending an order the server rejects with
-   *  `invalid_source_order` — see C6's route-write row. */
+  /** The route dialog's working PREFERENCE, as source ids, preferred first. Hydrated from
+   *  the persisted per-backend orders every time the screen is entered, so a stateful
+   *  installation opens on its real rows; empty means "not derived yet", never "no route".
+   *  It is not an entry-gate input — C4 reads the server, because a gate resting on client
+   *  draft state would block an installation that already has valid persisted routes.
+   *
+   *  It is also not what gets written. `AgentSupply.sources.order` is each backend's own
+   *  eligible subset, so a write projects this list through `eligibilityOf` per backend —
+   *  after that backend is in `hub` mode, since Direct reports `sources: null` and reads
+   *  every source ineligible — and skips a backend whose projection is empty rather than
+   *  sending an order the server rejects with `invalid_source_order`. See C6. */
   routeOrder: string[];
 };
 

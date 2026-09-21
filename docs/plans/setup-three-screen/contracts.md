@@ -115,13 +115,30 @@ before the change. The primary action stays disabled and unmoved for the whole t
 L3 owns the code; this is the semantics it must implement, and the semantics
 `WizardCompletion.test.tsx` is re-pinned to.
 
-With Model Hub available, `进入工作台` is enabled when all three hold:
+**One assistant must satisfy the whole gate.** Three independent existential checks can be
+met by three unrelated objects — an enabled Codex with no route, a persisted route on an
+uninstalled Claude, a healthy source that neither route uses — and setup would then complete
+on a machine whose first workspace turn cannot run. The gate is therefore correlated over a
+single assistant, and it reads the server rather than any client-side draft.
 
-| Input | Producer | Predicate |
-| --- | --- | --- |
-| a ready model source | `modelsApi.listSources()` | at least one source whose `state.status` is a healthy status (not `cooldown`, `needs_action` or `error`) |
-| a default route | `SetupFlowState.routeOrder` plus each backend's persisted order | the shared order is non-empty AND at least one enabled backend reads back a non-empty projection of it through `getAgentSources(backend)`. A backend whose projection is empty blocks nothing, because eligibility is per backend — see the route-write row in C6 |
-| a usable assistant | `api.detectCli` / `AgentSupply.cli_present`, and the enable write the identity Switch already owns | at least one of Claude Code, Codex, OpenCode is installed AND enabled |
+With Model Hub available, `进入工作台` is enabled when at least one of Claude Code, Codex and
+OpenCode is simultaneously:
+
+| Condition | Authoritative read |
+| --- | --- |
+| installed | `api.detectCli(cli_path)`, corroborated by `AgentSupply.cli_present` |
+| enabled | the identity Switch's existing write path, read back through `getBackendConnection(backend).enabled` |
+| routed | `getAgentSources(backend)`: `mode === 'hub'`, a non-empty `sources.order`, and `model_supply` reporting `has_runnable_hop` for that backend's `selected_model_id` — the runnable-hop read `readOpencodeSetupRoutes` already uses for OpenCode, generalized to all three |
+
+and that assistant is selectable as the default Vibe Agent, which keeps today's rule that a
+usable selected Agent is preserved and re-pointed only when the current default is not in the
+available set.
+
+Source health is not a separate condition: `has_runnable_hop` is the server's own answer
+about whether the route can run, and a healthy source that no route uses does not make an
+assistant usable. `SetupFlowState.routeOrder` is the route dialog's working preference and
+never gates entry — a gate resting on client draft state would block a stateful installation
+that already has valid persisted routes (see C6's hydration row).
 
 Unchanged from today's `complete()`: a start is issued only from a confirmed `stopped`
 application state; a usable selected Agent is preserved and only re-pointed when the
@@ -129,15 +146,16 @@ current default is not in the available set; `setup_completed` is written last s
 start leaves the AuthGuard's gate intact; `SetupPlatformRecovery` and `SetupModelRecovery`
 keep their recovery paths.
 
-Removed: the per-backend `getBackendConnection(...).ready` / `entry_eligible` requirement
-and the OpenCode-only `readOpencodeSetupRoutes` filter, because onboarding no longer opens
-a per-assistant connection dialog (handoff §13.5). Readiness is now a property of the
-gateway supply and the route, which is what the screen shows.
+Removed: `entry_eligible` / per-backend connection `ready` as the entry condition, and the
+OpenCode-only scope of the route filter, because onboarding no longer opens a per-assistant
+connection dialog (handoff §13.5). `getBackendConnection` stays the owner of the enable read
+and of the confirmed-stopped service start. Readiness becomes a property of the assistant
+that will actually run, which is what screen 3 shows.
 
-Degradation: when `capabilities.model_hub.enabled` is explicitly false, the gate is the
-predicate above minus its first two rows, evaluated against today's per-backend connection
-readiness, and screen 3 keeps the per-assistant connection actions. One documented
-degradation, not a third flow shape.
+Degradation: when `capabilities.model_hub.enabled` is explicitly false there is no hub route
+to read, so the routed condition is today's per-backend connection readiness and screen 3
+keeps the per-assistant connection actions. One documented degradation, not a third flow
+shape.
 
 Test impact, stated openly rather than absorbed: the invariants that named per-backend
 connection readiness as the entry condition are re-pinned to the table above; the
@@ -186,7 +204,7 @@ contract passes both sides' unit tests while the behavior silently disagrees.
 | add — Subscription tab | `modelsApi.startOAuth(vendor, channel)` → `getOAuthStatus(flowId)` → `submitOAuth` when a value is required | the offered vendors come from the backend's real OAuth capability, never from a fixture list; the design's two are OpenAI/ChatGPT and Anthropic/Claude |
 | add — Detected tab | the same filtered scan, minus the candidates already on the cards | already-added rows are disabled and marked; the tab appears only when unlisted candidates exist |
 | vendor picker order | `vibe/data/api_key_vendors.json` through `apiKeyVendors.ts` | the first eight are the primary grid in file order; `更多服务商` holds the catalog's remainder (Z.AI, Mistral, Groq, Together, Fireworks) plus 自定义. The UI partitions by position and never re-sorts, and it does not edit the backend-owned catalog |
-| gateway engine | `modelsApi.getRuntimeStatus()` → `installAndStartStep()` → `installRuntimeUntilSettled()` | entering screen 2 reads the status; `not_installed`/`not_started` runs the existing install-and-start path with progress inside the gateway card (D3); `manifest.resolution === 'unsupported'` surfaces the failure instead of retrying; a degraded engine still routes, so it does not block continuing |
+| gateway engine | `resumeGatewayAdoption(modelsApi, agentReads, backend)` in `settings/models/gatewayAdoption.ts` | the shipped owner of "prepare this backend for the gateway", and the only sequence screen 2 uses: it reads the agents, returns early when the backend is already `hub`, and otherwise ensures the engine through `resumeInstallAndStartRuntime` — install AND start, because `installAndStartStep` is only a classifier and `installRuntimeUntilSettled` only installs — then scans that backend's migration candidates. Progress and the classified `failure`/`failedStep` render inside the gateway card (D3); `runtimeCanAttemptInstall` (a `manifest.resolution` other than `unsupported`) decides whether an install may be attempted at all, and an unsupported host surfaces the failure instead of retrying. A degraded but running engine still routes, so it does not block continuing |
 | first-entry sequence | local | cards → inbound wires → gateway → outbound wires → destinations, about 1.1s, skipped under the C3 bail-out. The reference's reset/replay control is preview-only and does not ship |
 
 ### Screen 3 — assistants
@@ -198,7 +216,9 @@ contract passes both sides' unit tests while the behavior silently disagrees.
 | enabled | the identity Switch's existing write path | disabling preserves configuration and says so (`onboarding.setup.disabledNotice`) |
 | update available / update | `BackendLifecycleChip` with `onVisual` | the chip still owns the probe and the write; the card only draws the reported visual, and an update coexists with the enabled state |
 | default-model chip | `getAgentSources(backend)` → `selected_model_id`, `model_supply` | rendered only when the assistant is enabled and a route resolves |
-| route dialog list | the shared `SetupFlowState.routeOrder`, projected to rows | row = provider mark + model name + `服务名 · 首选/备用 N`; up/down disabled at the ends; a single route shows the "already preferred" note |
-| route write | `putAgentSources(backend, { order })` per enabled backend, with `setAgentMode(backend, 'hub')` where the backend is still Direct | one shared PREFERENCE, projected per backend, because the contract has no global route object and `AgentSupply.sources.order` is that backend's eligible subset: the server rejects a foreign or ineligible id with `invalid_source_order`. Project through `eligibilityOf(agent, sourceId)` in `settings/models/eligibility.ts` — the only place the UI reads eligibility, never a re-derived predicate — keeping the shared relative order, and skip a backend whose projection is empty instead of writing an empty order. The dialog says which backends were skipped and why, from the eligibility `reason_key`. A guard response (`would_interrupt`, `would_remove_hops`) is surfaced for confirmation and never auto-forced; a backend that refuses keeps the dialog open with the reason. A native ChatGPT or Claude subscription is the common case: it is eligible for its own client only, so a shared order containing it legitimately reaches one backend and not the others |
+| route preference hydration | `getAgentSources(backend)` for each enabled backend | the dialog's list is derived from persisted state and never left at an empty client default: prefer the order of the backend that will run (the default Vibe Agent's), else the longest persisted order, else the ordering the server reports for that backend's eligible sources. Every re-entry re-derives it, so persisted state stays authoritative — a stateful installation opens on its real rows and can satisfy C4 without any write |
+| backend mode | `resumeGatewayAdoption` → `setAgentMode(backend, 'hub')` | the shipped sequence in `BackendSupplyModeCard.setMode` and `SettingsModelsPage`: adoption ensures the engine first and hands back that backend's migration candidates, and only a backend with none is switched straight to hub. Eligibility is read AFTER the switch, from the echoed `AgentSupply`, because in Direct mode `sources` is `null` and `eligibilityOf` marks every source ineligible — projecting first would skip every Direct backend, so setup could never establish a route on a fresh or Direct installation |
+| route dialog list | the hydrated preference, projected to rows | row = provider mark + model name + `服务名 · 首选/备用 N`; up/down disabled at the ends; a single route shows the "already preferred" note |
+| route write | `putAgentSources(backend, { order })` per enabled backend | one shared PREFERENCE, projected per backend, because the contract has no global route object and `AgentSupply.sources.order` is that backend's eligible subset: the server rejects a foreign or ineligible id with `invalid_source_order`. Project through `eligibilityOf(agent, sourceId)` in `settings/models/eligibility.ts` — the only place the UI reads eligibility, never a re-derived predicate — keeping the shared relative order, and skip a backend whose projection is empty instead of writing it an empty order; the dialog says which backends were skipped and why, from the eligibility `reason_key`. Guard handling is `SourceOrderDrawer.save`'s and is not reimplemented: echo the server's exact `would_remove_hops` / `would_interrupt` back once with `force: true` for `source_in_route_chain` / `source_last_supplier`, a changed plan still fails, and an unknown-write outcome re-reads before any retry. A native ChatGPT or Claude subscription is the common asymmetric case: eligible for its own client only, so a shared preference legitimately reaches one backend and not the others |
 | 添加模型来源 | `onNavigate('providers')` | the footer's other exit is 完成, which closes and returns focus to the chip |
 | all-uninstalled case | the three rows above | three install actions, primary action disabled, and going back to screen 2 stays available |
