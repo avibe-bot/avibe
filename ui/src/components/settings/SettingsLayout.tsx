@@ -29,6 +29,7 @@ import { useApi } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { memoryNavShouldBeVisible } from '@/lib/memorySettings';
 import { SETTINGS_LANDING_PATH } from '@/lib/adminNavigation';
+import { settingsResumePath, writeLastSettingsSection } from '@/lib/settingsSectionMemory';
 import { getEnabledPlatforms, platformSupportsChannels } from '@/lib/platforms';
 import { useIsDesktop } from '@/lib/useIsDesktop';
 import {
@@ -354,10 +355,24 @@ export const SettingsLayout: React.FC = () => {
         section: t(activeTrail.at(-1)?.labelKey ?? 'nav.settings'),
       });
 
+  // Choosing a rail row is a lasting preference, not a step inside one visit,
+  // so the next ordinary entry resumes it. The trail's last item is what gets
+  // recorded: a detail page inside a section resumes at the section that owns
+  // it, which is the row the rail can show as current.
+  useEffect(() => {
+    const section = activeTrail.at(-1);
+    if (section) writeLastSettingsSection(section.path);
+  }, [activeTrail]);
+
+  // The root is the phone's section list — the one screen a viewport with no
+  // rail beside the page can navigate from, and what its entry points at. A
+  // desktop keeps that rail on screen, so the root has nothing left to show
+  // there and resolves through to a section: the resumed one, the same answer
+  // its entry link resolves for itself.
   useEffect(() => {
     if (!atRoot || !isDesktop) return;
-    navigate(SETTINGS_LANDING_PATH, { replace: true });
-  }, [atRoot, isDesktop, navigate]);
+    navigate(settingsResumePath(capabilities.can_manage_instance), { replace: true });
+  }, [atRoot, capabilities.can_manage_instance, isDesktop, navigate]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background md:h-[var(--app-shell-h)]">

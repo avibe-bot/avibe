@@ -5,9 +5,12 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
   matchesRoute(pathname, '/settings/memory');
 
 /**
- * Ordinary Settings always opens General, irrespective of the last visited
- * subsection. General is readable by every role, so the landing page needs no
- * capability fallback; explicit deep links stay authoritative on their own.
+ * Where Settings opens when there is no section to resume: a first visit, a
+ * device whose storage refused the write, or a remembered section that has
+ * since been retired or put out of this visitor's reach. General is readable by
+ * every role, so the fallback needs no capability check of its own — the resume
+ * does, and settingsSectionMemory applies it. Explicit deep links stay
+ * authoritative over both.
  */
 export const SETTINGS_LANDING_PATH = '/settings/general';
 

@@ -31,10 +31,8 @@ import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
-import {
-  isOwnerOnlyPath,
-  SETTINGS_LANDING_PATH,
-} from '../lib/adminNavigation';
+import { isOwnerOnlyPath } from '../lib/adminNavigation';
+import { settingsResumePath } from '../lib/settingsSectionMemory';
 import {
   closeSettingsOverlay,
   isChromelessShellPath,
@@ -506,7 +504,11 @@ export const AppShell: React.FC = () => {
             ) : (
               <Link
                 data-settings-toggle="true"
-                to={SETTINGS_LANDING_PATH}
+                // Desktop-only, like the column it sits in: Settings opens on
+                // the section this device was left on, and General when there is
+                // none to resume. Resolved here rather than left to the root's
+                // redirect so the entry lands on the section in one paint.
+                to={settingsResumePath(capabilities.can_manage_instance)}
                 title={t('appShell.openControlPanel')}
                 aria-label={t('appShell.openControlPanel')}
                 className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
