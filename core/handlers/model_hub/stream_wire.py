@@ -374,7 +374,17 @@ ErrorEnvelopePath = tuple[str, ...]
 # Token counts are vendor-reported, never self-measured, so one hostile or buggy
 # response must not be able to poison a persisted aggregate. The ceiling is fixed
 # in our code; it is never derived from a value the upstream declares.
-USAGE_TOKEN_CEILING: Final = 1_000_000_000
+#
+# It bounds ONE report, which is what the name has to say, because the scope is
+# the whole argument for the number. No request composes a billion input tokens,
+# so a single response past this is broken or hostile and dropping it costs
+# nothing true. An aggregate of many accepted reports is a different quantity
+# with no upper bound worth inventing — a user may spend whatever they spend —
+# and this ceiling was once reused there, where it silently truncated real usage
+# into a plausible-looking total. What an aggregate needs is
+# `usage.USAGE_COUNTER_CEILING`: a statement about what the read contract can
+# carry, not about what a count is allowed to be.
+USAGE_REPORT_TOKEN_CEILING: Final = 1_000_000_000
 
 
 @dataclass(frozen=True)
@@ -781,12 +791,12 @@ def _usage_sum(container: Mapping[str, object], paths: tuple[tuple[str, ...], ..
         for value in _path_values(container, path):
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if value < 0 or value > USAGE_TOKEN_CEILING:
+            if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
                 continue
             total = value if total is None else total + value
     if total is None:
         return None
-    return min(total, USAGE_TOKEN_CEILING)
+    return min(total, USAGE_REPORT_TOKEN_CEILING)
 
 
 def extract_protocol_usage(
@@ -830,10 +840,10 @@ def _usage_from_scalar_paths(
                 value = scalars.get((*container_path, *path))
                 if not isinstance(value, int) or isinstance(value, bool):
                     continue
-                if value < 0 or value > USAGE_TOKEN_CEILING:
+                if value < 0 or value > USAGE_REPORT_TOKEN_CEILING:
                     continue
                 total = value if total is None else total + value
-            return None if total is None else min(total, USAGE_TOKEN_CEILING)
+            return None if total is None else min(total, USAGE_REPORT_TOKEN_CEILING)
 
         input_tokens = usage_sum(taxonomy.input_paths)
         cached_input_tokens = usage_sum(taxonomy.cached_input_paths)

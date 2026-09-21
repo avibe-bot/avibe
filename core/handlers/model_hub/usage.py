@@ -15,6 +15,12 @@ why `token_reports` is tracked separately instead of treating a missing report a
 zero usage. And nothing here ever feeds admission, routing, or cooldown — a
 hostile upstream must not be able to change resolution behavior by lying about
 usage.
+
+What "bounded" bounds is the file: a fixed number of daily rows over a fixed
+retention window. It was never a bound on the counts inside them — how much a
+user spends is not ours to cap — so the aggregates here are exact sums, and the
+one ceiling this module applies is `USAGE_COUNTER_CEILING`, at the door a
+persisted row comes back through.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
 from .state_file import write_state_document
-from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
+from .stream_wire import ProtocolUsageReport
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +48,22 @@ logger = logging.getLogger(__name__)
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
+# The largest integer this module's read contract carries exactly. The summary is
+# JSON that the settings page reads into IEEE-754 doubles, so a counter past
+# 2**53 - 1 arrives as a value no reader can hold, and a tab drawing one would
+# print a total that disagrees with the parts it was summed from.
+#
+# This is not a limit on how much a user may spend, and deliberately not the
+# per-report ceiling: an aggregate is the exact sum of reports that were already
+# bounded where they entered the wire, and how many calls a user makes is not
+# ours to cap. Bounding what a *reader* can hold is a different claim, measured
+# from the contract rather than declared — the rule `_carried` already applies to
+# instants — so it belongs at the one door foreign bytes enter through and
+# nowhere else. Nothing this module writes can approach it: every persisted
+# counter is a sum of `stream_wire.USAGE_REPORT_TOKEN_CEILING`-bounded
+# increments, so reaching it would take some nine million maximal calls inside a
+# single day. What it actually guards is a corrupt or hand-edited file.
+USAGE_COUNTER_CEILING: Final = 2**53 - 1
 # Anything older than every instant this ledger can hold, so a row that never
 # recorded one sorts as the least recently metered.
 _OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
@@ -116,13 +138,19 @@ def local_usage_day(moment: datetime) -> date:
 
 
 def _bounded_counter(value: object) -> int:
-    """Read one persisted counter, degrading anything unusable to zero."""
+    """Read one persisted counter, degrading anything unusable to zero.
+
+    The bound is `USAGE_COUNTER_CEILING`, so what this admits is what the read
+    contract can carry — no reading of a real count is refused here. A value past
+    it is clamped rather than zeroed for the reason the subset repairs below
+    exist: a smaller true statement beats an unusable one.
+    """
 
     if not isinstance(value, int) or isinstance(value, bool):
         return 0
     if value < 0:
         return 0
-    return min(value, USAGE_TOKEN_CEILING)
+    return min(value, USAGE_COUNTER_CEILING)
 
 
 def _text(value: object) -> Optional[str]:
@@ -302,8 +330,21 @@ def _empty_totals() -> dict:
 
 
 def _accumulate(target: dict, row: dict) -> None:
+    """Add one row's counters into an aggregate, exactly.
+
+    Nothing is clamped here, and that absence is the point. Every addend already
+    passed the door that bounds it — a live report at
+    `stream_wire.USAGE_REPORT_TOKEN_CEILING`, a persisted one at
+    `USAGE_COUNTER_CEILING` — so a ceiling on the sum would no longer protect the
+    aggregate from a hostile upstream. It would cap how much usage the user is
+    allowed to have had, and it read as exactly that: a truncated total is
+    indistinguishable from a real one, and clamping a subset and its superset
+    independently drove every cached-input share to exactly 100% once either
+    saturated, which presents a broken number as perfect caching.
+    """
+
     for key in _COUNTER_KEYS:
-        target[key] = min(target[key] + row[key], USAGE_TOKEN_CEILING)
+        target[key] += row[key]
 
 
 def _newer_timestamp(current: Optional[str], candidate: Optional[str]) -> Optional[str]:

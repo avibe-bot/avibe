@@ -37,7 +37,7 @@ from core.handlers.model_hub.identifiers import (
 )
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
-    USAGE_TOKEN_CEILING,
+    USAGE_REPORT_TOKEN_CEILING,
     ProtocolSSEState,
     ProtocolUsageReport,
     extract_protocol_usage,
@@ -45,6 +45,7 @@ from core.handlers.model_hub.stream_wire import (
     observe_protocol_response,
 )
 from core.handlers.model_hub.usage import (
+    USAGE_COUNTER_CEILING,
     USAGE_RETENTION_DAYS,
     BoundedUsageLedger,
     SourceIdentity,
@@ -331,7 +332,7 @@ def test_a_buffered_error_still_carries_the_tokens_it_billed() -> None:
         pytest.param(12.5, id="float"),
         pytest.param(None, id="null"),
         pytest.param([120], id="list"),
-        pytest.param(USAGE_TOKEN_CEILING + 1, id="above-ceiling"),
+        pytest.param(USAGE_REPORT_TOKEN_CEILING + 1, id="above-ceiling"),
     ],
 )
 def test_an_unusable_token_value_is_dropped_not_coerced(reported: object) -> None:
@@ -352,16 +353,16 @@ def test_a_composed_input_total_cannot_exceed_our_own_ceiling() -> None:
         "anthropic",
         {
             "usage": {
-                "input_tokens": USAGE_TOKEN_CEILING,
-                "cache_read_input_tokens": USAGE_TOKEN_CEILING,
+                "input_tokens": USAGE_REPORT_TOKEN_CEILING,
+                "cache_read_input_tokens": USAGE_REPORT_TOKEN_CEILING,
                 "total_tokens": 3,
             }
         },
     )
 
     assert report is not None
-    assert report.input_tokens == USAGE_TOKEN_CEILING
-    assert report.cached_input_tokens == USAGE_TOKEN_CEILING
+    assert report.input_tokens == USAGE_REPORT_TOKEN_CEILING
+    assert report.cached_input_tokens == USAGE_REPORT_TOKEN_CEILING
 
 
 @pytest.mark.parametrize(
@@ -768,7 +769,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
                     "requests": -4,
                     "token_reports": True,
                     "input_tokens": "many",
-                    "output_tokens": USAGE_TOKEN_CEILING * 5,
+                    "output_tokens": USAGE_COUNTER_CEILING + 1,
                 }
             ]
         ),
@@ -780,7 +781,7 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
     assert row["token_reports"] == 0
     assert row["input_tokens"] == 0
     assert row["cached_input_tokens"] == 0
-    assert row["output_tokens"] == USAGE_TOKEN_CEILING
+    assert row["output_tokens"] == USAGE_COUNTER_CEILING
 
 
 @pytest.mark.parametrize(
@@ -1120,14 +1121,96 @@ def test_duplicate_persisted_rows_merge_instead_of_shadowing(tmp_path: Path) -> 
     assert rows[0]["input_tokens"] == 100
 
 
-def test_accumulated_counters_stop_at_the_ceiling(tmp_path: Path) -> None:
+def test_accumulated_counters_are_exact_past_the_per_report_ceiling(tmp_path: Path) -> None:
+    """An aggregate is a sum, not a capped one.
+
+    The per-report ceiling exists so one hostile response cannot poison the
+    ledger; it says nothing about how much a user may spend across many honest
+    ones. Reusing it on the sum truncated real usage: the totals card showed a
+    figure that was the ceiling rather than the usage, and nothing on the page
+    could tell the difference. Every level the summary publishes is checked,
+    because each one accumulates separately and a clamp left on any of them
+    reappears as the same silent lie.
+    """
+
     ledger = _ledger(tmp_path)
-    saturated = ProtocolUsageReport(input_tokens=USAGE_TOKEN_CEILING)
+    maximal = ProtocolUsageReport(input_tokens=USAGE_REPORT_TOKEN_CEILING)
 
-    ledger.record(source_id="src_a", model_id="model-x", usage=saturated, at=NOW)
-    ledger.record(source_id="src_a", model_id="model-x", usage=saturated, at=NOW)
+    ledger.record(source_id="src_a", model_id="model-x", usage=maximal, at=NOW)
+    ledger.record(source_id="src_a", model_id="model-x", usage=maximal, at=NOW)
 
-    assert ledger.summary(days=30, now=NOW)["totals"]["input_tokens"] == USAGE_TOKEN_CEILING
+    expected = 2 * USAGE_REPORT_TOKEN_CEILING
+    summary = ledger.summary(days=30, now=NOW)
+    assert summary["totals"]["input_tokens"] == expected
+    assert summary["sources"][0]["input_tokens"] == expected
+    assert summary["sources"][0]["models"][0]["input_tokens"] == expected
+    assert summary["days"][0]["input_tokens"] == expected
+
+
+def test_a_cached_input_share_survives_a_window_past_the_per_report_ceiling(
+    tmp_path: Path,
+) -> None:
+    """The share is the reason a clamped aggregate could not stay hidden.
+
+    Clamping input and its cached subset independently pinned both to the same
+    ceiling, so the ratio converged on exactly 100% — a broken number wearing the
+    appearance of perfect caching. The proportions here are a real week's:
+    billions of input tokens at a cached share in the nineties.
+    """
+
+    ledger = _ledger(tmp_path)
+    report = ProtocolUsageReport.of(
+        input_tokens=500_000_000,
+        cached_input_tokens=475_000_000,
+        output_tokens=2_000_000,
+    )
+    for day in range(7):
+        at = NOW - timedelta(days=day)
+        for _ in range(2):
+            ledger.record(source_id="src_a", model_id="model-x", usage=report, at=at)
+
+    totals = ledger.summary(days=7, now=NOW)["totals"]
+    assert totals["input_tokens"] == 14 * 500_000_000
+    assert totals["cached_input_tokens"] == 14 * 475_000_000
+    assert totals["cached_input_tokens"] < totals["input_tokens"]
+    assert totals["cached_input_tokens"] / totals["input_tokens"] == pytest.approx(0.95)
+
+
+def test_a_persisted_counter_is_bounded_by_what_the_read_contract_carries(
+    tmp_path: Path,
+) -> None:
+    """The one bound this module keeps, and the reason it is that number.
+
+    `usage-summary.schema.json` is JSON the settings page reads into doubles, so
+    a counter past 2**53 - 1 cannot be published without a reader losing it. That
+    is a claim about the contract, and no sum this module writes can reach it:
+    the probe has to come from a file nothing here would have produced.
+    """
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    ledger.path.write_text(
+        json.dumps(
+            [
+                {
+                    "day": local_usage_day(NOW).isoformat(),
+                    "source_id": "src_a",
+                    "model_id": "model-x",
+                    "requests": 1,
+                    "token_reports": 1,
+                    "input_tokens": USAGE_COUNTER_CEILING * 4,
+                    "cached_input_tokens": USAGE_COUNTER_CEILING * 4,
+                    "output_tokens": 0,
+                    "last_metered_at": NOW.isoformat(),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    totals = ledger.summary(days=30, now=NOW)["totals"]
+    assert totals["input_tokens"] == USAGE_COUNTER_CEILING
+    assert totals["cached_input_tokens"] == USAGE_COUNTER_CEILING
 
 
 @pytest.mark.parametrize(

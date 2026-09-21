@@ -52,9 +52,10 @@
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
     },
     "Count": {
+      "description": "One metered count. The maximum is the largest integer a consumer reading this document into IEEE-754 doubles holds exactly (2^53 - 1), so it bounds what a reader can carry rather than what a user may spend: every count here is the exact sum of per-call reports, each already bounded where it entered the wire. A producer must not clamp an aggregate to keep it small — a truncated total is indistinguishable from a real one.",
       "type": "integer",
       "minimum": 0,
-      "maximum": 1000000000
+      "maximum": 9007199254740991
     },
     "Counters": {
       "type": "object",
