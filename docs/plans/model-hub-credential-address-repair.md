@@ -220,8 +220,12 @@ and wherever the owning prefix is in hand the comparison is literal.
 2. **A model id this repair rewrote whose removed segment was not a proven
    address** — not the prefix recorded for any credential or Source here. Note
    the wording: *not* "carried no `avibe-<hex>` segment". `prefix` is settled
-   from `credential["prefix"]`, else `previous.prefix`, before the mint is
-   reached (`state.py:600-605`), so an installation can legitimately hold a
+   from `credential["prefix"]`, else `previous.prefix`, and only then minted —
+   in `StateStore.sync_sources`, the same order `bind_oauth_credential` and
+   `stage_oauth_credential` mint under. (Cited by symbol on purpose: the #2098
+   lane read these on pre-repair `master`, where the three mint sites sit at
+   different lines than on this branch, and a bare line number does not survive
+   the ref it was taken from.) So an installation can legitimately hold a
    prefix the mint would not produce today and removing it is correct —
    `test_only_the_owning_address_is_unwrapped` pins `legacy-prefix/gpt-5.5`
    unwrapping for the credential addressed by `legacy-prefix`. Where every
