@@ -28,7 +28,7 @@
 // that has no other owner.
 import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Check, CircleX, LoaderCircle, X } from 'lucide-react';
+import { Check, CircleX, KeyRound, LoaderCircle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -45,6 +45,7 @@ import {
 } from '@/components/settings/models/apiKeySourceDraft';
 import { apiKeyVendorPreset } from '@/components/settings/models/apiKeyVendors';
 import type { CollectionReadAuthority } from '@/components/settings/models/collectionReadAuthority';
+import { BLOCKED_REASON_FALLBACK_KEY } from '@/components/settings/models/migrationGrouping';
 import {
   createContinuationSettlement,
   type ContinuationTicket,
@@ -52,6 +53,7 @@ import {
 import { modelsApi, type Adoption, type SourceCreated } from '@/components/settings/models/modelsApi';
 import { OAuthConnectDialog } from '@/components/settings/models/OAuthConnectDialog';
 import { reconcileUnknownWrite } from '@/components/settings/models/reconcileUnknownWrite';
+import { serverText } from '@/components/settings/models/serverCopy';
 import { subscriptionChooser } from '@/components/settings/models/subscriptionOptions';
 import type { Source } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
@@ -101,25 +103,34 @@ const DetectedRow: React.FC<{
   onToggle: () => void;
 }> = ({ slot, selected, added, onToggle }) => {
   const { t } = useTranslation();
+  // Detected, and not takeable from here. The row stays — this list is what the
+  // screen found, and a credential that vanished because nobody may act on it is a
+  // credential the person will add a second copy of.
+  const blocked = slot.reasons.length > 0;
+  const detail = [
+    slot.mask ? t('onboarding.providers.cardKeyDetected', { mask: slot.mask }) : '',
+    ...slot.reasons.map((key) => serverText(t, key, BLOCKED_REASON_FALLBACK_KEY) ?? ''),
+  ].filter(Boolean).join(' · ');
   return (
     <button
       type="button"
       className="setup-add-row"
       data-provider={slot.vendor}
       data-state={added ? 'added' : 'detected'}
-      disabled={added}
-      {...(added ? {} : { 'aria-pressed': selected })}
-      aria-label={t('onboarding.providers.addDetectedSelectNamed', { name: slot.label })}
+      {...(blocked ? { 'data-blocked': 'true' } : {})}
+      disabled={added || blocked}
+      {...(added || blocked ? {} : { 'aria-pressed': selected })}
+      aria-label={blocked
+        ? [slot.label, detail].filter(Boolean).join(' · ')
+        : t('onboarding.providers.addDetectedSelectNamed', { name: slot.label })}
       onClick={onToggle}
     >
-      <span className="setup-add-row-logo"><VendorGlyph vendor={slot.vendor} /></span>
+      <span className="setup-add-row-logo">
+        {slot.brand ? <VendorGlyph vendor={slot.brand} /> : <KeyRound size={18} aria-hidden="true" />}
+      </span>
       <span className="setup-add-row-copy">
         <span className="setup-add-row-name">{slot.label}</span>
-        {slot.mask && (
-          <span className="setup-add-row-detail">
-            {t('onboarding.providers.cardKeyDetected', { mask: slot.mask })}
-          </span>
-        )}
+        {detail && <span className="setup-add-row-detail">{detail}</span>}
       </span>
       {added
         ? <span className="setup-add-row-tag">{t('onboarding.providers.addDetectedAdded')}</span>
@@ -140,6 +151,11 @@ export const AddSourceDialog: React.FC<{
   detected: readonly ProviderSlot[];
   /** Rows the current selection would submit — the number the review names. */
   pendingCount: number;
+  /** Whether the screen still admits a write. It can turn false while this is open —
+   *  the engine stopped, or the read that said it was serving failed — and then the
+   *  submit is what has to refuse. An authorization already in flight is left alone:
+   *  it owns its own outcome, and this frame stays up to report it. */
+  writable: boolean;
   sources: Source[];
   /** The generation-controlled source read, used to settle an unknown write. */
   sourceReads: CollectionReadAuthority<Source[]>;
@@ -156,6 +172,7 @@ export const AddSourceDialog: React.FC<{
   vendor,
   detected,
   pendingCount,
+  writable,
   sources,
   sourceReads,
   isSelected,
@@ -170,8 +187,19 @@ export const AddSourceDialog: React.FC<{
     : ['subscription', 'apiKey'];
   const namedSubscription = vendor && SUBSCRIPTION_CHOICES.includes(vendor) ? vendor : null;
 
+  // The detected list exists as discovery whatever it holds, but it only OPENS the
+  // dialog when something in it can be taken over. A person who pressed 「添加」 and
+  // landed on rows that all explain why they cannot be imported has been handed an
+  // answer to a question they did not ask, with nothing to press; the tab is still
+  // right there, saying what is on this machine.
   const [method, setMethod] = React.useState<AddSourceMethod>(
-    namedSubscription ? 'subscription' : vendor ? 'apiKey' : methods[0],
+    namedSubscription
+      ? 'subscription'
+      : vendor
+        ? 'apiKey'
+        : detected.some((slot) => slot.backends.length > 0)
+          ? 'detected'
+          : 'subscription',
   );
   const [subscriptionVendor, setSubscriptionVendor] = React.useState(
     namedSubscription ?? SUBSCRIPTION_CHOICES[0],
@@ -190,6 +218,11 @@ export const AddSourceDialog: React.FC<{
   // Set when an authorization really produced a source. It is what tells that
   // flow's own close apart from a cancellation: both arrive the same way.
   const authorizedLanded = React.useRef(false);
+  // Permission as of now, not as of the press. A submit that first reads the inventory
+  // back can be inside that await when the engine stops, and the value the press saw is
+  // by then a memory of a permission rather than one. Everything that SENDS reads this.
+  const writableRef = React.useRef(writable);
+  writableRef.current = writable;
   React.useEffect(() => () => continuation.invalidate(), [continuation]);
 
   // A method that stopped existing — the last detected candidate was taken over
@@ -213,6 +246,12 @@ export const AddSourceDialog: React.FC<{
   }, [continuation, onAdded, onClose]);
 
   const persist = React.useCallback(async (seq: ContinuationTicket) => {
+    // The actual boundary of the POST, and the last place the answer is still current.
+    // Refusing here changes nothing else on purpose: the draft, the nonce and an
+    // unsettled failure all stay exactly as they were, so the outcome nobody knows yet
+    // is still reconcilable from the same identity once the engine is back. What it will
+    // not do is send. There is no queued attempt behind this — recovery is another press.
+    if (!writableRef.current) return;
     if (continuation.settle(seq, () => setPhase({ kind: 'saving' })) === 'stale') return;
     try {
       await land(seq, await modelsApi.createApiKeySource(apiKeySourceCreate(draft, clientNonce.current)));
@@ -222,6 +261,10 @@ export const AddSourceDialog: React.FC<{
   }, [continuation, draft, land]);
 
   const submitKey = React.useCallback(async () => {
+    // The footer below already refuses this; refusing it here too is what makes a
+    // write against an engine the screen no longer vouches for unrepresentable
+    // rather than merely hard to reach.
+    if (!writable) return;
     const seq = continuation.begin();
     // An unsettled failure is not a verdict. Read the inventory back and adopt the
     // write if it did land, rather than sending a second one that would duplicate it.
@@ -230,6 +273,9 @@ export const AddSourceDialog: React.FC<{
         () => sourceReads.readValue(),
         (rows) => rows.find((row) => row.client_nonce === clientNonce.current),
       );
+      // A source that is there is a receipt, and a receipt is reported whatever the
+      // screen now admits: permission governs the NEXT write, never the delivery of one
+      // that already happened. Withdrawing it here would hide a credential that exists.
       if (reconciliation.kind === 'committed') {
         await land(seq, {
           source: reconciliation.value,
@@ -243,7 +289,7 @@ export const AddSourceDialog: React.FC<{
       return;
     }
     await persist(seq);
-  }, [continuation, land, persist, phase, sourceReads]);
+  }, [continuation, land, persist, phase, sourceReads, writable]);
 
   // Editing clears a verdict the server gave about a form that no longer exists.
   // It does NOT clear an unsettled one: that outcome is still unknown, and the
@@ -280,19 +326,24 @@ export const AddSourceDialog: React.FC<{
   // without saying so — reconciliation adopts the row the ORIGINAL draft wrote — so
   // the fields stay locked until that retry has an answer.
   const unsettled = phase.kind === 'failed' && !phase.settled;
-  const keyBlocked = busy || !draftComplete(draft);
+  const keyBlocked = busy || !writable || !draftComplete(draft);
   const keyPreset = apiKeyVendorPreset(draft.vendor);
 
+  // Every method's primary is a write — a key saved, a sign-in started, a batch handed
+  // to the takeover — so every one of them needs the screen to still admit one. The
+  // frame stays exactly as it is: what is on it was worth opening and is still worth
+  // reading, and the reason it cannot be submitted is on the gateway card behind it,
+  // next to the only control that can do anything about it.
   const primary = active === 'detected'
     ? {
       label: t('onboarding.providers.addFooterAdd', { count: pendingCount }),
-      disabled: pendingCount === 0,
+      disabled: pendingCount === 0 || !writable,
       run: onReviewDetected,
     }
     : active === 'subscription'
       ? {
         label: t('onboarding.providers.addFooterSignInNamed', { name: subscriptionBrand(subscriptionVendor) }),
-        disabled: busy,
+        disabled: busy || !writable,
         run: () => setPhase({ kind: 'waitingAuth' }),
       }
       : {

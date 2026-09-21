@@ -20,7 +20,9 @@ import type { TranslationKey } from '@/i18n/types';
 import { providerLabel, providerVendorId } from '../providers/providerIdentity';
 import {
   BACKEND_ORDER,
+  BLOCKED_REASON_FALLBACK_KEY,
   appliableItems,
+  blockedReasonKey,
   groupMigrationCandidates,
   groupSelectable,
   isImportable,
@@ -117,39 +119,17 @@ const MIGRATION_ERROR_KEYS: Record<string, TranslationKey> = {
   migration_credentials_invalid: 'settings.models.migration.errors.credentialsInvalid',
   migration_reauthorization_required: 'settings.models.migration.errors.reauthorizationRequired',
 };
-const BLOCKED_NOTE_KEYS = new Set<string>([
-  'settings.models.migration.blocked.config',
-  'settings.models.migration.blocked.environment',
-  'settings.models.migration.blocked.credential',
-  'settings.models.migration.blocked.dynamic_shell',
-  'settings.models.migration.blocked.ambiguous_shell',
-  'settings.models.migration.blocked.unreadable',
-  'settings.models.migration.blocked.reference',
-  'settings.models.migration.blocked.helper',
-  'settings.models.migration.blocked.token',
-  'settings.models.migration.blocked.headers',
-  'settings.models.migration.blocked.transport',
-] satisfies TranslationKey[]);
-const BLOCKED_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
-/**
- * Why a row this entry point could otherwise have taken is nonetheless blocked.
- *
- * The server's own reasons all say the credential cannot be imported at all, which
- * is untrue of this one: it is importable, just not from here. Unreachable in
- * Settings, whose scope takes over everything the scan proposes.
- */
-const OUT_OF_SCOPE_KEY = 'onboarding.import.outOfScope' satisfies TranslationKey;
-
 function blockedMessages(
   t: TFunction,
   rows: MigrationItem[],
 ): { key: string; source: string; message: string }[] {
   const messages = new Map<string, { key: string; source: string; message: string }>();
   for (const item of rows) {
-    const outOfScope = isImportable(item);
-    const noteKey = item.notes_key && BLOCKED_NOTE_KEYS.has(item.notes_key) ? item.notes_key : undefined;
-    const reason = outOfScope ? OUT_OF_SCOPE_KEY : item.notes_key ?? BLOCKED_FALLBACK_KEY;
-    const message = outOfScope ? t(OUT_OF_SCOPE_KEY) : serverText(t, noteKey, BLOCKED_FALLBACK_KEY) ?? '';
+    // The dedup identity stays the key the SERVER sent: two rows on one file with
+    // two unrecognised notes are two answers, even though both read as the generic
+    // line. What each of them says is the shared rule's business.
+    const reason = isImportable(item) ? 'onboarding.import.outOfScope' : item.notes_key ?? BLOCKED_REASON_FALLBACK_KEY;
+    const message = serverText(t, blockedReasonKey(item), BLOCKED_REASON_FALLBACK_KEY) ?? '';
     const paths = sourcePaths(item);
     // Older scans cannot identify a file. Keep their backend-level locator,
     // with each distinct reason, without duplicating an account or key title.
@@ -266,7 +246,29 @@ export const MigrationDialog: React.FC<{
    *  because its screen already holds both (C2). */
   value?: MigrationSelection;
   onChange?: (next: MigrationSelection) => void;
-}> = ({ open, onClose, onApplied, eligible, takeable, scope = 'settings', value, onChange }) => {
+  /**
+   * Whether the host still admits the write this dialog would send.
+   *
+   * Defaults to true, which is Settings: a host that never withdraws permission never
+   * passes it. Setup does withdraw it — the engine it would migrate into can stop, or
+   * the read that said it was serving can fail, while this is open — and then the
+   * take-over is what has to refuse. Refusing is all it does: the scan, the selection
+   * and what already landed stay on screen to be read and cancelled, because closing
+   * the dialog is not the same answer as declining to write and would take the report
+   * with it. A batch already sent keeps its own outcome.
+   */
+  writable?: boolean;
+}> = ({
+  open,
+  onClose,
+  onApplied,
+  eligible,
+  takeable,
+  scope = 'settings',
+  value,
+  onChange,
+  writable = true,
+}) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const copy = SCOPE_COPY[scope];
@@ -363,7 +365,11 @@ export const MigrationDialog: React.FC<{
     .reduce((total, group) => total + group.importRows.length, 0);
 
   const apply = async () => {
-    if (applying || selectedCount === 0) return;
+    // Read here, not captured at mount: permission is whatever it is at the moment the
+    // batch would be sent. The disabled button says the same thing, and this is what
+    // makes it true for a press the button did not gate — a keyboard activation that
+    // raced the render, or a caller invoking the confirm path some other way.
+    if (!writable || applying || selectedCount === 0) return;
     setApplying(true);
     if (scope === 'setup') setPhase({ kind: 'applying', count: selectedCount });
     try {
@@ -478,7 +484,7 @@ export const MigrationDialog: React.FC<{
             <Button variant="outline" size="sm" className="h-10 sm:h-9" onClick={onClose} disabled={applying}>
               {t(copy.cancel)}
             </Button>
-            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void apply()} disabled={selectedCount === 0 || applying}>
+            <Button variant="brand" size="sm" className="h-10 sm:h-9" onClick={() => void apply()} disabled={!writable || selectedCount === 0 || applying}>
               {applying ? <Loader2 className="size-4 animate-spin" /> : <ArrowDownToLine className="size-4" />}
               {t(applying ? copy.confirming : copy.confirm)}
             </Button>

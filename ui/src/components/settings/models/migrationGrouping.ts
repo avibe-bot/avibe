@@ -6,6 +6,7 @@
 // A group is the unit of consent, not a row: shared persisted assignments link
 // backends into one custody boundary, and a single non-importable row inside a
 // linked group blocks the whole group.
+import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationItem, MigrationScan } from './types';
 
 /**
@@ -118,6 +119,59 @@ export function groupMigrationCandidates(
 /** Whether a group can be consented to at all. */
 export const groupSelectable = (group: MigrationGroup): boolean =>
   !group.blocked && group.importRows.length > 0;
+
+/**
+ * The rows a scope may actually take over, group by group.
+ *
+ * The same question `groupSelectable` answers for the dialog, asked without
+ * rendering one: a surface that counts candidates by filtering rows would count a
+ * key whose group is blocked and then open a review with nothing to press. Offer
+ * and batch have to come from one rule, and this is it.
+ */
+export const takeableImportRows = (
+  items: MigrationItem[],
+  eligible: (item: MigrationItem) => boolean,
+  takeable: (item: MigrationItem) => boolean = () => true,
+): MigrationItem[] =>
+  groupMigrationCandidates(items, eligible, takeable)
+    .filter(groupSelectable)
+    .flatMap((group) => group.importRows);
+
+const BLOCKED_NOTE_KEYS = new Set<string>([
+  'settings.models.migration.blocked.config',
+  'settings.models.migration.blocked.environment',
+  'settings.models.migration.blocked.credential',
+  'settings.models.migration.blocked.dynamic_shell',
+  'settings.models.migration.blocked.ambiguous_shell',
+  'settings.models.migration.blocked.unreadable',
+  'settings.models.migration.blocked.reference',
+  'settings.models.migration.blocked.helper',
+  'settings.models.migration.blocked.token',
+  'settings.models.migration.blocked.headers',
+  'settings.models.migration.blocked.transport',
+] satisfies TranslationKey[]);
+
+export const BLOCKED_REASON_FALLBACK_KEY = 'settings.models.migration.blocked.fallback' satisfies TranslationKey;
+
+/**
+ * Why a row this entry point could otherwise have taken is nonetheless blocked.
+ *
+ * The server's own reasons all say the credential cannot be imported at all, which
+ * is untrue of a row that is importable and merely out of this scope's reach —
+ * unreachable in Settings, whose scope takes over everything the scan proposes.
+ *
+ * `notes_key` is an open vocabulary, so a key this app does not ship copy for
+ * resolves to the generic line rather than to its own machine name. Which copy
+ * explains a blocked row lives with the rule that decides a row is blocked, so the
+ * dialog that lists the group and any surface that has to explain one row of it
+ * cannot answer the same question two ways.
+ */
+export const blockedReasonKey = (item: MigrationItem): TranslationKey => {
+  if (isImportable(item)) return 'onboarding.import.outOfScope';
+  return item.notes_key && BLOCKED_NOTE_KEYS.has(item.notes_key)
+    ? (item.notes_key as TranslationKey)
+    : BLOCKED_REASON_FALLBACK_KEY;
+};
 
 /**
  * The rows a selection submits: every importable row of every selected backend.

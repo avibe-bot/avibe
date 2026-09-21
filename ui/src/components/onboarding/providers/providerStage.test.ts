@@ -14,11 +14,13 @@ import { readyRegion, loadingRegion, degradedRegion, unreadRegion } from '@/comp
 import type { AgentSupply, RuntimeDependency, RuntimeHealth } from '@/components/settings/models/types';
 
 import {
-  ACTION_LABEL,
+  COUNTED_LABEL,
+  PLAIN_LABEL,
   PROVIDER_SLOT_COUNT,
   addedThroughMoreCount,
   adoptionBackend,
   defaultSelection,
+  gatewayEvidenceSettled,
   gatewayIntent,
   offeredImportKeys,
   pendingImportRows,
@@ -102,9 +104,11 @@ describe('providerSlots', () => {
     expect(slots.map((slot) => slot.vendor)).toEqual(['openai', 'anthropic']);
   });
 
-  it('keeps a detected candidate out of the stage when its consent group is blocked', () => {
-    // A backend whose linked rows include something that cannot be imported is
-    // reviewed in Settings, not offered a one-click card here.
+  it('keeps a detected candidate on the stage when its consent group is blocked, and says why', () => {
+    // A backend whose linked rows include something this entry cannot import is
+    // reviewed in Settings. What it is not is invisible: the key is on the machine,
+    // and replacing it with an empty 「add Anthropic」 invitation is how a person
+    // adds a second copy of the key they already have.
     const slots = providerSlots({
       sources: [],
       scan: scanOf(
@@ -113,10 +117,15 @@ describe('providerSlots', () => {
       ),
     });
 
-    expect(slots.map((slot) => slot.kind)).toEqual(['empty', 'empty']);
+    expect(slots.map((slot) => [slot.vendor, slot.kind])).toEqual([['anthropic', 'detected'], ['openai', 'empty']]);
+    // Found, with a reason, and no permission: nothing in the card's `backends` is a
+    // backend anything here may take over. The reason is the migration feature's own
+    // note for that row — a server note nobody recognises still reads as a sentence.
+    expect(slots[0].reasons).toEqual(['settings.models.migration.blocked.fallback']);
+    expect(slots[0].backends).toEqual([]);
   });
 
-  it('keeps a candidate out when its group also holds an importable subscription', () => {
+  it('keeps the card and names setup’s own scope when the group holds an importable subscription', () => {
     // The harder half of the same rule, and the one that reads as working. This
     // OAuth store is importable — Settings would take it over — so nothing on the
     // server declines it. What declines it is setup's own scope: its copy names API
@@ -130,7 +139,54 @@ describe('providerSlots', () => {
       ),
     });
 
-    expect(slots.map((slot) => slot.kind)).toEqual(['empty', 'empty']);
+    expect(slots.map((slot) => [slot.vendor, slot.kind])).toEqual([['anthropic', 'detected'], ['openai', 'empty']]);
+    expect(slots[0].reasons).toEqual(['onboarding.import.outOfScope']);
+    expect(slots[0].backends).toEqual([]);
+  });
+
+  it('keeps a blocked-only scan on the stage rather than falling back to the shortlist', () => {
+    // Nothing here is takeable from setup, so the actionable count is zero. The stage
+    // is still what the machine holds: an empty shortlist would say nothing was found.
+    const scan = scanOf(
+      row({ id: 'mig_a', backend: 'claude', vendor: 'anthropic' }),
+      row({ id: 'mig_b', backend: 'claude', vendor: 'anthropic', kind: 'oauth_native' }),
+      row({ id: 'mig_c', backend: 'opencode', kind: 'opencode_provider', vendor: 'zhipuai' }),
+      row({ id: 'mig_d', backend: 'opencode', kind: 'oauth_native', proposed_action: 'keep_native', vendor: undefined }),
+    );
+    const slots = providerSlots({ sources: [], scan });
+
+    expect(slots.map((slot) => [slot.vendor, slot.kind])).toEqual([
+      ['anthropic', 'detected'],
+      ['zhipuai', 'detected'],
+    ]);
+    expect(slots.every((slot) => slot.reasons.length > 0 && slot.backends.length === 0)).toBe(true);
+
+    // Visible, and contributing nothing: no consent by default, none obtainable by
+    // pressing, no rows to submit, and nothing for the capsule to advertise.
+    expect(defaultSelection(scan)).toEqual([]);
+    expect(slots.some((slot) => slotSelected(slot, ['claude', 'opencode']))).toBe(false);
+    expect(toggleSlotSelection({ scan, selectedBackends: [] }, slots[0])).toEqual([]);
+    expect(pendingImportRows({ scan, selectedBackends: ['claude', 'opencode'] })).toEqual([]);
+    expect(offeredImportKeys({ scan, selectedBackends: [] })).toEqual([]);
+  });
+
+  it('does not lend one vendor’s takeable group the reason of its blocked one', () => {
+    // The same brand's key sits in two backends: one this entry may take over whole,
+    // one it may not. The card is the takeable one — pressing it consents to the
+    // group it may — and the blocked group keeps its reason in the review it belongs
+    // to. A card saying 「not from here」 that was pressable anyway contradicts itself.
+    const slots = providerSlots({
+      sources: [],
+      scan: scanOf(
+        row({ id: 'mig_a', backend: 'codex', vendor: 'openai' }),
+        row({ id: 'mig_b', backend: 'opencode', kind: 'opencode_provider', vendor: 'openai' }),
+        row({ id: 'mig_c', backend: 'opencode', kind: 'oauth_native', proposed_action: 'keep_native' }),
+      ),
+    });
+
+    expect(slots[0]).toMatchObject({ vendor: 'openai', kind: 'detected', reasons: [] });
+    // Consent covers the backend that offered it, and not the one that did not.
+    expect(slots[0].backends).toEqual(['codex']);
   });
 
   it('carries the masked credential and every consenting backend on a detected card', () => {
@@ -152,7 +208,7 @@ describe('providerSlots', () => {
     // that state; a card that did not would report it as a working provider.
     const slots = providerSlots({
       sources: [
-        source({ id: 'src_1', vendor: 'openai', state: { status: 'standby' }, verification_pending: true }),
+        source({ id: 'src_1', vendor: 'openai', state: { status: 'standby' }, verification_pending: 'vp_fixture' }),
         source({ id: 'src_2', vendor: 'anthropic' }),
       ],
       scan: null,
@@ -176,14 +232,31 @@ describe('providerSlots', () => {
     ]);
   });
 
-  it('leaves a row the server did not name to the import dialog', () => {
-    // No vendor means no brand slot. The row still migrates — it just has no card.
+  it('names a credential the server did not name by its mask, never by a brand', () => {
+    // No vendor and no display name: an older server, or a key in a file nothing
+    // claims. It is still a key on this machine, so it keeps its card — named by
+    // what is known about it. Naming it after the backend that held the file would
+    // put 「OpenAI」 on a key that may be anything, and a brand mark would do the
+    // same silently, so the card falls back to the key it is.
     const slots = providerSlots({
       sources: [],
-      scan: scanOf(row({ id: 'mig_1', vendor: undefined })),
+      scan: scanOf(row({
+        id: 'mig_1',
+        vendor: undefined,
+        display_name: undefined,
+        masked_detail: 'sk-…abcd · Codex configuration',
+        masked_credential: undefined,
+      })),
     });
 
-    expect(slots.every((slot) => slot.kind === 'empty')).toBe(true);
+    expect(slots.map((slot) => slot.kind)).toEqual(['detected', 'empty']);
+    expect(slots[0].label).toBe('sk-…abcd · Codex configuration');
+    // Its own identity, so a second unnamed row is a second card rather than a
+    // collision, and no brand mark: `brand` is what the glyph is filed under.
+    expect(slots[0]).toMatchObject({ vendor: 'mig_1', brand: null, mask: null });
+    // And takeable: nothing about it being unnamed blocks the group it belongs to.
+    expect(slots[0].backends).toEqual(['codex']);
+    expect(slots[0].reasons).toEqual([]);
   });
 });
 
@@ -259,7 +332,7 @@ describe('pendingImportRows', () => {
     const rows = pendingImportRows({
       scan: scanOf(
         row({ id: 'mig_1', backend: 'codex' }),
-        row({ id: 'mig_2', backend: 'codex', proposed_action: 'keep' }),
+        row({ id: 'mig_2', backend: 'codex', proposed_action: 'keep_native' }),
       ),
       selectedBackends: ['codex'],
     });
@@ -516,7 +589,7 @@ describe('reconcileSelection', () => {
 const supply = (over: Partial<AgentSupply> & { backend: AgentSupply['backend'] }): AgentSupply => ({
   cli_present: true,
   mode: 'direct',
-  menu_kind: 'native',
+  menu_kind: 'fixed',
   ...over,
 });
 
@@ -653,6 +726,49 @@ describe('gatewayIntent', () => {
       gatewayEnabled: null,
       runtimeRead: readyRegion(runtime('ok')),
     })).toEqual({ kind: 'running' });
+  });
+});
+
+describe('gatewayEvidenceSettled', () => {
+  const enabled = { capability: 'enabled', gatewayEnabled: true } as const;
+
+  it.each([
+    ['a read in flight', loadingRegion<RuntimeDependency>()],
+    ['a re-read over the last value', degradedRegion(runtime('not_started'), 'refreshing', false)],
+  ] as const)('is not answered by %s', (_label, runtimeRead) => {
+    // The states the shell hands down on its way to an answer. `gatewayIntent` folds
+    // all of them to `waiting`, which is the right thing to draw and the wrong thing
+    // to spend a pending request on.
+    expect(gatewayEvidenceSettled({ ...enabled, runtimeRead })).toBe(false);
+  });
+
+  it.each([
+    ['capability is still being read', { capability: 'pending', gatewayEnabled: true }],
+    ['the configuration has not been read', { capability: 'enabled', gatewayEnabled: null }],
+  ] as const)('is not answered while %s', (_label, gate) => {
+    expect(gatewayEvidenceSettled({ ...gate, runtimeRead: readyRegion(runtime('not_started')) }))
+      .toBe(false);
+  });
+
+  it.each([
+    ['a read that landed', readyRegion(runtime('not_started'))],
+    ['a first read that failed', unreadRegion<RuntimeDependency>()],
+    ['a later read that failed', degradedRegion(runtime('ok'), 'read_failed', true)],
+    ['a failure nothing can ask again about', unreadRegion<RuntimeDependency>(false)],
+  ] as const)('is answered by %s', (_label, runtimeRead) => {
+    // Including the failures: 「不知道」 is an answer, and terminal until someone asks
+    // again. A mutation left pending on one would fire on an unrelated later read.
+    expect(gatewayEvidenceSettled({ ...enabled, runtimeRead })).toBe(true);
+  });
+
+  it.each([
+    ['capability says so', { capability: 'disabled', gatewayEnabled: true }],
+    ['the configuration says so', { capability: 'enabled', gatewayEnabled: false }],
+  ] as const)('is answered by a gateway that is off, whatever the read holds, when %s', (_label, gate) => {
+    // No runtime read overrides this, so there is nothing left to wait for: the
+    // request is over, refused.
+    expect(gatewayEvidenceSettled({ ...gate, runtimeRead: loadingRegion<RuntimeDependency>() }))
+      .toBe(true);
   });
 });
 
@@ -807,14 +923,14 @@ describe('providerAction', () => {
       importFailed: false,
       supply: { kind: 'read', hasSource },
       gatewayBusy: false,
-      gatewayRunning: true,
+      hubAdmitted: true,
       verifying: false,
       ...rest,
     });
   };
 
   it('offers to add when there is nothing yet', () => {
-    expect(state()).toEqual({ kind: 'add', count: 0 });
+    expect(state()).toEqual({ kind: 'add', count: 0, blocked: false });
   });
 
   it('offers to continue once a source exists', () => {
@@ -825,23 +941,32 @@ describe('providerAction', () => {
     // The next screen picks a model per assistant out of what the Hub supplies, so
     // arriving there with a stopped engine is arriving at an empty screen. Changing
     // the label instead would move that explanation off the card it belongs to.
-    expect(state({ hasSource: true, gatewayRunning: false }))
+    expect(state({ hasSource: true, hubAdmitted: false }))
       .toEqual({ kind: 'continue', count: 0, blocked: true });
-    expect(providerSetupAction(state({ hasSource: true, gatewayRunning: false })))
+    expect(providerSetupAction(state({ hasSource: true, hubAdmitted: false })))
       .toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: true, busy: false });
   });
 
-  it('does not block the states that are not going to the next screen', () => {
-    expect(state({ gatewayRunning: false })).toEqual({ kind: 'add', count: 0 });
-    expect(state({ gatewayRunning: false, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
+  it('keeps naming the write and refuses it while the engine is not serving', () => {
+    // Both of these write to the Hub — one saves a source, the other hands a batch to
+    // the take-over — and a stopped, failed, unsupported or unreadable engine cannot
+    // take either. Offering the press anyway is a control that reaches nothing; hiding
+    // it would take away the only name for what the person came here to do.
+    expect(state({ hubAdmitted: false })).toEqual({ kind: 'add', count: 0, blocked: true });
+    expect(state({ hubAdmitted: false, pendingCount: 2 }))
+      .toEqual({ kind: 'import', count: 2, blocked: true });
+    expect(providerSetupAction(state({ hubAdmitted: false })))
+      .toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: true, busy: false });
   });
 
   it('puts a pending take-over ahead of continuing, and carries its count', () => {
-    expect(state({ hasSource: true, pendingCount: 3 })).toEqual({ kind: 'import', count: 3 });
+    expect(state({ hasSource: true, pendingCount: 3 }))
+      .toEqual({ kind: 'import', count: 3, blocked: false });
   });
 
   it('changes what it offers after a failed batch without losing the count', () => {
-    expect(state({ pendingCount: 2, importFailed: true })).toEqual({ kind: 'retryImport', count: 2 });
+    expect(state({ pendingCount: 2, importFailed: true }))
+      .toEqual({ kind: 'retryImport', count: 2, blocked: false });
   });
 
   it('reports the engine coming up ahead of everything else', () => {
@@ -871,13 +996,19 @@ describe('providerAction', () => {
   it('still takes over a key a failed inventory read knows nothing about', () => {
     // The scan answered even though the source list did not, and taking over what
     // it found does not depend on knowing what else is already there.
-    expect(state({ supply: { kind: 'unreadable' }, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
-    expect(state({ supply: { kind: 'reading' }, pendingCount: 2 })).toEqual({ kind: 'import', count: 2 });
+    expect(state({ supply: { kind: 'unreadable' }, pendingCount: 2 }))
+      .toEqual({ kind: 'import', count: 2, blocked: false });
+    expect(state({ supply: { kind: 'reading' }, pendingCount: 2 }))
+      .toEqual({ kind: 'import', count: 2, blocked: false });
   });
 });
 
 describe('providerSetupAction', () => {
-  it('sends the count only when there is one, so a plural key never renders a zero', () => {
+  // The count travels with the label that needs it and with nothing else: a family
+  // does not resolve without one, and a plain leaf has nothing to interpolate. The
+  // only states carrying a count are the two `providerAction` builds from a positive
+  // pending count, so this is the same pairing C2's type requires.
+  it('carries the count with a counted label and nothing with a plain one', () => {
     expect(providerSetupAction({ kind: 'import', count: 2 })).toEqual({
       labelKey: 'onboarding.providers.actionImport',
       labelArgs: { count: 2 },
@@ -898,24 +1029,30 @@ describe('providerSetupAction', () => {
     expect(providerSetupAction({ kind: 'add', count: 0 }).icon).toBe('none');
   });
 
-  // `labelKey` is handed to the shell through an assertion, because C1 ships the two
-  // counted labels as plural families and C2's type admits only count-free leaves.
-  // This is that assertion's evidence: the thing the type was protecting was that a
-  // screen cannot name a string which has not shipped, and here it is, checked
-  // against both bundles rather than promised. A plural family counts as shipped
-  // when `_other` is there — that is the form `t` reaches for at every count in the
-  // two locales Avibe ships.
-  it('names only labels that have shipped, in both locales', () => {
-    const resolves = (bundle: unknown, key: string): boolean => typeof key
+  // Which table a label sits in is what decides whether the count travels with it,
+  // and the compiler cannot check that in the e2e project, where this module is
+  // compiled without the bundle augmentation. So both halves answer to the bundles
+  // themselves: a counted label must be a complete family and must NOT resolve on
+  // its own (a plain leaf given a count is a different string than the one C1
+  // approved), and a plain label must resolve exactly as it stands.
+  it('names only labels that have shipped, in the form its table claims, in both locales', () => {
+    const leaf = (bundle: unknown, key: string): unknown => key
       .split('.')
       .reduce<unknown>(
         (node, part) => (node && typeof node === 'object' ? (node as Record<string, unknown>)[part] : undefined),
         bundle,
-      ) === 'string';
+      );
+    const resolves = (bundle: unknown, key: string): boolean => typeof leaf(bundle, key) === 'string';
 
-    for (const key of Object.values(ACTION_LABEL)) {
-      for (const [locale, bundle] of [['en', en], ['zh', zh]] as const) {
-        expect(resolves(bundle, key) || resolves(bundle, `${key}_other`), `${key} in ${locale}`).toBe(true);
+    for (const [locale, bundle] of [['en', en], ['zh', zh]] as const) {
+      for (const key of Object.values(COUNTED_LABEL)) {
+        for (const suffix of ['_one', '_other']) {
+          expect(resolves(bundle, `${key}${suffix}`), `${key}${suffix} in ${locale}`).toBe(true);
+        }
+        expect(leaf(bundle, key), `${key} in ${locale} is a family, not a leaf`).toBeUndefined();
+      }
+      for (const key of Object.values(PLAIN_LABEL)) {
+        expect(resolves(bundle, key), `${key} in ${locale}`).toBe(true);
       }
     }
   });

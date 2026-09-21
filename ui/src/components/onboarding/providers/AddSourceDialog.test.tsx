@@ -46,12 +46,22 @@ import type { ProviderSlot } from './providerStage';
 
 const slot = (vendor: string, over: Partial<ProviderSlot> = {}): ProviderSlot => ({
   vendor,
+  brand: vendor,
   label: vendor === 'openai' ? 'OpenAI' : vendor === 'anthropic' ? 'Anthropic' : vendor,
   kind: 'detected',
   mask: 'sk-…9f21',
+  supply: null,
+  pending: false,
+  // Takeable from here, and no reason not to be: the blocked shape is the
+  // opposite pair — no backend may take it, and it says why.
   backends: ['codex'],
+  reasons: [],
   ...over,
 });
+
+/** Found, and not this screen's to take: the rows the stage keeps visible anyway. */
+const blockedSlot = (vendor: string, over: Partial<ProviderSlot> = {}): ProviderSlot =>
+  slot(vendor, { backends: [], reasons: ['onboarding.import.outOfScope'], ...over });
 
 const source = (over: Partial<Source> & { id: string; vendor: string }): Source => ({
   last_discovered_at: null,
@@ -79,6 +89,7 @@ type Options = {
   pendingCount?: number;
   sources?: Source[];
   selected?: (slot: ProviderSlot) => boolean;
+  writable?: boolean;
 };
 
 const renderDialog = ({
@@ -88,6 +99,7 @@ const renderDialog = ({
   pendingCount = 0,
   sources = [],
   selected = () => false,
+  writable = true,
 }: Options = {}) => {
   const view = render(
     <I18nextProvider i18n={i18n}>
@@ -96,6 +108,7 @@ const renderDialog = ({
         vendor={vendor}
         detected={detected}
         pendingCount={pendingCount}
+        writable={writable}
         sources={sources}
         sourceReads={createSourceCollectionReadAuthority()}
         isSelected={selected}
@@ -113,6 +126,7 @@ const renderDialog = ({
         vendor={next.vendor ?? vendor}
         detected={next.detected ?? detected}
         pendingCount={next.pendingCount ?? pendingCount}
+        writable={next.writable ?? writable}
         sources={next.sources ?? sources}
         sourceReads={createSourceCollectionReadAuthority()}
         isSelected={next.selected ?? selected}
@@ -352,6 +366,44 @@ describe('AddSourceDialog — detected', () => {
     expect(onToggleDetected).toHaveBeenCalledTimes(1);
     expect(onToggleDetected.mock.calls[0][0]).toMatchObject({ vendor: 'gemini' });
   });
+
+  it('keeps a credential nobody may take here, and says why instead of offering it', async () => {
+    renderDialog({ detected: [blockedSlot('anthropic'), slot('openai')], selected: () => true });
+    const user = userEvent.setup();
+    const [blocked, open] = [...document.querySelectorAll<HTMLButtonElement>('.setup-add-row')];
+
+    // Still on the list, with the migration feature's own sentence about it. The
+    // alternative — dropping it — is how a person ends up adding a second copy of a
+    // key that is already on the machine.
+    expect(blocked.dataset.blocked).toBe('true');
+    expect(within(blocked).getByText(/can be migrated, but not from here/)).toBeTruthy();
+    expect(blocked.disabled).toBe(true);
+    // Not a toggle that happens to be off: there is no consent to give here, and
+    // `aria-pressed="false"` beside a selected sibling would say there is.
+    expect(blocked.getAttribute('aria-pressed')).toBeNull();
+    expect(open.getAttribute('aria-pressed')).toBe('true');
+
+    await user.click(blocked);
+    expect(onToggleDetected).not.toHaveBeenCalled();
+  });
+
+  it('opens on something that can be done when every detection is blocked', async () => {
+    renderDialog({ detected: [blockedSlot('anthropic')] });
+    const user = userEvent.setup();
+
+    // The method still exists — it is where the explanation lives — but landing on
+    // a pane whose every row is disabled answers nothing for someone who came here
+    // to add a provider.
+    expect(methodNames()).toEqual(['Detected', 'Subscription', 'API Key']);
+    expect(activeMethod()).toBe('subscription');
+
+    await chooseMethod(user, 'Detected');
+    expect(document.querySelectorAll('.setup-add-row')).toHaveLength(1);
+    // Nothing to hand to the take-over, so nothing is offered.
+    expect(primary().disabled).toBe(true);
+    await user.click(primary());
+    expect(onReviewDetected).not.toHaveBeenCalled();
+  });
 });
 
 describe('AddSourceDialog — the one write it owns', () => {
@@ -568,6 +620,105 @@ describe('AddSourceDialog — the one write it owns', () => {
     await user.type(within(body()).getByLabelText('API key'), 'sk-live-1{Enter}');
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  });
+
+  it('refuses every method\'s offer once the screen stops admitting a write', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockResolvedValue(created(source({ id: 'src_new', vendor: 'custom' })));
+    const { rerender } = renderDialog({ detected: [slot('openai')], pendingCount: 1 });
+    const user = userEvent.setup();
+    await chooseMethod(user, 'API Key');
+    await user.type(within(body()).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(body()).getByLabelText('API key'), 'sk-live-1');
+    expect(primary().disabled).toBe(false);
+
+    // The engine this write would go to stopped being one the screen can vouch for,
+    // while the form was being filled. The frame stays — what is in it is the
+    // person's, and the read may come back — and the offer is what is withdrawn.
+    rerender({ writable: false });
+    expect(frame()).toBeTruthy();
+    expect(primary().disabled).toBe(true);
+    await user.type(within(body()).getByLabelText('API key'), '{Enter}');
+    expect(create).not.toHaveBeenCalled();
+
+    // Every method's offer is a write: a key saved, a sign-in started, a batch handed
+    // to the take-over.
+    await chooseMethod(user, 'Subscription');
+    expect(primary().disabled).toBe(true);
+    await chooseMethod(user, 'Detected');
+    expect(primary().disabled).toBe(true);
+    expect(onReviewDetected).not.toHaveBeenCalled();
+  });
+
+  it('does not resend a write whose permission was withdrawn while it read back', async () => {
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('gateway_timeout', 'timeout', true, [], [], [], 504));
+    let answer!: (rows: Source[]) => void;
+    const list = vi.spyOn(modelsApi, 'listSources')
+      .mockImplementation(() => new Promise<Source[]>((resolve) => { answer = resolve; }));
+    const { rerender } = renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+    await waitFor(() => expect(screen.getByText(/Your entries are preserved/)).toBeTruthy());
+
+    // The retry reads the inventory back before deciding whether to send: an unsettled
+    // failure may have landed, and a blind second write is how a duplicate appears.
+    await user.click(primary());
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+
+    // Permission goes away INSIDE that read. The press that started it saw a screen
+    // that admitted a write; by the time the readback answers, that is a memory of a
+    // permission rather than one, and the POST is where the current answer counts.
+    rerender({ writable: false });
+    await act(async () => { answer([]); });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    // And nothing was thrown away in the refusing: the entries, the retry and the
+    // identity that write was sent under are all still here, so the outcome nobody
+    // knows yet is still reconcilable rather than abandoned.
+    expect((within(body()).getByLabelText('API key') as HTMLInputElement).value).toBe('sk-live-1');
+    expect(primary().textContent).toBe('Retry');
+    expect(onAdded).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    const nonce = create.mock.calls[0][0].client_nonce;
+    list.mockResolvedValue([{ ...source({ id: 'src_landed', vendor: 'custom' }), client_nonce: nonce }]);
+    rerender({ writable: true });
+    await user.click(primary());
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(onAdded.mock.calls[0][0]).toMatchObject({ source: { id: 'src_landed' } });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('delivers the source a readback found even once no further write is admitted', async () => {
+    const landed = source({ id: 'src_landed', vendor: 'custom' });
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValue(new ApiCallError('gateway_timeout', 'timeout', true, [], [], [], 504));
+    let answer!: (rows: Source[]) => void;
+    vi.spyOn(modelsApi, 'listSources')
+      .mockImplementation(() => new Promise<Source[]>((resolve) => { answer = resolve; }));
+    const { rerender } = renderDialog();
+    const user = userEvent.setup();
+    await fill(user);
+
+    await user.click(primary());
+    await waitFor(() => expect(screen.getByText(/Your entries are preserved/)).toBeTruthy());
+    await user.click(primary());
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(1));
+
+    // Same withdrawal, and this time the read says the write had landed. A source that
+    // exists is a receipt: permission governs the next write, never the delivery of one
+    // that already happened. Withholding it would hide a credential the person owns.
+    rerender({ writable: false });
+    const nonce = create.mock.calls[0][0].client_nonce;
+    await act(async () => { answer([{ ...landed, client_nonce: nonce }]); });
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledTimes(1));
+    expect(onAdded.mock.calls[0][0]).toMatchObject({ source: { id: 'src_landed' } });
+    expect(create).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it('locks the draft an unknown outcome is still attached to', async () => {

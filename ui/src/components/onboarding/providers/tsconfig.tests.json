@@ -1,0 +1,16 @@
+{
+  "extends": "../../../../tsconfig.app.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "tsBuildInfoFile": "../../../../node_modules/.tmp/setup-providers-tests.tsbuildinfo"
+  },
+  "include": [
+    "./**/*.ts",
+    "./**/*.tsx",
+    "../ImportKeysNotice.test.tsx",
+    "../setupAction.types.test.ts",
+    "../../../i18n/i18next.d.ts"
+  ],
+  "exclude": []
+}

@@ -10,19 +10,19 @@
 // `google` and Qwen `alibaba-cn`; a source calls them what it was created with.
 // Resolving both through `providerIdentity` is what stops the same provider
 // occupying two slots.
-import type { ParseKeys } from 'i18next';
-
 import {
   appliableItems,
   BACKEND_ORDER,
+  blockedReasonKey,
   groupMigrationCandidates,
   groupSelectable,
   requiredBackends,
+  takeableImportRows,
   type MigrationGroup,
   type MigrationSelection,
 } from '@/components/settings/models/migrationGrouping';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
-import { foldRegionRead, type RegionRead } from '@/components/settings/models/regionRead';
+import { foldRegionRead, regionFailed, type RegionRead } from '@/components/settings/models/regionRead';
 import { installAndStartStep } from '@/components/settings/models/runtimeLifecycle';
 import type {
   AgentBackend,
@@ -87,8 +87,21 @@ export type ProviderSlotKind =
   | 'empty';
 
 export type ProviderSlot = {
-  /** Catalog vendor id — the stable identity for artwork, label and selection. */
+  /**
+   * The card's stable identity — for the slot it occupies, its React key and its
+   * `data-provider`. The catalog vendor id whenever there is one, and a detected
+   * row's own id when the server named no provider for it: that row is still one
+   * credential and still needs one slot of its own.
+   */
   vendor: string;
+  /**
+   * The catalog brand whose mark and name this card wears, `null` for a detected
+   * credential the server named no provider for. Distinct from `vendor` for exactly
+   * that case: an unnamed credential has an identity but no brand, and drawing one
+   * from its backend or its key prefix would be a guess — the same guess the import
+   * dialog refuses to make, where such a row is identified by its masked detail.
+   */
+  brand: string | null;
   label: string;
   kind: ProviderSlotKind;
   /**
@@ -123,8 +136,20 @@ export type ProviderSlot = {
    * One entry per consent group the card's credentials sit in — the migration
    * feature expands each to its linked group when the card is toggled, so this
    * stays the entry point rather than the closure.
+   *
+   * Only groups this entry point can actually take over. A card whose credential
+   * sits in a blocked group carries none, which is what makes it unselectable
+   * everywhere at once — and a brand holding one blocked group beside an unrelated
+   * selectable one carries only the selectable one, because consent to the second
+   * was never consent to the first.
    */
   backends: AgentBackend[];
+  /**
+   * Why this card's credentials cannot be taken over from here, empty when they
+   * can. The migration feature's own reasons, deduped, so the card and the review
+   * explain one blocked group with one sentence.
+   */
+  reasons: TranslationKey[];
 };
 
 /**
@@ -144,7 +169,17 @@ export type ProviderSlot = {
 const setupGroups = (items: MigrationItem[]): MigrationGroup[] =>
   groupMigrationCandidates(items, isImportableKey, isImportableKey);
 
+/**
+ * Detected cards in the order the stage should spend its two slots on them.
+ *
+ * Actionable before blocked, then the shortlist's own order. Both stay visible —
+ * whichever does not fit is in the add dialog's 已检测到 list — but the stage has
+ * two slots and a card that can be acted on has the better claim to one.
+ */
 const byPrimaryRank = (left: ProviderSlot, right: ProviderSlot): number => {
+  if (left.reasons.length !== right.reasons.length) {
+    return (left.reasons.length > 0 ? 1 : 0) - (right.reasons.length > 0 ? 1 : 0);
+  }
   const leftRank = setupPrimaryRank(left.vendor);
   const rightRank = setupPrimaryRank(right.vendor);
   if (leftRank === rightRank) return 0;
@@ -154,43 +189,67 @@ const byPrimaryRank = (left: ProviderSlot, right: ProviderSlot): number => {
 };
 
 /**
- * Providers a scan found that setup could take over.
+ * Every API key the scan found, and for each one whether setup may take it over.
  *
- * Only rows inside a group this entry point can actually consent to: a linked
- * group holding a subscription sign-in or a blocker is reviewed in Settings,
- * not offered a card here. A row whose provider the server did not name has no
- * brand slot to fill — it still appears in the import dialog, where the masked
- * detail identifies it.
+ * Discovery and permission are two projections of one scan, not two scans. A key
+ * inside a group this entry point cannot consent to — a linked subscription
+ * sign-in, a server blocker — is still a key that is on this machine, and a stage
+ * that dropped it would answer 「we found your Anthropic key」 with an empty invitation
+ * to add one. So every importable key gets a card; what a blocked group does not get
+ * is a backend to consent to, which is the one thing that decides selection,
+ * the batch and the counts.
+ *
+ * A row whose provider the server did not name keeps its own identity and is
+ * labelled by its masked detail, exactly as the import dialog labels it. Guessing a
+ * brand from the backend that happened to hold the key is the one thing neither
+ * surface does.
  */
 function detectedProviders(scan: MigrationScan | null): ProviderSlot[] {
   if (!scan) return [];
-  const byVendor = new Map<string, ProviderSlot>();
+  const byIdentity = new Map<string, ProviderSlot>();
   for (const group of setupGroups(scan.items)) {
-    if (!groupSelectable(group)) continue;
+    const selectable = groupSelectable(group);
+    const reasons = selectable ? [] : [...new Set(group.blockedRows.map(blockedReasonKey))];
     for (const row of group.importRows) {
       const named = row.vendor?.trim();
-      if (!named) continue;
-      const vendor = providerVendorId(named);
-      const existing = byVendor.get(vendor);
+      const brand = named ? providerVendorId(named) : null;
+      const identity = brand ?? row.id;
+      const existing = byIdentity.get(identity);
       if (existing) {
-        if (!existing.backends.includes(group.backend)) existing.backends.push(group.backend);
+        if (selectable && !existing.backends.includes(group.backend)) existing.backends.push(group.backend);
+        for (const reason of reasons) {
+          if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+        }
         continue;
       }
-      byVendor.set(vendor, {
-        vendor,
-        label: providerBrandLabel(named, row.display_name),
+      byIdentity.set(identity, {
+        vendor: identity,
+        brand,
+        label: named ? providerBrandLabel(named, row.display_name) : row.masked_detail.trim(),
         kind: 'detected',
         // `masked_credential` is the newer separate field; `masked_detail` is the one
         // every server has always sent. Falling back to it is what stops a row from an
-        // older server reading as a provider with nothing detected about it.
-        mask: row.masked_credential?.trim() || row.masked_detail?.trim() || null,
+        // older server reading as a provider with nothing detected about it. An unnamed
+        // row has no second line to fill: its masked detail is already its name, and
+        // saying the same string twice on one card describes nothing.
+        mask: named ? row.masked_credential?.trim() || row.masked_detail?.trim() || null : null,
         supply: null,
         pending: false,
-        backends: [group.backend],
+        backends: selectable ? [group.backend] : [],
+        // Copied, not shared: two rows of one blocked group are two cards, and a
+        // reason later pushed onto one of them is not a reason on the other.
+        reasons: [...reasons],
       });
     }
   }
-  return [...byVendor.values()].sort(byPrimaryRank);
+  // A reason is why nothing can be done, so it only belongs on a card where nothing
+  // can be. One vendor found in two backends — takeable in one, blocked in the other
+  // — is a takeable card: pressing it takes over the group it may, and the group it
+  // may not keeps its own reason in the review. A card that read 「not from here」 and
+  // was pressable anyway would contradict itself.
+  return [...byIdentity.values()]
+    .map((slot) => (slot.backends.length > 0 && slot.reasons.length > 0 ? { ...slot, reasons: [] } : slot))
+    .sort(byPrimaryRank);
 }
 
 /**
@@ -214,12 +273,14 @@ export function providerSlots(input: {
     seen.add(vendor);
     slots.push({
       vendor,
+      brand: vendor,
       label: providerBrandLabel(source.vendor, source.display_name),
       kind: 'connected',
       mask: source.masked_credential?.trim() || null,
       supply: { kind: source.kind, account: source.account_label?.trim() || null },
       pending: Boolean(source.verification_pending),
       backends: [],
+      reasons: [],
     });
   }
 
@@ -235,12 +296,14 @@ export function providerSlots(input: {
     seen.add(vendor);
     slots.push({
       vendor,
+      brand: vendor,
       label: providerBrandLabel(vendor),
       kind: 'empty',
       mask: null,
       supply: null,
       pending: false,
       backends: [],
+      reasons: [],
     });
   }
 
@@ -301,12 +364,13 @@ export function pendingImportRows(selection: MigrationSelection): MigrationItem[
  * selectable groups the cards and the dialog are built from — already only keys,
  * because that is setup's scope, and 「发现 N 个可导入的 API Key」 is what the
  * sentence says.
+ *
+ * The migration feature's own projection, because the standalone capsule in
+ * Settings' wizard has to count the same way and cannot reach into this screen to
+ * do it.
  */
 export function offeredImportKeys(selection: MigrationSelection): MigrationItem[] {
-  const items = selection.scan?.items ?? [];
-  return setupGroups(items)
-    .filter(groupSelectable)
-    .flatMap((group) => group.importRows);
+  return takeableImportRows(selection.scan?.items ?? [], isImportableKey, isImportableKey);
 }
 
 /**
@@ -526,6 +590,46 @@ export function gatewayIntent(input: {
     : { kind: 'unsupported' };
 }
 
+/**
+ * Whether the evidence above is an ANSWER, or still on its way to one.
+ *
+ * A retry is a request: it asks the shell to read the machine again, and the states
+ * that read passes through on the way back are not answers. `beginRegionRead`
+ * degrades the previous value to `refreshing`, and a configuration being re-read
+ * reports `pending`/`null` before it reports what it found. `gatewayIntent` folds
+ * every one of them to `waiting`, which is the right thing to DRAW and says nothing
+ * about whether the request has been served — so a request spent on the first of
+ * them is spent on the read's start and never sees its result.
+ *
+ * Three things are answers. A read that failed, which answers 「不知道」. A
+ * configuration that came back off, which no runtime read can override. And a read
+ * that landed.
+ *
+ * The failed read is asked FIRST, ahead of the configuration, because one load
+ * failure usually takes both: the shell comes back with no capability, no saved
+ * intent and an unread machine. That is a complete answer to the request — nothing
+ * more is coming unless someone asks again — and filing it under 「configuration
+ * unknown」 would leave the request pending on a read that is never arriving, to
+ * fire on some unrelated later one. It is still distinguishable from a read in
+ * flight: `beginRegionRead` maps a failure to `loading`, so a re-read over a
+ * failure is `loading` and the failure itself is not.
+ */
+export function gatewayEvidenceSettled(input: {
+  capability: SetupCapability;
+  gatewayEnabled: boolean | null;
+  runtimeRead: RegionRead<RuntimeDependency>;
+}): boolean {
+  if (regionFailed(input.runtimeRead)) return true;
+  if (input.capability === 'disabled' || input.gatewayEnabled === false) return true;
+  if (!setupNavigationReady(input.capability, input.gatewayEnabled)) return false;
+  return foldRegionRead(input.runtimeRead, {
+    loading: () => false,
+    ready: () => true,
+    unread: () => true,
+    degraded: (_stale, cause) => cause === 'read_failed',
+  });
+}
+
 export type ProviderActionKind =
   | 'import'
   | 'retryImport'
@@ -569,6 +673,14 @@ export type ProviderActionState = {
  * pending take-over is the shortest path to a working provider, and continuing
  * is only offered once something is really there to continue with.
  *
+ * Every state that would WRITE additionally needs the engine to be serving, and
+ * says so by staying visible and unpressable rather than by disappearing: adding a
+ * source and taking over a key both go to the Hub, and one that is stopped, failed,
+ * unsupported or simply not readable this second cannot take either. What went
+ * wrong is on the gateway card with the recovery next to it, which is the one place
+ * it can be acted on — so the footer keeps naming what the person came to do
+ * instead of offering a press that reaches nothing.
+ *
  * Continuing additionally needs the engine to be serving. C4 says as much —
  * `setupCandidateAllowed` requires `setupHubRunning` — and the reason is not
  * procedural: the next screen picks a model per assistant out of what the Hub
@@ -586,8 +698,11 @@ export function providerAction(input: {
   supply: SupplyState;
   /** The engine is installing or starting. */
   gatewayBusy: boolean;
-  /** The engine is up and serving — the authoritative read, not the attempt. */
-  gatewayRunning: boolean;
+  /** The flow is admitted to the Hub and the Hub is serving it: the configuration
+   *  prerequisite the next screen is gated on, plus the authoritative runtime read —
+   *  never this screen's own attempt, and never one without the other. Writing and
+   *  continuing both need exactly this, so both read the same field. */
+  hubAdmitted: boolean;
   /** A source was written and its connection is being read back. */
   verifying: boolean;
 }): ProviderActionState {
@@ -596,36 +711,43 @@ export function providerAction(input: {
   if (input.pendingCount > 0) {
     // Ahead of the inventory on purpose: a scan that arrived is an answer of its
     // own, and taking over a key it found does not depend on knowing what else is
-    // already there.
-    return { kind: input.importFailed ? 'retryImport' : 'import', count: input.pendingCount };
+    // already there. It does depend on the engine it would write to.
+    return {
+      kind: input.importFailed ? 'retryImport' : 'import',
+      count: input.pendingCount,
+      blocked: !input.hubAdmitted,
+    };
   }
   if (input.supply.kind === 'reading') return { kind: 'checking', count: 0 };
   if (input.supply.kind === 'unreadable') return { kind: 'retrySupply', count: 0 };
-  if (input.supply.hasSource) return { kind: 'continue', count: 0, blocked: !input.gatewayRunning };
-  return { kind: 'add', count: 0 };
+  if (input.supply.hasSource) return { kind: 'continue', count: 0, blocked: !input.hubAdmitted };
+  return { kind: 'add', count: 0, blocked: !input.hubAdmitted };
 }
 
-/** A plural family, named by the base `t` resolves it under. */
-type PluralBase<Key> = Key extends `${infer Base}_other` ? Base : never;
+/** Kinds `providerAction` only ever produces from a positive pending count. */
+type CountedActionKind = 'import' | 'retryImport';
 
 /**
- * The label per action state — and the one place C1 and C2 do not meet.
+ * The counted labels, named by the base `t(base, { count })` resolves them under.
  *
- * `TranslationKey` is text leaves that resolve *without* count (its own note says
- * so); a family shipped only as `_one`/`_other` is not one, even though
- * `t(base, { count })` resolves it. C1 ships both counted action labels as exactly
- * such families and C2 types `SetupAction.labelKey` as `TranslationKey` — so the
- * contract's copy cannot be named by the contract's type. Widening `labelKey` to
- * accept a plural base is the edit that removes the assertion below; it is
- * `setupFlow.ts`, so it is reported rather than made here.
+ * C1 ships both as `_one`/`_other` families, which `TranslationKey` deliberately
+ * cannot name — it is the leaves that resolve *without* count. C2's counted member
+ * is what names them, and it requires the count in the same claim, which is why
+ * these are a table of their own rather than a row in the one below.
  *
- * What the assertion gives up is checked back in `actionLabelResolves`: every key
- * in this table has to resolve in both shipped bundles, which is the guarantee
- * `TranslationKey` was providing and the only one that was ever at stake.
+ * Typed as the claim rather than as `SetupCountedLabelKey` on purpose: the e2e
+ * fidelity project compiles this module without the bundle augmentation, where the
+ * derived family type collapses to `never` and nothing could satisfy it. That two
+ * keys really are families is checked where the bundles are in scope —
+ * `setupAction.types.test.ts` for the type and `providerStage.test.ts` for both locales.
  */
-export const ACTION_LABEL = {
+export const COUNTED_LABEL = {
   import: 'onboarding.providers.actionImport',
   retryImport: 'onboarding.providers.actionRetryImport',
+} as const satisfies Record<CountedActionKind, SetupAction['labelKey']>;
+
+/** Everything else: a label that resolves on its own, with no count to carry. */
+export const PLAIN_LABEL = {
   continue: 'onboarding.providers.actionContinue',
   add: 'onboarding.providers.actionAdd',
   // The shared label, not a new one: the contract lets the active owner publish
@@ -633,7 +755,7 @@ export const ACTION_LABEL = {
   retrySupply: 'common.retry',
   connecting: 'onboarding.providers.actionConnecting',
   checking: 'onboarding.providers.actionChecking',
-} as const satisfies Record<ProviderActionKind, TranslationKey | PluralBase<ParseKeys>>;
+} as const satisfies Record<Exclude<ProviderActionKind, CountedActionKind>, TranslationKey>;
 
 const BUSY_ACTIONS = new Set<ProviderActionKind>(['connecting', 'checking']);
 
@@ -644,11 +766,15 @@ const STAYS_HERE = new Set<ProviderActionKind>(['add', 'retrySupply']);
 /** The C2 action the shell renders. The screen never draws the button itself. */
 export function providerSetupAction(state: ProviderActionState): SetupAction {
   const busy = BUSY_ACTIONS.has(state.kind);
-  return {
-    labelKey: ACTION_LABEL[state.kind] as TranslationKey,
-    ...(state.count > 0 ? { labelArgs: { count: state.count } } : {}),
+  const chrome: Pick<SetupAction, 'disabled' | 'busy' | 'icon'> = {
     disabled: busy || state.blocked === true,
     busy,
     icon: busy ? 'spinner' : STAYS_HERE.has(state.kind) ? 'none' : 'arrow-right',
   };
+  // The two counted kinds carry their count, and nothing else carries one: a family
+  // without a count does not resolve, and a plain key has nothing to interpolate.
+  // Narrowed rather than asserted, so the pairing is the compiler's to check.
+  return state.kind === 'import' || state.kind === 'retryImport'
+    ? { ...chrome, labelKey: COUNTED_LABEL[state.kind], labelArgs: { count: state.count } }
+    : { ...chrome, labelKey: PLAIN_LABEL[state.kind] };
 }

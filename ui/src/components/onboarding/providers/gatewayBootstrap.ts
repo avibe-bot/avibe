@@ -27,9 +27,10 @@ import type { BackendConnectionState } from '@/context/ApiContext';
  * Why bootstrap could not finish, in the terms the caller has to act in.
  *
  * `disabled` is not a failure: it is C2's prerequisite boundary, and the caller
- * shows the configuration path rather than a retry. The rest differ in whether
- * anything may be written again — `refused` is definitive and blocks, `unknown`
- * leaves a write outstanding and is settled by reading, `unread` never wrote at all.
+ * shows the configuration path rather than a retry. The rest differ in what is
+ * outstanding — `refused` is a definitive no and blocks, `unknown` leaves a write
+ * nobody can account for, `unread` means no write is outstanding and a read this
+ * flow depends on did not answer.
  */
 export type GatewayBootstrapReason = 'refused' | 'unknown' | 'unread' | 'disabled';
 
@@ -153,47 +154,35 @@ export async function bootstrapGateway(
   deps: GatewayBootstrapDeps,
   backend: AgentBackend,
 ): Promise<GatewayBootstrapResult> {
-  // 1. Seed. An empty patch, because `configMutationsToPayload` rejects an empty
-  //    mutation list before it ever reaches HTTP — the general validator stays as it
-  //    is, and this composition goes around it rather than through it.
-  let seeded: Response;
-  try {
-    seeded = await deps.fetch('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-  } catch {
-    // The request may or may not have reached the server. Unknown, not refused.
-    throw new GatewayBootstrapError('unknown', 'seed');
-  }
-  const seedBody = await parseJson(seeded);
-  if (!seeded.ok || hasError(seedBody)) {
-    // A server that says no is definitive; a server that broke is not.
-    const reason: GatewayBootstrapReason = seeded.status >= 500 ? 'unknown' : 'refused';
-    throw new GatewayBootstrapError(reason, 'seed', {
-      status: seeded.status,
-      detail: errorDetail(seedBody),
-    });
-  }
+  // 1. Seed, exactly once. A definitive refusal throws from inside it; anything else
+  //    leaves a write to account for, and accounting for a write is reading.
+  const outstanding = await seedConfig(deps);
 
   // 2. Read back, uncached and directly: this POST cleared no `ApiContext` cache and
   //    emitted no convergence event, so a cached read here would describe the world
-  //    before the write.
+  //    before the write. An acknowledged write and an unaccounted one take the same
+  //    read, because they ask the server the same question — what does the config say
+  //    now — and only the answer can tell them apart.
   let readback: Response;
   try {
     readback = await deps.fetch('/api/config', { cache: 'no-store' });
   } catch {
-    throw new GatewayBootstrapError('unread', 'readback');
+    // An outstanding write is the more specific answer, and it is why a retry here
+    // may reseed at all. Only a read that succeeds retires it.
+    throw outstanding ?? new GatewayBootstrapError('unread', 'readback');
   }
   const config = readback.ok ? readSetupConfig(await parseJson(readback)) : null;
   if (!config) {
-    throw new GatewayBootstrapError('unread', 'readback', { status: readback.status });
+    throw outstanding ?? new GatewayBootstrapError('unread', 'readback', { status: readback.status });
   }
 
   // 3. The prerequisite boundary. Stop here without touching the preference: a
   //    person who turned the gateway off in Settings did so deliberately, and setup
   //    silently turning it back on would be the worst possible answer.
+  //
+  //    This answers the attempt whatever became of the write. Reporting an unaccounted
+  //    seed instead would send someone to retry a write whose fate has stopped
+  //    mattering, when what they are owed is the configuration path.
   if (!config.capabilityEnabled || !config.savedIntentEnabled) {
     throw new GatewayBootstrapError('disabled', 'capability');
   }
@@ -201,7 +190,16 @@ export async function bootstrapGateway(
   // 4. Prove persistence. A valid GET cannot do it alone — the server answers with an
   //    in-memory default when no file exists, so the seed's outcome is still open
   //    until a handler that actually calls `load_config()` succeeds.
-  let connection = await readConnection(deps, backend);
+  //
+  //    Which is also what retires an unaccounted seed: the empty patch's only intended
+  //    effect was a config file the server can load, and a handler that just loaded one
+  //    is that effect, observed. Everything after this line answers for itself.
+  let connection: BackendConnectionState;
+  try {
+    connection = await readConnection(deps, backend);
+  } catch (error) {
+    throw outstanding ?? error;
+  }
 
   // 5. Start, but only a controller confirmed stopped. Draining, failed or unknown
   //    are somebody's existing recovery path; inferring a restart from them would
@@ -232,6 +230,49 @@ export async function bootstrapGateway(
   }
 
   return { config, runtime };
+}
+
+/**
+ * Send the empty patch once, and say what is still unaccounted for afterwards.
+ *
+ * An empty patch, because `configMutationsToPayload` rejects an empty mutation list
+ * before it ever reaches HTTP — the general validator stays as it is, and this
+ * composition goes around it rather than through it.
+ *
+ * Returns the error that stays outstanding, or `null` when the server acknowledged
+ * the write in terms this flow can read. Throws only for a definitive refusal, which
+ * no later read may clear: a server that says no has answered, and reading the config
+ * afterwards describes what exists, not what it declined to do.
+ */
+async function seedConfig(deps: GatewayBootstrapDeps): Promise<GatewayBootstrapError | null> {
+  let seeded: Response;
+  try {
+    seeded = await deps.fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    // The request may never have reached the server, or may have committed and lost
+    // its reply on the way back. Unknown, not refused — and never sent again.
+    return new GatewayBootstrapError('unknown', 'seed');
+  }
+  const body = await parseJson(seeded);
+  if (!seeded.ok || hasError(body)) {
+    const evidence = { status: seeded.status, detail: errorDetail(body) };
+    // A server that says no is definitive; a server that broke is not.
+    if (seeded.status < 500) throw new GatewayBootstrapError('refused', 'seed', evidence);
+    return new GatewayBootstrapError('unknown', 'seed', evidence);
+  }
+  // A 2xx is an acknowledgement only if it carries the config these handlers return.
+  // A truncated or unrecognisable body says nothing about what was written, so it is
+  // reconciled by reading like any other unknown rather than believed like a success.
+  // The status stays as the evidence it is: the server did answer, and this is what
+  // it answered with.
+  if (!readSetupConfig(body)) {
+    return new GatewayBootstrapError('unknown', 'seed', { status: seeded.status });
+  }
+  return null;
 }
 
 async function readConnection(

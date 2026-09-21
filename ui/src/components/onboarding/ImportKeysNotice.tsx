@@ -5,7 +5,9 @@
 // It is deliberately narrower than the settings migration: this entry is about
 // keys only, while OAuth takeover and re-authentication stay in Settings. The
 // sentence, the rows in the dialog, the batch submitted and the count left
-// afterwards all read the single `isImportableKey` predicate.
+// afterwards all read the single `isImportableKey` predicate — through the same
+// consent grouping the dialog applies it with, because a key whose group cannot be
+// taken over from here is not one this sentence may offer.
 //
 // It stays visible after an import to say what happened and what is left, so a
 // partial selection can be finished without hunting for the entry again.
@@ -16,7 +18,8 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { InfoHint } from '@/components/ui/info-hint';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
-import { importableKeys, isImportableKey, scanMigrationWhenEnabled } from '@/components/settings/models/migrationScan';
+import { takeableImportRows } from '@/components/settings/models/migrationGrouping';
+import { isImportableKey, scanMigrationWhenEnabled } from '@/components/settings/models/migrationScan';
 import type { MigrationItem } from '@/components/settings/models/types';
 import { useModelHubCapability } from '@/components/settings/models/useModelHubCapability';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
@@ -72,7 +75,11 @@ export const ImportKeysNotice: React.FC<{
     scanMigrationWhenEnabled(true)
       .then((scan) => {
         if (cancelled || !aliveRef.current || scan === null) return;
-        const keys = importableKeys(scan.items);
+        // Grouped, not filtered: the dialog this sentence opens takes a backend
+        // whole and refuses a group holding a subscription sign-in or a blocker, so
+        // a count of loose importable keys would advertise keys its own review has
+        // nothing to offer for. One rule, so the number and the rows behind it agree.
+        const keys = takeableImportRows(scan.items, isImportableKey, isImportableKey);
         setCandidates(keys);
         // Only the first scan consults the persisted dismissal. A rescan follows an
         // import the person just asked for, and hiding their own result because an

@@ -45,15 +45,18 @@ type FakeSource = {
 /**
  * The scan the screen opens on.
  *
- * Three importable keys across two independent consent groups, plus one native token
- * the entry point must leave alone. The shapes matter to what the screen derives:
+ * Three importable keys across two independent consent groups, plus a third group
+ * holding a native token the entry point must leave alone and an API key that cannot
+ * be taken without it. The shapes matter to what the screen derives:
  * `openai` and `qwen` rank inside the setup shortlist so they take the two card slots,
  * `zhipu` ranks outside it so it stays an unlisted candidate — which is the only
  * reason the add dialog's 已检测到 method exists at all, and therefore the only way
- * the stable-frame proof can switch between three panes.
+ * the stable-frame proof can switch between three panes. The Claude key ranks outside
+ * it too, so the blocked row and the sentence explaining it are laid out beside that
+ * candidate at every size measured here — the longest line either surface can hold.
  *
- * No row carries `required_backends`, so the two groups are genuinely independent and
- * consenting to one submits one.
+ * No row carries `required_backends`, so the three groups are genuinely independent
+ * and consenting to one submits one.
  */
 export const SCAN_ITEMS: FakeItem[] = [
   {
@@ -88,6 +91,17 @@ export const SCAN_ITEMS: FakeItem[] = [
     vendor: 'zhipu',
     display_name: 'zhipu',
     masked_credential: 'sk-…3456',
+  },
+  {
+    id: 'claude-key',
+    backend: 'claude',
+    kind: 'api_key',
+    masked_detail: 'sk-ant-…4f2a',
+    proposed_action: 'import',
+    selected: true,
+    vendor: 'anthropic',
+    display_name: 'Anthropic',
+    masked_credential: 'sk-ant-…4f2a',
   },
   {
     id: 'claude-oauth',
@@ -248,9 +262,26 @@ export async function serveProviders(page: Page): Promise<ProviderServer> {
 export const vendorCount = (facts: ServerFacts): number =>
   new Set(facts.sources.map((source) => source.vendor)).size;
 
-/** Importable rows a scan would still offer — what the capsule's sentence counts. */
-export const importableCount = (facts: ServerFacts): number =>
-  facts.items.filter((item) => item.proposed_action === 'import').length;
+/**
+ * Importable rows this entry point could actually take — what the capsule counts.
+ *
+ * Stated from the server's own rule rather than from the product's projection: the
+ * server migrates a backend whole and refuses a batch that omits one of its rows, so
+ * one row it will not import takes its whole backend out of the offer. Written out
+ * here because the point of every count below is to be derived twice.
+ *
+ * Enough for the shapes this fixture serves: no row carries `required_backends`, and
+ * every importable row in it is a key, so there is no closure to walk and nothing
+ * importable that setup's key-only scope would decline.
+ */
+export const importableCount = (facts: ServerFacts): number => {
+  const blocked = new Set(
+    facts.items.filter((item) => item.proposed_action !== 'import').map((item) => item.backend),
+  );
+  return facts.items
+    .filter((item) => item.proposed_action === 'import' && !blocked.has(item.backend))
+    .length;
+};
 
 export async function openProviders(page: Page, options: { lang?: string; theme?: string } = {}) {
   const query = new URLSearchParams({ lang: options.lang ?? 'en', theme: options.theme ?? 'dark' });

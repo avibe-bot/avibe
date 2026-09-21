@@ -44,6 +44,7 @@ import {
   addedThroughMoreCount,
   adoptionBackend,
   defaultSelection,
+  gatewayEvidenceSettled,
   gatewayIntent,
   offeredImportKeys,
   pendingImportRows,
@@ -79,6 +80,11 @@ type GatewayRun =
   | { kind: 'idle' }
   | { kind: 'running'; step: 'install' | 'start' }
   | { kind: 'failed'; step: GatewayAdoptionFailure['step'] };
+
+/** Everything the shell hands down that decides whether an attempt is authorized at
+ *  all: the runtime read and the two configuration facts beside it. A retry holds the
+ *  set it was pressed against, and is answered when any part of it is replaced. */
+type GatewayEvidence = Pick<SetupScreenProps, 'runtimeRead' | 'gatewayEnabled' | 'capability'>;
 
 /** Locale-correct enumeration without inventing a separator string for each language.
  *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
@@ -298,14 +304,55 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
       })();
     }, [active, resumeStep, gatewayToken, agentReads]);
 
+    // A retry that is waiting for the shell to answer. The press asks for a fresh read;
+    // the ANSWER re-arms the attempt, never the press — the only read a press can see is
+    // the one its failure was read from, so arming on it starts the same attempt against
+    // the same snapshot, ahead of the shell and on evidence already known to be stale.
+    const [resumeRequested, setResumeRequested] = React.useState(false);
+    const requestedAgainstRef = React.useRef<GatewayEvidence | null>(null);
+
     const retryGateway = React.useCallback(() => {
-      // The shell owns the authoritative read; this screen owns the attempt. Both are
-      // re-armed, because either one could be what is stale.
+      // One owner at a time: an attempt that has not reported still owns the engine, and
+      // a second press over it is a second install or start on the same machine.
+      if (gatewayRun.kind === 'running') return;
+      requestedAgainstRef.current = { runtimeRead, gatewayEnabled, capability };
+      setResumeRequested(true);
+      // The shell owns the authoritative read. Asking for it is all this does.
       onRetrySetup();
+    }, [gatewayRun.kind, runtimeRead, gatewayEnabled, capability, onRetrySetup]);
+
+    React.useEffect(() => {
+      if (!active || !resumeRequested) return;
+      const against = requestedAgainstRef.current;
+      // The same read and the same configuration the press was made against: the shell
+      // has not answered yet, and nothing here is new information.
+      if (against !== null
+        && against.runtimeRead === runtimeRead
+        && against.gatewayEnabled === gatewayEnabled
+        && against.capability === capability) return;
+      // Different, and still not an answer. The shell reports its read starting before
+      // it reports what it found — `refreshing` over the old value, a configuration
+      // back to 「pending」 — and every one of those states looks like 「nothing to
+      // resume」 from here. Spending the request on one loses it: the person pressed
+      // Retry, the read they asked for lands a moment later saying the engine is
+      // stopped, and nothing starts it.
+      if (!gatewayEvidenceSettled({ capability, gatewayEnabled, runtimeRead })) return;
+      requestedAgainstRef.current = null;
+      setResumeRequested(false);
+      // Only an answer that still calls for a resume re-arms one. A configuration that
+      // came back disabled ends the request instead of being overridden by it, and an
+      // engine that is simply running now has nothing left to resume. Either way the
+      // card goes on describing the fresh read rather than this screen's last attempt.
+      if (resumeStep === null) return;
       setGatewayRun({ kind: 'idle' });
       setGatewayToken((token) => token + 1);
-      setSupplyToken((token) => token + 1);
-    }, [onRetrySetup]);
+    }, [active, resumeRequested, runtimeRead, gatewayEnabled, capability, resumeStep]);
+
+    // Supply recovers on its own, because its failures are reads: a source list or a
+    // scan that could not be fetched is what breaks the sentence, and the gateway
+    // neither caused that nor can fix it. Rearming an install from it would be a server
+    // mutation nobody asked for.
+    const retrySupply = React.useCallback(() => setSupplyToken((token) => token + 1), []);
 
     const gatewayBusy = gatewayRun.kind === 'running';
     const gatewayPhase: GatewayPhase = gatewayBusy
@@ -325,6 +372,44 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
               ? 'failed'
               : 'idle';
 
+    // ── Write admission ─────────────────────────────────────────────────────
+
+    // One rule for every control that can start a write, wherever it is drawn: the
+    // cards, the footer, the capsule and the dialogs all admit the same thing, so a
+    // control that is drawn somewhere else cannot admit what the footer refuses.
+    //
+    // Four separate facts, and a write needs all of them. What the machine's HEALTH is
+    // (`intent.kind === 'running'`, the authoritative read rather than this screen's
+    // attempt). Whether this flow is admitted to use the Hub at all (`ready`, the same
+    // prerequisite C4 gates the next screen on). Whether this screen is the one the
+    // person is on. And whether a write this screen already issued is still out.
+    //
+    // Health is not permission, and the card is right to say so: `gatewayIntent`
+    // reports a running engine even while the configuration that admits the flow is
+    // pending or off, on purpose — a truthful engine state is what the person needs to
+    // read. It is not authorization to write to it, and reusing it as one is how a
+    // Model Hub someone turned off still gets a source written into it.
+    //
+    // What this deliberately keeps is the case that looks like an exception and is
+    // not: a healthy engine on a host that cannot INSTALL one is still a healthy
+    // engine, and with the configuration enabled, writing to it is fine. That
+    // boundary is about installing, not about writing.
+    const hubAdmitted = ready && intent.kind === 'running';
+    const writeAdmitted = active && hubAdmitted && !gatewayBusy && !verifying;
+
+    const openAdd = React.useCallback((more: boolean, vendor: string | null) => {
+      if (!writeAdmitted || sourceRead !== 'read') return;
+      setAddDialog({ more, vendor });
+    }, [writeAdmitted, sourceRead]);
+
+    // The takeover reads the machine for itself, and can take over a credential an
+    // unreadable inventory knows nothing about; an unread source list is no reason to
+    // withhold it. An engine that cannot be written to is.
+    const openImport = React.useCallback(() => {
+      if (!writeAdmitted) return;
+      setImportOpen(true);
+    }, [writeAdmitted]);
+
     // ── The action the shell renders ────────────────────────────────────────
 
     const action = providerAction({
@@ -337,9 +422,10 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
         ? { kind: 'read', hasSource: sources.some(usableSource) }
         : { kind: sourceRead },
       gatewayBusy,
-      // The authoritative read, not this screen's attempt: an attempt that reported
-      // success is not the engine answering, and C4 gates the next screen on the read.
-      gatewayRunning: intent.kind === 'running',
+      // The same admission the dialogs are opened and submitted against, so the footer
+      // cannot reach a write the rest of the screen refuses. `gatewayBusy` and
+      // `verifying` are answered earlier in that ordering and stay separate facts.
+      hubAdmitted,
       verifying,
     });
 
@@ -369,25 +455,26 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             // Consent is the takeover's, always. Continuing is what the next press
             // does, once the batch has landed and the rescan has emptied the pending
             // set — an automatic navigation here would hide the report of what landed.
-            setImportOpen(true);
+            openImport();
             return;
           case 'continue':
             onNavigate('assistants');
             return;
           case 'add':
-            setAddDialog({ more: true, vendor: null });
+            openAdd(true, null);
             return;
           case 'retrySupply':
             // Asking again is the whole action. The effect flips back to 「reading」 on
-            // its way in, so the button reports the retry it just started.
-            setSupplyToken((token) => token + 1);
+            // its way in, so the button reports the retry it just started. It is the
+            // supply read that failed, so the supply read is what it asks for again.
+            retrySupply();
             return;
           default:
             // Busy. The shell already renders the action disabled; ignoring the call
             // rather than trusting that is what makes it unrepresentable.
         }
       },
-    }), [action.kind, action.blocked, onNavigate]);
+    }), [action.kind, action.blocked, onNavigate, openAdd, openImport, retrySupply]);
 
     // ── First-entry sequence ────────────────────────────────────────────────
 
@@ -499,12 +586,15 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
                   slot={slot}
                   selected={slotSelected(slot, selection.selectedBackends)}
                   onToggle={() => toggleSlot(slot)}
-                  onAdd={() => setAddDialog({ more: false, vendor: slot.vendor })}
+                  // The brand, not the slot's identity: the dialog opens on a catalog
+                  // vendor, and a card standing for a credential the server named no
+                  // provider for has none to open on.
+                  onAdd={() => openAdd(false, slot.brand)}
                 />
               ))}
               <AddMoreCard
                 count={addedThroughMoreCount(flowState.addedThroughMore, sources)}
-                onAdd={() => setAddDialog({ more: true, vendor: null })}
+                onAdd={() => openAdd(true, null)}
               />
             </div>
 
@@ -538,7 +628,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             >
               {summaryText}
               {summary.kind === 'error' && (
-                <Button type="button" variant="outline" size="sm" className="setup-summary-retry" onClick={retryGateway}>
+                <Button type="button" variant="outline" size="sm" className="setup-summary-retry" onClick={retrySupply}>
                   {t('common.retry')}
                 </Button>
               )}
@@ -551,7 +641,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
                 <ImportKeysNotice
                   candidates={offered}
                   imported={flowState.importedCount}
-                  onReview={() => setImportOpen(true)}
+                  onReview={openImport}
                 />
               )}
             </div>
@@ -566,9 +656,14 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             pendingCount={pending.length}
             sources={sources}
             sourceReads={sourceReads}
+            // Admission is not only a door: it can be withdrawn while this is open, and
+            // the write is the thing that must not happen then. Closing the dialog
+            // instead would take down a flow that is mid-authorization and lose the
+            // report of what it landed, which is worse than the press it prevents.
+            writable={writeAdmitted}
             isSelected={(slot) => slotSelected(slot, selection.selectedBackends)}
             onToggleDetected={toggleSlot}
-            onReviewDetected={() => { setAddDialog(null); setImportOpen(true); }}
+            onReviewDetected={() => { setAddDialog(null); openImport(); }}
             onAdded={(created) => landSource(created, addDialog.more)}
             onClose={() => setAddDialog(null)}
           />
@@ -581,32 +676,29 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             eligible={isImportableKey}
             takeable={isImportableKey}
             value={selection}
+            // Same admission, same reason as the add dialog: a take-over migrates keys
+            // INTO the Hub, so an engine that stopped while this was open has nothing to
+            // migrate them into. The review stays readable and cancellable; only the
+            // batch is refused. Settings passes nothing and keeps writing, as it always has.
+            writable={writeAdmitted}
             onChange={(next) => changeSelection(next.selectedBackends)}
             onApplied={(applied) => {
               // `onApplied(0)` is a refresh trigger, not a receipt: the takeover reports
               // a rejected batch that way, and the only observable difference between a
-              // batch that landed and one that did not is this number.
+              // batch that landed and one that did not is this number. The count moves
+              // only when something actually landed.
               //
-              // It is a trigger on BOTH paths. A rejection the server terminalised —
-              // `migration_credentials_invalid` closes the dialog behind it — leaves the
-              // held scan describing rows the server has just disagreed about, and
-              // retrying that same batch returns the same error forever. Re-reading is
-              // what surfaces the reauthentication; only the count is not touched,
-              // because nothing landed.
-              if (applied === 0) {
-                setImportFailed(true);
-                setSupplyToken((token) => token + 1);
-                return;
-              }
-              setImportFailed(false);
+              // The snapshot is spent on BOTH paths, in this tick. Success would
+              // otherwise keep advertising rows that are now imported until the rescan
+              // answers. A terminal rejection — `migration_credentials_invalid` closes
+              // the dialog behind it — would otherwise leave the held scan and consent
+              // looking like a batch still authorized to submit; a failed rescan must
+              // not be able to revive those ids, and retrying them returns the same
+              // error forever. Re-reading is what surfaces the reauthentication.
+              setImportFailed(applied === 0);
               setFlowState((previous) => ({
                 ...previous,
-                importedCount: previous.importedCount + applied,
-                // The batch is spent in the same tick it landed. The rescan is a round
-                // trip away, and until it answers the old scan still names rows that
-                // are now imported — which would keep the capsule advertising them,
-                // the cards offering them and the action saying 「导入」 for a batch the
-                // dialog would refuse to build.
+                importedCount: applied > 0 ? previous.importedCount + applied : previous.importedCount,
                 providerSelection: { scan: null, selectedBackends: [] },
               }));
               setSupplyToken((token) => token + 1);

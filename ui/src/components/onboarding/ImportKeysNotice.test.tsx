@@ -73,6 +73,21 @@ const CODEX_REAUTH: MigrationItem = {
   masked_credential: 'sk-…9f21',
 };
 
+// The same backend without the blocker beside it: a key this entry really may take
+// over, and the second consent group that makes a partial selection possible at all.
+const CODEX_KEY: MigrationItem = {
+  id: 'mig_codex_key',
+  backend: 'codex',
+  kind: 'api_key',
+  masked_detail: 'sk-…5e77',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+  vendor: 'openai',
+  display_name: 'OpenAI',
+  masked_credential: 'sk-…5e77',
+};
+
 // An OpenCode key: `opencode_provider`, never `api_key`, and its display_name is
 // only the provider id echoed back.
 const OPENCODE_ZHIPU: MigrationItem = {
@@ -167,12 +182,24 @@ describe('ImportKeysNotice', () => {
     expect(modelsApi.applyMigration).not.toHaveBeenCalled();
   });
 
-  it('counts the importable keys — not the rows the scan returned', async () => {
+  it('counts the keys its own review can act on, not every importable row', async () => {
     serve(FULL_SCAN);
     renderNotice();
+    const user = userEvent.setup();
 
-    // Three of five: the subscription and the reauth row are not offers.
-    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
+    // Two of five. The subscription and the reauth row are not offers; and the
+    // Claude key beside that subscription is not one either, because the dialog this
+    // sentence opens takes a backend whole and will not submit a batch that omits
+    // the sign-in sitting in the same file. Counting it would advertise a key whose
+    // own review has nothing to press.
+    expect(await screen.findByText('Found 2 API keys to import into Model Hub')).toBeTruthy();
+
+    // The same number, read off the dialog: what it counted is what can be ticked.
+    const dialog = await openDialog(user);
+    const offered = within(dialog)
+      .getAllByRole('checkbox')
+      .filter((box) => !(box as HTMLButtonElement).disabled);
+    expect(offered).toHaveLength(2);
   });
 
   it('offers exactly the rows it counted, and no subscription or reauth row', async () => {
@@ -213,12 +240,13 @@ describe('ImportKeysNotice', () => {
   });
 
   it('stays to report what was imported and what is still available', async () => {
-    serve(FULL_SCAN);
+    // Two independent groups, so half the offer can be left for later.
+    serve([CODEX_KEY, OPENCODE_ZHIPU, OPENCODE_LEGACY]);
     renderNotice();
     const user = userEvent.setup();
 
     const dialog = await openDialog(user);
-    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…dd3c/ }));
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…5e77/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
     // The remainder is the server's answer after the rescan, not a subtraction.
@@ -227,7 +255,7 @@ describe('ImportKeysNotice', () => {
     expect(screen.getByRole('button', { name: 'Review migration' })).toBeTruthy();
   });
 
-  it('keeps a blocked CLI group available after importing independent keys', async () => {
+  it('reports the outcome without offering a review of what it may not take', async () => {
     serve(FULL_SCAN);
     renderNotice();
     const user = userEvent.setup();
@@ -235,10 +263,11 @@ describe('ImportKeysNotice', () => {
     const dialog = await openDialog(user);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    expect(await screen.findByText('Migrated 2 · 1 API key still available')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Review migration' })).toBeTruthy();
-    // The blocked Claude group remains on this machine, including its import
-    // row, and the unrelated reauth row is untouched.
+    // What is left on the machine is a Claude key nothing here may take and a reauth
+    // row that was never an offer. The receipt says what happened; it does not invite
+    // a second look at a review with nothing to press. Settings still has both.
+    expect(await screen.findByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
     expect(stored.map((i) => i.id)).toEqual([
       'mig_claude_key',
       'mig_claude_oauth',
@@ -269,10 +298,28 @@ describe('ImportKeysNotice', () => {
     await user.click(await screen.findByRole('button', { name: 'Dismiss import notice' }));
     unmount();
     cleanup();
+    stored = [...stored, { ...OPENCODE_ZHIPU, id: 'mig_opencode_new', masked_detail: 'kimi · sk-…7a10' }];
+    renderNotice();
+
+    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
+  });
+
+  it('does not ask again for a key its review could not act on', async () => {
+    serve(FULL_SCAN);
+    const { unmount } = renderNotice();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Dismiss import notice' }));
+    unmount();
+    cleanup();
+    // A second Claude key, in the group the sign-in beside it blocks. Nothing this
+    // entry can offer has changed, so reappearing would be a notice about keys it
+    // would then decline to import.
     stored = [...stored, { ...CLAUDE_KEY, id: 'mig_claude_key_2', masked_detail: 'sk-…7a10' }];
     renderNotice();
 
-    expect(await screen.findByText('Found 4 API keys to import into Model Hub')).toBeTruthy();
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/API keys? to import/)).toBeNull();
   });
 
   it('says nothing when there is nothing to import', async () => {

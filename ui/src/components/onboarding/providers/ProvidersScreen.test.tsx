@@ -19,7 +19,12 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
-import { readyRegion, unreadRegion, type RegionRead } from '@/components/settings/models/regionRead';
+import {
+  beginRegionRead,
+  readyRegion,
+  unreadRegion,
+  type RegionRead,
+} from '@/components/settings/models/regionRead';
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import type {
   AgentSupply,
@@ -122,6 +127,36 @@ const CLAUDE_SUBSCRIPTION: MigrationItem = {
   vendor: 'anthropic',
   display_name: 'Anthropic',
 };
+
+// The API key in the same store as the sign-in above. The server migrates a
+// backend whole, so this key cannot be taken without the subscription beside it —
+// and setup's copy offers keys only. Found, and not this screen's to take.
+const CLAUDE_KEY: MigrationItem = {
+  id: 'mig_claude_key',
+  backend: 'claude',
+  kind: 'api_key',
+  masked_detail: 'sk-…dd3c',
+  masked_credential: 'sk-…dd3c',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+  vendor: 'anthropic',
+  display_name: 'Anthropic',
+};
+
+// No presentation metadata at all: an older server, or a provider nothing names.
+const OPENCODE_LEGACY: MigrationItem = {
+  id: 'mig_opencode_legacy',
+  backend: 'opencode',
+  kind: 'opencode_provider',
+  masked_detail: 'Self-hosted relay · sk-…abcd',
+  proposed_action: 'import',
+  selected: true,
+  notes_key: null,
+};
+
+/** The one sentence the migration feature has for a row it cannot take. */
+const BLOCKED_SENTENCE = 'This credential cannot be imported.';
 
 // ── The fake server ───────────────────────────────────────────────────────
 
@@ -375,7 +410,7 @@ describe('ProvidersScreen — the stage', () => {
         id: 'src_pending',
         vendor: 'openai',
         state: { status: 'standby' },
-        verification_pending: true,
+        verification_pending: 'vp_fixture',
       })],
     });
     renderScreen();
@@ -463,7 +498,7 @@ describe('ProvidersScreen — the stage', () => {
     expect(summary()?.dataset.tone).toBeUndefined();
   });
 
-  it('offers a way back when the machine cannot be read', async () => {
+  it('offers a way back when the machine cannot be read, and asks again only for the read that failed', async () => {
     serve();
     vi.mocked(modelsApi.scanMigration).mockRejectedValue(new Error('offline'));
     renderScreen();
@@ -473,10 +508,13 @@ describe('ProvidersScreen — the stage', () => {
     if (!failed) throw new Error('no summary');
     await userEvent.setup().click(within(failed).getByRole('button', { name: 'Retry' }));
 
-    // Both halves are re-armed: either the shell's read or this screen's attempt
-    // could be what is stale.
-    expect(retrySetup).toHaveBeenCalledTimes(1);
+    // What broke the sentence is a read, so a read is what this asks for again. The
+    // engine is not what failed: asking the shell to resume its bootstrap, or arming an
+    // install or a start from here, would be a mutation nobody asked for.
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    expect(retrySetup).not.toHaveBeenCalled();
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
   });
 
   it('keeps the sources that did arrive when the scan beside them fails', async () => {
@@ -602,6 +640,111 @@ describe('ProvidersScreen — the import capsule', () => {
   });
 });
 
+// A scan answers two different questions: what is on this machine, and what this
+// entry may take over. They are two projections of one grouping, not two rules —
+// and every case here is a way a screen that conflated them would lie. Hiding a
+// found key behind an empty 「add Anthropic」 invitation is the loud version; a
+// capsule counting a key its own review would refuse is the quiet one.
+describe('ProvidersScreen — what it found but may not take', () => {
+  it('keeps a blocked credential on the stage, with its reason and no way to consent', async () => {
+    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION] });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    const card = cardFor('anthropic');
+    expect(card.dataset.state).toBe('detected');
+    expect(card.dataset.blocked).toBe('true');
+    expect(within(card).getByText(new RegExp(BLOCKED_SENTENCE))).toBeTruthy();
+    // Not a toggle that happens to be off, and not an invitation to add a key for a
+    // provider whose key is right there on the card.
+    expect((card as HTMLButtonElement).disabled).toBe(true);
+    expect(card.getAttribute('aria-pressed')).toBeNull();
+    // Still the found key, said in the card and in what a screen reader reads: the
+    // mask is the evidence that this is a detection and not an offer.
+    expect(card.getAttribute('aria-label')).toContain('sk-…dd3c');
+
+    await user.click(card);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // Nothing to import, so the footer asks for a provider instead of offering a
+    // batch, and the capsule — whose whole sentence is a count — says nothing.
+    expect(lastAction().labelKey).toBe('onboarding.providers.actionAdd');
+    expect(screen.queryByText(/to import into Model Hub/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
+  });
+
+  it('counts the takeable group beside it, and only that one', async () => {
+    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
+    renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    // What can be done comes first, and both stay on the stage. The second slot has
+    // to be the Claude key that was found — an empty 「add Anthropic」 card would fill
+    // the same position from the shortlist and read as if nothing had been found.
+    await waitFor(() => expect(cards().map((card) => [card.dataset.provider, card.dataset.state]))
+      .toEqual([['openai', 'detected'], ['anthropic', 'detected'], [undefined, 'add']]));
+    expect(cardFor('anthropic').dataset.blocked).toBe('true');
+    expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true');
+
+    // One number, three readings: the card that is ticked, the sentence, the footer.
+    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+    expect(lastAction()).toMatchObject({
+      labelKey: 'onboarding.providers.actionImport',
+      labelArgs: { count: 1 },
+    });
+
+    // Pressing the blocked card cannot borrow the consent of the one beside it, and
+    // does not open the add dialog an empty card in that slot would have opened.
+    await user.click(cardFor('anthropic'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(cardFor('anthropic').getAttribute('aria-pressed')).toBeNull();
+    expect(lastAction().labelArgs).toEqual({ count: 1 });
+  });
+
+  it('submits the batch it counted, and keeps the blocked card after the rescan', async () => {
+    serve({ scan: [CLAUDE_KEY, CLAUDE_SUBSCRIPTION, CODEX_KEY] });
+    const { handle } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(lastAction().labelArgs).toEqual({ count: 1 }));
+    await activate(handle);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: /Start migration/ }));
+
+    // No half group and no sign-in: one row, from the one group that consented.
+    await waitFor(() => expect(applied).toHaveLength(1));
+    expect(applied[0]).toEqual([CODEX_KEY.id]);
+    expect(await screen.findByText('Migrated 1 API key into Model Hub')).toBeTruthy();
+
+    // The rescan still finds the Claude store, so the card is still there, still
+    // saying why. Settings is where it is resolved; forgetting it is not.
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(cardFor('anthropic').dataset.blocked).toBe('true'));
+    expect(within(cardFor('anthropic')).getByText(new RegExp(BLOCKED_SENTENCE))).toBeTruthy();
+    // And nothing left to offer: the receipt is the whole sentence now.
+    expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
+  });
+
+  it('names a credential the server did not name, rather than guessing a brand', async () => {
+    serve({ scan: [OPENCODE_LEGACY] });
+    renderScreen();
+    await settled();
+
+    // Its own slot, keyed by the row: a card named 「OpenCode」 would name the file
+    // it was found in, and a brand mark would name a provider nobody identified.
+    const card = cardFor(OPENCODE_LEGACY.id);
+    expect(card.dataset.state).toBe('detected');
+    expect(within(card).getByText('Self-hosted relay · sk-…abcd')).toBeTruthy();
+    expect(card.querySelector('.setup-provider-logo svg')).toBeTruthy();
+    // Unnamed is not blocked: it is still a key this entry may take over.
+    expect(card.getAttribute('aria-pressed')).toBe('true');
+    expect(card.dataset.blocked).toBeUndefined();
+    expect(await screen.findByText('Found 1 API key to import into Model Hub')).toBeTruthy();
+  });
+});
+
 describe('ProvidersScreen — the action the shell renders', () => {
   it('offers to add when there is nothing yet, and opens the add dialog when pressed', async () => {
     serve();
@@ -709,30 +852,109 @@ describe('ProvidersScreen — what an import leaves behind', () => {
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
   });
 
-  it('keeps the selection and asks to retry when the batch is refused', async () => {
+  it('spends a terminally rejected batch before the rescan, so a failed reread cannot resubmit it', async () => {
     serve({ scan: [CODEX_KEY] });
     const { handle } = renderScreen();
     await settled();
     const user = userEvent.setup();
 
     await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    expect(lastAction().labelArgs).toEqual({ count: 1 });
+
     vi.mocked(modelsApi.applyMigration)
       .mockRejectedValueOnce(new ApiCallError('migration_credentials_invalid', 'refused'));
+    vi.mocked(modelsApi.scanMigration).mockRejectedValue(new Error('offline'));
 
     await activate(handle);
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /Start migration/ }));
 
-    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionRetryImport'));
-    // Nothing landed, so nothing is retired: the same batch is still the offer.
-    expect(lastAction().labelArgs).toEqual({ count: 1 });
-    expect(cardFor('openai').getAttribute('aria-pressed')).toBe('true');
-    // `onApplied(0)` is a refresh trigger on this path too. The server terminalised
-    // the batch and closed the dialog behind it, so the held scan now describes rows
-    // it has just disagreed about — retrying that same batch would fail forever.
+    // Spent in the same tick as the rejection: the refused ids are gone before the
+    // rescan answers, the count does not move because nothing landed, and a failed
+    // reread has nothing left to revive.
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => {
+      expect(lastAction().labelKey).not.toBe('onboarding.providers.actionImport');
+      expect(lastAction().labelKey).not.toBe('onboarding.providers.actionRetryImport');
+    });
+    expect(lastAction().labelArgs).toBeUndefined();
+    expect(cardFor('openai').dataset.state).toBe('empty');
+    expect(screen.queryByText(/Migrated/)).toBeNull();
+    expect(screen.queryByText(/API key to import/)).toBeNull();
+    expect(vi.mocked(modelsApi.applyMigration).mock.calls[0][0]).toEqual([CODEX_KEY.id]);
 
     await activate(handle);
-    expect(await screen.findByRole('dialog')).toBeTruthy();
+    const dialog = screen.queryByRole('dialog');
+    if (dialog) {
+      expect(within(dialog).queryByRole('button', { name: /Start migration/ })).toBeNull();
+    }
+    expect(modelsApi.applyMigration).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a batch the engine behind it can no longer take, without taking the review away', async () => {
+    // A take-over migrates keys INTO the Hub. An engine that stopped being readable
+    // while the review was open has nothing to migrate them into — and this is a write
+    // like any other, so it is refused at the submit and not only at the door.
+    serve({ scan: [CODEX_KEY] });
+    const { handle, show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(handle);
+    await screen.findByRole('dialog');
+
+    await show({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    const start = () => within(screen.getByRole('dialog')).getByRole<HTMLButtonElement>(
+      'button', { name: /Start migration/ },
+    );
+    expect(start().disabled).toBe(true);
+    await user.click(start());
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+
+    // What the person was reading is still there, still says what it found, and can
+    // still be left. Closing it for them would be a different answer than refusing
+    // the write, and would lose the one place the offer is spelled out.
+    expect(within(screen.getByRole('dialog')).getByText(CODEX_KEY.masked_detail!)).toBeTruthy();
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Not now' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // Nothing was consumed: the offer is exactly the one it was.
+    expect(lastAction()).toMatchObject({ labelKey: 'onboarding.providers.actionImport', labelArgs: { count: 1 } });
+  });
+
+  it('settles a batch it had already sent, whatever the screen admits by the time it answers', async () => {
+    serve({ scan: [CODEX_KEY] });
+    const gate = deferred<void>();
+    // The server's own behaviour, held open at the wire: the batch is on its way and
+    // the answer is what this case gets to choose the moment for.
+    vi.mocked(modelsApi.applyMigration).mockImplementationOnce(async (ids) => {
+      applied.push([...ids]);
+      await gate.promise;
+      server.scan = server.scan.filter((row) => !ids.includes(row.id));
+      server.sources = [...server.sources, source({ id: 'src_mig_codex', vendor: 'openai' })];
+      return { applied: ids.length, sources: [] };
+    });
+    const { handle, show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionImport'));
+    await activate(handle);
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: /Start migration/ }));
+    await waitFor(() => expect(applied).toHaveLength(1));
+
+    // The engine goes unreadable while that batch is in flight. It is already on the
+    // server's side of the wire: permission governs the next write, never the delivery
+    // of one that happened, and dropping the report would leave keys migrated with
+    // nothing on screen saying so.
+    await show({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    await act(async () => { gate.resolve(); });
+
+    expect(await screen.findByText('Migrated 1 API key into Model Hub')).toBeTruthy();
+    expect(modelsApi.applyMigration).toHaveBeenCalledTimes(1);
+    // Reported once, counted once — and a screen that no longer admits a write does
+    // not offer the spent batch again either.
+    await waitFor(() => expect(lastAction().labelKey).not.toBe('onboarding.providers.actionImport'));
   });
 });
 
@@ -826,10 +1048,10 @@ describe('ProvidersScreen — the engine', () => {
     expect(within(gatewayCard()).getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
 
-  it('reports a failed step on the card it is about, and retries from there', async () => {
+  it('reports a failed step on the card it is about, and retries it on the read that answers', async () => {
     serve({ runtime: runtimeOf('not_started') });
     vi.mocked(modelsApi.startRuntime).mockRejectedValueOnce(new ApiCallError('engine_down', 'down'));
-    renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
 
     await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
     expect(gatewayCard().dataset.failedStep).toBe('start');
@@ -839,14 +1061,259 @@ describe('ProvidersScreen — the engine', () => {
 
     await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
 
-    // Both halves are re-armed at once: the failure could be the engine or the read
-    // that described it, and from here neither is distinguishable.
+    // The press asks the shell for the read and stops there. Starting a second attempt
+    // now would run it against the only read a press can see — the one the failure was
+    // read from — so the failure stays on the card until something actually changes.
+    expect(retrySetup).toHaveBeenCalledTimes(2);
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+    expect(gatewayCard().dataset.state).toBe('failed');
+
+    // The shell's read STARTS. This is what it really hands down first: the previous
+    // value degraded to 「refreshing」, and a configuration back to unknown while it is
+    // re-read. None of it is an answer, and a request spent here is a request lost —
+    // the read lands a moment later saying the engine is stopped, and nothing starts it.
+    await show({
+      capability: 'pending',
+      gatewayEnabled: null,
+      runtimeRead: beginRegionRead(readyRegion(runtimeOf('not_started'))),
+    });
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+    expect(gatewayCard().dataset.state).toBe('failed');
+
+    // The shell answers. The answer is what re-arms the attempt.
+    await show({
+      capability: 'enabled',
+      gatewayEnabled: true,
+      runtimeRead: readyRegion(runtimeOf('not_started')),
+    });
+
     await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(gatewayCard().dataset.state).not.toBe('failed'));
     // Three reads, not two: the press asked for one, and the engine moving asked for
     // another. That last one is the only thing that turns the card and the footer
     // around — the attempt's own success is not the machine answering.
     await waitFor(() => expect(retrySetup).toHaveBeenCalledTimes(3));
+  });
+
+  it('admits one engine mutation at a time, whatever else on the screen has failed', async () => {
+    serve({ runtime: runtimeOf('not_installed') });
+    const install = deferred<RuntimeDependency>();
+    vi.mocked(modelsApi.installRuntime).mockReturnValue(install.promise);
+    vi.mocked(modelsApi.scanMigration).mockRejectedValue(new Error('offline'));
+    renderScreen({ runtimeRead: readyRegion(runtimeOf('not_installed')) });
+
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('installing'));
+    await waitFor(() => expect(summary()?.dataset.tone).toBe('error'));
+    const user = userEvent.setup();
+    const retry = () => within(summary()!).getByRole('button', { name: 'Retry' });
+    await user.click(retry());
+    await user.click(retry());
+
+    // The install is unsettled and still owns the engine. The broken sentence has its
+    // own recovery, and pressing it — twice — reaches the reads and nothing else: a
+    // second install over one the server is still performing is not a retry.
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(3));
+    expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1);
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+
+    // Nor can a write start around the side of the footer: every add control obeys the
+    // same admission the footer publishes.
+    await user.click(cards()[cards().length - 1]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => { install.resolve(runtimeOf('not_started')); });
+
+    await waitFor(() => expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1));
+    expect(modelsApi.installRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot resume a gateway the answer says is off', async () => {
+    serve({ runtime: runtimeOf('not_started') });
+    vi.mocked(modelsApi.startRuntime).mockRejectedValue(new ApiCallError('engine_down', 'down'));
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
+    await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
+
+    // The answer comes back with the Hub turned off. A retry asks for the current
+    // configuration; it carries no authorization of its own, and a stopped intent is
+    // not something this screen may start around.
+    await show({ gatewayEnabled: false, runtimeRead: readyRegion(runtimeOf('not_started')) });
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+    expect(gatewayCard().dataset.state).toBe('failed');
+
+    // Enabled again later is a new answer, not a queued press.
+    await show({ gatewayEnabled: true, runtimeRead: readyRegion(runtimeOf('not_started')) });
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a write against an engine nobody can read, however much else is known', async () => {
+    serve();
+    const { handle, show } = renderScreen();
+    await settled();
+    // Awaited, not read once: the scan and the inventory are two reads, and the action
+    // this case starts from is the one published after both have answered.
+    await waitFor(() => expect(lastAction())
+      .toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: false }));
+
+    // The inventory is still an answer and the stage still draws it. What stopped
+    // being known is the engine the add would be written to — and a write needs that,
+    // not just an idle screen and a source list.
+    await show({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    expect(cards()).toHaveLength(3);
+    await waitFor(() => expect(lastAction())
+      .toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: true }));
+
+    // Not through the card, and not through the footer either: one admission, wherever
+    // the control is drawn.
+    await userEvent.setup().click(cards()[2]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await activate(handle);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // And the recovery is where the failure is, on the card that can do something.
+    expect(within(gatewayCard()).getByRole('button', { name: 'Retry' })).toBeTruthy();
+  });
+
+  it('still asks again for the read that failed while the engine is unknown too', async () => {
+    // Two unknowns, two different answers. Asking again is a read: it writes nothing,
+    // so an unreadable engine is no reason to withhold it. What it may not do is turn
+    // into a write once the inventory answers.
+    serve();
+    vi.mocked(modelsApi.listSources).mockRejectedValue(new Error('offline'));
+    const { handle } = renderScreen({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    await settled();
+    await waitFor(() => expect(lastAction()).toMatchObject({ labelKey: 'common.retry', disabled: false }));
+
+    const before = vi.mocked(modelsApi.listSources).mock.calls.length;
+    vi.mocked(modelsApi.listSources)
+      .mockImplementation(async () => [source({ id: 'src_zhipu', vendor: 'zhipuai' })]);
+    await activate(handle);
+
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(before + 1));
+    await waitFor(() => expect(cardFor('zhipuai').dataset.state).toBe('connected'));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // The inventory answered; the engine still has not. So the screen names what is
+    // next and goes on refusing it.
+    await waitFor(() => expect(lastAction())
+      .toMatchObject({ labelKey: 'onboarding.providers.actionContinue', disabled: true }));
+  });
+
+  it('refuses the write an open dialog was for when the answer beneath it changes', async () => {
+    serve();
+    vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: source({ id: 'src_new', vendor: 'custom' }),
+      added_to: [],
+      adopted_by: [],
+    });
+    const { show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await user.click(cards()[2]);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'API Key' }));
+    await user.type(within(dialog).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(dialog).getByLabelText('API key'), 'sk-live-1');
+    const add = () => within(screen.getByRole('dialog')).getByRole<HTMLButtonElement>(
+      'button', { name: 'Add' },
+    );
+    expect(add().disabled).toBe(false);
+
+    // The engine stopped being readable while the form was being filled. Admission is
+    // not only a door: the dialog stays, because what is typed in it is the person's
+    // and the read behind it may come back — and the write is what stops.
+    await show({ runtimeRead: unreadRegion<RuntimeDependency>() });
+    expect(screen.queryByRole('dialog')).not.toBeNull();
+    expect(add().disabled).toBe(true);
+    await user.click(add());
+    expect(modelsApi.createApiKeySource).not.toHaveBeenCalled();
+
+    // The read comes back and says the engine is serving. Nothing was lost.
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    expect(add().disabled).toBe(false);
+    await user.click(add());
+    await waitFor(() => expect(modelsApi.createApiKeySource).toHaveBeenCalledTimes(1));
+  });
+
+  it('refuses the write of a dialog the wizard has hidden, and takes it back on return', async () => {
+    serve();
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source: source({ id: 'src_new', vendor: 'custom' }),
+      added_to: [],
+      adopted_by: [],
+    });
+    const { show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    await user.click(cards()[2]);
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'API Key' }));
+    await user.type(within(dialog).getByLabelText('Base URL'), 'https://api.example/v1');
+    await user.type(within(dialog).getByLabelText('API key'), 'sk-live-1');
+    const add = () => within(screen.getByRole('dialog')).getByRole<HTMLButtonElement>(
+      'button', { name: 'Add' },
+    );
+
+    // The wizard moved somewhere else with this open. A screen nobody is looking at
+    // does not act — and a write is the strongest thing it could do, so it is the
+    // first thing that stops. What was typed is still the person's.
+    await show({ active: false });
+    expect(add().disabled).toBe(true);
+    await user.click(add());
+    expect(create).not.toHaveBeenCalled();
+
+    await show({ active: true });
+    expect(add().disabled).toBe(false);
+    await user.click(add());
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  });
+
+  it('refuses a write the configuration does not admit, however healthy the engine is', async () => {
+    serve();
+    const { handle, show } = renderScreen();
+    await settled();
+    const user = userEvent.setup();
+
+    // The runtime is up and the card goes on saying so, truthfully: health is a fact
+    // about the machine, not a permission. What is gone is the configuration that
+    // admits this flow to the Hub — and every write here is a write to the Hub.
+    await show({ gatewayEnabled: false, runtimeRead: readyRegion(runtimeOf('ok')) });
+    await waitFor(() => expect(lastAction())
+      .toMatchObject({ labelKey: 'onboarding.providers.actionAdd', disabled: true }));
+    await user.click(cards()[2]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await activate(handle);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    // Unknown is not authorization either. A capability still being read and a saved
+    // intent nobody has answered are two reasons to wait, not two halves of a yes.
+    await show({ capability: 'pending', gatewayEnabled: null, runtimeRead: readyRegion(runtimeOf('ok')) });
+    await user.click(cards()[2]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('ends a retry on the answer that failed, not on an unrelated later one', async () => {
+    serve({ runtime: runtimeOf('not_started') });
+    vi.mocked(modelsApi.startRuntime).mockRejectedValue(new ApiCallError('engine_down', 'down'));
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('not_started')) });
+
+    await waitFor(() => expect(gatewayCard().dataset.state).toBe('failed'));
+    await userEvent.setup().click(within(gatewayCard()).getByRole('button', { name: 'Retry' }));
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+
+    // The read the retry asked for fails, and one load failure takes everything with
+    // it: no capability, no saved intent, an unread machine. That is a complete answer
+    // — 「不知道」 — and nothing more is coming unless someone asks again. Filing it
+    // under 「still unknown」 would leave the press waiting to be spent on whatever
+    // read landed next, which is not the one it asked for.
+    await show({ capability: 'pending', gatewayEnabled: null, runtimeRead: unreadRegion<RuntimeDependency>() });
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
+
+    // Something else re-reads the machine much later and finds it installed and idle.
+    await show({ capability: 'enabled', gatewayEnabled: true, runtimeRead: readyRegion(runtimeOf('not_started')) });
+    await waitFor(() => expect(gatewayCard()).toBeTruthy());
+    expect(modelsApi.startRuntime).toHaveBeenCalledTimes(1);
   });
 
   it('refuses to continue into a screen with no engine behind it', async () => {

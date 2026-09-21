@@ -827,7 +827,10 @@ const SetupHost: React.FC<{
   after?: MigrationItem[][];
   onClose?: () => void;
   onApplied?: (applied: number) => void;
-}> = ({ scan, after = [], onClose = () => {}, onApplied }) => {
+  /** What a host that can withdraw permission mid-review passes. Settings passes
+   *  nothing at all, which is the default and what every case above relies on. */
+  writable?: boolean;
+}> = ({ scan, after = [], onClose = () => {}, onApplied, writable }) => {
   const [selection, setSelection] = useState<MigrationSelection>({
     scan: { items: scan },
     selectedBackends: [],
@@ -841,6 +844,7 @@ const SetupHost: React.FC<{
       takeable={isImportableKey}
       value={selection}
       onChange={setSelection}
+      writable={writable}
       onApplied={(applied) => {
         onApplied?.(applied);
         // The receipt is a refresh trigger, not a success receipt: re-read and
@@ -853,12 +857,20 @@ const SetupHost: React.FC<{
   );
 };
 
-const renderSetup = (props: React.ComponentProps<typeof SetupHost>) =>
-  render(
+const renderSetup = (props: React.ComponentProps<typeof SetupHost>) => {
+  const view = render(
     <I18nextProvider i18n={i18n}>
       <SetupHost {...props} />
     </I18nextProvider>,
   );
+  /** The host changing its half of the contract without remounting the dialog. */
+  const show = (next: Partial<React.ComponentProps<typeof SetupHost>>) => view.rerender(
+    <I18nextProvider i18n={i18n}>
+      <SetupHost {...props} {...next} />
+    </I18nextProvider>,
+  );
+  return { ...view, show };
+};
 
 describe('MigrationDialog — the setup scope', () => {
   it('wears setup copy and never scans for a controlled caller', async () => {
@@ -969,6 +981,61 @@ describe('MigrationDialog — the setup scope', () => {
     await within(dialog).findByText('Migrated 1 configuration item');
     await user.click(within(dialog).getByRole('button', { name: 'Done' }));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('refuses a batch its host no longer admits, and keeps the review readable', async () => {
+    serve();
+    const onClose = vi.fn();
+    const { show } = renderSetup({ scan: [CODEX_KEY, LEGACY], onClose, writable: true });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    const confirm = () => within(dialog).getByRole<HTMLButtonElement>('button', { name: 'Start migration' });
+    expect(confirm().disabled).toBe(false);
+
+    // The host stopped admitting a write — for setup, the engine these keys would be
+    // migrated INTO. Only the batch is refused: what was chosen is still chosen, still
+    // readable, and still leavable, because closing this is a different answer.
+    show({ writable: false });
+    expect(confirm().disabled).toBe(true);
+    await user.click(confirm());
+    expect(modelsApi.applyMigration).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }).getAttribute('aria-checked')).toBe('true');
+    expect(within(dialog).getByText(/sk-…9f21/)).toBeTruthy();
+    expect(within(dialog).queryByText(/Migrated/)).toBeNull();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Not now' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles a batch it had already sent when permission goes away mid-flight', async () => {
+    let release: (value: { applied: number; sources: [] }) => void = () => {};
+    const apply = vi.spyOn(modelsApi, 'applyMigration').mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+    const onApplied = vi.fn();
+    const { show } = renderSetup({ scan: [CODEX_KEY], onApplied, writable: true });
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole('dialog');
+    await user.click(within(dialog).getByRole('checkbox', { name: /sk-…9f21/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
+    await within(dialog).findByText('Migrating 1 configuration item…');
+
+    // Withdrawn while that batch is on the server's side of the wire. It owns its own
+    // outcome: permission governs the next write, and a report dropped here would
+    // leave keys migrated with nothing on screen saying so.
+    show({ writable: false });
+    release({ applied: 1, sources: [] });
+
+    await within(dialog).findByText('Migrated 1 configuration item');
+    expect(onApplied).toHaveBeenCalledTimes(1);
+    expect(onApplied).toHaveBeenCalledWith(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+    // The report is the whole of what is offered: there is no second batch to send.
+    expect(within(dialog).queryByRole('button', { name: 'Start migration' })).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
   });
 
   it('shows a key it cannot take here, and says why rather than offering it', async () => {

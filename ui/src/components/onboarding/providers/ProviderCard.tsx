@@ -6,9 +6,11 @@
 // only it is a toggle — giving a connected card a pressed state would announce that
 // something already true can be turned off here, which it cannot.
 import type { FC } from 'react';
-import { Check, Plus } from 'lucide-react';
+import { Check, KeyRound, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { BLOCKED_REASON_FALLBACK_KEY } from '@/components/settings/models/migrationGrouping';
+import { serverText } from '@/components/settings/models/serverCopy';
 import type { SourceKind } from '@/components/settings/models/types';
 import { VendorGlyph } from '@/components/settings/models/vendorGlyph';
 import type { TranslationKey } from '@/i18n/types';
@@ -31,17 +33,32 @@ export const ProviderCard: FC<{
   const { t } = useTranslation();
   const detected = slot.kind === 'detected';
   const connected = slot.kind === 'connected';
+  // Found, and not something this flow may take over. It keeps its card and its
+  // reason: an invitation to add a key for a provider whose key is right there is
+  // an answer to a question nobody asked.
+  const blocked = slot.reasons.length > 0;
 
   // The second line says where the card's knowledge came from. A connected
   // subscription has no key to mask, so it names the sign-in instead; only a card
   // with nothing behind it describes the offer, which is the one thing a connected
-  // card must never do — it is disabled, so an invitation to add a key there is an
-  // invitation to press something that does nothing.
+  // or detected card must never do — neither can be pressed into adding one, so an
+  // invitation there is an invitation to press something that does nothing. A
+  // detected row the server named no provider for has no second line at all: its
+  // masked detail is already the name above.
   const written = slot.mask
     ? t(connected ? 'onboarding.providers.cardKeyAdded' : 'onboarding.providers.cardKeyDetected', { mask: slot.mask })
     : slot.supply
       ? [t(SUPPLY_KIND_COPY[slot.supply.kind]), slot.supply.account].filter(Boolean).join(' · ')
-      : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
+      : detected
+        ? ''
+        : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
+
+  // The migration feature's own words for the same group, so the card and the
+  // review it opens from give one answer.
+  const reason = slot.reasons
+    .map((key) => serverText(t, key, BLOCKED_REASON_FALLBACK_KEY))
+    .filter(Boolean)
+    .join(' · ');
 
   // A key saved without verification is `standby` carrying `verification_pending`:
   // stored, but nothing has confirmed it answers. Settings states that difference
@@ -50,7 +67,7 @@ export const ProviderCard: FC<{
   // places the card is read, because `aria-label` replaces the text rather than
   // adding to it.
   const note = slot.pending ? ` · ${t('settings.models.sourceDetail.status.saved')}` : '';
-  const keyLine = `${written}${note}`;
+  const keyLine = [`${written}${note}`, reason].filter(Boolean).join(' · ');
 
   const label = connected
     ? t('onboarding.providers.cardUseExistingNamed', { name: slot.label })
@@ -65,17 +82,22 @@ export const ProviderCard: FC<{
       data-provider={slot.vendor}
       data-state={slot.kind}
       {...(slot.pending ? { 'data-pending': 'true' } : {})}
-      {...(detected ? { 'aria-pressed': selected } : {})}
+      {...(blocked ? { 'data-blocked': 'true' } : {})}
+      {...(detected && !blocked ? { 'aria-pressed': selected } : {})}
       aria-label={detected ? `${slot.label} · ${keyLine}` : `${label}${note}`}
-      disabled={connected}
+      disabled={connected || blocked}
       onClick={detected ? onToggle : onAdd}
     >
       {/* The catalog's own mark, filed by the same vendor id the slot carries — the
           picker, the import rows and this card therefore draw one provider one way,
           and a vendor with no published mark falls back to its initial rather than
-          to a neighbour's logo. */}
+          to a neighbour's logo. A credential the server named no provider for gets
+          the key it is, because every other mark here would name a brand. */}
       <span className="setup-provider-logo">
-        <VendorGlyph vendor={slot.vendor} />
+        {slot.brand
+          ? <VendorGlyph vendor={slot.brand} />
+          // No class: the logo well already sizes whatever svg it holds.
+          : <KeyRound strokeWidth={1.6} aria-hidden="true" />}
       </span>
       <span className="setup-provider-copy">
         <span className="setup-provider-name">{slot.label}</span>
