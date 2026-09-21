@@ -28,6 +28,9 @@ Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
   selectable UI; it does not introduce a new gateway allowlist.
 - Unknown/custom effort strings still round-trip. Existing `supports_reasoning`
   semantics and empty-versus-missing catalog behavior remain unchanged.
+- Existing Agent creation/model-switch default selection remains intact:
+  prefer an available `medium`, otherwise use the declared list's first option.
+  Adding the vocabulary entry never reorders that declared list.
 
 ## Validation invariants
 
@@ -44,6 +47,9 @@ Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
 - Catalog serialization and existing routing/retry tests stay green. Tests use
   isolated state and native-transport fakes; they do not prove live provider
   support for an operator's custom model declaration.
+- Resolver tests include direct/nested `none` and disabled thinking, plus
+  provider fallback with mismatched/empty source capability metadata. Each
+  attempt preserves the caller's original payload, protocol, and headers.
 
 ## Known by design
 
@@ -51,5 +57,9 @@ Owner decision: 2026-09-21. Revises PR #2084's backend-wide Off proposal.
 - No universal Off-to-medium fallback or re-enabling thinking on rejection.
 - No migration, deployment, release, host restart, or live-model invocation is
   part of this implementation.
-- Automatic Codex review on the original external-fork PR has not been picked
-  up yet. Full exact-head review remains a delivery gate, not a waived check.
+- Live provider acceptance and the proxy engine's protocol translation policy
+  remain separate verification layers. The existing boundary documented in
+  `model-hub-reasoning-intent.md` is not changed by a model-menu option.
+- Exact-head automatic Codex review remains a delivery gate; a missing
+  external-fork review pickup must not be treated as a pass or manually
+  triggered contrary to the repository policy.

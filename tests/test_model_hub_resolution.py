@@ -872,7 +872,8 @@ def test_401_retry_depends_on_credential_capability_not_source_kind(tmp_path):
     *[(efforts, provenance) for efforts in (["low"], ["high"])
       for provenance in ("user", "catalog", "upstream")],
 ])
-def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, efforts, provenance):
+@pytest.mark.parametrize("effort", ["high", "none"])
+def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, efforts, provenance, effort):
     first = _source("src_effort001", ("upstream-first",))
     second = _source("src_effort002", ("upstream-second",))
     first.models[0].reasoning_efforts = ["high"]
@@ -910,7 +911,7 @@ def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, e
     )
     service, _store, _ = _service(tmp_path, config, adapter)
     request = ModelHubRequest(
-        {"reasoning": {"effort": "high", "summary": "auto"}},
+        {"reasoning": {"effort": effort, "summary": "auto"}},
         protocol="openai_responses",
         headers={"x-test": "preserved"},
     )
@@ -927,11 +928,11 @@ def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, e
 
     assert resolved.source_id == second.id
     assert adapter.invocation_requests[0]["reasoning"] == {
-        "effort": "high",
+        "effort": effort,
         "summary": "auto",
     }
     assert adapter.invocation_requests[1] == request
-    assert request["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert request["reasoning"] == {"effort": effort, "summary": "auto"}
     assert adapter.invocation_requests[1].protocol == "openai_responses"
     assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
     started = [attempt for attempt in observed_attempts if attempt[4] is None]
@@ -942,9 +943,12 @@ def test_runtime_preserves_reasoning_intent_across_provider_fallback(tmp_path, e
 
 @pytest.mark.parametrize("payload", [
     {"reasoning_effort": "high"},
+    {"reasoning_effort": "none"},
     {"reasoning_effort": "future-tier"},
     {"reasoning": {"effort": "high", "summary": "auto"}},
+    {"reasoning": {"effort": "none"}},
     {"thinking": {"type": "enabled", "budget_tokens": 4096}},
+    {"thinking": {"type": "disabled"}},
     {"thinking": {"type": "adaptive"}, "output_config": {"effort": "max"}},
     {"reasoning": {"summary": "auto"}},
     {},
