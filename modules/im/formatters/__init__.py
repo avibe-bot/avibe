@@ -4,7 +4,7 @@ from .base_formatter import (
     hold_markdown_escapes,
     restore_held,
 )
-from .slack_formatter import SlackFormatter
+from .slack_formatter import SlackFormatter, encode_slack_delimiters
 from .discord_formatter import DiscordFormatter
 from .telegram_formatter import TelegramFormatter
 from .feishu_formatter import FeishuFormatter
@@ -17,6 +17,7 @@ __all__ = [
     "hold_markdown_escapes",
     "restore_held",
     "SlackFormatter",
+    "encode_slack_delimiters",
     "DiscordFormatter",
     "TelegramFormatter",
     "FeishuFormatter",

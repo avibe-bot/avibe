@@ -10,8 +10,9 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -41,6 +42,7 @@ from core.message_output import (
 from core.reply_enhancer import (
     FileLink,
     QuickReplyButton,
+    inline_links,
     process_reply,
     strip_file_links,
     strip_silent_blocks,
@@ -301,6 +303,25 @@ _WECHAT_CONSOLIDATED_SPLIT_THRESHOLD = 1700
 # normal fast step stays a clean label. This is the always-moving "still running"
 # signal that the heartbeat keeps ticking even when no new emit arrives.
 _ACTION_TIME_HINT_S = 10.0
+# Name the result attachment gets when a platform has no native Markdown upload
+# and the full text has to ride its ordinary file path instead.
+_RESULT_DOCUMENT_NAME = "result.md"
+
+
+@dataclass(frozen=True)
+class _ResultSplit:
+    """A proposed split, and whether every link in it survived.
+
+    ``links_whole`` is False when a link unit is longer than one message can
+    carry, so no boundary keeps it intact. The chunks are still the best split
+    available, but a caller that can deliver the whole text another way should
+    take that route BEFORE sending any of them: a half link sends fine, which
+    would make the delivery look successful while the reader is shown broken
+    Markdown and no way to reach the source.
+    """
+
+    chunks: list[str]
+    links_whole: bool
 
 
 class ConsolidatedMessageDispatcher:
@@ -1854,31 +1875,82 @@ class ConsolidatedMessageDispatcher:
                 return candidate if candidate <= max_chars else index
         return max_chars
 
-    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
-        if len(text) <= max_chars:
-            return [text]
+    @staticmethod
+    def _link_units(text: str) -> list[tuple[int, int]]:
+        """Where each Markdown link unit starts and ends in ``text``.
 
+        A link is one unit - a label a reader taps and an address the tap goes
+        to - and a boundary drawn through it delivers neither: both halves send
+        successfully, so nothing falls back, and the reader is shown raw
+        Markdown where the source should have been. The enumeration is the
+        shared one every platform pass already holds a link with, so splitting
+        and spelling agree on where a link is.
+        """
+        try:
+            return [(link.start, link.end) for link in inline_links(text)]
+        except Exception:
+            logger.debug("Link scan failed while planning a split; falling back to text boundaries", exc_info=True)
+            return []
+
+    @staticmethod
+    def _boundary_outside_links(split_at: int, links: Sequence[tuple[int, int]], consumed: int) -> int:
+        """Pull a proposed boundary back to the start of the link it would cut.
+
+        ``links`` are offsets into the whole text and ``consumed`` is how much
+        of it earlier chunks already took. Returns ``0`` when the link begins
+        the chunk and outruns it - there is no boundary that keeps that one
+        whole, which is the caller's signal to stop splitting.
+        """
+        for start, end in links:
+            start -= consumed
+            end -= consumed
+            if end <= split_at:
+                continue
+            if start >= split_at:
+                break
+            return start
+        return split_at
+
+    def _plan_result_split(self, text: str, max_chars: int) -> _ResultSplit:
+        if len(text) <= max_chars:
+            return _ResultSplit(chunks=[text], links_whole=True)
+
+        links = self._link_units(text)
         chunks: list[str] = []
+        links_whole = True
         remaining = text
+        consumed = 0
 
         while len(remaining) > max_chars:
             split_at = self._find_result_split_index(remaining, max_chars)
             if split_at <= 0:
                 split_at = max_chars
+            whole_at = self._boundary_outside_links(split_at, links, consumed)
+            if whole_at <= 0:
+                links_whole = False
+            else:
+                split_at = whole_at
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
+        return self._plan_result_split(text, max_chars).chunks
+
+    def _plan_result_split_by_bytes(self, text: str, max_bytes: int) -> _ResultSplit:
         if self._get_text_byte_length(text) <= max_bytes:
-            return [text]
+            return _ResultSplit(chunks=[text], links_whole=True)
 
+        links = self._link_units(text)
         chunks: list[str] = []
+        links_whole = True
         remaining = text
+        consumed = 0
 
         while self._get_text_byte_length(remaining) > max_bytes:
             prefix = remaining.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
@@ -1891,19 +1963,31 @@ class ConsolidatedMessageDispatcher:
                     if self._get_text_byte_length(remaining[:candidate]) <= max_bytes:
                         split_at = candidate
                         break
+            whole_at = self._boundary_outside_links(split_at, links, consumed)
+            if whole_at <= 0:
+                links_whole = False
+            else:
+                split_at = whole_at
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+        return self._plan_result_split_by_bytes(text, max_bytes).chunks
+
+    def _plan_result_split_for_context(self, context: MessageContext, text: str) -> _ResultSplit:
         max_bytes = self._get_result_max_bytes(context)
         if max_bytes is not None:
-            return self._split_result_text_by_bytes(text, max_bytes)
-        return self._split_result_text(text, self._get_result_max_chars(context))
+            return self._plan_result_split_by_bytes(text, max_bytes)
+        return self._plan_result_split(text, self._get_result_max_chars(context))
+
+    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+        return self._plan_result_split_for_context(context, text).chunks
 
     def _truncate_consolidated(self, text: str, max_bytes: int) -> str:
         if self._get_text_byte_length(text) <= max_bytes:
@@ -2874,22 +2958,17 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("All direct result sends failed; attempting fallback delivery")
                     file_uploaded = False
 
-                    # Fallback 1: upload full content as .md file.
-                    if hasattr(im_client, "upload_markdown"):
-                        try:
-                            primary_message_id = await im_client.upload_markdown(
-                                target_context,
-                                title="result.md",
-                                content=display_text,
-                                filetype="markdown",
-                            )
-                            file_uploaded = True
-                            delivered_as_attachment = True
-                            if self._attachment_id_can_anchor_delivery(context):
-                                scheduled_anchor_message_id = primary_message_id
-                            logger.info("Result delivered as .md file attachment (fallback)")
-                        except Exception as upload_err:
-                            logger.warning("upload_markdown fallback failed: %s", upload_err)
+                    # Fallback 1: upload the full content as a .md file, by the
+                    # native markdown upload or by the plain file upload of a
+                    # platform that has only that one.
+                    attachment_id = await self._upload_result_document(im_client, target_context, display_text)
+                    if attachment_id:
+                        primary_message_id = attachment_id
+                        file_uploaded = True
+                        delivered_as_attachment = True
+                        if self._attachment_id_can_anchor_delivery(context):
+                            scheduled_anchor_message_id = primary_message_id
+                        logger.info("Result delivered as .md file attachment (fallback)")
 
                     # Fallback 2: split into multiple messages.
                     if not file_uploaded:
@@ -3436,7 +3515,17 @@ class ConsolidatedMessageDispatcher:
         chunk (a mid-stream footer would read wrong); every chunk is a new send so
         the result notifies. Returns the first chunk's id (the delivery anchor).
         """
-        chunks = self._split_result_text_for_context(context, text)
+        plan = self._plan_result_split_for_context(context, text)
+        if not plan.links_whole:
+            # Checked BEFORE the first send: a link that no boundary keeps whole
+            # would go out as two halves that both send successfully, so nothing
+            # downstream would ever fall back, and the reader would be left with
+            # a broken address. Hand the whole result to the caller's fallback
+            # instead of reporting a delivery that lost the source.
+            logger.warning("Split would break a link unit; abandoning the split before sending")
+            return None
+
+        chunks = plan.chunks
         first_message_id: Optional[str] = None
 
         for index, chunk in enumerate(chunks):
@@ -3476,6 +3565,70 @@ class ConsolidatedMessageDispatcher:
                 first_message_id = message_id
 
         return first_message_id
+
+    async def _upload_result_document(
+        self,
+        im_client,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Deliver the whole result as a file, by whichever route the client has.
+
+        ``upload_markdown`` is the native route. A platform can inherit it from
+        ``BaseIMClient`` without implementing it and still have an ordinary file
+        upload - WeChat is exactly that shape - so the same content is written
+        to a temporary ``result.md`` and handed to ``upload_file_from_path``,
+        the path its own file links already take.
+
+        Returns the delivered id, or ``None`` when nothing was delivered: an
+        adapter that reports failure by returning an empty id has uploaded
+        nothing, and treating that as an attachment would end the turn claiming
+        a result the user never received.
+        """
+        upload_markdown = getattr(im_client, "upload_markdown", None)
+        if callable(upload_markdown):
+            try:
+                message_id = await upload_markdown(
+                    context,
+                    title=_RESULT_DOCUMENT_NAME,
+                    content=text,
+                    filetype="markdown",
+                )
+                if message_id:
+                    return message_id
+                logger.warning("upload_markdown returned no id; nothing was attached")
+                return None
+            except NotImplementedError:
+                logger.debug("IM client inherits upload_markdown unimplemented; trying its file upload")
+            except Exception as err:
+                logger.warning("upload_markdown fallback failed: %s", err)
+                return None
+
+        upload_file_from_path = getattr(im_client, "upload_file_from_path", None)
+        if not callable(upload_file_from_path):
+            logger.debug("IM client supports no file upload; cannot attach the full result")
+            return None
+
+        with tempfile.TemporaryDirectory(prefix="avibe-result-") as staging_dir:
+            document = Path(staging_dir) / _RESULT_DOCUMENT_NAME
+            try:
+                document.write_text(text, encoding="utf-8")
+                file_id = await upload_file_from_path(
+                    context,
+                    file_path=str(document),
+                    title=_RESULT_DOCUMENT_NAME,
+                )
+            except NotImplementedError:
+                logger.debug("IM client does not implement file uploads; cannot attach the full result")
+                return None
+            except Exception as err:
+                logger.warning("Result file upload fallback failed: %s", err)
+                return None
+
+        if not file_id:
+            logger.warning("Result file upload returned no id; nothing was attached")
+            return None
+        return file_id
 
     async def _upload_file_links(
         self,

@@ -1,4 +1,38 @@
+import re
+
 from .base_formatter import BaseMarkdownFormatter
+
+# The three character references Slack resolves on the way in. Text that already
+# spells one means the character it resolves to, so encoding it again would show
+# the reader ``&amp;`` where the source said ``&``.
+_SLACK_RESOLVED_REFERENCE_RE = re.compile(r"&(?:amp|lt|gt);")
+
+
+def encode_slack_delimiters(text: str) -> str:
+    """Spell ``&``, ``<`` and ``>`` so Slack shows them instead of reading them.
+
+    For text whose Markdown has already been resolved - a link label, where the
+    reader's ``&`` may have been written ``&amp;`` or backslash-escaped. Slack
+    reads all three characters as markup of its own, and inside ``<url|label>``
+    a bare ``>`` ends the link early, so the label arrives as a character
+    reference. A reference the source already spells is left as it stands.
+
+    Not the same job as ``escape_special_chars``, which encodes text that was
+    never Markdown (a path, a tool name): there ``&amp;`` is five literal
+    characters and has to be encoded to survive as those five.
+    """
+    encoded: list[str] = []
+    index = 0
+    for reference in _SLACK_RESOLVED_REFERENCE_RE.finditer(text):
+        encoded.append(_encode_run(text[index : reference.start()]))
+        encoded.append(reference.group())
+        index = reference.end()
+    encoded.append(_encode_run(text[index:]))
+    return "".join(encoded)
+
+
+def _encode_run(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class SlackFormatter(BaseMarkdownFormatter):

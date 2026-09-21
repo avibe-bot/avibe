@@ -136,6 +136,29 @@ blob with no way to reach the page the answer is based on.
   not a link found inside it. The spans come back sorted and non-overlapping,
   so a caller splices each exactly once. Code, images, and ordinary
   non-citation formatting keep the behaviour they had.
+- **A link stays whole after the hold, too.** Holding the unit is where a
+  platform reads it; two stages downstream still rewrite it. A result longer
+  than one message is cut at whitespace on Discord and WeChat, and a cut taken
+  through `[label](url)` delivers neither half — both chunks send successfully,
+  so nothing falls back, and the reader is shown raw Markdown with no way to
+  reach the source. The split now asks the same `inline_links` enumeration
+  where a link is and pulls a boundary back to the link's start; non-link text
+  keeps the boundaries it had. When one link is longer than a whole message no
+  boundary can save it, so the split is abandoned **before the first chunk is
+  sent** and the complete result goes out as the `result.md` attachment the
+  fallback already had. WeChat has no `upload_markdown` — it inherits the base
+  class's `NotImplementedError` — so that fallback also takes the ordinary
+  `upload_file_from_path` route it does implement, staging the text in a
+  temporary file that is removed once the upload returns; an adapter that
+  reports failure with an empty id has delivered nothing, and the turn says so
+  rather than claiming an attachment. And at Slack's own serialization
+  boundary, `&`, `<` and `>` in a label are encoded as Slack requires: a bare
+  `>` closes `<url|label>` at that character, so the rest of the label and the
+  whole address arrive as plain text. The label is finished before the wrapper
+  closes over it — escapes restored, then encoded — because a character a
+  backslash protected only comes back after the platform pass, and a reference
+  the source already spells (`&amp;`) is left alone rather than encoded twice.
+  The destination is delivered exactly as it stands.
 - **A backslash escape is resolved before a platform reads it.** An escape says
   one character is not syntax, and no IM dialect knows that. Telegram and Slack
   re-read the escaped character as markup of their own — Slack's converter
@@ -339,7 +362,19 @@ blob with no way to reach the page the answer is based on.
 - `tests/test_link_unit_delivery.py` — the whole-link hold, on the consumers
   that would swallow it: a footnote definition, a table row, an HTML block,
   ordinary prose and prose wrapped across lines, plus a code span written
-  across two lines that must stay one code span.
+  across two lines that must stay one code span. Then what happens to the unit
+  after the hold: a label spelling `&`, `<` or `>` — written plainly, written
+  as a backslash escape restored after the converter ran, spelled as a
+  character reference that must not be encoded twice, or looking like a
+  mention — and the destination delivered untouched; a fitting link crossing a
+  proposed boundary, two adjacent links, and a multibyte byte budget, each
+  keeping every link whole and every chunk within the platform limit; and the
+  delivery itself, through the real dispatcher with only the network replaced —
+  Discord attaching the complete result rather than fragmenting a link no
+  message can hold, the real WeChat adapter carrying it over
+  `upload_file_from_path` with the staging file cleaned up, a refused CDN
+  upload reported as no delivery rather than as an attachment, and in every one
+  of those cases not one fragment sent before the fallback.
 - `ui/src/components/workbench/CitationStoredRows.test.tsx` — the rows
   `tests/citation_bridge.py` wrote through the real dispatcher, read by the
   real `MessageRow` and the real activity card: an IM row whose footer is

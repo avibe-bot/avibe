@@ -342,6 +342,13 @@ class SlackConsumerTests(PlatformConsumerTests):
 
     # ``<destination|label>``, and the bare ``<destination>`` Slack also accepts.
     _LINK = re.compile(r"<([^<>|]+)(?:\|([^<>]*))?>")
+    # The three references Slack resolves on the way in, and the only ones: a
+    # label spelling ``&copy;`` is shown as those six characters, not ``(c)``.
+    # A label arrives spelled this way because ``&``, ``<`` and ``>`` are
+    # Slack's own markup, so reading back what the reader sees means resolving
+    # these three and nothing else.
+    _RESOLVED = {"&amp;": "&", "&lt;": "<", "&gt;": ">"}
+    _REFERENCE = re.compile(r"&(?:amp|lt|gt);")
 
     def setUp(self):
         self.bot = SlackBot(SlackConfig(bot_token="xoxb-test"))
@@ -349,13 +356,20 @@ class SlackConsumerTests(PlatformConsumerTests):
     def render(self, text: str) -> str:
         return self.bot._convert_markdown_to_slack_mrkdwn(text)
 
+    def _resolve(self, text: str) -> str:
+        return self._REFERENCE.sub(lambda match: self._RESOLVED[match.group()], text)
+
     def links(self, rendered: str) -> list[tuple[str, str]]:
         found = []
         for match in self._LINK.finditer(rendered):
             destination = match.group(1)
             if not destination.startswith(("http://", "https://")):
                 continue  # ``<@U1>``/``<#C1>`` and stray angle brackets in prose
-            found.append((destination, match.group(2) if match.group(2) is not None else destination))
+            # The label is resolved, the destination is not: an address is
+            # delivered as it stands, so an encoded one is a defect this
+            # reading must keep visible rather than undo.
+            label = match.group(2)
+            found.append((destination, self._resolve(label) if label is not None else destination))
         return found
 
     def test_the_converter_alone_would_have_sent_readers_to_another_site(self):

@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import aiohttp
-from typing import Dict, Any, Optional, Callable, List, Tuple
+from typing import Dict, Any, Callable, List, Mapping, Optional, Tuple
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -31,6 +31,7 @@ from config.v2_config import SlackConfig
 from core.auth import AuthResult
 from .formatters import (
     SlackFormatter,
+    encode_slack_delimiters,
     hold_links,
     hold_markdown_escapes,
     restore_held,
@@ -382,7 +383,7 @@ class SlackBot(BaseIMClient):
             pattern = rf"^\s*<@{re.escape(user_id)}>\s*"
         return re.sub(pattern, "", text, count=1).strip()
 
-    def _render_slack_link(self, label: str, destination: str) -> str:
+    def _render_slack_link(self, label: str, destination: str, escaped: Mapping[str, str]) -> str:
         """Spell one Markdown link the way Slack reads one.
 
         ``<destination|label>`` is a single unit, so whatever formatting the
@@ -392,8 +393,19 @@ class SlackBot(BaseIMClient):
         has to be one here too, because a newline inside the angle brackets is
         not a link on Slack. A link spelling no label at all is sent bare
         rather than with an empty one.
+
+        The label is also finished here rather than left half-built. Slack reads
+        ``&``, ``<`` and ``>`` as markup of its own - a bare ``>`` ends the link
+        at that character, so the rest of the label and the whole address are
+        shown as plain text - and the characters a backslash escape protected
+        only come back when ``escaped`` is restored. Restoring them inside the
+        label, before it is encoded, is the difference between the reader seeing
+        a label that says ``a > b`` and seeing the link fall apart: restoring
+        them after the wrapper is built puts a raw delimiter inside it with
+        nothing left to encode it.
         """
         label = self.markdown_converter.convert(_SOFT_LINE_BREAK_RE.sub(" ", label))
+        label = encode_slack_delimiters(restore_held(label, escaped))
         return f"<{destination}|{label}>" if label else f"<{destination}>"
 
     def _convert_markdown_to_slack_mrkdwn(self, text: str) -> str:
@@ -421,10 +433,14 @@ class SlackBot(BaseIMClient):
             # ``https://a_b_.example/x``, a link to a different site, and a
             # bracket it paired with the wrong text sent a footnote definition
             # out labelled ``^f]: [p``. Slack spells a link itself below.
-            held_text, links = hold_links(held_text, render=self._render_slack_link)
+            held_text, links = hold_links(
+                held_text,
+                render=lambda label, destination: self._render_slack_link(label, destination, escaped),
+            )
             converted_text = self.markdown_converter.convert(held_text)
-            # Links first: a label or a destination may still hold an escape
-            # placeholder.
+            # Links first: a destination may still hold an escape placeholder
+            # (a label's are resolved when the link is spelled, so its literals
+            # can be encoded for Slack before the wrapper closes over them).
             converted_text = restore_held(converted_text, links)
             return restore_held(converted_text, escaped)
         except Exception as e:
