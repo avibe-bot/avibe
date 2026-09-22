@@ -1215,70 +1215,8 @@ def _recorded_install_origin(package_name: str) -> str | None:
     return url if isinstance(url, str) else None
 
 
-def release_asset_specs(version: str) -> tuple[str, str] | None:
-    """Preserve a verified GitHub core origin during an exact package repair."""
-
-    return _release_asset_pair(version, _recorded_install_origin(PACKAGE_NAME))
-
-
-def _release_asset_pair(version: str, origin: str | None) -> tuple[str, str] | None:
-    if not origin:
-        return None
-    try:
-        parsed_version = Version(version)
-    except InvalidVersion:
-        return None
-    if parsed_version.local is not None:
-        return None
-    normalized = str(parsed_version)
-    prefix = f"{RELEASE_DOWNLOAD_BASE_URL}/"
-    if not origin.startswith(prefix):
-        return None
-    # Exactly one tag segment and one filename: anything else is not an asset of
-    # this repository's releases, whatever it may resemble.
-    segments = origin[len(prefix) :].split("/")
-    if len(segments) != 2:
-        return None
-    tag, asset = segments
-    if not tag.startswith(("v", "gh-v")):
-        return None
-    tag_version = tag.removeprefix("gh-").removeprefix("v")
-    try:
-        normalized_tag_version = str(Version(tag_version))
-    except InvalidVersion:
-        return None
-    if normalized_tag_version != normalized:
-        return None
-    if asset != f"{_wheel_distribution(PACKAGE_NAME)}-{normalized}-py3-none-any.whl":
-        return None
-    # One release directory, so the companion cannot come from another release.
-    return (
-        origin,
-        f"{prefix}{tag}/{_wheel_distribution(MEMORY_PACKAGE_NAME)}-{normalized}-py3-none-any.whl",
-    )
-
-
-
-
-def pinned_package_spec(
-    version: str,
-    *,
-    package_name: str,
-) -> str:
-    """Pin one explicit distribution name to one exact published version.
-
-    The explicit Memory install uses this to reinstall the running core release
-    together with its matching optional package. The distribution name must be a
-    bare package name; direct URLs and pre-versioned requirements are rejected.
-
-    The message never quotes the spec. An operator-supplied spec can be an index
-    URL carrying credentials.
-    """
-
-    spec = package_name
-    if _BARE_PACKAGE_NAME_RE.fullmatch(spec) is None:
-        raise ValueError("The configured upgrade package spec cannot carry a version pin")
-    return f"{spec}=={version}"
+def release_asset_specs(version: str) -> None:
+    return None
 
 
 def build_upgrade_plan(
@@ -1321,6 +1259,7 @@ def build_upgrade_plan(
         if version
         else (package_spec or get_upgrade_package_spec())
     )
+    uv_binary = find_uv_binary(uv_path=uv_path, base_env=base_env)
     if is_uv_tool_install(executable) and uv_binary:
         env = dict(base_env or os.environ)
         preflight_error = None
