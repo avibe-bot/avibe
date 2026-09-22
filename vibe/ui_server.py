@@ -75,11 +75,9 @@ from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.message_types import types_with
-from vibe.model_service import MODEL_SERVICE_REFRESH_PATH
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
-from vibe.ui_memory_routes import register_memory_routes
 
 if TYPE_CHECKING:
     from core.show_runtime import ShowRuntimeUnavailableError
@@ -632,7 +630,6 @@ def _is_mutation_guard_exempt() -> bool:
     if (
         _is_cli_show_event_request()
         or _is_cli_session_activity_request()
-        or _is_cli_model_service_refresh_request()
     ):
         return True
     return (
@@ -667,8 +664,6 @@ def _is_cli_session_activity_request() -> bool:
     )
 
 
-def _is_cli_model_service_refresh_request() -> bool:
-    return _cli_local_event_token_ok() and request.path == MODEL_SERVICE_REFRESH_PATH
 
 
 def _is_show_api_mutation() -> bool:
@@ -3244,15 +3239,6 @@ def status():
         payload = json.loads(runtime.render_status(detect_extra_processes=False))
     return jsonify(payload)
 
-
-@app.route(MODEL_SERVICE_REFRESH_PATH, methods=["POST"])
-def model_service_refresh():
-    if not _is_cli_model_service_refresh_request():
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-    from vibe.model_service import request_model_service_refresh
-
-    request_model_service_refresh()
-    return jsonify({"ok": True})
 
 
 @app.websocket("/ws/echo")
@@ -10221,9 +10207,6 @@ async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler
     return await app.dispatch_native_request(starlette_request, handler)
 
 
-# The Memory routes live in their own module; registered here so their position
-# in the app's route table is unchanged.
-register_memory_routes(app)
 
 
 @app.get("/api/files/list", include_in_schema=False)
@@ -16681,9 +16664,6 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
 
-    from vibe.memory_ui_access import initialize_process_ui_read_secret
-
-    initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn
