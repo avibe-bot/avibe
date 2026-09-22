@@ -2953,26 +2953,87 @@ def test_supervisor_keeps_installing_state_unverified_until_settlement(
     assert status["verified"] is False
 
 
-def test_supervisor_reaps_an_engine_left_running_by_a_dead_service(tmp_path: Path) -> None:
-    # A SIGKILLed service never runs atexit; its isolated engine group survives.
-    first, store = _fixture_supervisor(tmp_path)
+def _recorded_engine_pids(record: Path) -> list[int]:
+    return [entry["pid"] for entry in json.loads(record.read_text(encoding="utf-8"))["engines"]]
+
+
+def _wait_for(condition, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+
+
+def _orphan_engine(tmp_path: Path) -> subprocess.Popen:
+    """Start an engine, then forget it the way a SIGKILLed service would."""
+
+    first, _store = _fixture_supervisor(tmp_path)
     first.ensure_running()
     orphan = first._process
     assert orphan is not None
-    record = store.root / "engine-process.json"
-    assert json.loads(record.read_text(encoding="utf-8"))["pid"] == orphan.pid
     first._process = None
     first._connection = None
     # The dead service's orphan is re-parented to init, which reaps it; here it is
     # still this test's child, so stand in for init.
     threading.Thread(target=orphan.wait, daemon=True).start()
+    return orphan
+
+
+def test_supervisor_stop_without_a_handle_reaps_the_recorded_engine(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.stop()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_keeps_an_unconfirmed_engine_tracked_beside_the_new_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    real_reap = supervisor_module.reap_orphaned_process_tree
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+    record = store.root / "engine-process.json"
+
+    supervisor.ensure_running()
+
+    assert supervisor._process is not None
+    assert _recorded_engine_pids(record) == [orphan.pid, supervisor._process.pid]
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", real_reap)
+    supervisor.stop()
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not record.exists()
+
+
+def test_supervisor_leaves_an_unreadable_engine_record_untouched(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    record = store.root / "engine-process.json"
+    record.mkdir(parents=True)
+
+    supervisor.ensure_running()
+    supervisor.stop()
+
+    assert record.is_dir()
+
+
+def test_supervisor_reaps_an_engine_left_running_by_a_dead_service(tmp_path: Path) -> None:
+    # A SIGKILLed service never runs atexit; its isolated engine group survives.
+    orphan = _orphan_engine(tmp_path)
+    record = _fixture_supervisor(tmp_path)[1].root / "engine-process.json"
+    assert _recorded_engine_pids(record) == [orphan.pid]
 
     second, _store = _fixture_supervisor(tmp_path)
     second.ensure_running()
 
-    assert orphan.wait(timeout=5) is not None
+    _wait_for(lambda: orphan.poll() is not None)
     assert second._process is not None and second._process.pid != orphan.pid
-    assert json.loads(record.read_text(encoding="utf-8"))["pid"] == second._process.pid
+    assert _recorded_engine_pids(record) == [second._process.pid]
     second.stop()
     assert not record.exists()
 
@@ -2988,10 +3049,14 @@ def test_supervisor_never_signals_a_recycled_pid_from_its_record(tmp_path: Path)
         (store.root / "engine-process.json").write_text(
             json.dumps(
                 {
-                    "pid": stranger.pid,
-                    # A recycled pid never shares its predecessor's birth time.
-                    "create_time": psutil.Process(stranger.pid).create_time() - 1000,
-                    "worker_fingerprint": "sha256:" + "0" * 64,
+                    "engines": [
+                        {
+                            "pid": stranger.pid,
+                            # A recycled pid never shares its predecessor's birth time.
+                            "create_time": psutil.Process(stranger.pid).create_time() - 1000,
+                            "worker_fingerprint": "sha256:" + "0" * 64,
+                        }
+                    ]
                 }
             ),
             encoding="utf-8",
@@ -3000,9 +3065,7 @@ def test_supervisor_never_signals_a_recycled_pid_from_its_record(tmp_path: Path)
         supervisor.ensure_running()
 
         assert stranger.poll() is None
-        assert not (store.root / "engine-process.json").read_text(encoding="utf-8").count(
-            str(stranger.pid)
-        )
+        assert stranger.pid not in _recorded_engine_pids(store.root / "engine-process.json")
         supervisor.stop()
     finally:
         stranger.kill()

@@ -17,6 +17,7 @@ from config.atomic_io import write_atomic
 from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
+    PersistedProcessIdentity,
     capture_spawned_process_identity,
     isolated_subprocess_kwargs,
     new_process_identity_marker,
@@ -185,10 +186,9 @@ class EngineSupervisor:
 
     def _start_locked(self) -> EngineConnection:
         self._start_attempted = True
-        if not self._reap_recorded_engine_locked():
-            # Every start binds a fresh port, so an unverifiable survivor cannot
-            # collide with the new engine; refusing would wedge Model Hub forever.
-            logger.warning("Could not confirm the previous Model Hub engine exited; starting anyway")
+        # Every start binds a fresh port, so an unverifiable survivor cannot collide
+        # with the new engine; it stays in the record beside it instead of blocking.
+        survivors = self._reap_recorded_engines_locked()
         managed = self.installer.status()
         binary = self.installer.resolve_engine_path()
         if binary is None:
@@ -233,7 +233,7 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        self._record_engine_locked(process, marker)
+        self._record_engine_locked(process, marker, survivors)
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
         exit_code: int | None = None
@@ -305,61 +305,99 @@ class EngineSupervisor:
         self._process = None
         self._connection = None
         self._health_failure_signature = None
-        if process is None:
-            return
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
             try:
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
                 process.wait(timeout=3)
-        # The leader is gone; the record retires only once its group is too.
-        self._reap_recorded_engine_locked()
+        # Also reached with no local handle (a restarted service): the record may
+        # still name an engine the previous service left running.
+        self._reap_recorded_engines_locked()
 
     @property
     def _engine_record_path(self) -> Path:
         return self.state_store.root / _ENGINE_PROCESS_RECORD
 
-    def _record_engine_locked(self, process: Any, marker: str) -> None:
-        pid = getattr(process, "pid", None)
-        identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
-        if identity is None:
-            return
+    def _load_engine_records_locked(self) -> list[PersistedProcessIdentity] | None:
+        """Return the recorded engine identities, or ``None`` if the record is unreadable."""
+
         try:
-            self._engine_record_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            text = self._engine_record_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        except OSError:
+            logger.warning("Model Hub engine process record could not be read", exc_info=True)
+            return None
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            payload = None
+        entries = payload.get("engines") if isinstance(payload, dict) else None
+        records: list[PersistedProcessIdentity] = []
+        for entry in entries if isinstance(entries, list) else ():
+            pid = entry.get("pid") if isinstance(entry, dict) else None
+            identity = process_identity_from_payload(entry, pid) if isinstance(pid, int) else None
+            if identity is not None:
+                records.append(identity)
+        return records
+
+    def _store_engine_records_locked(self, records: list[PersistedProcessIdentity]) -> None:
+        path = self._engine_record_path
+        try:
+            if not records:
+                path.unlink(missing_ok=True)
+                return
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             write_atomic(
-                self._engine_record_path,
-                json.dumps(serialize_process_identity(identity), sort_keys=True) + "\n",
+                path,
+                json.dumps(
+                    {"engines": [serialize_process_identity(identity) for identity in records]},
+                    sort_keys=True,
+                )
+                + "\n",
             )
         except OSError:
             logger.warning("Model Hub engine process record could not be written", exc_info=True)
 
-    def _reap_recorded_engine_locked(self) -> bool:
-        """Stop the recorded engine tree; return whether no recorded tree remains."""
-
-        path = self._engine_record_path
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return True
-        except (OSError, ValueError):
-            payload = None
-        pid = payload.get("pid") if isinstance(payload, dict) else None
-        identity = process_identity_from_payload(payload, pid) if isinstance(pid, int) else None
+    def _record_engine_locked(
+        self,
+        process: Any,
+        marker: str,
+        survivors: list[PersistedProcessIdentity] | None,
+    ) -> None:
+        if survivors is None:
+            # Rewriting a record we could not read would drop identities it may hold.
+            return
+        pid = getattr(process, "pid", None)
+        identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
         if identity is not None:
+            self._store_engine_records_locked([*survivors, identity])
+
+    def _reap_recorded_engines_locked(self) -> list[PersistedProcessIdentity] | None:
+        """Stop every recorded engine tree; return those still unconfirmed.
+
+        ``None`` means the record could not be read and was left untouched.
+        """
+
+        records = self._load_engine_records_locked()
+        if records is None:
+            return None
+        survivors: list[PersistedProcessIdentity] = []
+        for identity in records:
             outcome = reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=identity)
             if outcome == "unconfirmed":
-                return False
-            if outcome == "reaped":
+                survivors.append(identity)
+            elif outcome == "reaped":
                 logger.warning("Reaped a Model Hub engine left running by an earlier service")
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.warning("Model Hub engine process record could not be retired", exc_info=True)
-        return True
+        if survivors:
+            logger.warning(
+                "Could not confirm %d earlier Model Hub engine(s) exited; keeping them tracked",
+                len(survivors),
+            )
+        self._store_engine_records_locked(survivors)
+        return survivors
 
 
 def _allocate_loopback_port() -> int:
