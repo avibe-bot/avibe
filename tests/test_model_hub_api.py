@@ -3633,7 +3633,7 @@ def test_backend_catalog_keeps_every_existing_origin_immutable(
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("codex", baseline, desired))
 
-    assert raised.value.code == "backend_model_locked"
+    assert raised.value.code == "backend_model_origin_immutable"
     assert next(model for model in agent.models if model.id == model_id).origin == origin
 
 
@@ -3654,8 +3654,63 @@ def test_backend_catalog_rejects_an_origin_forged_into_the_baseline(tmp_path):
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_models("codex", forged_baseline, forged_desired))
 
-    assert raised.value.code == "backend_model_locked"
+    assert raised.value.code == "backend_model_origin_immutable"
     assert next(model for model in agent.models if model.id == model_id).origin == "manual"
+
+
+def test_backend_catalog_names_a_re_added_row_by_its_own_refusal(tmp_path):
+    """A row removed and added back keeps the origin the server recorded.
+
+    OpenCode publishes no built-in models at all, so the built-in refusal can
+    never be the honest answer there. The save is refused for re-deciding an
+    existing row's creation path, and has to say that and nothing else.
+    """
+    service, store, _adapter = _service(tmp_path)
+    model_id = "grok-4.6"
+    agent = store.config.agents["opencode"]
+    agent.models.append(ModelHubBackendModelConfig(
+        id=model_id, origin="provider", native_protocol="openai_responses",
+    ))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    if agent.menu is not None:
+        agent.menu.checked.append(model_id)
+    baseline = next(
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "opencode"
+    )
+    kept = [copy.deepcopy(model) for model in baseline if model["id"] != model_id]
+    re_added = copy.deepcopy(next(model for model in baseline if model["id"] == model_id))
+    re_added["origin"] = "models_dev"
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(service.set_agent_models("opencode", baseline, [*kept, re_added]))
+
+    assert raised.value.code == "backend_model_origin_immutable"
+    assert next(model for model in agent.models if model.id == model_id).origin == "provider"
+
+
+def test_backend_catalog_accepts_a_re_added_row_under_its_recorded_origin(tmp_path):
+    """The same removal and re-add saves once the origin is the recorded one."""
+    service, store, _adapter = _service(tmp_path)
+    model_id = "grok-4.6"
+    agent = store.config.agents["opencode"]
+    agent.models.append(ModelHubBackendModelConfig(
+        id=model_id, origin="provider", native_protocol="openai_responses",
+    ))
+    agent.routes[model_id] = ModelHubRouteConfig()
+    if agent.menu is not None:
+        agent.menu.checked.append(model_id)
+    baseline = next(
+        projected["catalog_models"] for projected in service.list_agents() if projected["backend"] == "opencode"
+    )
+    kept = [copy.deepcopy(model) for model in baseline if model["id"] != model_id]
+    re_added = copy.deepcopy(next(model for model in baseline if model["id"] == model_id))
+    re_added["display_name"] = "Grok 4.6"
+
+    response = asyncio.run(service.set_agent_models("opencode", baseline, [*kept, re_added]))
+
+    saved = next(model for model in response["agent"]["catalog_models"] if model["id"] == model_id)
+    assert saved["origin"] == "provider"
+    assert saved["display_name"] == "Grok 4.6"
 
 
 @pytest.mark.parametrize("model_id", ["opus", "sonnet[1m]"])

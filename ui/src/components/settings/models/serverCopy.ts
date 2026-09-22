@@ -123,6 +123,8 @@ const CATALOG_SAVE_FAILURE_COPY: Readonly<Record<string, TranslationKey>> = {
   'modelHub.errors.backend_model_id_invalid': 'settings.models.gateway.catalog.saveIdInvalid',
   'modelHub.errors.backend_model_duplicate': 'settings.models.gateway.catalog.saveDuplicate',
   'modelHub.errors.backend_model_locked': 'settings.models.gateway.catalog.saveLocked',
+  'modelHub.errors.backend_model_origin_immutable':
+    'settings.models.gateway.catalog.saveOriginImmutable',
   'modelHub.errors.backend_model_catalog_invalid': 'settings.models.gateway.catalog.saveInvalid',
 };
 

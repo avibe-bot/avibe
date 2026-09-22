@@ -8,7 +8,7 @@ import i18n from '@/i18n';
 import { BackendModelCatalogDialog } from './BackendModelCatalogDialog';
 import { blankBackendModel, candidateBackendModel } from './backendCatalog';
 import { ApiCallError, modelsApi } from './modelsApi';
-import type { AgentSupply, BackendModel, ModelCandidate, RouteHop } from './types';
+import type { AgentSupply, BackendModel, ModelCandidate, ModelsDevMatch, RouteHop } from './types';
 
 const model = (id: string, overrides: Partial<BackendModel> = {}): BackendModel => ({
   ...blankBackendModel(),
@@ -298,6 +298,61 @@ describe('BackendModelCatalogDialog', () => {
       baseline: catalog,
       models: [model('glm-4.7', { native_protocol: 'openai_responses' }), { ...FOO, max_output_tokens: 8000 }],
     }));
+  });
+
+  it('keeps the recorded origin of a row re-added under an ID the editor only lands on at the end', async () => {
+    const user = userEvent.setup();
+    // The row the server already stores, and the creation path it recorded.
+    const GROK = model('grok-4.6', {
+      origin: 'provider',
+      display_name: 'Grok 4.6',
+      native_protocol: 'openai_responses',
+    });
+    const catalog = [model('glm-4.7', { native_protocol: 'openai_responses' }), GROK];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, { backend: 'opencode' }));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    // models.dev publishes this model under exactly the id the list already
+    // holds, which is the whole point: the typed query does not name the saved
+    // row, and the chosen suggestion does.
+    vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
+      provider_id: 'xai',
+      provider_name: 'xAI',
+      model_id: 'grok-4.6',
+      models_dev_id: 'xai/grok-4.6',
+      display_name: 'Grok 4.6',
+      context_window: 256000,
+      max_output_tokens: 64000,
+      input_modalities: ['text'],
+      output_modalities: ['text'],
+      supports_tools: true,
+      supports_reasoning: true,
+      reasoning_efforts: ['low', 'high'],
+      native_protocol: 'openai_responses',
+    } satisfies ModelsDevMatch]);
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog({ backend: 'opencode' });
+
+    await user.click(await screen.findByRole('button', { name: 'Remove Grok 4.6' }));
+    await user.click(screen.getByRole('button', { name: 'Add models' }));
+    await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
+    // A query that is not the saved id, so nothing resolves it to the saved row
+    // on the way in — the editor opens in add mode and stamps `models_dev`.
+    await user.type(await screen.findByLabelText('Search models or providers'), 'grok 4.6');
+    await user.click(await screen.findByRole('button', { name: 'Add "grok 4.6" as a custom model…' }));
+    await user.click(await screen.findByRole('option', { name: /Grok 4\.6/ }));
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    // `origin` is how the row was FIRST created and the server holds it
+    // immutable, so the only list this can be saved as is one that still says
+    // `provider`. Sending `models_dev` is refused outright, and the user is
+    // left with a row they cannot re-add by hand at all.
+    await waitFor(() => expect(write).toHaveBeenCalled());
+    const [, body] = write.mock.calls[0];
+    expect(body.models.find((entry) => entry.id === 'grok-4.6')?.origin).toBe('provider');
+    // And the fill itself still landed: inheriting the origin is not reverting
+    // the row to the one that was removed.
+    expect(body.models.find((entry) => entry.id === 'grok-4.6')?.context_window).toBe(256000);
   });
 
   it('edits an existing row without renaming it', async () => {

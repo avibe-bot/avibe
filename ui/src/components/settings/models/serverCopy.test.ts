@@ -174,6 +174,7 @@ describe('catalogSaveFailureKey', () => {
     ['backend_model_id_invalid', 'saveIdInvalid'],
     ['backend_model_duplicate', 'saveDuplicate'],
     ['backend_model_locked', 'saveLocked'],
+    ['backend_model_origin_immutable', 'saveOriginImmutable'],
     ['backend_model_catalog_invalid', 'saveInvalid'],
   ] as const;
 

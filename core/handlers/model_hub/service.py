@@ -4926,17 +4926,26 @@ class ModelHubService:
                 )
                 if admission_error == "backend_model_id_invalid":
                     raise ModelHubError(admission_error)
+            # Two different refusals, and they are separate codes because they
+            # name different next steps. Forging `builtin` is a claim about a
+            # model this backend publishes, and the way out is to drop the row.
+            # Rewriting a saved row's origin is a claim about a row that already
+            # exists, and the way out is to EDIT that row instead of removing it
+            # and adding it again — advice the built-in wording cannot carry, and
+            # which the merged code left unsayable on a backend like OpenCode
+            # whose built-in snapshot is empty by construction.
             for model_id, desired in desired_by_id.items():
                 trusted = current_by_id.get(model_id) or baseline_by_id.get(model_id)
-                if (
-                    (
-                        trusted is None
-                        and desired.origin == "builtin"
-                        and model_id not in builtin_ids
+                if trusted is None:
+                    if desired.origin == "builtin" and model_id not in builtin_ids:
+                        raise ModelHubError("backend_model_locked", status=409)
+                elif desired.origin != trusted.origin:
+                    # `origin` records how a row was FIRST created, so a saved
+                    # row keeps its own answer however often it is re-filled.
+                    raise ModelHubError(
+                        "backend_model_origin_immutable",
+                        status=409,
                     )
-                    or (trusted is not None and desired.origin != trusted.origin)
-                ):
-                    raise ModelHubError("backend_model_locked", status=409)
             for model_id in desired_by_id.keys() - current_by_id.keys():
                 admission_error = self._backend_model_admission_error(
                     agent_backend,

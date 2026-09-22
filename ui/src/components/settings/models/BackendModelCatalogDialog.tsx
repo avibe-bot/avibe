@@ -512,9 +512,19 @@ export const BackendModelCatalogDialog: React.FC<{
     // existing row keeps whatever it already carried: the editor holds its id
     // fixed, so the projection is still about the same addition.
     if (existing < 0) chosenRef.current.delete(model.id);
+    // `origin` is how a row was FIRST created, and the server holds it immutable
+    // for an id it already stores — so it is read back off the saved list here
+    // rather than taken from the editor. Add mode stamps `models_dev` on a
+    // typeahead pick and only learns the final id at that moment, so a row the
+    // user removed and then re-added by hand arrives claiming a creation path
+    // the server will refuse. The saved answer is the one that survives; asking
+    // the saved list and not the draft is what keeps a genuinely new row's own
+    // creation path intact.
+    const saved = (baselineRef.current?.models ?? []).find((entry) => entry.id === model.id);
+    const kept = saved ? { ...model, origin: saved.origin } : model;
     mutate(existing >= 0
-      ? draft.map((entry, index) => (index === existing ? { ...model, locked: entry.locked, routeable: entry.routeable } : entry))
-      : [...draft, model]);
+      ? draft.map((entry, index) => (index === existing ? { ...kept, locked: entry.locked, routeable: entry.routeable } : entry))
+      : [...draft, kept]);
     setEditing(null);
   };
 
