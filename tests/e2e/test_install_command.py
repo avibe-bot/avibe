@@ -80,8 +80,13 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
             'test "$PATH" = /usr/bin:/bin; '
             "! command -v vibe; "
             "/home/installer/.local/bin/vibe version; "
-            "sleep 2; "
-            "/home/installer/.local/bin/vibe status"
+            "for attempt in $(seq 1 30); do "
+            'status=$(/home/installer/.local/bin/vibe status); '
+            'printf "%s\\n" "$status"; '
+            'echo "$status" | grep -q \'"running": true\' && break; '
+            "sleep 1; "
+            "done; "
+            'echo "$status" | grep -q \'"running": true\''
         )
         command = (
             "apt-get update >/dev/null && "

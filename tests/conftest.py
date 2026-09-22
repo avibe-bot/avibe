@@ -44,10 +44,12 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import shutil
 import sqlite3
 import sys
+import unittest
 import warnings
 from contextlib import closing, contextmanager
 from functools import wraps
@@ -431,6 +433,48 @@ def _reset_show_runtime_manager():
         show_runtime.set_show_runtime_manager_for_tests(None)
     except Exception:
         pass
+
+
+def _async_items_missing_plugin(items) -> list:
+    """Return selected native coroutine items that need pytest-asyncio."""
+    offenders = []
+    for item in items:
+        if item.get_closest_marker("anyio") is not None:
+            continue
+        if item.get_closest_marker("skip") is not None:
+            continue
+        cls = getattr(item, "cls", None)
+        if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
+            continue
+        try:
+            func = item.obj
+        except Exception:
+            continue
+        if inspect.iscoroutinefunction(func):
+            offenders.append(item)
+    return offenders
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Report missing pytest-asyncio without aborting legitimate selections."""
+    if config.pluginmanager.hasplugin("asyncio"):
+        return
+    offenders = _async_items_missing_plugin(items)
+    if not offenders:
+        return
+    message = (
+        'pytest-asyncio is not installed, so asyncio_mode="auto" is inactive. '
+        f"{len(offenders)} selected tests are native 'async def' tests and will "
+        'fail as "async def functions are not natively supported" -- that is the '
+        "missing dev dependency, not a product regression. Install it with "
+        "`uv sync --group dev`."
+    )
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"\n{message}", yellow=True, bold=True)
+    else:
+        print(f"\n{message}", file=sys.stderr)
 
 @pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():
