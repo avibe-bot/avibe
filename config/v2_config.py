@@ -4300,8 +4300,8 @@ class V2Config:
             avault=avault,
         )
 
-        # ``memory`` was a product feature removed in v2. Treat the legacy
-        # subtree as an opaque obsolete field: do not validate or activate it.
+        # ``memory`` is an obsolete feature subtree. Treat it as opaque unknown
+        # input: do not validate or activate it.
         # This deliberately accepts malformed values (including ``enabled``)
         # and leaves no memory data or runtime side effects.
         memory = MemoryConfig()
