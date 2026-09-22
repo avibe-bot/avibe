@@ -1155,19 +1155,24 @@ describe("RouteChainDialog", () => {
     expect(screen.getByText("Model")).toBeTruthy();
     // Both halves of a candidate are legible: the model id AND which source
     // supplies it. The source column is what a sizing rework once dropped, so
-    // the assertion is over the rendered row grid, not over the mere presence
-    // of the name somewhere in the panel.
-    const rows = [...document.querySelectorAll(".model-hub-route-candidate")];
+    // the assertion is over the rendered groups, not over the mere presence of
+    // the name somewhere in the panel. It is named once per group and on the
+    // group itself — a name drawn into the first row leaves the column blank
+    // for every row after it, and blank again for all of them once that row has
+    // scrolled away.
+    const groups = [...document.querySelectorAll(".model-hub-route-selector-group")];
     expect(
-      rows.map((row) => [
-        row.querySelector(".model-hub-route-candidate-source")?.textContent,
-        row.querySelector(".model-hub-route-candidate-model")?.textContent,
+      groups.map((group) => [
+        group.querySelector("[cmdk-group-heading]")?.textContent,
+        [...group.querySelectorAll(".model-hub-route-candidate-model")].map((cell) => cell.textContent),
       ]),
     ).toEqual([
-      ["API key", "claude-haiku-5"],
-      ["", "claude-sonnet-5"],
-      ["Claude subscription", "sonnet-5"],
+      ["API key", ["claude-haiku-5", "claude-sonnet-5"]],
+      ["Claude subscription", ["sonnet-5"]],
     ]);
+    // And the name is not also duplicated into a row, which is what would put
+    // it back on the list's scroll.
+    expect(document.querySelector(".model-hub-route-candidate-source")).toBeNull();
   });
 
   it("narrows the candidates to what was typed without claiming none exist", async () => {
