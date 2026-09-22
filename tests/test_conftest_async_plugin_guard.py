@@ -1,24 +1,31 @@
-"""Regression guard: the missing-pytest-asyncio check must stay scoped to the
-runs that actually select ``async def`` tests.
+"""Regression guard: the missing-pytest-asyncio notice must never change a run.
 
-The first version of this guard was a ``required_plugins`` entry in the root
-``pyproject.toml``. That key is a rootdir-wide prerequisite enforced *before*
-collection, so it also aborted the two CI jobs that deliberately install only a
-built artifact plus ``pytest`` and select synchronous tests only: the
-packaged-test matrix in ``.github/workflows/lint.yml`` and the publish
-finalizer in ``.github/workflows/publish.yml`` -- the repository's sole release
-finalizer. Both died with "Missing required plugins: pytest-asyncio" before
-running a single test.
+The notice exists so that a suite run in an environment that never installed the
+dev group reads as "one missing dependency" instead of a broad product
+regression. It is advisory on purpose.
 
-These tests pin both directions: a synchronous selection with no async plugin
-still collects, and an ``async def`` selection with no async plugin fails once,
-naming the missing dependency rather than every test that would have failed.
+Two earlier revisions aborted collection instead, and each time the abort -- not
+the diagnosis -- was the defect:
+
+* as ``required_plugins`` in the root pyproject it was a rootdir-wide
+  prerequisite enforced before collection, so it also killed the packaged-test
+  matrix in lint.yml and the publish finalizer, which install only a built
+  artifact plus pytest;
+* as a collection-time abort it still killed legitimate selections, because
+  ``unittest.IsolatedAsyncioTestCase`` methods (1087 of them here) run fine
+  without the plugin, ``-k`` / ``-m`` deselection runs in the same hook, and
+  already-skipped items are never awaited.
+
+So these tests assert outcomes, not just messages: every selection that works
+without the plugin must keep working, and the one selection that genuinely
+fails must fail exactly as it would have anyway, with the notice added.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+import unittest
 from pathlib import Path
 
 import pytest
@@ -26,17 +33,23 @@ import pytest
 from tests.conftest import _async_items_missing_plugin
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+NOTICE = "pytest-asyncio is not installed"
 
-# One of the files the packaged-test and publish jobs select. Kept in sync with
-# the workflows on purpose: if it ever grows an async test, those jobs need the
-# plugin and this guard should not be what tells us.
+# One of the files the packaged-test and publish jobs select.
 SYNC_ONLY_CI_SELECTION = "tests/test_memory_distribution.py"
+# IsolatedAsyncioTestCase methods only -- unittest supplies the event loop.
+UNITTEST_ASYNC_FILE = "tests/test_feishu_post_messages.py"
+# Async tests behind the opt-in e2e_model_hub marker, skipped unless selected.
+SKIPPED_ASYNC_FILE = "tests/e2e/test_codex_request_gateway.py"
+# Contains one module-level `async def` test that genuinely needs the plugin.
+NATIVE_ASYNC_FILE = "tests/test_claude_agent_sessions.py"
 
 
 class _FakeItem:
-    def __init__(self, obj, *, anyio: bool = False, raises: bool = False):
+    def __init__(self, obj, *, marker: str | None = None, cls=None, raises=False):
         self._obj = obj
-        self._anyio = anyio
+        self._marker = marker
+        self.cls = cls
         self._raises = raises
 
     @property
@@ -46,7 +59,11 @@ class _FakeItem:
         return self._obj
 
     def get_closest_marker(self, name: str):
-        return object() if (name == "anyio" and self._anyio) else None
+        return object() if name == self._marker else None
+
+
+class _AsyncCase(unittest.IsolatedAsyncioTestCase):
+    pass
 
 
 async def _coroutine_test():
@@ -62,10 +79,16 @@ def test_plain_coroutine_items_are_reported() -> None:
     assert _async_items_missing_plugin([item]) == [item]
 
 
-def test_anyio_marked_coroutines_are_not_reported() -> None:
-    # anyio is a runtime dependency, so its plugin drives these wherever the
-    # package installs -- flagging them would fire in environments that are fine.
-    assert _async_items_missing_plugin([_FakeItem(_coroutine_test, anyio=True)]) == []
+@pytest.mark.parametrize(
+    ("kwargs", "why"),
+    [
+        ({"cls": _AsyncCase}, "unittest brings its own event loop"),
+        ({"marker": "anyio"}, "anyio is a runtime dependency"),
+        ({"marker": "skip"}, "a skipped item is never awaited"),
+    ],
+)
+def test_items_pytest_handles_without_the_plugin_are_not_reported(kwargs, why) -> None:
+    assert _async_items_missing_plugin([_FakeItem(_coroutine_test, **kwargs)]) == [], why
 
 
 def test_synchronous_items_are_not_reported() -> None:
@@ -73,42 +96,43 @@ def test_synchronous_items_are_not_reported() -> None:
 
 
 def test_items_without_a_test_function_are_skipped() -> None:
-    # Doctest and custom collectors raise on ``.obj``; the guard must not crash
-    # the whole collection over one of them.
     assert _async_items_missing_plugin([_FakeItem(None, raises=True)]) == []
 
 
-def _collect(selection: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "no:asyncio",
-            "--collect-only",
-            "-q",
-            selection,
-        ],
+def _run_without_plugin(*args: str) -> tuple[int, str]:
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:asyncio", "-q", *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
     )
+    return result.returncode, result.stdout + result.stderr
 
 
 @pytest.mark.uses_real_paths
-def test_sync_only_ci_selection_still_collects_without_the_async_plugin() -> None:
-    """The exact shape of the packaged-test and publish jobs must stay green."""
-    result = _collect(SYNC_ONLY_CI_SELECTION)
-    output = result.stdout + result.stderr
-    assert result.returncode == 0, output
-    assert "pytest-asyncio" not in output
+@pytest.mark.parametrize(
+    ("args", "why"),
+    [
+        (("--collect-only", SYNC_ONLY_CI_SELECTION), "the packaged-test/publish shape"),
+        ((UNITTEST_ASYNC_FILE,), "unittest-managed async tests need no plugin"),
+        ((SKIPPED_ASYNC_FILE,), "opt-in e2e items are skipped, not awaited"),
+        (
+            ("-k", "test_ambiguous_results_emit_each_answer_in_order", NATIVE_ASYNC_FILE),
+            "the notice must run after -k deselection",
+        ),
+    ],
+)
+def test_selections_that_work_without_the_plugin_stay_untouched(args, why) -> None:
+    returncode, output = _run_without_plugin(*args)
+    assert returncode == 0, f"{why}: {output}"
+    assert NOTICE not in output, f"{why}: {output}"
 
 
 @pytest.mark.uses_real_paths
-def test_async_selection_fails_once_naming_the_missing_plugin() -> None:
-    result = _collect("tests/test_claude_agent_sessions.py")
-    # pytest writes a UsageError raised from a hook to stderr, not stdout.
-    output = result.stdout + result.stderr
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, output
-    assert "pytest-asyncio is not installed" in output
+def test_a_genuine_async_selection_is_explained_but_not_aborted() -> None:
+    returncode, output = _run_without_plugin(NATIVE_ASYNC_FILE)
+    assert NOTICE in output, output
+    # Not an abort: the run still executed, and failed only on the one test that
+    # genuinely needs the plugin -- exactly what it would do without the notice.
+    assert returncode != pytest.ExitCode.USAGE_ERROR, output
+    assert " passed" in output, output
