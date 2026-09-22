@@ -76,6 +76,25 @@ for (const width of [390, 1366]) test(`Files picker ${width} searches, refreshes
   await picker(page).screenshot({ path: testInfo.outputPath('files-picker.png') });
 });
 
+for (const width of [390, 1366]) test(`folder creation shortcut ${width} follows route activity and preserves the draft`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 768 });
+  await openProjectPicker(page);
+  await expect(picker(page).getByRole('button', { name: en.directoryBrowser.favoritesHome, exact: true })).toBeVisible();
+  await page.keyboard.press('Control+n');
+  const folderName = page.getByPlaceholder(en.apps.fileBrowser.newFolderPlaceholder);
+  await expect(folderName).toBeFocused();
+  await folderName.fill('快捷键文件夹');
+  await page.keyboard.press('Meta+n');
+  await expect(folderName).toHaveValue('快捷键文件夹');
+  await settings(page);
+  await back(page);
+  await expect(folderName).toHaveValue('快捷键文件夹');
+  await expect(folderName).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(picker(page).getByRole('button', { name: /^快捷键文件夹(?: |$)/ })).toBeVisible();
+  expect((await writes(page, '/api/files/mkdir')).at(-1)?.body.path).toBe(`${initialDirectory}/快捷键文件夹`);
+});
+
 for (const width of [390, 1366]) for (const suspended of [false, true]) {
   test(`directory draft ${width}: pending browse preserves text and selection ${suspended ? 'through Settings' : 'in foreground'}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 768 });

@@ -5,7 +5,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { sortProjectsByRecent } from '../../lib/projectOrder';
-import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import {
   fileBrowserErrorMessage,
@@ -386,6 +386,21 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     }
   };
 
+  const canCreateFolder = !!cwd && !loading && !listingError && !creatingFolder;
+  const startCreateFolder = () => {
+    if (!canCreateFolder) return;
+    cancelPathEdit();
+    changeQuery('');
+    setNewFolderName('');
+    setCreatingFolder(true);
+  };
+
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'n') return;
+    event.preventDefault();
+    startCreateFolder();
+  });
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
@@ -501,12 +516,8 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
               size="sm"
               variant="outline"
               className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]"
-              disabled={!cwd || loading || !!listingError || creatingFolder}
-              onClick={() => {
-                changeQuery('');
-                setNewFolderName('');
-                setCreatingFolder(true);
-              }}
+              disabled={!canCreateFolder}
+              onClick={startCreateFolder}
             >
               <FolderPlus className="size-3.5" />
               {t('apps.fileBrowser.newFolder')}

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 
+import type { TranslationKey } from '../../i18n/types';
 import type { Favorite, FsEntry } from '../../lib/filesApi';
 import { Button } from './button';
 import { MobileAppHeader } from '../apps/MobileAppHeader';
@@ -87,6 +88,14 @@ const FAV_ICON: Record<string, LucideIcon> = {
   root: HardDrive,
 };
 
+const FAV_LABEL: Partial<Record<string, TranslationKey>> = {
+  home: 'directoryBrowser.favoritesHome',
+  desktop: 'directoryBrowser.favoritesDesktop',
+  documents: 'directoryBrowser.favoritesDocuments',
+  downloads: 'directoryBrowser.favoritesDownloads',
+  applications: 'directoryBrowser.favoritesApplications',
+};
+
 export const FileBrowser: React.FC<FileBrowserProps> = ({
   fullBleed = false,
   mobileRoute = false,
@@ -125,6 +134,10 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   className,
 }) => {
   const { t } = useTranslation();
+  const favoriteLabel = (favorite: Favorite) => {
+    const key = FAV_LABEL[favorite.key];
+    return key ? t(key) : favorite.path;
+  };
   const hasSearch = query !== undefined && onQueryChange;
   const navigateTo = (path: string) => {
     onClearQuery?.();
@@ -276,6 +289,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   key={favorite.path}
                   type="button"
                   aria-current={active ? 'true' : undefined}
+                  title={favorite.path}
                   onClick={() => navigateFavoriteTo(favorite.path)}
                   className={clsx(
                     'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
@@ -283,7 +297,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   )}
                 >
                   <Icon className="size-3.5 shrink-0" />
-                  <span className="max-w-[140px] truncate">{favorite.path.split(/[\\/]/).filter(Boolean).pop() || favorite.path}</span>
+                  <span className="max-w-[140px] truncate">{favoriteLabel(favorite)}</span>
                 </button>
               );
             })}
@@ -319,7 +333,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                 <RailRow
                   key={favorite.path}
                   icon={<Icon className="size-3.5 text-muted" />}
-                  label={favorite.path.split(/[\\/]/).filter(Boolean).pop() || favorite.path}
+                  label={favoriteLabel(favorite)}
+                  title={favorite.path}
                   active={cwd === favorite.path}
                   dropActive={dropTarget === favorite.path}
                   dropProps={railDropProps(favorite.path)}
@@ -371,13 +386,15 @@ const RailTitle: React.FC<{ children: ReactNode }> = ({ children }) => (
 const RailRow: React.FC<{
   icon: ReactNode;
   label: string;
+  title?: string;
   active: boolean;
   onClick: () => void;
   dropActive?: boolean;
   dropProps?: FileBrowserDropProps;
-}> = ({ icon, label, active, onClick, dropActive, dropProps }) => (
+}> = ({ icon, label, title, active, onClick, dropActive, dropProps }) => (
   <button
     type="button"
+    title={title}
     onClick={onClick}
     {...dropProps}
     className={clsx(

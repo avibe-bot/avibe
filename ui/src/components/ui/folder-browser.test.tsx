@@ -171,7 +171,7 @@ it.each(['favorite', 'project'] as const)('canonicalizes a selected %s before li
   render(<FolderBrowser initialPath="/workspace" onSelect={onSelect} onClose={() => {}} />);
   await screen.findByText('src');
 
-  fireEvent.click(screen.getAllByRole('button', { name: 'folder-link' })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: source === 'favorite' ? 'directoryBrowser.favoritesHome' : 'folder-link' })[0]);
   await waitFor(() => expect(listDir).toHaveBeenLastCalledWith(canonicalPath, false));
   expect(listDir).not.toHaveBeenCalledWith('/folder-link', expect.anything());
   fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.select' }));
@@ -185,7 +185,7 @@ it('waits for favorite canonicalization before refreshing with the new hidden-fi
   render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
   await screen.findByText('src');
 
-  fireEvent.click(screen.getAllByRole('button', { name: 'folder-link' })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'directoryBrowser.favoritesHome' })[0]);
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/folder-link'));
   fireEvent.click(screen.getByRole('checkbox'));
   expect(listDir).not.toHaveBeenCalledWith('/folder-link', true);
@@ -249,7 +249,7 @@ it('discards a manual path submission after explicit navigation', async () => {
   fireEvent.keyDown(input, { key: 'Enter' });
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/stale'));
 
-  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: 'directoryBrowser.favoritesHome' }))[0]);
   await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/workspace', false));
   resolvePath('/stale');
 
@@ -301,7 +301,7 @@ it('does not override explicit navigation when initial path resolution finishes 
   render(<FolderBrowser initialPath="./workspace" onSelect={() => {}} onClose={() => {}} />);
 
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
-  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: 'directoryBrowser.favoritesHome' }))[0]);
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
 
   resolvePath('/resolved/workspace');
@@ -319,7 +319,7 @@ it('ignores an initial path resolution error after explicit navigation', async (
   render(<FolderBrowser initialPath="./workspace" onSelect={onSelect} onClose={() => {}} />);
 
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
-  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  fireEvent.click((await screen.findAllByRole('button', { name: 'directoryBrowser.favoritesHome' }))[0]);
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
 
   await act(async () => {
@@ -578,7 +578,7 @@ it.each(['success', 'failure'] as const)('ignores an older listing %s while a fa
   await screen.findByText('src');
   listDir.mockReturnValueOnce(stale.promise);
   fireEvent.click(screen.getByText('src'));
-  fireEvent.click(screen.getAllByRole('button', { name: 'favorite' })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'directoryBrowser.favoritesHome' })[0]);
   fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
   const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
   fireEvent.change(editor, { target: { value: '/new-draft' } });
@@ -605,7 +605,7 @@ it.each(['success', 'failure'] as const)('ignores a favorite resolver %s after a
   resolveDirectoryPath.mockImplementation((path: string) => path === '/favorite' ? favorite.promise : Promise.resolve(path));
   render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
   await screen.findByText('src');
-  fireEvent.click(screen.getAllByRole('button', { name: 'favorite' })[0]);
+  fireEvent.click(screen.getAllByRole('button', { name: 'directoryBrowser.favoritesHome' })[0]);
   fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
   const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
   fireEvent.change(editor, { target: { value: '/manual' } });
@@ -776,4 +776,47 @@ it.each(['cancel', 'failure'] as const)('reconciles hidden entries in the source
   expect(listDir).toHaveBeenLastCalledWith('/workspace', true);
   expect(currentDirectory()).toBe('/workspace');
   expect(selectButton().disabled).toBe(false);
+});
+
+it.each(['ctrlKey', 'metaKey'] as const)('opens folder creation with %s+N without resetting an existing draft', async (modifier) => {
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  expect(fireEvent.keyDown(window, { key: 'n', [modifier]: true })).toBe(false);
+  const editor = screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder') as HTMLInputElement;
+  expect(screen.queryByRole('textbox', { name: 'directoryBrowser.editPath' })).toBeNull();
+  fireEvent.change(editor, { target: { value: 'retained draft' } });
+  expect(fireEvent.keyDown(window, { key: 'n', [modifier]: true })).toBe(false);
+  expect(editor.value).toBe('retained draft');
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  await waitFor(() => expect(makeDir).toHaveBeenCalledWith('/workspace/retained draft'));
+});
+
+it('does not bypass new-folder readiness with the shortcut', async () => {
+  const pending = deferred<FsListing>();
+  listDir.mockReturnValueOnce(pending.promise);
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await waitFor(() => expect(listDir).toHaveBeenCalled());
+  fireEvent.keyDown(window, { key: 'n', ctrlKey: true });
+  expect(screen.queryByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeNull();
+  await act(async () => pending.resolve(emptyListing('/workspace')));
+  listDir.mockRejectedValueOnce(new Error('listing unavailable'));
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.refresh' }));
+  await screen.findByText('apps.fileBrowser.errors.listFailed');
+  fireEvent.keyDown(window, { key: 'n', metaKey: true });
+  expect(screen.queryByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeNull();
+});
+
+it('withdraws the creation shortcut while suspended and restores it on return', async () => {
+  const props = { initialPath: '/workspace', onSelect: () => {}, onClose: () => {} };
+  const view = render(<RouteSurfaceActiveContext.Provider value><FolderBrowser {...props} /></RouteSurfaceActiveContext.Provider>);
+  await screen.findByText('src');
+  view.rerender(<RouteSurfaceActiveContext.Provider value={false}><FolderBrowser {...props} /></RouteSurfaceActiveContext.Provider>);
+  expect(fireEvent.keyDown(window, { key: 'n', ctrlKey: true })).toBe(true);
+  view.rerender(<RouteSurfaceActiveContext.Provider value><FolderBrowser {...props} /></RouteSurfaceActiveContext.Provider>);
+  expect(screen.queryByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeNull();
+  expect(fireEvent.keyDown(window, { key: 'n', metaKey: true })).toBe(false);
+  expect(screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeTruthy();
+  view.unmount();
+  expect(fireEvent.keyDown(window, { key: 'n', metaKey: true })).toBe(true);
 });

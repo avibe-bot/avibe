@@ -2,10 +2,10 @@
 
 ## Circuit-breaker decision — 2026-09-23
 
-PR #2115 has 12 findings-bearing reviewed heads and no clean review. GitHub's
-complete review/thread inventory contains 30 finding threads, 27 resolved and
-three open. Reviewed heads are bound through the review's commit, not the
-mutable inline-comment diff location.
+At the navigation-owner decision, PR #2115 had 12 findings-bearing reviewed
+heads and no clean review. GitHub's complete inventory contained 30 finding
+threads, 27 resolved and three open. Reviewed heads are bound through the
+review's commit, not the mutable inline-comment diff location.
 
 | Reviewed head | Root causes in its findings |
 | --- | --- |
@@ -21,6 +21,7 @@ mutable inline-comment diff location.
 | ad888b312d | Stale initial error |
 | abf628c72f | Repeated refresh/search race; favorite and fallback symlink compatibility |
 | 09e7a3c1ea | Stale creation completion; lost navigation history; stale consuming fixture |
+| 2fb7dd9676 | Omitted creation shortcut; lost localized system-favorite labels |
 
 The repeated async-ownership class and the post-extraction head count both
 trip the breaker. Further isolated callback patches are paused. Inspection of
@@ -92,6 +93,49 @@ read-only review found the two search/source-option boundaries noted above;
 after their fixes its six focused probes passed with no further findings.
 The orchestrator also inspected the final production diff and consuming tests.
 No failing race tests were removed.
+
+## Compatibility inventory follow-up
+
+Before further edits, the orchestrator re-read all review heads and threads:
+13 findings-bearing heads, 32 threads, 30 resolved and two open. This is the
+first findings-bearing head after the navigation-owner rewrite. The recurring
+lost-picker-capability class (manual input, retained editors, history, now a
+shortcut and labels) still triggers the root-cause breaker.
+
+Inspection of the removed DirectoryBrowser, the current shared view, the
+route-scoped event helper and the consuming suspension tests supports a narrow
+compatibility completion, not another state-model rewrite. Restore Ctrl/Cmd+N
+through `useRouteSurfaceWindowEvent`, using the same creation entry point and
+readiness guard as the button. It must not act while the picker is suspended,
+reset an existing creation draft or bypass an unavailable directory. Restore
+the existing stable-key translation map in the shared FileBrowser so both the
+Files app and picker, on desktop and mobile, use the same labels. Unknown
+system favorites retain their actual paths.
+
+The old picker capability inventory now covers modal dismissal/focus, arbitrary
+paths, parent/breadcrumb/history navigation, canonical external paths, hidden
+entries, creation by button/shortcut, localized system favorites, selection and
+retained route state. Existing tests cover navigation/lifecycle/selection; add
+shortcut readiness/suspension and English/Chinese favorite-label cases. Preserve
+the existing request-owner tests and run the consuming browser suite before
+pushing. No backend, shared shell shortcut or dependency changes are authorized
+or needed.
+
+### Follow-up verification
+
+The orchestrator inspected the production diff and the consuming shortcut
+test, including suspension into Settings and the retained creation draft on
+return. Both mobile and desktop screenshots show the localized Home label.
+The 53 focused tests, 59 consuming browser cases, fixture typecheck, UI lint
+and production build passed. The complete UI suite passed all 5,324 tests in
+349 files with one worker.
+
+An initial four-worker run exposed an unrelated test-fixture race:
+`lintBaseline.test.mjs` removes its temporary `update-integrity-probe.ts` while
+`glowScale.test.mjs` scans the source tree. The serial rerun passed without
+changing either test or weakening an assertion. No temporary probe remains.
+The preceding committed head's GitHub CI also completed successfully. The new
+commit still requires its own automatic Codex review and CI.
 
 Keep the existing durable PR/Actions Watch. Repository automation owns Codex
 review pickup; do not manually trigger it. Close-out requires a current-version
