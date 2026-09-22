@@ -33,9 +33,6 @@ from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
-    _create_definition,
-    delegated_owner_transport,  # noqa: F401 -- fixture with real internal accessor
-)
 from tests.test_session_delivery_fsm import (
     _context, _seed_session,
     _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
