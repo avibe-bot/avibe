@@ -23,10 +23,16 @@ for (const width of [1200, 390]) {
       state: { status: 'standby', retry_at: null, detail_key: null },
       models: [], last_discovered_at: null,
     };
+    // `mode` is the deployment mode and `version` is the schema — AuthGuard reads the
+    // first, setup validates the second, and this fixture used to answer the schema in
+    // the deployment field and neither of them correctly. No platform is enabled here
+    // on purpose; `primary` is which one would be, which the envelope always carries.
     const config = () => ({
-      mode: 'v2', setup_completed: completed, setup_state: { needs_setup: !completed },
+      version: 'v2', mode: 'self_host',
+      setup_completed: completed, setup_state: { needs_setup: !completed },
       capabilities: { model_hub: { enabled: true } },
-      platforms: { enabled: [] },
+      platforms: { primary: 'slack', enabled: [] },
+      runtime: {},
       agents: Object.fromEntries(['claude', 'codex', 'opencode'].map((backend) => [
         backend, { enabled: backend === 'claude', cli_path: backend },
       ])),

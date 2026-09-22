@@ -100,6 +100,15 @@ describe('resource type representation and dynamic boundaries', () => {
     expect(instance.t('common', { returnObjects: true }).save).toEqual((lng === 'en' ? en : zh).common.save);
   });
 
+  it.each(['en', 'zh'] as const)('carries the config-read status through localized copy in %s', (lng) => {
+    const bundle = lng === 'en' ? en : zh;
+    const rendered = translator(lng).t('onboarding.connection.readFailedStatus', { status: 500 });
+    // Both languages must spend the placeholder: a locale that drops it would show a
+    // sentence with no diagnostic, which is what the raw `HTTP 500` fragment replaced.
+    expect(rendered).toBe(bundle.onboarding.connection.readFailedStatus.replace('{{status}}', '500'));
+    expect(rendered).toContain('500');
+  });
+
   it('matches nested-before-literal collision precedence', () => {
     const instance = createInstance();
     void instance.init({ lng: 'en', resources: { en: { translation: { collision } } } });

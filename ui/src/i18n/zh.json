@@ -5247,7 +5247,7 @@
   },
   "onboarding": {
     "welcome": {
-      "getStarted": "开始使用",
+      "getStarted": "立即开始",
       "title": "各有所长，接力完成",
       "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
       "detecting": "检测中…",
@@ -5281,7 +5281,7 @@
     },
     "access": {
       "label": "随时随地安排工作",
-      "description": "手机 APP 和常用聊天应用，随时随地安排工作",
+      "description": "6个工作入口，随时随地安排工作",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5341,6 +5341,7 @@
       "savedSubscription": "已检测到订阅凭据",
       "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",
+      "readFailedStatus": "无法读取连接状态（HTTP {{status}}），请重试",
       "saveFailed": "无法保存连接，请重试",
       "applyFailed": "凭据已保存，但运行时应用失败，请重试保存",
       "applyPending": "运行时尚未确认生效，请刷新连接状态",
@@ -5402,6 +5403,11 @@
     "brand": {
       "name": "Avibe",
       "tagline": "Agent OS"
+    },
+    "flow": {
+      "backToIntro": "返回介绍",
+      "backToProviders": "返回模型",
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
     }
   }
 }
