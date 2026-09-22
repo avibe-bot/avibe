@@ -87,7 +87,11 @@ const CommandItem = React.forwardRef<
   <CommandPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[selected=true]:bg-accent/10 data-[selected=true]:text-accent-ink data-[disabled=true]:opacity-50",
+      // Every item in this codebase carries an `onSelect`: there is no such
+      // thing here as one you only read. `index.css` already says a control
+      // you can click reads as a hand; an item is a control that happens to
+      // be `role="option"` rather than a button, so it says so too.
+      "relative flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-[disabled=true]:pointer-events-none data-[selected=true]:bg-accent/10 data-[selected=true]:text-accent-ink data-[disabled=true]:opacity-50",
       className
     )}
     {...props}
