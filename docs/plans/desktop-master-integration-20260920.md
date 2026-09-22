@@ -422,3 +422,37 @@ pushed fix is evidenced.
   upgrades. The optional trusted-signing path remains unchanged; this decision
   does not authorize public Release publishing, updater work, new certificates,
   or OS-protection bypasses.
+
+### Resumed merge candidate evidence
+
+- 2026-09-22: A real non-fast-forward merge of
+  `16bf1be3f93cd3cb855da2dd1b7133932acc0363` completed as
+  `5589edc71292921281f95d072916628a9790fa6a`, with parents
+  `45aa0208e8acda3a7d51e1e5b2052e90a824743e` and
+  `16bf1be3f93cd3cb855da2dd1b7133932acc0363`. The one conflict in
+  `tests/test_ui_server_install.py` keeps the desktop three-backend refresh
+  failure parameterization, master's `_agent_runtime_fingerprint -> None`
+  hermetic stub, and all measured-runtime refresh cases. No conflict markers or
+  unresolved paths remain.
+- The automatically merged shared boundaries were audited. Master changes to
+  Model Hub credential migration/persistence, Codex steering reconciliation,
+  caller authorization, queued delivery projections, Workbench/sidebar/API
+  context, and i18n remain present. Desktop `vibe.desktop_backends`,
+  `vibe.desktop_runtime`, FastAPI UI server behavior, rolling backend refresh,
+  and native Runtime ownership/readiness paths remain present. No migration or
+  allocated-ID namespace collision was introduced.
+- Candidate validation passed: Python desktop/runtime, installation/upgrade,
+  IPC, FastAPI/API, backend rolling-refresh, and observability consumers passed
+  `1389` tests with `5` skips; Model Hub/native-auth/Codex consumers passed
+  `1610` tests, `68` warnings, and `47` subtests. The merged UI focused suite
+  passed `125` tests; UI test typechecks and `npm run build` passed. Desktop
+  i18n validation and bootstrap `npm run build` passed. Runtime-host passed
+  `94` library, `28` bootstrap, and `5` notification HTTP tests; `cargo fmt
+  --all -- --check` and workspace Clippy with `-D warnings` passed. Changed
+  Python Ruff passed. The only native warning was the existing inability to
+  clean one shared global Cargo cache entry due to permissions; it did not
+  affect compilation, tests, or lint.
+- This candidate is ready for the orchestrator's independent diff and consuming
+  test spot-check. It has not been pushed; the first push remains held. The
+  latest remote desktop still needs an immediate explicit-refspec check before
+  any authorized push.
