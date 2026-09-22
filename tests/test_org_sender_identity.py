@@ -25,9 +25,28 @@ from storage.settings_service import upsert_scope
 from tests.ui_server_test_helpers import _save_config
 
 INSTANCE_ID = "inst_123"
+# A pairing this machine no longer serves. Its rows are explicitly tolerated on
+# disk when cleanup fails during re-pairing, and OIDC subjects are only unique
+# within an Instance, so they are exactly what must not name anyone here.
+FOREIGN_INSTANCE_ID = "inst_former"
 SESSION_ID = "sess_org_identity"
 AMY = "remote:sub-amy"
 STRANGER = "remote:sub-stranger"
+
+
+def _authorize(*, instance_id: str, subject: str, email: str, updated_at: int = 1) -> None:
+    remote_access_authorization_service.upsert_scoped(
+        reference=None,
+        instance_id=instance_id,
+        subject=subject,
+        email=email,
+        scope_kind="instance",
+        scope_ref=instance_id,
+        authorization_state="current",
+        claims={"email": email},
+        last_checked_at=updated_at,
+        updated_at=updated_at,
+    )
 
 
 def _state(tmp_path, monkeypatch, *, instance_kind: str):
@@ -38,18 +57,7 @@ def _state(tmp_path, monkeypatch, *, instance_kind: str):
     ensure_sqlite_state()
     SettingsStore.reset_instance()
 
-    remote_access_authorization_service.upsert_scoped(
-        reference=None,
-        instance_id=INSTANCE_ID,
-        subject="sub-amy",
-        email="amy.chen@acme.example",
-        scope_kind="instance",
-        scope_ref=INSTANCE_ID,
-        authorization_state="current",
-        claims={"email": "amy.chen@acme.example"},
-        last_checked_at=1,
-        updated_at=1,
-    )
+    _authorize(instance_id=INSTANCE_ID, subject="sub-amy", email="amy.chen@acme.example")
 
     engine = create_sqlite_engine(tmp_path / "state" / "vibe.sqlite")
     with engine.begin() as conn:
@@ -98,6 +106,43 @@ def _seed_transcript(engine, scope_id: str) -> dict[str, str]:
     return ids
 
 
+def _claim_input(engine, scope_id: str, *, author_id: str) -> None:
+    """The state a just-sent message sits in before native acceptance.
+
+    Chat projects this Delivery as a transcript row, so it is a fifth window
+    onto the same transcript and has to name its sender like the other four.
+    """
+
+    from storage import message_deliveries
+
+    with engine.begin() as conn:
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_claimed_org",
+            session_id=SESSION_ID,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=SESSION_ID,
+                platform="avibe",
+                author="user",
+                source="user",
+                text="just sent",
+                author_id=author_id,
+            ),
+            dispatch_text="just sent",
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=message_deliveries.new_turn_id(),
+            session_id=SESSION_ID,
+            backend="claude",
+            deliveries=[delivery],
+            dispatch_text="just sent",
+        )
+
+
 def _window(conn, **kwargs) -> dict[str, dict]:
     result = messages_service.list_session_messages(
         conn, session_id=SESSION_ID, limit=50, **kwargs
@@ -128,6 +173,24 @@ def test_organization_transcript_labels_every_window_and_the_live_row(tmp_path, 
     assert "sender_label" not in tail[ids["agent"]]
 
 
+def test_a_just_sent_message_is_named_before_it_materializes(tmp_path, monkeypatch):
+    engine, scope_id = _state(tmp_path, monkeypatch, instance_kind="organization")
+    _claim_input(engine, scope_id, author_id=AMY)
+
+    from vibe.ui_server import _active_unmaterialized_input
+
+    with engine.connect() as conn:
+        projected = _active_unmaterialized_input(conn, SESSION_ID)
+
+    assert projected is not None
+    assert projected["projection"] == "claimed_delivery"
+    # Chat appends this row to a transcript whose durable rows are already
+    # enriched. Without its own label the sender would read "unknown" and then
+    # change once the Delivery materializes -- the one thing the field exists
+    # to prevent.
+    assert projected["sender_label"] == "amy.chen"
+
+
 def test_organization_payload_carries_the_label_not_the_address(tmp_path, monkeypatch):
     engine, scope_id = _state(tmp_path, monkeypatch, instance_kind="organization")
     _seed_transcript(engine, scope_id)
@@ -151,6 +214,35 @@ def test_personal_instance_transcript_is_unchanged(tmp_path, monkeypatch):
 
     assert all("sender_label" not in row for row in tail.values())
     assert "sender_label" not in live
+
+
+def test_another_instances_authorization_never_names_a_sender(tmp_path, monkeypatch):
+    engine, scope_id = _state(tmp_path, monkeypatch, instance_kind="organization")
+    ids = _seed_transcript(engine, scope_id)
+    # The same subject re-issued to someone else by a former pairing, written
+    # more recently than the row that is actually ours...
+    _authorize(
+        instance_id=FOREIGN_INSTANCE_ID,
+        subject="sub-amy",
+        email="dana.wu@former.example",
+        updated_at=99,
+    )
+    # ...and a subject only that former pairing ever knew.
+    _authorize(
+        instance_id=FOREIGN_INSTANCE_ID,
+        subject="sub-stranger",
+        email="mallory@former.example",
+        updated_at=99,
+    )
+
+    with engine.connect() as conn:
+        tail = _window(conn, tail=True)
+
+    # Freshness breaks ties *within* our Instance; a newer foreign row is not a
+    # candidate at all, so the label stays the one this Instance authorized.
+    assert tail[ids["amy"]]["sender_label"] == "amy.chen"
+    assert "sender_label" not in tail[ids["stranger"]]
+    assert "former.example" not in repr(tail)
 
 
 def test_organization_transcript_survives_an_unreadable_identity_source(tmp_path, monkeypatch):

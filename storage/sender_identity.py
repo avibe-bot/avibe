@@ -35,20 +35,27 @@ REMOTE_PRINCIPAL_PREFIX = "remote:"
 SENDER_LABEL_FIELD = "sender_label"
 
 
-def organization_instance() -> bool:
-    """True when this instance is configured as an organization.
+def organization_instance_id() -> str | None:
+    """The paired Instance whose members a transcript here may be named after.
 
-    Never raises: an unreadable config means no sender identity, not a failed
-    transcript request.
+    ``None`` on a personal instance, on an unpaired one, and whenever the config
+    cannot be read -- each of which means there is no organization directory to
+    resolve a sender against, not a failed transcript request.
+
+    Returning the id rather than a yes/no is what lets the lookup stay scoped:
+    an OIDC subject is unique within an Instance, not across them, and a stale
+    row from an earlier pairing is explicitly tolerated on disk.
     """
     try:
         from core.services import settings as settings_service
 
-        config = settings_service.load_config()
+        cloud = settings_service.load_config().remote_access.vibe_cloud
     except Exception:
-        logger.debug("Sender identity: instance kind unavailable", exc_info=True)
-        return False
-    return config.remote_access.vibe_cloud.instance_kind == "organization"
+        logger.debug("Sender identity: instance identity unavailable", exc_info=True)
+        return None
+    if cloud.instance_kind != "organization":
+        return None
+    return (cloud.instance_id or "").strip() or None
 
 
 def sender_label_from_email(email: Any) -> str | None:
@@ -65,13 +72,24 @@ def sender_label_from_email(email: Any) -> str | None:
     return trimmed.split("@", 1)[0].strip() or trimmed
 
 
-def resolve_sender_labels(conn: Connection, subjects: Iterable[str]) -> dict[str, str]:
+def resolve_sender_labels(
+    conn: Connection,
+    subjects: Iterable[str],
+    *,
+    instance_id: str,
+) -> dict[str, str]:
     """Map OIDC subjects to display labels in one query.
 
-    A subject can hold several authorization rows (one per granted scope); they
-    describe the same person, so the most recently written one wins and ties
-    break on ``id`` -- the same subject must not label differently between two
-    reads of the same transcript.
+    Scoped to ``instance_id`` because that is what the table's identity key is
+    scoped to. Subjects are issued per Instance, so rows left behind by an
+    earlier pairing can carry the same subject for a different person; matching
+    on the subject alone would let one Instance's address name another's sender.
+    Required keyword, so a caller cannot reach the disclosure by forgetting it.
+
+    A subject can hold several authorization rows within an Instance (one per
+    granted scope); they describe the same person, so the most recently written
+    one wins and ties break on ``id`` -- the same subject must not label
+    differently between two reads of the same transcript.
     """
     wanted = {subject for subject in subjects if subject}
     if not wanted:
@@ -85,7 +103,9 @@ def resolve_sender_labels(conn: Connection, subjects: Iterable[str]) -> dict[str
                     remote_access_authorizations.c.email,
                     remote_access_authorizations.c.updated_at,
                     remote_access_authorizations.c.created_at,
-                ).where(remote_access_authorizations.c.subject.in_(wanted))
+                )
+                .where(remote_access_authorizations.c.instance_id == instance_id)
+                .where(remote_access_authorizations.c.subject.in_(wanted))
             ).mappings()
         )
     except Exception:
@@ -126,10 +146,14 @@ def attach_sender_labels(
         subject = author_id[len(REMOTE_PRINCIPAL_PREFIX) :].strip()
         if subject:
             by_subject.setdefault(subject, []).append(payload)
-    if not by_subject or not organization_instance():
+    if not by_subject:
+        return payloads
+    instance_id = organization_instance_id()
+    if not instance_id:
         return payloads
 
-    for subject, label in resolve_sender_labels(conn, by_subject.keys()).items():
+    resolved = resolve_sender_labels(conn, by_subject.keys(), instance_id=instance_id)
+    for subject, label in resolved.items():
         for payload in by_subject[subject]:
             payload[SENDER_LABEL_FIELD] = label
     return payloads
