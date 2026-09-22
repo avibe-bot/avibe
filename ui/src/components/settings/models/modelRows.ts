@@ -15,6 +15,10 @@ export type ModelChainRequest = {
 export const modelChainKey = (backend: AgentBackend, modelId: string): string =>
   `${backend}\u0000${modelId}`;
 
+/** The backend half of a chain key, for reads that own chains rather than backends. */
+export const chainKeyBackend = (key: string): AgentBackend =>
+  key.slice(0, key.indexOf('\u0000')) as AgentBackend;
+
 /** Manual inventory is a credential-backed capability; subscriptions are read-only. */
 export function manualModelSources(sources: Source[]): Source[] {
   return sources.filter((source) => source.kind === 'api_key');

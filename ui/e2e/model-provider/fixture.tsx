@@ -11,7 +11,7 @@ import { AddApiKeyDialog } from '../../src/components/settings/models/AddApiKeyD
 import { SourceDetailPanel } from '../../src/components/settings/models/SourceDetailPanel';
 import { createSourceCollectionReadAuthority } from '../../src/components/settings/models/collectionReadAuthority';
 import { modelsApi } from '../../src/components/settings/models/modelsApi';
-import { readSurfaceLanding, sourceMutationLanding, type TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
+import { readSurfaceLanding, type TrackSourceMutation } from '../../src/components/settings/models/mutationSettlement';
 import { CONTRACT_VERSION, type Source } from '../../src/components/settings/models/types';
 
 const params = new URLSearchParams(location.search);
@@ -70,14 +70,14 @@ export function Fixture() {
       chains: async () => ({}),
     }, []);
     if (reads.sources.kind === 'ready') setSource(saved);
-    return sourceMutationLanding(reads, [], true);
+    return reads;
   };
   const trackMutation: TrackSourceMutation = async (work) => {
     try {
       return await work(saved, {
         source: async (next) => { setSource(next); return reconcile(); },
         unread: reconcile,
-        gone: async () => ({ verdict: 'degraded', reads: null, affectedChains: [] }),
+        gone: async () => null,
         readInventory: async () => ({ sources: [saved], snapshot: 1 }),
         release: () => {},
       });

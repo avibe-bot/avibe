@@ -1834,27 +1834,14 @@
             "displayNameCredential": "显示名称不能包含凭据",
             "baseUrlCredential": "请从 Base URL 中移除凭据和疑似凭据的查询参数"
           },
-          "impact": {
-            "title": "供应商已更新，部分路由受到影响",
-            "detail": "以下路由或模型已被移除或中断。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已更新"
           }
         },
         "remove": {
-          "impact": {
-            "title": "供应商已移除，部分路由受到影响",
-            "detail": "以下是这次移除实际影响的路由和模型。",
-            "done": "完成"
-          },
           "settlement": {
             "title": "供应商已移除"
           }
-        },
-        "impact": {
-          "refreshFail": "变更已经提交，但模型页面暂时无法刷新。请再次重试对账。"
         },
         "refetch": {
           "added": "新增",

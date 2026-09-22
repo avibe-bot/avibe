@@ -5,6 +5,7 @@
       "models": [
         {"id": "claude-fable-5-1", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-fable-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+        {"id": "claude-opus-5-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-4-8", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-opus-4-7", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
