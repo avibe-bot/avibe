@@ -91,6 +91,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const initialPathHandled = useRef(false);
   const initialPathResolving = useRef<string | null>(null);
   const pathInputRef = useRef<HTMLInputElement | null>(null);
+  const pathRequestSeq = useRef(0);
   const mounted = useRef(true);
   const previousShowHidden = useRef(showHidden);
 
@@ -119,12 +120,16 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   }, [pathEditing]);
 
   const cancelPathEdit = useCallback(() => {
+    pathRequestSeq.current += 1;
     setPathEditing(false);
     setPathError(null);
   }, []);
 
   const navigate = useCallback(
     (path: string, options: { preserveQuery?: boolean } = {}) => {
+      pathRequestSeq.current += 1;
+      setPathEditing(false);
+      setPathError(null);
       initialPathHandled.current = true;
       previousShowHidden.current = showHidden;
       const seq = ++navSeq.current;
@@ -162,15 +167,18 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const submitPath = useCallback(async () => {
     const target = pathInput.trim();
     if (!target) return;
+    const requestSeq = ++pathRequestSeq.current;
     setPathError(null);
     try {
       const resolved = await resolveDirectoryPath(target);
-      if (resolved) {
+      if (mounted.current && requestSeq === pathRequestSeq.current && resolved) {
         setPathEditing(false);
         navigate(resolved);
       }
     } catch (cause: unknown) {
-      setPathError(fileBrowserErrorMessage(cause, t, t('directoryBrowser.pathNotFound')));
+      if (mounted.current && requestSeq === pathRequestSeq.current) {
+        setPathError(fileBrowserErrorMessage(cause, t, t('directoryBrowser.pathNotFound')));
+      }
     }
   }, [navigate, pathInput, t]);
 
@@ -352,6 +360,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     value={pathInput}
                     aria-label={t('directoryBrowser.editPath')}
                     onChange={(event) => {
+                      pathRequestSeq.current += 1;
                       setPathInput(event.target.value);
                       setPathError(null);
                     }}
@@ -383,6 +392,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                 aria-label={t('directoryBrowser.editPath')}
                 title={t('directoryBrowser.editPath')}
                 onClick={() => {
+                  pathRequestSeq.current += 1;
                   setPathInput(cwd);
                   setPathError(null);
                   setPathEditing(true);

@@ -164,6 +164,67 @@ it('navigates to an arbitrary path entered in the picker', async () => {
   await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/server/share', false));
 });
 
+it('discards a manual path submission after explicit navigation', async () => {
+  let resolvePath!: (path: string) => void;
+  resolveDirectoryPath.mockImplementation((path: string) => {
+    if (path === '/stale') {
+      return new Promise((resolve) => {
+        resolvePath = resolve;
+      });
+    }
+    return Promise.resolve(path);
+  });
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const input = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(input, { target: { value: '/stale' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/stale'));
+
+  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/workspace', false));
+  resolvePath('/stale');
+
+  await waitFor(() => expect(listDir).not.toHaveBeenCalledWith('/stale', false));
+});
+
+it('keeps only the newest manual path submission', async () => {
+  let resolveFirst!: (path: string) => void;
+  let resolveSecond!: (path: string) => void;
+  resolveDirectoryPath.mockImplementation((path: string) => {
+    if (path === '/first') {
+      return new Promise((resolve) => {
+        resolveFirst = resolve;
+      });
+    }
+    if (path === '/second') {
+      return new Promise((resolve) => {
+        resolveSecond = resolve;
+      });
+    }
+    return Promise.resolve(path);
+  });
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const input = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(input, { target: { value: '/first' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/first'));
+
+  fireEvent.change(input, { target: { value: '/second' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/second'));
+
+  resolveFirst('/first');
+  await waitFor(() => expect(listDir).not.toHaveBeenCalledWith('/first', false));
+  resolveSecond('/second');
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/second', false));
+});
+
 it('does not override explicit navigation when initial path resolution finishes later', async () => {
   let resolvePath!: (path: string) => void;
   resolveDirectoryPath.mockReturnValueOnce(
