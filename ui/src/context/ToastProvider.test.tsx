@@ -1,13 +1,16 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from './ToastProvider';
 import { useToast } from './ToastContext';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const Trigger = () => {
   const { showToast } = useToast();
@@ -28,5 +31,23 @@ describe('ToastProvider', () => {
     expect(toast.textContent).toContain('Saved');
     expect(toast.getAttribute('aria-live')).toBe('polite');
     expect(toast.getAttribute('aria-atomic')).toBe('true');
+  });
+
+  it('refreshes the dismissal lifetime when a visible toast is coalesced', () => {
+    vi.useFakeTimers();
+    render(
+      <ToastProvider>
+        <Trigger />
+      </ToastProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    act(() => vi.advanceTimersByTime(2500));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    act(() => vi.advanceTimersByTime(2999));
+    expect(screen.getByRole('status')).toBeTruthy();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

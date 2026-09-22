@@ -42,14 +42,23 @@ export const focusModelHubProjection = ({
   activeTarget,
   backend,
   modelId,
+  preserveCurrentFocus = false,
 }: {
   root: HTMLElement | null;
   activeTarget: HTMLElement | null;
   backend: AgentBackend;
   modelId: string;
+  preserveCurrentFocus?: boolean;
 }): HTMLElement | null => {
   if (!root) return null;
+  const currentFocus =
+    preserveCurrentFocus &&
+    document.activeElement instanceof HTMLElement &&
+    document.activeElement !== document.body
+      ? document.activeElement
+      : null;
   const candidates = [
+    currentFocus,
     activeTarget,
     exactModelRow(root, backend, modelId),
     exactGroupHead(root, backend),

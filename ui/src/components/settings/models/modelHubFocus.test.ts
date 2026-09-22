@@ -49,4 +49,27 @@ describe("model hub projection focus", () => {
     expect(group?.dataset.agentGroupHead).toBe("claude");
     root.remove();
   });
+
+  it("preserves the current focus when a background projection installs", () => {
+    const root = document.createElement("main");
+    root.innerHTML = [
+      '<button data-destination="current">Current</button>',
+      '<button data-route-backend="claude" data-route-model="model">Model</button>',
+    ].join("");
+    document.body.append(root);
+    const current = root.querySelector<HTMLElement>('[data-destination="current"]')!;
+    current.focus();
+
+    const focused = focusModelHubProjection({
+      root,
+      activeTarget: null,
+      backend: "claude",
+      modelId: "model",
+      preserveCurrentFocus: true,
+    });
+
+    expect(focused).toBe(current);
+    expect(document.activeElement).toBe(current);
+    root.remove();
+  });
 });

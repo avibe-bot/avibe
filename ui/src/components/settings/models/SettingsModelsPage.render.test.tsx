@@ -1466,6 +1466,98 @@ describe('SettingsModelsPage surface branches', () => {
     expect(document.activeElement?.closest('[data-agent-backend="codex"]')).toBeNull();
   });
 
+  const saveRouteForFocusTest = async () => {
+    const sources = [
+      { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+      { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+    ];
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
+      chain: { ...takeoverChain, manual_override: { hops: [takeoverChain.chain[0]] }, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
+      removed_hops: [],
+      interrupted: [],
+    });
+    renderPage(sources, [takeoverAgent]);
+    const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
+    await userEvent.click(opener);
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i }))[1]);
+    return { opener, sources };
+  };
+
+  // Flush real animation frames, not a waitFor that can pass before a queued
+  // focus callback has had the chance to steal (or repair) focus.
+  const flushRouteFocus = async () => {
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      }));
+    });
+  };
+
+  it('MH-ROUTING-007 preserves user-moved focus after each delayed route projection install', async () => {
+    const { opener, sources } = await saveRouteForFocusTest();
+    const agentsRead = deferred<AgentSupply[]>();
+    const sourcesRead = deferred<Source[]>();
+    vi.mocked(modelsApi.listAgents).mockReturnValueOnce(agentsRead.promise);
+    vi.mocked(modelsApi.listSources).mockReturnValueOnce(sourcesRead.promise);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(opener);
+
+    const destination = screen.getByRole('button', { name: /Add API key|添加 API Key/i });
+    destination.focus();
+    await act(async () => { agentsRead.resolve([takeoverAgent]); });
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(destination);
+    await act(async () => { sourcesRead.resolve(sources); });
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(destination);
+  });
+
+  it('MH-ROUTING-007 restores page focus when a delayed route projection removes the opener', async () => {
+    const { opener } = await saveRouteForFocusTest();
+    const agentsRead = deferred<AgentSupply[]>();
+    vi.mocked(modelsApi.listAgents).mockReturnValueOnce(agentsRead.promise);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(opener);
+    await act(async () => { agentsRead.resolve([]); });
+    await flushRouteFocus();
+    expect(opener.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.querySelector('.model-hub-shell-info'));
+  });
+
+  for (const member of ['agents', 'sources'] as const) {
+    it(`MH-ROUTING-007 retains the route fallback through failed ${member} retries`, async () => {
+      const { opener, sources } = await saveRouteForFocusTest();
+      const reader = member === 'agents'
+        ? vi.mocked(modelsApi.listAgents)
+        : vi.mocked(modelsApi.listSources);
+      reader.mockRejectedValueOnce(new TypeError('offline'));
+      await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await flushRouteFocus();
+      const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+      reader.mockRejectedValueOnce(new TypeError('still offline'));
+      await userEvent.click(retry);
+      await flushRouteFocus();
+      expect(document.activeElement).toBe(retry);
+
+      const nextRead = deferred<AgentSupply[] & Source[]>();
+      reader.mockReturnValueOnce(nextRead.promise);
+      await userEvent.click(retry);
+      await flushRouteFocus();
+      expect(document.activeElement).toBe(retry);
+      await act(async () => { nextRead.resolve((member === 'agents' ? [takeoverAgent] : sources) as AgentSupply[] & Source[]); });
+      await flushRouteFocus();
+      expect(retry.isConnected).toBe(false);
+      expect(document.activeElement).toBe(opener);
+    });
+  }
+
   it('keeps the source projection intact after a lost Direct-mode response', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
     const staleSource = {

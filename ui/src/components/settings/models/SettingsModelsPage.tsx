@@ -1019,19 +1019,23 @@ export const SettingsModelsPage: React.FC = () => {
     read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
     available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
   } : null;
-  const focusRouteDestination = React.useCallback((target: RouteTarget) => {
+  const focusRouteDestination = React.useCallback((
+    target: RouteTarget,
+    preserveCurrentFocus = false,
+  ) => {
     requestAnimationFrame(() => {
       focusModelHubProjection({
         root: pageRef.current,
         activeTarget: target.opener,
         backend: target.agent.backend,
         modelId: target.modelId,
+        preserveCurrentFocus,
       });
     });
   }, []);
   const refocusPendingRouteDestination = React.useCallback(() => {
     const target = pendingRouteFocusRef.current;
-    if (target) focusRouteDestination(target);
+    if (target) focusRouteDestination(target, true);
   }, [focusRouteDestination]);
   const routeObserved = React.useCallback((next: RouteReport['chain']) => {
     setChainsRead((previous) => readyRegion({
@@ -1098,8 +1102,8 @@ export const SettingsModelsPage: React.FC = () => {
   React.useEffect(() => {
     if (!routeCommitStatus || routeCommitStatus.pending || !pendingRouteFocusRef.current) return;
     const target = pendingRouteFocusRef.current;
-    pendingRouteFocusRef.current = null;
-    focusRouteDestination(target);
+    focusRouteDestination(target, true);
+    if (routeCommitStatus.failed.size === 0) pendingRouteFocusRef.current = null;
   }, [focusRouteDestination, routeCommitStatus]);
   const retryRouteCommit = React.useCallback(() => {
     if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
