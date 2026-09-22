@@ -29,6 +29,48 @@ versions.
 - Add one short general upgrade note stating that Memory was removed and its
   existing data was untouched.
 
+## Installed-shape and scenario audit (review 5281184620)
+
+Before edits at `d84f7052bdf3af4f128083ba177fd40100d4159a`, the
+orchestrator authorized a bounded whole-consumer audit of retained installed
+compatibility and restored scenario evidence. Inventory: `k1GlY` incorrectly
+counts the retained companion's namespace metadata as core integrity evidence;
+`k1Glk` points MH-RUNTIME-008 at disabled reconciliation rather than convergence.
+Exclude only the canonical companion distribution at the shared provider
+boundary; preserve core/legacy-core disagreement, unknown/editable behavior,
+and repair provenance checks. Inspect historical wheel metadata without import,
+activation, installation or mutation. Verify normal versus forced upgrade plans
+through real metadata discovery in test-owned directories. Audit affected
+catalog pointers against executable behavior, preserving disabled-mode tests.
+The two historical release-policy findings remain unresolved pending owner
+decision. No publication, guard restoration, merge, or premature closure.
+
+Audit/evidence: downloaded the immutable v3.1.0 wheel into ignored test-owned
+`.runtime/legacy-provider-evidence`; SHA256
+`ce5cfb1473442642d7d19863b6f9131c0a17a1fb6e828d5e0aec04f2deea06b0`.
+Read-only zip/real importlib metadata discovery confirms no `top_level.txt` and
+a RECORD manifest entry causing both `avibe_memory` and `vibe` namespace
+ownership. No artifact code was imported or installed. Regression fixtures
+exercise actual dist-info discovery, four canonical name spellings, current and
+legacy core, unrelated vendor providers, real mismatches, companion-only and
+unpublished editable shapes, immutable companion bytes/mtime and explicit
+core-source exact repair/preflight. CLI and API forward upgrades both consume
+the shared planner. The historical automatic origin-pair resolver's only caller
+was the removed Memory-package repair; it is not restored. Explicit core repair
+sources and availability checks remain unchanged, without companion fallback.
+
+Focused upgrade/provider/local-dependency/catalog run: **319 passed**.
+Catalog audit compared both changed retained catalogs and the previously
+restored SCT-038/AUTH-SETUP-907 pointers to test bodies. MESSAGE-DELIVERY-316
+executes hydrated WeChat addressing; 317 verifies canonical text and sender;
+SCT-038 checks localized refusal copy; AUTH-SETUP-907 tests actual disposable
+IPv4/IPv6 origin listeners. Only MH-RUNTIME-008 was mismatched. Its convergence
+test is restored as the catalog target; disabled coverage stays without that ID.
+The four audited scenario targets reran: **7 passed, 2 subtests passed**.
+Changed-Python Ruff and diff whitespace checks passed. No UI source changes.
+Current-head automated review/CI and the two owner release decisions remain
+required; no completion/closure exception is inferred.
+
 ## Acceptance evidence
 
 - Load and save fixtures for old configurations prove the obsolete subtree is

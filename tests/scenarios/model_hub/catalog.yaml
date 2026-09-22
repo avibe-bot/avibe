@@ -505,7 +505,7 @@ scenarios:
     status: covered
     kind: lifecycle
     layer: unit
-    test: tests/test_local_deps.py::test_reconcile_startup_dependencies_can_be_disabled
+    test: tests/test_local_deps.py::test_reconcile_startup_dependencies_uses_automatic_runtime_admission
   - id: MH-RUNTIME-009
     name: Connected inference remains live until completion, transport failure, or owner cancellation
     status: covered

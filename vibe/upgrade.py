@@ -1039,11 +1039,14 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
 
 
 def _distributions_providing_this_package() -> list[str]:
-    """Every installed distribution that provides the package this module is in."""
+    """Installed core providers, excluding the retained legacy companion.
+
+    Its manifest shared the vibe namespace, but never described core code.
+    Read distribution metadata only; do not load or modify that package.
+    """
 
     try:
         from importlib.metadata import packages_distributions
-        from packaging.utils import canonicalize_name
     except ImportError:  # pragma: no cover - importlib.metadata ships with 3.10+
         return []
     try:
@@ -1051,6 +1054,7 @@ def _distributions_providing_this_package() -> list[str]:
             {
                 name
                 for name in packages_distributions().get(__name__.split(".")[0], [])
+                if canonicalize_name(name) != "avibe-memory"
             }
         )
     except Exception:  # pragma: no cover - a broken environment answers nothing
@@ -1145,8 +1149,8 @@ def _names_a_published_release(version: str) -> bool:
 
     Public dev versions are supported by the official release producer too.
     Only local labels identify source builds; a dev suffix is not provenance.
-    Eligibility does not prove availability: installer preflights must still
-    resolve the matching core/companion pair before activation.
+    Eligibility does not prove availability: exact repair preflights must still
+    resolve the selected core artifact before installation.
 
     Asking the property instead of listing the strings is what stops the next
     unlisted shape from costing the same attempt. Unparseable reads as
