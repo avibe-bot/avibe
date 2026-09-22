@@ -522,3 +522,94 @@ def _reset_show_runtime_manager():
         show_runtime.set_show_runtime_manager_for_tests(None)
     except Exception:
         pass
+
+
+def _async_items_missing_plugin(items) -> list:
+    """Return the selected items pytest will try, and fail, to run as coroutines.
+
+    Three kinds of coroutine item are deliberately excluded because pytest
+    handles them without the plugin:
+
+    * ``unittest.TestCase`` methods -- ``IsolatedAsyncioTestCase`` brings its own
+      event loop, and 1087 of this suite's async items are of this kind;
+    * ``anyio``-marked coroutines -- anyio is a runtime dependency, so its plugin
+      is present wherever the package installs;
+    * items already marked ``skip`` -- pytest reports the skip without ever
+      awaiting them (``tests/e2e/conftest.py`` skips ``e2e_model_hub`` items
+      unless they are explicitly selected).
+
+    ``skipif`` is not evaluated here: deciding it needs pytest's private
+    evaluation helpers, and over-counting 15 items costs one inaccurate number
+    in an advisory message rather than a broken run.
+    """
+    offenders = []
+    for item in items:
+        if item.get_closest_marker("anyio") is not None:
+            continue
+        if item.get_closest_marker("skip") is not None:
+            continue
+        cls = getattr(item, "cls", None)
+        if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
+            continue
+        try:
+            func = item.obj
+        except Exception:
+            # Exotic collectors (doctests, custom items) have no test function.
+            continue
+        if inspect.iscoroutinefunction(func):
+            offenders.append(item)
+    return offenders
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Say once, up front, that a missing pytest-asyncio explains the failures.
+
+    ``asyncio_mode = "auto"`` only takes effect when the plugin is installed.
+    Without it each native ``async def`` test fails on its own with "async def
+    functions are not natively supported", while the mode setting is reported
+    merely as an unknown-config warning. That names the tests instead of the one
+    missing dev dependency, so a suite run in an environment that never
+    installed the dev group reads as a broad product regression -- measured as
+    10 failures across 2 files in a container whose runtime venv installs only
+    the wheel.
+
+    This reports and lets the run proceed; it deliberately does not abort.
+    Aborting requires being right about every item, and the cost of being wrong
+    is asymmetric: a wrong abort breaks a legitimate run, while a wrong count
+    costs one inaccurate line. An earlier revision of this guard aborted, and
+    broke the packaged-test and publish jobs before running a single test. The
+    value here was always diagnosis, never saving time, and a message buys that
+    without being able to break anything.
+
+    ``trylast`` matters: pytest's own ``-k`` / ``-m`` deselection runs in this
+    same hook, so an earlier-running implementation would count items the user
+    already filtered out.
+
+    The notice goes to the terminal reporter rather than ``warnings.warn`` for
+    the same reason. A warning is not inert: under ``-W error`` (or
+    ``filterwarnings = error``) it is promoted to an exception, and an exception
+    raised from a collection hook ends the run as an INTERNALERROR before any
+    test executes. Advisory has to mean advisory in every environment, not just
+    the ones this repository's CI happens to configure.
+    """
+    if config.pluginmanager.hasplugin("asyncio"):
+        return
+    offenders = _async_items_missing_plugin(items)
+    if not offenders:
+        return
+    message = (
+        f"pytest-asyncio is not installed, so asyncio_mode=\"auto\" is inactive. "
+        f"{len(offenders)} selected tests are native 'async def' tests and will "
+        'fail as "async def functions are not natively supported" -- that is the '
+        "missing dev dependency, not a product regression. Install it with "
+        "`uv sync --group dev`."
+    )
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"\n{message}", yellow=True, bold=True)
+    else:
+        # No terminal reporter -- ``-p no:terminal``, or pytest driven as a
+        # library. stderr still reaches the operator and, unlike
+        # ``warnings.warn``, cannot be promoted to an exception.
+        print(f"\n{message}", file=sys.stderr)

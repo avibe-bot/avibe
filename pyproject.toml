@@ -150,6 +150,11 @@ extend-ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# The missing-pytest-asyncio guard lives in tests/conftest.py, not in a
+# ``required_plugins`` entry here: this table is the rootdir-wide config, and
+# that key is enforced before collection, so it would also abort the
+# packaged-test and publish jobs that deliberately install only the built
+# artifact plus pytest and select synchronous tests only.
 markers = [
     "e2e_model_hub: opt-in hermetic Model Hub HTTP and gateway scenarios",
     "integration: tests excluded from the unit shards because they need external infrastructure (Docker + platform tokens) or minutes of real filesystem work",
