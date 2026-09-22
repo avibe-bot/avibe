@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Folder, FolderPlus, File as FileIcon, FolderOpen, Loader2, X } from 'lucide-react';
+import { Folder, FolderPlus, File as FileIcon, FolderOpen, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -20,8 +20,8 @@ import {
   type FsListing,
   type NameHit,
 } from '../../lib/filesApi';
-import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Button } from './button';
+import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { FileBrowser, type FileBrowserRow } from './file-browser';
 import { InlineNameInput } from './inline-name-input';
 
@@ -61,12 +61,12 @@ function formatMtime(seconds: number | null): string {
 export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSelect, onClose }) => {
   const { t } = useTranslation();
   const { projects } = useWorkbenchProjectsTree();
-  const surfaceActive = useRouteSurfaceActive();
   const isDesktop = useIsDesktop();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [listingError, setListingError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
   const [query, setQuery] = useState('');
@@ -75,20 +75,26 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [searchTruncated, setSearchTruncated] = useState(false);
   const navSeq = useRef(0);
-  const searchSeq = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
   const previousShowHidden = useRef(showHidden);
 
+  const changeQuery = useCallback((value: string) => {
+    searchAbort.current?.abort();
+    setQuery(value);
+    setSearchRows(null);
+    setSearchTruncated(false);
+    setSearchBusy(value.trim().length > 0);
+    setError(null);
+  }, []);
+
   const navigate = useCallback(
     (path: string) => {
+      initialPathHandled.current = true;
       const seq = ++navSeq.current;
-      searchAbort.current?.abort();
-      setQuery('');
-      setSearchRows(null);
-      setSearchBusy(false);
+      changeQuery('');
       setCreatingFolder(false);
-      setError(null);
+      setListingError(null);
       setLoading(true);
       listDir(path, showHidden)
         .then((result) => {
@@ -97,13 +103,15 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           setListing(result);
         })
         .catch((cause: unknown) => {
-          if (seq === navSeq.current) setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+          if (seq === navSeq.current) {
+            setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+          }
         })
         .finally(() => {
           if (seq === navSeq.current) setLoading(false);
         });
     },
-    [showHidden, t],
+    [changeQuery, showHidden, t],
   );
 
   useEffect(() => {
@@ -112,9 +120,9 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
 
   useEffect(() => {
     if (initialPathHandled.current) return;
+    if (!initialPath && projects === null) return;
     const start = initialPath || sortProjectsByRecent(projects || [])[0]?.folder_path || sysFavs.find((favorite) => favorite.key === 'home')?.path;
     if (!start) return;
-    initialPathHandled.current = true;
     let cancelled = false;
     Promise.resolve().then(() => {
       if (!cancelled) navigate(start);
@@ -138,34 +146,31 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
 
   useEffect(() => {
     const trimmed = query.trim();
-    searchAbort.current?.abort();
     if (!trimmed || !cwd) {
       return;
     }
+    const controller = new AbortController();
+    searchAbort.current = controller;
     const timeout = window.setTimeout(() => {
-      const controller = new AbortController();
-      searchAbort.current = controller;
-      const seq = ++searchSeq.current;
-      setSearchBusy(true);
       searchNames(cwd, trimmed, showHidden, controller.signal)
         .then((result) => {
-          if (seq !== searchSeq.current) return;
+          if (controller.signal.aborted) return;
           setSearchRows(result.results.map(searchRow));
           setSearchTruncated(result.truncated);
         })
         .catch((cause: unknown) => {
-          if (seq !== searchSeq.current || (cause as { name?: string })?.name === 'AbortError') return;
-          setSearchRows([]);
+          if (controller.signal.aborted) return;
           setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.searchFailed')));
         })
         .finally(() => {
-          if (seq === searchSeq.current) setSearchBusy(false);
+          if (!controller.signal.aborted) setSearchBusy(false);
         });
     }, 220);
-    return () => window.clearTimeout(timeout);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
   }, [cwd, query, showHidden, t]);
-
-  useEffect(() => () => searchAbort.current?.abort(), []);
 
   const projectFavs = useMemo(
     () => (projects || []).filter((project) => !!project.folder_path).map((project) => ({ label: project.display_name, path: project.folder_path as string })),
@@ -181,12 +186,21 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     [cwd, inSearch, listing, searchRows],
   );
   const showSpinner = loading && !listing;
-  const showEmpty = !loading && (rows.length === 0 || (inSearch && searchRows !== null && searchRows.length === 0)) && !creatingFolder;
+  const showEmpty =
+    !loading &&
+    !listingError &&
+    !creatingFolder &&
+    (inSearch ? !searchBusy && searchRows !== null && searchRows.length === 0 : listing !== null && listing.entries.length === 0);
+
+  const cancelCreateFolder = () => {
+    setCreatingFolder(false);
+    setError(null);
+  };
 
   const createFolder = async (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) {
-      setCreatingFolder(false);
+      cancelCreateFolder();
       return;
     }
     if (!isPlainEntryName(trimmed)) {
@@ -202,33 +216,28 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     }
   };
 
-  if (!surfaceActive) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 sm:p-6"
-      role="presentation"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[min(84dvh,760px)] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)]"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('directoryBrowser.title')}
-        onClick={(event) => event.stopPropagation()}
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        aria-describedby={undefined}
+        closeLabel={t('common.close')}
+        mobileSheetHeight="tall"
+        className="flex h-[min(84dvh,760px)] max-w-5xl flex-col gap-0 overflow-hidden border-border-strong bg-surface p-0 max-md:p-0 max-md:pb-0"
+        onEscapeKeyDown={(event) => {
+          if (creatingFolder) {
+            event.preventDefault();
+            cancelCreateFolder();
+          }
+        }}
       >
-        <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-2 px-4 py-3">
-          <FolderOpen className="size-4 text-mint-ink" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[13px] font-semibold text-foreground">{t('directoryBrowser.title')}</div>
-          </div>
-          <button type="button" aria-label={t('common.close')} onClick={onClose} className="text-muted transition hover:text-foreground">
-            <X className="size-4" />
-          </button>
+        <div className="flex shrink-0 items-center gap-3 border-b border-border bg-surface-2 py-4 pl-4 pr-12">
+          <FolderOpen className="size-4 shrink-0 text-mint-ink" />
+          <DialogTitle className="truncate text-[13px] font-semibold text-foreground">{t('directoryBrowser.title')}</DialogTitle>
         </div>
 
         <FileBrowser
           fullBleed
+          className="min-h-0 flex-1"
           mobileRoute={!isDesktop}
           cwd={cwd}
           crumbs={crumbs}
@@ -237,22 +246,21 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           loading={loading}
           searchBusy={searchBusy}
           query={query}
-          onQueryChange={setQuery}
+          onQueryChange={changeQuery}
           onRefresh={() => cwd && navigate(cwd)}
           onNavigate={navigate}
-          onClearQuery={() => setQuery('')}
           showHidden={showHidden}
           onShowHiddenChange={setShowHidden}
-          error={error}
+          error={listingError || error}
           toolbarActions={
             <Button
               type="button"
               size="sm"
               variant="outline"
               className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]"
-              disabled={!cwd || creatingFolder}
+              disabled={!cwd || loading || !!listingError || creatingFolder}
               onClick={() => {
-                setQuery('');
+                changeQuery('');
                 setCreatingFolder(true);
               }}
             >
@@ -278,7 +286,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                       initial=""
                       placeholder={t('apps.fileBrowser.newFolderPlaceholder')}
                       onCommit={(value) => void createFolder(value)}
-                      onCancel={() => setCreatingFolder(false)}
+                      onCancel={cancelCreateFolder}
                       className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1.5 py-0.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
                     />
                   </span>
@@ -330,7 +338,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                 size="sm"
                 variant="brand"
                 className="h-8 gap-1.5 px-3.5 text-[12px]"
-                disabled={!cwd || loading || !!error}
+                disabled={!cwd || loading || !!listingError}
                 onClick={() => cwd && onSelect(cwd)}
               >
                 <FolderOpen className="size-3.5" />
@@ -344,11 +352,12 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
               <span className="shrink-0">
                 {inSearch ? t('apps.fileBrowser.searchCount', { count: rows.length }) : t('apps.fileBrowser.itemCount', { count: rows.length })}
               </span>
+              {!inSearch && listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? rows.length })}</span>}
               {inSearch && searchTruncated && <span className="shrink-0">· {t('apps.fileBrowser.searchTruncated')}</span>}
             </span>
           }
         />
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };
