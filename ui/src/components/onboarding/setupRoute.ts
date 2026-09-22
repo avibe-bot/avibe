@@ -3,7 +3,7 @@ import type { AssistantId } from './collaborationTimeline';
 import { ASSISTANT_ORDER } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 import { routeChainMatchesAttempt, sameManualOverride, sameRouteDraft } from '../settings/models/routeChainDraft';
-import { candidateBackendModel, catalogModels, offeredCandidates } from '../settings/models/backendCatalog';
+import { catalogModels, chosenCandidate, draftRowFor, offeredCandidates } from '../settings/models/backendCatalog';
 import type {
   AgentBackend,
   AgentChain,
@@ -295,16 +295,28 @@ const precheckTarget = async (
  * fixed-menu backend ships its own catalog, and a server that predates backend
  * catalogs states none at all, so both are left exactly as they were.
  *
- * The row is the candidate the server offers for that id, so its OpenCode
- * protocol is the one the server derived. Deriving it here instead would mean
- * guessing, and the guess has a direction: the generic default is Responses, so
- * an Anthropic-family model adopted without asking would be written down as a
- * Responses model and every later turn would speak the wrong protocol — a
- * silently wrong config in place of a loud refusal. So when no offered candidate
- * names this id, or the one that does states no protocol, nothing is written and
- * the preview refuses exactly as it did before: the person is sent to the
- * catalog to say what this model is, rather than being given an answer nobody
- * gave.
+ * What is added is a candidate the server offered, so it is added the way the
+ * picker adds one — the whole agreement, through the functions that own it,
+ * rather than the fields this path happens to need. `draftRowFor` owns which row
+ * an id gets, and `chosenCandidate` pairs a pick with the projection it was
+ * picked against so the two cannot drift apart. Composing either half here is
+ * what produced the defects this comment is now the record of: a protocol
+ * defaulted to Responses under an Anthropic-family model, and an addition that
+ * promised nothing about its suppliers.
+ *
+ * So the protocol is the one the server derived — the generic default is
+ * Responses, and an Anthropic-family model adopted without asking would be
+ * written down as a Responses model and speak the wrong protocol on every later
+ * turn, a silently wrong config in place of a loud refusal. And the suppliers
+ * are the projection that candidate was offered with, which is what lets the
+ * server refuse this write when inventory has moved since the read; without it
+ * the addition is filed as a hand-written row, which promises nothing, and a
+ * catalog entry nobody agreed to commits while the route preview still fails.
+ *
+ * When no offered candidate names this id, or the one that does states no
+ * protocol, nothing is written and the preview refuses exactly as it did before:
+ * the person is sent to the catalog to say what this model is, rather than being
+ * given an answer nobody gave.
  */
 const adoptTargetModel = async (
   target: SetupRouteTargetSnapshot,
@@ -317,8 +329,13 @@ const adoptTargetModel = async (
   const offered = offeredCandidates(await api.getAgentModelCandidates(target.backend));
   const candidate = offered.get(target.modelId);
   if (!candidate?.native_protocol) return;
-  const adopted = candidateBackendModel(candidate);
-  await api.putAgentModels(target.backend, { baseline: catalog, models: [...catalog, adopted] });
+  const chosen = chosenCandidate(candidate);
+  const adopted = draftRowFor(chosen.candidate, [], catalog);
+  await api.putAgentModels(target.backend, {
+    baseline: catalog,
+    models: [...catalog, adopted],
+    expected_suppliers: { [adopted.id]: chosen.expected_suppliers },
+  });
 };
 
 const writeTarget = async (

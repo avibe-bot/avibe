@@ -4,7 +4,9 @@ import type {
   AgentChain,
   AgentSupply,
   BackendModel,
+  BackendModelsPut,
   ModelCandidate,
+  ModelCandidateSupplier,
   NativeProtocol,
   RouteHop,
 } from '../settings/models/types';
@@ -277,14 +279,19 @@ describe('saveSetupRoutes', () => {
   // route override against that catalog, so the preview is refused for a model nobody
   // has had the chance to add — which is every first route this step tries to save.
   describe('an open-menu catalog that does not yet name the Agent\'s model', () => {
-    // What the server offers for an id. Its protocol is the server's answer: for
-    // OpenCode it is derived per model, so an Anthropic-family model states
-    // `anthropic` and nothing in the browser may decide otherwise.
-    const candidate = (id: string, native_protocol?: NativeProtocol): ModelCandidate => ({
+    // What the server offers for an id: its protocol, and the suppliers it is
+    // offered with. Both are the server's answer — for OpenCode the protocol is
+    // derived per model, so an Anthropic-family model states `anthropic` and
+    // nothing in the browser may decide otherwise.
+    const candidate = (
+      id: string,
+      native_protocol?: NativeProtocol,
+      suppliers: ModelCandidateSupplier[] = [],
+    ): ModelCandidate => ({
       id,
       display_name: id.toUpperCase(),
       reasoning_efforts: [],
-      suppliers: [],
+      suppliers,
       origin: 'provider',
       ...(native_protocol ? { native_protocol } : {}),
     });
@@ -327,7 +334,7 @@ describe('saveSetupRoutes', () => {
           store[`${backend}:${model}`] = next;
           return { chain: next };
         }),
-        putAgentModels: vi.fn(async (_backend: AgentChain['backend'], body: { models: BackendModel[] }) => {
+        putAgentModels: vi.fn(async (_backend: AgentChain['backend'], body: BackendModelsPut) => {
           calls.push('models');
           listed = body.models;
           return supply('opencode', [{ name: 'opencode', model: 'glm-4.6' }]);
@@ -352,6 +359,10 @@ describe('saveSetupRoutes', () => {
           id: 'glm-4.6', display_name: 'GLM-4.6', origin: 'provider',
           native_protocol: 'openai_responses', locked: false, routeable: true,
         })],
+        // An offered id nothing supplies yet still states its projection: empty
+        // is the agreement, and the guard it arms is what refuses this write if
+        // something starts supplying the id before it commits.
+        expected_suppliers: { 'glm-4.6': [] },
       });
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
       expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
@@ -368,9 +379,30 @@ describe('saveSetupRoutes', () => {
       expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
         baseline: [],
         models: [expect.objectContaining({ id, native_protocol: 'anthropic' })],
+        expected_suppliers: { [id]: [] },
       });
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
       expect(store[`opencode:${id}`]?.manual_override).toEqual({ hops: [A] });
+    });
+
+    // The other half of the same agreement. The server matches an addition
+    // against inventory at commit time, and only an addition that states which
+    // projection it was made against can be refused when that inventory moved;
+    // one that states none is filed as a hand-written row, which promised
+    // nothing, and commits a catalog entry nobody agreed to. The projection is
+    // the candidate's own — its supplier names a different model id than the one
+    // being added, so a rebuild from anything but the candidate cannot produce it.
+    it('states the suppliers the candidate was offered with, not a projection rebuilt here', async () => {
+      const supplier: ModelCandidateSupplier = {
+        source_id: 'src_a', source_name: 'Relay', model_id: 'glm-4.6-air',
+      };
+      const { api, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses', [supplier])]);
+      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      expect(api.putAgentModels).toHaveBeenCalledWith('opencode', expect.objectContaining({
+        expected_suppliers: { 'glm-4.6': [{ source_id: 'src_a', model_id: 'glm-4.6-air' }] },
+      }));
+      expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
     });
 
     // Nobody has an authoritative answer for this id, so nobody invents one: the
