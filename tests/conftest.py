@@ -522,6 +522,13 @@ def pytest_collection_modifyitems(config, items):
     ``trylast`` matters: pytest's own ``-k`` / ``-m`` deselection runs in this
     same hook, so an earlier-running implementation would count items the user
     already filtered out.
+
+    The notice goes to the terminal reporter rather than ``warnings.warn`` for
+    the same reason. A warning is not inert: under ``-W error`` (or
+    ``filterwarnings = error``) it is promoted to an exception, and an exception
+    raised from a collection hook ends the run as an INTERNALERROR before any
+    test executes. Advisory has to mean advisory in every environment, not just
+    the ones this repository's CI happens to configure.
     """
     if config.pluginmanager.hasplugin("asyncio"):
         return
@@ -538,4 +545,8 @@ def pytest_collection_modifyitems(config, items):
     reporter = config.pluginmanager.get_plugin("terminalreporter")
     if reporter is not None:
         reporter.write_line(f"\n{message}", yellow=True, bold=True)
-    warnings.warn(message, pytest.PytestWarning, stacklevel=1)
+    else:
+        # No terminal reporter -- ``-p no:terminal``, or pytest driven as a
+        # library. stderr still reaches the operator and, unlike
+        # ``warnings.warn``, cannot be promoted to an exception.
+        print(f"\n{message}", file=sys.stderr)

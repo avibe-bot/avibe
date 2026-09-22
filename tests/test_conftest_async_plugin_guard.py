@@ -99,9 +99,14 @@ def test_items_without_a_test_function_are_skipped() -> None:
     assert _async_items_missing_plugin([_FakeItem(None, raises=True)]) == []
 
 
-def _run_without_plugin(*args: str) -> tuple[int, str]:
+def _run_without_plugin(*args: str, quiet: bool = True) -> tuple[int, str]:
+    # ``quiet=False`` exists for the ``-p no:terminal`` case: ``-q`` is registered
+    # by the terminal plugin, so passing both is a usage error rather than a run.
+    argv = [sys.executable, "-m", "pytest", "-p", "no:asyncio"]
+    if quiet:
+        argv.append("-q")
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:asyncio", "-q", *args],
+        [*argv, *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -136,3 +141,45 @@ def test_a_genuine_async_selection_is_explained_but_not_aborted() -> None:
     # genuinely needs the plugin -- exactly what it would do without the notice.
     assert returncode != pytest.ExitCode.USAGE_ERROR, output
     assert " passed" in output, output
+
+
+def test_the_notice_survives_W_error_without_ending_the_run() -> None:
+    """``-W error`` must not turn the advisory notice into an INTERNALERROR.
+
+    An earlier revision emitted the notice with ``warnings.warn``. A warning is
+    not inert: ``-W error`` promotes it to an exception, and an exception raised
+    from a collection hook aborts the whole run before any test executes -- the
+    third time this guard changed an outcome it was only meant to describe.
+
+    ``PytestConfigWarning`` is filtered back out because pytest raises its own
+    "Unknown config option: asyncio_mode" warning whenever the plugin is
+    missing. That one is pytest's, not this guard's, and leaving it promoted
+    would mask which of the two the assertion is actually measuring. The
+    ``ignore`` entry comes last because Python prepends each ``-W`` filter, so
+    the last one wins.
+    """
+    returncode, output = _run_without_plugin(
+        "-W",
+        "error::pytest.PytestWarning",
+        "-W",
+        "ignore::pytest.PytestConfigWarning",
+        "--collect-only",
+        NATIVE_ASYNC_FILE,
+    )
+    assert NOTICE in output, output
+    assert "INTERNALERROR" not in output, output
+    assert returncode != pytest.ExitCode.INTERNAL_ERROR, output
+
+
+def test_the_notice_still_appears_without_a_terminal_reporter() -> None:
+    """``-p no:terminal`` removes the reporter the notice normally writes to.
+
+    Dropping ``warnings.warn`` left ``reporter.write_line`` as the only channel,
+    so the stderr fallback is what keeps the notice from disappearing silently
+    when pytest runs without a terminal reporter.
+    """
+    returncode, output = _run_without_plugin(
+        "-p", "no:terminal", "--collect-only", NATIVE_ASYNC_FILE, quiet=False
+    )
+    assert NOTICE in output, output
+    assert returncode == 0, output
