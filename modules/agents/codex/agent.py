@@ -22,7 +22,6 @@ from core.backend_failure import emit_backend_failure
 from core.agent_input import AgentInputMetadata
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
-from core.memory_cli_access import configure_memory_cli_access
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -2950,11 +2949,6 @@ class CodexAgent(BaseAgent):
             or self.controller.config.platform
         )
 
-        # Resolve admission once: it associates or clears this turn's Memory CLI
-        # session scope as a side effect, so a second call per turn would repeat
-        # that write.
-        configure_memory_cli_access(self.controller, request.context)
-
         skill_catalog_sink: list[dict] = []
         instructions = await asyncio.to_thread(
             build_system_prompt_injection,
@@ -2963,9 +2957,6 @@ class CodexAgent(BaseAgent):
             include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
             and platform != "wechat",
             include_codex_generated_images=True,
-                memory_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
-                ),
                 profile_enabled=bool(
                     getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
                 ),

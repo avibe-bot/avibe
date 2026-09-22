@@ -30,7 +30,6 @@ from core.caller_context import (
     issue_caller_session_proof,
 )
 from core.message_output import stop_output_for, terminal_output_for
-from core.memory_cli_access import configure_memory_cli_access
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
@@ -1511,7 +1510,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # Resolve admission once: it associates or clears this turn's Memory
             # CLI session scope as a side effect, so a second call per turn would
             # repeat that write.
-            configure_memory_cli_access(self.controller, request.context)
             caller_context_env = caller_env_for_platform_payload(
                 request.context.platform_specific or {},
                 message=request.context,
@@ -1574,9 +1572,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
-                memory_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "enabled", False)
-                ),
                 profile_enabled=bool(
                     getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
                 ),
@@ -2631,9 +2626,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or poll_info.base_session_id or ""
             )
             if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
-                memory_context = self.controller.session_turns.restore_memory_context(restored_session_id, logical_turn_id)
-                admitted = memory_context is not None and configure_memory_cli_access(self.controller, memory_context)
-                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id) if admitted else None
+                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id)
                 if proof:
                     restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (
