@@ -530,7 +530,7 @@ class CodexAgent(BaseAgent):
                         await self._remove_ack_reaction(interrupted_request)
 
                 # Render once at the actual Turn boundary. Besides keeping the
-                # payload byte-stable, this avoids repeating Memory admission
+                # payload byte-stable, this avoids repeating admission
                 # side effects while the same request refreshes and starts.
                 if not prompt_rendered:
                     developer_instructions = await self._build_thread_developer_instructions(request)

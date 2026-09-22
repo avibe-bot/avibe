@@ -20,18 +20,8 @@ def _session_owner_proof(session_id: str, owner: Mapping[str, Any]) -> str:
 
 
 def issue_caller_session_proof(session_id: str, *, turn_id: str | None = None) -> str | None:
-    """Host-only proof of the exact execution's owner, stable across its turns."""
-    from storage.message_deliveries import current_delivery_memory_owner
-
-    from sqlalchemy.exc import SQLAlchemyError
-
-    try:
-        owner = current_delivery_memory_owner(session_id, turn_id=turn_id)
-    except SQLAlchemyError:
-        # Missing/unavailable durable execution identity must not interrupt an
-        # ordinary Agent launch, and cannot authorize Memory delegation.
-        return None
-    return _session_owner_proof(session_id, owner) if owner else None
+    """Return no legacy delivery proof; caller identity is carried directly."""
+    return None
 
 
 def verify_caller_session_proof(session_id: str, proof: str, owner: Mapping[str, Any] | None) -> bool:
@@ -523,12 +513,7 @@ def caller_context_from_platform_payload(
         workspace_id = _origin_workspace_id(platform, payload)
 
     message_metadata = payload.get("message_metadata")
-    owner = message_metadata.get("delegated_memory_owner") if isinstance(message_metadata, Mapping) else None
-    authorization_user_id = (
-        _clean(owner.get("user_id"))
-        if isinstance(owner, Mapping) and owner.get("platform") == platform
-        else user_id
-    )
+    authorization_user_id = user_id
     is_remote = platform == "avibe" and authorization_user_id.startswith("remote:")
     resource_user_context: Optional[dict[str, Any]] = None
     if is_remote and isinstance(message_metadata, Mapping):

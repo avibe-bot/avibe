@@ -32,7 +32,6 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings/backends/codex',
   '/settings/models',
   '/settings/dependencies',
-  '/settings/memory',
   '/settings/replies',
   '/settings/diagnostics',
   '/settings/diagnostics/logs',

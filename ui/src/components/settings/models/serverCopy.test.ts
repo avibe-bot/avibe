@@ -54,7 +54,7 @@ describe('serverText', () => {
   });
 
   it.each(['en', 'zh'] as const)('rejects existing objects and arrays as server text in %s', (lng) => {
-    for (const key of ['common', 'memory.settings.disclosure']) {
+    for (const key of ['common']) {
       expect(serverText(t(lng), key)).toBeNull();
       expect(serverText(t(lng), key, 'settings.models.oauth.error.generic')).toBe(t(lng)('settings.models.oauth.error.generic'));
     }

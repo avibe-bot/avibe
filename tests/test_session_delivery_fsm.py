@@ -247,27 +247,6 @@ async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) 
     assert not manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
 
 
-@pytest.mark.anyio
-async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
-    """MEMORY-IM-ATTACH-001: failed reset preserves an in-flight turn epoch."""
-
-    manager, _other, _engine, _engine_b, _starts = managers
-    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
-
-    async def lifecycle_operation() -> str:
-        raise RuntimeError("reset failed")
-
-    with pytest.raises(RuntimeError, match="reset failed"):
-        await manager.run_session_lifecycle("ses_fsm", lifecycle_operation)
-
-    admission = await manager.acquire_lifecycle_admission("ses_fsm")
-    try:
-        assert manager.session_lifecycle_snapshot_matches(
-            "ses_fsm",
-            sampled_snapshot,
-        )
-    finally:
-        admission.release()
 
 
 
@@ -728,53 +707,8 @@ def test_core_message_kind_separates_original_and_quick_reply_segments() -> None
     assert _collect_delivery_segment([original, quick_reply]) == [original]
 
 
-def test_legacy_and_new_original_rows_do_not_merge_admission_schemas() -> None:
-    legacy = {
-        "scope_id": "scope",
-        "platform": "avibe",
-        "author": "user",
-        "type": "user",
-        "source": "user",
-        "author_id": "remote:alice",
-        "author_name": "Alice",
-        "parent_native_message_id": None,
-        "metadata": {"_memory_ordinary_text": True},
-    }
-    current = {
-        **legacy,
-        "message_kind": "original",
-        "metadata": {},
-    }
-
-    assert delivery_store.message_merge_identity(legacy) != (
-        delivery_store.message_merge_identity(current)
-    )
 
 
-def test_raw_legacy_and_new_original_snapshots_do_not_merge_admission_schemas() -> None:
-    common = {
-        "scope_id": "scope",
-        "platform": "avibe",
-        "author": "user",
-        "type": "user",
-        "source": "user",
-        "author_id": "remote:alice",
-        "author_name": "Alice",
-        "parent_native_message_id": None,
-    }
-    legacy = {
-        **common,
-        "metadata_json": json.dumps({"_memory_ordinary_text": True}),
-    }
-    current = {
-        **common,
-        "message_kind": "original",
-        "metadata_json": "{}",
-    }
-
-    assert delivery_store.message_merge_identity(legacy) != (
-        delivery_store.message_merge_identity(current)
-    )
 
 
 
@@ -1978,96 +1912,8 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     }
 
 
-def test_hydrate_delivery_context_preserves_im_author_as_routing_identity(
-    managers,
-) -> None:
-    """Hydrating an IM delivery keeps the outbound recipient on author_id.
-
-    This is the guardrail that would have caught avibe-bot/avibe#1584: Memory
-    identity must not replace MessageContext.user_id.
-    """
-
-    manager, _other, engine, _engine_b, _starts = managers
-    author_id = "wxid_real_user"
-    admitted = asyncio.run(
-        manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p3",
-                content="hello from wechat",
-                platform="wechat",
-                source="user",
-                author="user",
-                message_type="user",
-                author_id=author_id,
-                author_name="Ada",
-                native_message_id="wc-msg-1",
-                metadata={"_memory_user_id": "local"},
-            ),
-            context=_context(),
-        )
-    )
-    delivery = _row(engine, str(admitted.delivery_id))
-    context = MessageContext(
-        user_id="workbench",
-        channel_id=author_id,
-        platform="wechat",
-    )
-
-    manager._hydrate_delivery_context(context, delivery)
-
-    assert context.user_id == author_id
-    assert context.platform_specific["message_metadata"] == {}
 
 
-def test_wechat_outbound_send_uses_hydrated_author_id(managers) -> None:
-    """Scenario: MESSAGE-DELIVERY-316.
-
-    WeChat reply addresses the real platform user, never a Memory principal.
-    """
-
-    from modules.im.wechat import WeChatBot, WeChatConfig
-
-    manager, _other, engine, _engine_b, _starts = managers
-    author_id = "wxid_real_user"
-    admitted = asyncio.run(
-        manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p3",
-                content="hello from wechat",
-                platform="wechat",
-                source="user",
-                author="user",
-                message_type="user",
-                author_id=author_id,
-                native_message_id="wc-msg-2",
-            ),
-            context=_context(),
-        )
-    )
-    delivery = _row(engine, str(admitted.delivery_id))
-    context = MessageContext(
-        user_id=None,
-        channel_id=author_id,
-        platform="wechat",
-        platform_specific={"context_token": "ctx-1"},
-    )
-    manager._hydrate_delivery_context(context, delivery)
-    bot = WeChatBot(
-        WeChatConfig(bot_token="token", base_url="https://ilinkai.weixin.qq.com")
-    )
-
-    with patch(
-        "modules.im.wechat.wechat_api.send_message",
-        new=AsyncMock(return_value={}),
-    ) as mock_send:
-        message_id = asyncio.run(bot.send_message(context, "reply"))
-
-    to_user_id = mock_send.await_args.args[2]
-    assert to_user_id == author_id
-    assert to_user_id
-    assert message_id
 
 
 
@@ -4882,35 +4728,6 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
 
 
-def test_persisted_start_does_not_acquire_lifecycle_admission(
-    managers,
-    monkeypatch,
-) -> None:
-    """Scenario: MEMORY-INDEP-001. Dispatch must not wait on Memory."""
-
-    manager, _other, _engine, _engine_b, _starts = managers
-    acquired = False
-    original_acquire = manager.acquire_lifecycle_admission
-
-    async def track_acquire(raw_session_id):
-        nonlocal acquired
-        acquired = True
-        return await original_acquire(raw_session_id)
-
-    monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
-    asyncio.run(
-        manager.deliver(
-            DeliveryRequest(
-                session_id="ses_fsm",
-                priority="p3",
-                content="do not fence dispatch",
-            ),
-            context=_context(),
-        )
-    )
-
-    assert acquired is False
-    assert "ses_fsm" not in manager._session_lifecycle_states
 
 
 @pytest.mark.parametrize(

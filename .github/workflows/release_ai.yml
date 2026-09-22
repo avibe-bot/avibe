@@ -109,54 +109,9 @@ jobs:
             show-runtime-ref-${{ matrix.artifact }}.txt
             show-router-${{ matrix.artifact }}.tsx
 
-  memory-runtime-bundles:
-    if: startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: linux-x64
-          - os: ubuntu-24.04-arm
-            artifact: linux-arm64
-          - os: macos-14
-            artifact: darwin-arm64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          version: "0.9.18"
-
-      - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12"
-
-      - name: Build Memory Runtime bundle
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: |
-          python scripts/build_memory_runtime.py \
-            --output-dir runtime-artifacts \
-            --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
-
-      - name: Upload Memory Runtime bundle
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
-        with:
-          name: memory-runtime-${{ matrix.artifact }}
-          path: |
-            runtime-artifacts/memory-runtime-*.tar.gz
-            runtime-artifacts/memory-runtime-*.json
-
   build-assets:
     needs:
       - show-runtime-bundles
-      - memory-runtime-bundles
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -194,21 +149,6 @@ jobs:
             --output vibe/show_runtime_manifest.json \
             --router-output vibe/show_router.tsx
 
-      - name: Download Memory Runtime bundles
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
-        with:
-          pattern: memory-runtime-*
-          path: runtime-artifacts
-          merge-multiple: true
-
-      - name: Generate Memory Runtime manifest
-        run: |
-          python scripts/generate_memory_runtime_manifest.py \
-            --archive-dir runtime-artifacts \
-            --tag "${{ github.event.inputs.tag || github.ref_name }}" \
-            --repo "${{ github.repository }}" \
-            --output vibe/memory_runtime_manifest.json
-
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
@@ -222,12 +162,10 @@ jobs:
           PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
           echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
-          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY=$PACKAGE_VERSION" >> "$GITHUB_ENV"
 
       - name: Build Python distributions
         run: |
           pip install -e . build pytest
-          python -m build --outdir dist packaging/avibe-memory
           python -m build
 
       - name: Verify Python distribution asset matrix
@@ -236,8 +174,6 @@ jobs:
           from pathlib import Path
 
           patterns = (
-              "avibe_memory-*.whl",
-              "avibe_memory-*.tar.gz",
               "avibe_os-*.whl",
               "avibe_os-*.tar.gz",
           )
@@ -249,80 +185,6 @@ jobs:
                   )
           PY
 
-      - name: Verify bundled runtime manifests
-        run: |
-          python - <<'PY'
-          import sys
-          import zipfile
-          from pathlib import Path
-
-          core_wheels = sorted(Path("dist").glob("avibe_os-*.whl"))
-          memory_wheels = sorted(Path("dist").glob("avibe_memory-*.whl"))
-          if len(core_wheels) != 1:
-              raise SystemExit(f"Expected exactly one avibe-os wheel, found {len(core_wheels)}")
-          if len(memory_wheels) != 1:
-              raise SystemExit(f"Expected exactly one avibe-memory wheel, found {len(memory_wheels)}")
-
-          with zipfile.ZipFile(core_wheels[0]) as wheel:
-              core_names = set(wheel.namelist())
-              archives = {
-                  name for name in core_names
-                  if name.startswith("vibe/show_runtime/") and name.endswith(".tgz")
-              }
-
-          if archives:
-              raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
-          if "vibe/show_runtime_manifest.json" not in core_names:
-              raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in core_names):
-              raise SystemExit("Wheel unexpectedly contains Memory Runtime archives")
-          if "vibe/memory_runtime_manifest.json" in core_names:
-              raise SystemExit("avibe-os wheel unexpectedly owns the Memory Runtime manifest")
-
-          with zipfile.ZipFile(memory_wheels[0]) as wheel:
-              memory_names = set(wheel.namelist())
-          if "vibe/memory_runtime_manifest.json" not in memory_names:
-              raise SystemExit("avibe-memory wheel is missing vibe/memory_runtime_manifest.json")
-          if any(name.startswith("vibe/memory_runtime/") for name in memory_names):
-              raise SystemExit("avibe-memory wheel unexpectedly contains Memory Runtime archives")
-
-          print("vibe/show_runtime_manifest.json")
-          print("vibe/memory_runtime_manifest.json")
-          PY
-
-      - name: Checkout release verification
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          ref: ${{ github.sha }}
-          path: release-automation
-          sparse-checkout: tests/test_memory_distribution.py
-          sparse-checkout-cone-mode: false
-
-      - name: Verify distribution package matrix
-        run: |
-          # Use workflow-owned verification only AFTER building the tagged source.
-          # Keep its location so source comparisons still inspect that source.
-          cp release-automation/tests/test_memory_distribution.py tests/test_memory_distribution.py
-          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
-          AVIBE_MEMORY_WHEEL="$(ls dist/avibe_memory-*.whl)" \
-            pytest tests/test_memory_distribution.py -v
-
-      - name: Run Memory Runtime release guard for GitHub-only assets
-        shell: bash
-        run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          if [[ "$TAG" != gh-v* ]]; then
-            echo "Skipping GitHub-only Memory Runtime guard for $TAG."
-            exit 0
-          fi
-          rm -rf memory-release-guard-assets
-          mkdir -p memory-release-guard-assets
-          cp vibe/memory_runtime_manifest.json memory-release-guard-assets/memory-runtime-manifest.json
-          cp runtime-artifacts/memory-runtime-*.tar.gz memory-release-guard-assets/
-          python scripts/memory_runtime_release_guard.py \
-            --manifest vibe/memory_runtime_manifest.json \
-            verify --asset-dir memory-release-guard-assets
-
       - name: Add Show Runtime release assets
         shell: bash
         run: |
@@ -330,8 +192,6 @@ jobs:
           if [[ "$TAG" == gh-v* ]]; then
             cp runtime-artifacts/vibe-show-runtime-node-*.tgz dist/
             cp vibe/show_runtime_manifest.json dist/show-runtime-manifest.json
-            cp runtime-artifacts/memory-runtime-*.tar.gz dist/
-            cp vibe/memory_runtime_manifest.json dist/memory-runtime-manifest.json
           else
             echo "Runtime release assets for $TAG are produced by the PyPI publish workflow."
           fi
@@ -716,10 +576,7 @@ jobs:
           asset_paths=(
             dist/vibe-show-runtime-node-*.tgz
             dist/show-runtime-manifest.json
-            dist/memory-runtime-*.tar.gz
-            dist/memory-runtime-manifest.json
             dist/avibe_os-*.whl dist/avibe_os-*.tar.gz
-            dist/avibe_memory-*.whl dist/avibe_memory-*.tar.gz
           )
           # Packages and runtimes share the same immutable publication boundary.
           # Validate every existing byte before uploading even a missing asset.
@@ -737,7 +594,6 @@ jobs:
               fi
             else
               case "$name" in
-                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json|memory-runtime-*.tar.gz|memory-runtime-manifest.json)
                   runtime_to_upload+=("$path") ;;
                 *) package_to_upload+=("$path") ;;
               esac

@@ -1207,7 +1207,7 @@ def save_config(
     generic_remote_access: bool = False,
     user_context: Any = None,
 ) -> V2Config:
-    """Save general settings while preserving Memory's dedicated settings block."""
+    """Save general settings while discarding removed optional-feature sections."""
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
     from vibe.authorization import require_instance_role
@@ -1381,6 +1381,17 @@ def _require_preserved_config_access(current: V2Config, candidate: V2Config) -> 
 
 
 
+def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
+    """Project remote-access pairing state while redacting credentials."""
+    vibe_cloud = config.remote_access.vibe_cloud
+    payload = vibe_cloud.__dict__.copy()
+    payload["paired"] = vibe_cloud.is_runtime_paired()
+    if not include_secrets:
+        for key in ("tunnel_token", "instance_secret", "session_secret"):
+            payload.pop(key, None)
+    return payload
+
+
 def _agent_payload(raw: dict, *, include_secrets: bool) -> dict:
     """Project a Claude/Codex config dict for the UI, masking the api_key.
 
@@ -1537,7 +1548,7 @@ def config_to_payload(
         },
         "remote_access": {
             "provider": config.remote_access.provider,
-            "vibe_cloud": config.remote_access.vibe_cloud.__dict__,
+            "vibe_cloud": _vibe_cloud_payload(config, include_secrets),
         },
         "audio_asr": config.audio_asr.__dict__,
         "update": config.update.__dict__,
@@ -1558,17 +1569,9 @@ def config_to_payload(
 def client_config_payload(config: V2Config) -> dict:
     """Project config for an HTTP response rather than for a save.
 
-    ``config_to_payload`` has to emit ``memory`` because the UI save path uses
-    the same projection as its deep-merge base, and an omitted block resets the
-    stored one (the ``agents.avault`` comment above records the same hazard).
-    A response is the opposite case: Memory settings have their own
-    ``/api/memory/*`` routes and lifecycle, so returning them from the generic
-    config endpoint would duplicate that contract and mix independently loaded
-    state into every settings response.
-
-    Every endpoint that returns the generic config must project through this
-    function, so a new one inherits the exclusion instead of having to repeat
-    ``payload.pop("memory", None)`` and eventually forgetting.
+    The generic projection excludes the removed optional-feature section from
+    both saved and returned configuration. Legacy clients may still submit that
+    section; it is ignored before persistence and never appears in this payload.
     """
 
     payload = config_to_payload(config)

@@ -116,7 +116,7 @@ class SessionLifecycleSnapshot:
 
 @dataclass
 class TurnLifecycleAdmission:
-    """One idempotent lease bridging turn admission into Memory capture."""
+    """One idempotent lease bridging turn admission into capture."""
 
     _state: _SessionLifecycleState
     _released: bool = field(default=False, init=False)
@@ -757,7 +757,7 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition without waiting for Memory capture."""
+        """Run a destructive transition without waiting for capture."""
 
         state = self._session_lifecycle_state(raw_session_id)
         await state.operation_lock.acquire()
@@ -765,7 +765,7 @@ class SessionTurnManager:
         try:
             pre_epoch = state.epoch
             # Lifecycle operations are intentionally non-blocking with respect
-            # to Memory delivery. If a capture already owns the admission lock,
+            # to delivery. If a capture already owns the admission lock,
             # advance the generation immediately; the capture will revalidate
             # its snapshot and drop without provider I/O. An uncontended lock
             # acquisition completes synchronously on this event loop.

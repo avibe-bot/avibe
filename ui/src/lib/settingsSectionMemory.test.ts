@@ -70,7 +70,6 @@ describe('settings section memory', () => {
       .toBe('/settings/service');
   });
 
-  it.each(['/settings/memory', '/settings/models', '/settings/platforms/groups'])(
     'resumes %s whatever its feature flag is doing',
     (remembered) => {
       // A feature flag decides which rows the rail advertises, not which pages a

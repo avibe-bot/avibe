@@ -10871,7 +10871,7 @@ class ScheduledTaskService:
                 "is_dm": target.is_dm,
                 "message_metadata": {
                     key: value for key, value in (metadata or {}).items()
-                    if key in {"delegated_memory_owner", "resource_user_context"}
+                    if key == "resource_user_context"
                 },
                 "turn_source": "scheduled",
                 "agent_session_id": session_id,

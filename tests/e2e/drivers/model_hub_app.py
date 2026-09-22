@@ -236,7 +236,6 @@ class ModelHubTestApp:
                 "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                 "VIBE_MODEL_HUB_ENABLED": "1" if self.enabled else "0",
                 "VIBE_MODEL_HUB_ENGINE_OFFLINE": "1",
-                "VIBE_MEMORY_OFFLINE": "1",
                 "VIBE_SHOW_RUNTIME_OFFLINE": "1",
                 "VIBE_TMUX_OFFLINE": "1",
                 "VIBE_GIT_OFFLINE": "1",

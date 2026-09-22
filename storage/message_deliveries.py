@@ -39,65 +39,10 @@ FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
-LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
-LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
-LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
-LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS = (
-    LEGACY_MEMORY_USER_ID_METADATA,
-    LEGACY_MEMORY_ORDINARY_TEXT_METADATA,
-    LEGACY_MEMORY_CLI_ADMITTED_METADATA,
-)
+def message_kind_from_metadata(metadata: object) -> str:
+    """Translate persisted metadata into the core message vocabulary."""
 
-
-def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
-    return metadata if isinstance(metadata, dict) else {}
-
-
-def legacy_admitted_user_id(metadata: object) -> str | None:
-    """Read the principal from a released pre-author_id Message row."""
-
-    memory_user_id = _legacy_memory_metadata(metadata).get(
-        LEGACY_MEMORY_USER_ID_METADATA
-    )
-    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
-        return None
-    return memory_user_id.strip()
-
-
-def legacy_is_ordinary_text(metadata: object) -> bool:
-    """Read the literal ordinary-text flag from a released Message row."""
-
-    return (
-        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_ORDINARY_TEXT_METADATA)
-        is True
-    )
-
-
-def legacy_is_cli_admitted(metadata: object) -> bool:
-    """Read the literal CLI-admission flag from a released Message row."""
-
-    return (
-        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_CLI_ADMITTED_METADATA)
-        is True
-    )
-
-
-def legacy_memory_merge_identity(
-    metadata: object,
-) -> tuple[str | None, bool, bool]:
-    """Return the released Memory facts that one dispatch kept singular."""
-
-    return (
-        legacy_admitted_user_id(metadata),
-        legacy_is_ordinary_text(metadata),
-        legacy_is_cli_admitted(metadata),
-    )
-
-
-def legacy_message_kind(metadata: object) -> str:
-    """Translate released `_memory_*` rows into the core message vocabulary."""
-
-    metadata = _legacy_memory_metadata(metadata)
+    metadata = metadata if isinstance(metadata, dict) else {}
     if metadata.get("quick_reply_for"):
         return "quick_reply"
     if any(
@@ -109,7 +54,7 @@ def legacy_message_kind(metadata: object) -> str:
         return "edited"
     if metadata.get("is_system") or metadata.get("system"):
         return "system"
-    return "original" if legacy_is_ordinary_text(metadata) else "unknown"
+    return "original"
 
 
 def utc_now_iso() -> str:
@@ -216,11 +161,7 @@ def message_snapshot(
     if source == "user":
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         metadata.pop("scheduled_provenance", None)
-    filtered_metadata = {
-        key: value
-        for key, value in (metadata or {}).items()
-        if not str(key).startswith("_memory_")
-    }
+    filtered_metadata = dict(metadata or {})
     return {
         "scope_id": scope_id,
         "session_id": session_id,
@@ -532,7 +473,7 @@ def _delivery_payload_from_snapshot(
         "message_kind": (
             normalize_message_kind(snapshot.get("message_kind"))
             if "message_kind" in snapshot
-            else legacy_message_kind(metadata)
+            else message_kind_from_metadata(metadata)
         ),
         "text": snapshot.get("content_text") or content.get("text") or "",
         "content": content,
@@ -586,13 +527,11 @@ def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
     """Project the two known owner locations without changing stored metadata."""
     result = dict(metadata) if isinstance(metadata, dict) else {}
-    result.pop("delegated_memory_owner", None)
     provenance = result.get("scheduled_provenance")
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
     nested = spec.get("message_metadata") if isinstance(spec, dict) else None
     if isinstance(nested, dict):
         public_nested = dict(nested)
-        public_nested.pop("delegated_memory_owner", None)
         result["scheduled_provenance"] = {
             **provenance, "platform_specific": {**spec, "message_metadata": public_nested},
         }
@@ -605,7 +544,7 @@ def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         return {
             key: item for key, item in value.items()
             if key != "resource_user_context"
-            and not str(key).startswith(("_web_push_", "_memory_"))
+            and not str(key).startswith("_web_push_")
         }
 
     result = without_private_fields(dict(metadata) if isinstance(metadata, dict) else {})
@@ -654,7 +593,7 @@ def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
     # Compare raw authority, including absent/malformed values, before batching.
     # Execution IDs and unrelated metadata must not disable normal coalescing.
     return _canonical_json([
-        {key: value.get(key) for key in ("delegated_memory_owner", "resource_user_context")}
+        {"resource_user_context": value.get("resource_user_context")}
         if isinstance(value, Mapping) else None
         for value in (metadata, nested)
     ])
@@ -669,13 +608,12 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     kind = (
         normalize_message_kind(value.get("message_kind"))
         if "message_kind" in value
-        else legacy_message_kind(metadata)
+        else message_kind_from_metadata(metadata)
     )
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
         _delegated_authority_merge_identity(metadata),
-        legacy_memory_merge_identity(metadata),
     )
 
 

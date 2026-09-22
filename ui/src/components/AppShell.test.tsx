@@ -48,7 +48,6 @@ const viewport = vi.hoisted(() => {
 
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
-  getMemorySettings: vi.fn(),
   getVersion: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
@@ -207,10 +206,6 @@ beforeEach(() => {
   instanceAuth.capabilities.can_use_show_pages = true;
   i18n = makeI18n();
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
-  api.getMemorySettings.mockResolvedValue({
-    status: 'failed',
-    error: 'memory_settings_remote_only',
-  });
   api.getVersion.mockResolvedValue({ version: 'test' });
 });
 

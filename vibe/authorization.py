@@ -481,7 +481,6 @@ _EDITOR_HTTP_NAMESPACES = (
     "/api/terminal",
 )
 _VIEWER_HTTP_NAMESPACES = (
-    "/api/memory",
     "/api/web-push",
 )
 _VIEWER_HTTP_MUTATION_RULES = (

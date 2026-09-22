@@ -233,84 +233,8 @@ def _accepted_dispatch(session_id: str) -> AsyncMock:
     return AsyncMock(side_effect=dispatch)
 
 
-def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
-    """The web Chat POST persists the user row AND fire-and-forgets the turn via
-    ``/internal/dispatch_async``. The reply arrives over the persistent
-    ``message.new`` stream, so the response returns 201 immediately with the row
-    (it does NOT hold the turn open).
-    """
-
-    from vibe.ui_server import app
-
-    _, session_id = _make_session(tmp_path)
-
-    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
-    with (
-        patch("vibe.internal_client.dispatch_async", dispatch_mock),
-        patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
-        patch(
-            "vibe.ui_server._workbench_author_id",
-            return_value="remote:user-a",
-        ),
-        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
-    ):
-        client = app.test_client()
-        headers = csrf_headers(client)
-        saved_draft = client.put(
-            f"/api/sessions/{session_id}/draft",
-            json={"text": "draft before send", "expected_updated_at": None},
-            headers=headers,
-        ).get_json()["draft"]
-        response = client.post(
-            f"/api/sessions/{session_id}/messages",
-            json={"text": "no stream", "author_id": "remote:spoofed"},
-            headers=headers,
-        )
-    assert response.status_code == 201
-    payload = response.get_json()
-    assert payload["author"] == "user"
-    assert payload["author_id"] == "remote:user-a"
-    assert "_web_push_user_key" not in payload["metadata"]
-    assert not any(key.startswith("_memory_") for key in payload["metadata"])
-    assert payload["text"] == "no stream"
-    assert payload["draft_advanced"] is True
-    assert payload["draft"]["text"] == ""
-    assert payload["draft"]["updated_at"] not in (None, saved_draft["updated_at"])
-    # The turn was kicked off fire-and-forget with the session + text.
-    dispatch_mock.assert_awaited_once()
-    sent = dispatch_mock.await_args.args[0]
-    assert sent["session_id"] == session_id
-    assert sent["text"] == "no stream"
-    assert sent["author_id"] == "remote:user-a"
-    assert sent["message_kind"] == "original"
-    assert "user_id" not in sent
-    assert "memory_cli_admitted" not in sent
-    assert "is_ordinary_text" not in sent
 
 
-def test_lan_workbench_message_has_no_memory_author(isolated_state, tmp_path):
-    from vibe.ui_server import app
-
-    _, session_id = _make_session(tmp_path)
-    dispatch = _accepted_dispatch(session_id)
-    with (
-        patch("vibe.internal_client.dispatch_async", dispatch),
-        patch("vibe.ui_server._web_push_user_key", return_value="local"),
-        patch("vibe.ui_server.is_direct_loopback_memory_request", return_value=False),
-        patch("vibe.ui_server._load_remote_access_config", return_value=None),
-    ):
-        client = app.test_client()
-        response = client.post(
-            f"/api/sessions/{session_id}/messages",
-            json={"text": "LAN input"},
-            headers=csrf_headers(client),
-        )
-
-    assert response.status_code == 201
-    assert response.get_json()["author_id"] is None
-    sent = dispatch.await_args.args[0]
-    assert sent["author_id"] is None
-    assert "memory_cli_admitted" not in sent
 
 
 @pytest.mark.parametrize(
@@ -1777,36 +1701,6 @@ def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_pat
     assert response.get_json()["turn_state"]["in_flight"] is None
 
 
-def test_chat_bootstrap_omits_memory_from_the_generic_config(isolated_state, tmp_path):
-    """Bootstrap is reachable by an authenticated remote user over the tunnel.
-
-    Memory settings -- enablement, both processing endpoint URLs and model
-    names, and API-key-presence flags -- are served only by the
-    direct-loopback-only /api/memory/* routes, so a generic config projection
-    must not carry them. /api/config already excluded them; this endpoint did
-    not, which is the whole reason the exclusion now lives in one projection.
-    """
-
-    from vibe import internal_client
-    from vibe.ui_server import app
-
-    _, session_id = _make_session(tmp_path)
-
-    async def timeout(session_id_inner):
-        raise internal_client.InternalServerTimeout("slow internal turn-state")
-
-    with (
-        patch("vibe.internal_client.turn_state", timeout),
-        patch("vibe.api.get_vibe_agents", return_value={"agents": [], "default_agent_name": None}),
-    ):
-        client = app.test_client()
-        response = client.get(f"/api/sessions/{session_id}/bootstrap")
-
-    assert response.status_code == 200
-    config_payload = response.get_json()["config"]
-    # Still a real config projection, just without the Memory block.
-    assert "setup_state" in config_payload
-    assert "memory" not in config_payload
 
 
 def test_cancel_route_proxies_to_internal_socket(isolated_state, tmp_path):

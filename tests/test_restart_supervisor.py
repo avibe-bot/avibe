@@ -171,48 +171,6 @@ def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tm
     assert "--prepare-show-runtime" in calls["command"]
 
 
-def test_schedule_restart_passes_memory_ui_secret_only_through_stdin(monkeypatch, tmp_path):
-    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
-
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    paths.ensure_data_dirs()
-    calls = {}
-    secret = "test-memory-ui-secret"
-
-    monkeypatch.setattr(
-        restart_supervisor,
-        "get_restart_invocation_command",
-        lambda vibe_path=None: ["/bin/vibe", "restart"],
-    )
-    monkeypatch.setattr(
-        restart_supervisor,
-        "get_restart_environment",
-        lambda vibe_path=None: {"PATH": "/bin"},
-    )
-    monkeypatch.setattr(restart_supervisor, "get_safe_cwd", lambda: str(tmp_path))
-    monkeypatch.setattr(restart_supervisor, "_prune_restart_logs", lambda: None)
-
-    def fake_popen(command, **kwargs):
-        calls["kwargs"] = kwargs
-        return SimpleNamespace(pid=45678, stdin=io.BytesIO())
-
-    monkeypatch.setattr(restart_supervisor.subprocess, "Popen", fake_popen)
-
-    restart_supervisor.schedule_restart(
-        delay_seconds=0,
-        vibe_path="/bin/vibe",
-        trigger="web-ui",
-        scope="service",
-        memory_ui_secret=secret,
-    )
-
-    assert calls["kwargs"]["stdin"] is restart_supervisor.subprocess.PIPE
-    assert calls["kwargs"]["env"] == {
-        "PATH": "/bin",
-        MEMORY_UI_SECRET_STDIN_ENV: "1",
-    }
-    assert secret not in calls["kwargs"]["env"].values()
-
 
 def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch, tmp_path):
     """The detached restart command round-trips through the real CLI parser."""
@@ -258,50 +216,6 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
         "trigger": "upgrade",
         "scope": "service",
         "prepare_show_runtime": True,
-    }
-
-
-def test_entry_point_accepts_and_ignores_retired_rollback_argv(monkeypatch):
-    from vibe import cli
-
-    ran = {}
-    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
-    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "vibe",
-            "__restart-supervisor",
-            "--job-id",
-            "legacy-upgrade",
-            "--trigger",
-            "upgrade",
-            "--rollback-to",
-            "3.0.14",
-            "--rollback-package",
-            "avibe-os",
-            "--rollback-memory-package",
-            "--rollback-memory-version",
-            "3.0.14",
-            "--rollback-python",
-            "/opt/avibe/bin/python",
-            "--rollback-main",
-            "/opt/avibe/vibe/service_main.py",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main()
-
-    assert exit_info.value.code == 0
-    assert ran == {
-        "job_id": "legacy-upgrade",
-        "delay_seconds": 0.0,
-        "vibe_path": None,
-        "trigger": "upgrade",
-        "scope": "all",
-        "prepare_show_runtime": False,
     }
 
 
@@ -758,7 +672,6 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
     assert calls[2][:3] == ("start_service", False, 0)
     assert calls[3] == ("bind_host", config)
     assert calls[4][:4] == ("start_ui", "0.0.0.0", 5123, False)
-    assert calls[2][3]["memory_ui_secret"] == calls[4][4]["memory_ui_secret"]
     assert "launcher" not in calls[2][3]
     assert "launcher" not in calls[4][4]
 

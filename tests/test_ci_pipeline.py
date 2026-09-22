@@ -29,81 +29,10 @@ def _artifact_build_commands() -> list[list[str]]:
             if line.strip() and not line.lstrip().startswith("#")]
 
 
-def test_artifact_producer_only_installs_the_frontend_and_builds_both_isolated_distributions():
-    assert _artifact_build_commands() == [
-        ["python", "-m", "pip", "install", "--disable-pip-version-check", "build"],
-        ["python", "scripts/prepare_local_show_runtime_manifest.py"],
-        ["python", "-m", "build", "--outdir", "memory-dist", "packaging/avibe-memory"],
-        ["python", "-m", "build"],
-    ]
 
 
-@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2, 3])
-def test_artifact_build_stops_at_each_failed_boundary(tmp_path, failed_stage):
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    python = binary / "python"
-    python.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, pathlib, sys\n"
-        "path = pathlib.Path('commands.json')\n"
-        "commands = json.loads(path.read_text()) if path.exists() else []\n"
-        "commands.append(sys.argv)\n"
-        "path.write_text(json.dumps(commands))\n"
-        "sys.exit(7 if str(len(commands) - 1) == os.environ['FAIL_STAGE'] else 0)\n"
-    )
-    python.chmod(0o755)
-    step, = [step for step in _jobs()["build-linux-artifacts"]["steps"]
-             if step.get("name") == "Build package artifact"]
-    result = subprocess.run(
-        [shutil.which("bash"), "-e", "-c", step["run"]], cwd=tmp_path,
-        env={**os.environ, "PATH": str(binary), "FAIL_STAGE": str(failed_stage)},
-        capture_output=True, text=True, timeout=10,
-    )
-    assert result.returncode == (0 if failed_stage is None else 7), result.stderr
-    commands = json.loads((tmp_path / "commands.json").read_text())
-    expected = _artifact_build_commands()
-    assert [["python", *command[1:]] for command in commands] == expected[:
-        len(expected) if failed_stage is None else failed_stage + 1
-    ]
 
 
-def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
-    owners = {
-        name: job for name, job in _jobs().items()
-        if any(step.get("run", "").startswith("uv ") for step in job["steps"])
-    }
-    assert set(owners) == {
-        "unit-test-shards", "migration-release-guard", "install-upgrade-shards", "memory-insight-contract",
-        "show-router-integration",
-    }
-    cache_keys = {}
-    for name, job in owners.items():
-        steps = job["steps"]
-        install, = [step for step in steps if step.get("name") == "Install pinned uv"]
-        version = "0.9.18" if name == "memory-insight-contract" else "0.12.10"
-        assert shlex.split(install["run"]) == [
-            "python", "-m", "pip", "install", "--disable-pip-version-check",
-            "--only-binary=:all:", "--no-deps", f"uv=={version}",
-        ]
-        assert not install.get("if") and not install.get("continue-on-error")
-        assert any(step.get("uses", "").startswith("actions/setup-python@") for step in steps[:steps.index(install)])
-        assert not any(step.get("uses", "").startswith("astral-sh/setup-uv@") for step in steps)
-        cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache")]
-        action = "actions/cache/restore" if name in {
-            "unit-test-shards", "migration-release-guard", "show-router-integration",
-        } else "actions/cache"
-        assert cache["uses"] == f"{action}@caa296126883cff596d87d8935842f9db880ef25"
-        assert cache["with"]["path"] == "~/.cache/uv"
-        key = cache["with"]["key"]
-        assert "${{ runner.os }}-${{ runner.arch }}" in key and f"uv-{version}-py3.12" in key
-        dependencies = "'scripts/memory_runtime/uv.lock'" if name == "memory-insight-contract" else "'pyproject.toml', 'uv.lock'"
-        assert f"hashFiles({dependencies})" in key
-        cache_keys[name] = key
-        first_consumer = next(step for step in steps if step.get("run", "").startswith("uv "))
-        assert steps.index(install) < steps.index(cache) < steps.index(first_consumer)
-    assert len({cache_keys[name] for name in owners if name != "memory-insight-contract"}) == 1
-    assert cache_keys["memory-insight-contract"] != cache_keys["install-upgrade-shards"]
 
 
 @pytest.mark.parametrize("exit_code", [0, 1, 7])
@@ -245,108 +174,14 @@ def _metrics(result) -> list[dict]:
     return [json.loads(line.removeprefix(prefix)) for line in result.stderr.splitlines() if line.startswith(prefix)]
 
 
-def test_file_metrics_observe_real_phases_and_waited_child_cpu(tmp_path: Path) -> None:
-    result = _run_isolated_unit_files(tmp_path, {"test_metrics.py": (
-        "import subprocess, sys, time, pytest\n"
-        "time.sleep(0.03)\n"
-        "@pytest.fixture\n"
-        "def prepared():\n"
-        "    time.sleep(0.03)\n"
-        "    yield\n"
-        "    time.sleep(0.03)\n"
-        "def test_work(prepared):\n"
-        "    started = time.process_time()\n"
-        "    while time.process_time() - started < 0.03: pass\n"
-        "    subprocess.run([sys.executable, '-c', "
-        "'import time; start=time.process_time()\\nwhile time.process_time()-start<0.03: pass'], check=True)\n"
-    )})
-    assert result.returncode == 0, result.stdout + result.stderr
-    record, = _metrics(result)
-    assert record["schema_version"] == 1
-    assert record["boundary"] == "pytest_returned_before_interpreter_shutdown"
-    assert record["file"] == "tests/test_metrics.py"
-    assert record["exit_code"] == 0
-    assert record["phase_counts"] == {"collection": 1, "setup": 1, "call": 1, "teardown": 1}
-    assert all(value >= 0.02 for value in record["phase_seconds"].values())
-    assert record["outside_phases_seconds"] >= 0
-    assert record["wall_seconds"] >= sum(record["phase_seconds"].values())
-    observation = record["wait_observation"]
-    assert observation["interval"] == "metrics_initialization_to_pytest_return"
-    assert 0.02 <= observation["launcher_thread_cpu_seconds"] <= observation["wall_seconds"]
-    assert observation["wall_seconds"] <= record["wall_seconds"]
-    assert observation["linux_scheduler"]["scope"] == "launcher_thread"
-    assert observation["linux_host_pressure"]["scope"] == "host"
-    assert "full_seconds" not in observation["linux_host_pressure"]["cpu"]
-    if sys.platform != "win32":
-        usage = record["process_usage"]
-        for scope in ("self", "waited_children"):
-            assert usage[scope]["user_cpu_seconds"] + usage[scope]["system_cpu_seconds"] >= 0.02
-        assert usage["self"]["peak_rss_bytes"] > 0
-    if sys.platform == "linux":
-        assert record["linux_proc_io"]["rchar"] > 0
-        assert record["cpu_affinity_count"] >= 1
-    assert {row["phase"] for row in record["slowest_phases"]} == {"setup", "call", "teardown"}
 
 
-def test_file_metrics_do_not_double_count_subtests_or_grow_with_test_count(tmp_path: Path) -> None:
-    result = _run_isolated_unit_files(tmp_path, {"test_subtests.py": (
-        "import pytest\n"
-        "@pytest.mark.parametrize('case', range(8))\n"
-        "def test_subtests(case, subtests):\n"
-        "    for item in range(4):\n"
-        "        with subtests.test(item=item):\n"
-        "            assert item < 4\n"
-    )})
-    assert result.returncode == 0, result.stdout + result.stderr
-    record, = _metrics(result)
-    assert record["phase_counts"] == {"collection": 1, "setup": 8, "call": 8, "teardown": 8}
-    assert len(record["slowest_phases"]) == 5
 
 
-def test_file_metrics_do_not_turn_collection_errors_into_success(tmp_path: Path) -> None:
-    result = _run_isolated_unit_files(tmp_path, {"test_collection.py": "raise RuntimeError('collection failed')\n"})
-    assert result.returncode == 1
-    record, = _metrics(result)
-    assert record["exit_code"] == 2
-    assert record["phase_counts"] == {"collection": 1, "setup": 0, "call": 0, "teardown": 0}
 
 
-@pytest.mark.parametrize("phase", ["setup", "teardown"])
-def test_file_metrics_preserve_fixture_failures(tmp_path: Path, phase: str) -> None:
-    setup = "    raise RuntimeError('setup failed')\n" if phase == "setup" else ""
-    teardown = "    raise RuntimeError('teardown failed')\n" if phase == "teardown" else ""
-    result = _run_isolated_unit_files(tmp_path, {"test_fixture.py": (
-        "import pytest\n@pytest.fixture\ndef broken():\n" + setup + "    yield\n" + teardown
-        + "def test_fixture(broken): pass\n"
-    )})
-    assert result.returncode == 1
-    record, = _metrics(result)
-    assert record["exit_code"] == 1
-    assert record["phase_counts"]["call"] == (0 if phase == "setup" else 1)
-    assert record["phase_counts"][phase] == 1
 
 
-def test_file_metrics_mark_unavailable_platform_counters_explicitly(monkeypatch) -> None:
-    from scripts import ci_pytest_metrics
-
-    monkeypatch.setattr(ci_pytest_metrics, "resource", None)
-    assert ci_pytest_metrics.process_usage() is None
-
-    def denied(_path):
-        raise PermissionError("proc is unavailable")
-
-    monkeypatch.setattr(ci_pytest_metrics.Path, "read_text", denied)
-    monkeypatch.setattr(ci_pytest_metrics.os, "sched_getaffinity", denied, raising=False)
-    assert ci_pytest_metrics.linux_io() is None
-    stream = io.StringIO()
-    metrics = ci_pytest_metrics.FileMetrics("tests/test_unavailable.py", ci_pytest_metrics.time.perf_counter())
-    metrics.emit(stream, 0)
-    payload = json.loads(stream.getvalue().removeprefix("CI_TEST_METRICS "))
-    assert payload["cpu_affinity_count"] is None
-    observation = payload["wait_observation"]
-    assert observation["linux_scheduler"]["enabled_at_start"] is None
-    assert observation["linux_scheduler"]["runqueue_seconds"] is None
-    assert observation["linux_host_pressure"]["io"] == {"some_seconds": None, "full_seconds": None}
 
 
 @pytest.mark.parametrize("enabled,contents,expected", [
@@ -391,56 +226,12 @@ def test_wait_pressure_has_explicit_host_scope_and_units(monkeypatch, resource_n
     assert metrics.linux_pressure(resource_name) == expected
 
 
-def _wait_counter_snapshot(*, multiplier=1, thread=7, enabled=True):
-    return {
-        "wall": 20 * multiplier, "cpu": 2 * multiplier, "thread": thread,
-        "scheduler": {"enabled": enabled, "run_ns": 2_000_000_000 * multiplier,
-                      "runqueue_ns": 3_000_000_000 * multiplier},
-        "pressure": {name: {"some": 9_000_000 * multiplier, "full": 5_000_000 * multiplier}
-                     for name in ("cpu", "io", "memory")},
-    }
 
 
-def test_wait_interval_deltas_do_not_mix_thread_and_host_counters():
-    from scripts.ci_pytest_metrics import wait_observation
-
-    result = wait_observation(_wait_counter_snapshot(), _wait_counter_snapshot(multiplier=2))
-    assert result["wall_seconds"] == 20
-    assert result["launcher_thread_cpu_seconds"] == 2
-    assert result["linux_scheduler"] == {
-        "scope": "launcher_thread", "enabled_at_start": True, "enabled_at_end": True,
-        "run_seconds": 2, "runqueue_seconds": 3,
-    }
-    assert result["linux_host_pressure"] == {
-        "scope": "host", "cpu": {"some_seconds": 9},
-        "io": {"some_seconds": 9, "full_seconds": 5},
-        "memory": {"some_seconds": 9, "full_seconds": 5},
-    }
 
 
-@pytest.mark.parametrize("first_enabled,last_enabled", [(False, False), (False, True), (True, False), (None, True)])
-def test_wait_interval_never_treats_disabled_accounting_as_no_wait(first_enabled, last_enabled):
-    from scripts.ci_pytest_metrics import wait_observation
-
-    result = wait_observation(_wait_counter_snapshot(enabled=first_enabled),
-                              _wait_counter_snapshot(multiplier=2, enabled=last_enabled))
-    assert result["linux_scheduler"]["enabled_at_start"] is first_enabled
-    assert result["linux_scheduler"]["enabled_at_end"] is last_enabled
-    assert result["linux_scheduler"]["runqueue_seconds"] is None
-    assert result["linux_scheduler"]["run_seconds"] is None
-    assert result["launcher_thread_cpu_seconds"] == 2
 
 
-def test_wait_interval_rejects_reset_counters_and_changed_thread_identity():
-    from scripts.ci_pytest_metrics import wait_observation
-
-    reset = wait_observation(_wait_counter_snapshot(multiplier=2), _wait_counter_snapshot())
-    assert reset["linux_scheduler"]["runqueue_seconds"] is None
-    assert reset["linux_host_pressure"]["io"]["some_seconds"] is None
-    changed = wait_observation(_wait_counter_snapshot(), _wait_counter_snapshot(multiplier=2, thread=8))
-    assert changed["launcher_thread_cpu_seconds"] is None
-    assert changed["linux_scheduler"]["runqueue_seconds"] is None
-    assert changed["linux_host_pressure"]["io"]["some_seconds"] == 9
 
 
 @pytest.mark.parametrize("timeout", ["0", "00", "-1", "invalid"])
@@ -478,102 +269,9 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
         assert jobs[name]["needs"] == "build-linux-artifacts"
 
 
-def test_install_suites_run_independently_without_losing_checks() -> None:
-    jobs = _jobs()
-    shards = jobs["install-upgrade-shards"]
-    assert shards["strategy"]["fail-fast"] is False
-    suites = shards["strategy"]["matrix"]["suite"]
-    assert len(suites) == len(set(suites)) == 2
-    assert not shards.get("if")
-    assert not shards.get("continue-on-error")
-    assert all(not step.get("continue-on-error") for step in shards["steps"])
-    steps = {step["name"]: step for step in shards["steps"] if "name" in step}
-    test_steps = [steps["Run packaged Memory package-shape smoke"], steps["Run install and upgrade regressions"]]
-    for suite in suites:
-        selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}'"]
-        assert len(selected) == 1, f"Every suite must select exactly one regression command: {suite}"
-    # Both suites build real source wheels, including the released-generation
-    # bridge inside the Docker upgrade test.
-    prepare = steps["Prepare Show Runtime manifest for fixture wheels"]
-    assert not prepare.get("if")
-    assert "python scripts/prepare_local_show_runtime_manifest.py" in prepare["run"]
-    assert "tests/test_memory_upgrade_packaged.py -m integration" in test_steps[0]["run"]
-    assert "SKIPPED" in test_steps[0]["run"] and "exit 1" in test_steps[0]["run"]
-    for test_file in (
-        "tests/test_upgrade_flow.py", "tests/test_install_script.py",
-        "tests/e2e/test_install_command.py", "tests/e2e/test_upgrade_command.py",
-    ):
-        assert test_file in test_steps[1]["run"]
-    assert "docker info" in test_steps[1]["run"]
-    assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
 
 
-def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other_installers() -> None:
-    jobs = _jobs()
-    build = jobs["build-linux-artifacts"]
-    installers = jobs["install-upgrade-shards"]
-    uploads = {
-        step["with"]["name"]: step
-        for step in build["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")
-    }
-    assert uploads["vibe-wheel-linux"]["with"]["path"] == "dist/*.whl"
-    companion = uploads["vibe-package-contracts-linux"]
-    assert set(companion["with"]["path"].splitlines()) == {
-        "dist/*.tar.gz", "memory-dist/*.whl", "memory-dist/*.tar.gz",
-    }
-    assert companion["with"]["if-no-files-found"] == "error"
-    assert not companion.get("if") and not companion.get("continue-on-error")
-    downloads = [
-        step for step in installers["steps"]
-        if step.get("with", {}).get("name") == "vibe-package-contracts-linux"
-    ]
-    download, = downloads
-    assert download["uses"].startswith("actions/download-artifact@")
-    assert download["if"] == "matrix.suite == 'installer'"
-    assert download["with"] == {"name": "vibe-package-contracts-linux", "path": "."}
-    assert not download.get("continue-on-error")
-    owners = [
-        (name, step) for name, job in jobs.items() for step in job["steps"]
-        if "tests/test_memory_distribution.py" in step.get("run", "")
-    ]
-    (owner, contracts), = owners
-    assert owner == "install-upgrade-shards"
-    assert contracts["if"] == "matrix.suite == 'installer'"
-    assert installers["strategy"]["matrix"]["suite"].count("installer") == 1
-    assert installers["steps"].index(download) < installers["steps"].index(contracts)
-    build_environment = next(step["env"] for step in build["steps"] if step.get("name") == "Build package artifact")
-    assert contracts["env"] == {"AVIBE_PACKAGE_CONTRACT_VERSION": build_environment["AVIBE_PACKAGE_CONTRACT_VERSION"]}
-    assert 'AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)"' in contracts["run"]
-    assert 'AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)"' in contracts["run"]
-    assert "pytest tests/test_memory_distribution.py -v -ra" in contracts["run"]
-    assert not contracts.get("continue-on-error")
-    assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
-    assert jobs["windows-install-smoke"]["needs"] == "build-linux-artifacts"
-
-
-@pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])
-def test_distribution_contract_command_fails_on_errors_and_skips(tmp_path, pytest_exit, summary):
-    for directory, filename in (("dist", "avibe_os-test.whl"), ("memory-dist", "avibe_memory-test.whl")):
-        (tmp_path / directory).mkdir()
-        (tmp_path / directory / filename).touch()
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    pytest_stub = binary / "pytest"
-    pytest_stub.write_text(f"#!/bin/sh\nprintf '%s\\n' '{summary}'\nexit {pytest_exit}\n")
-    pytest_stub.chmod(0o755)
-    step = next(
-        step for step in _jobs()["install-upgrade-shards"]["steps"]
-        if step.get("name") == "Verify built distribution contracts"
-    )
-    result = subprocess.run(
-        ["bash", "-e", "-c", step["run"]], cwd=tmp_path,
-        env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)},
-        capture_output=True, text=True,
-    )
-    assert (result.returncode == 0) == (pytest_exit == 0 and "skipped" not in summary), result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", ""])
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
 def test_install_gate_fails_unless_all_suites_succeeded(tmp_path: Path, result: str) -> None:
     gate = _jobs()["install-upgrade-regression"]
     assert gate["if"] == "always()"

@@ -12862,11 +12862,7 @@ def _start_service_after_repair(
         except Exception:
             # The service repair itself succeeded; report it rather than failing
             # the whole repair because the UI could not be realigned.
-            logger.exception(
-                "Repaired the service but could not restart the Web UI pid=%s to share the Memory UI proof secret; "
-                "Memory profile, search and clear stay unavailable until both processes restart together",
-                live_ui_pid,
-            )
+            logger.exception("Repaired the service but could not restart the Web UI pid=%s", live_ui_pid)
     runtime.write_status("running", f"pid={new_pid}", new_pid, ui_pid)
     return _doctor_repair_result(
         target,
@@ -13398,35 +13394,18 @@ def cmd_start():
         wait_for_ready=False,
     )
     service_reused = live_service_pid is not None and service_pid == live_service_pid
-    if service_reused:
-        # The reused service still verifies proofs with the secret it was started
-        # with. Signing with a different one would only produce requests it
-        # rejects, so leave the surviving pair's own secret authoritative.
-        ui_memory_secret = None
-    else:
-        if live_ui_pid is not None:
+    if not service_reused and live_ui_pid is not None:
             # A surviving UI signs with the previous secret, which the service
             # started just now cannot verify. Restart it so the pair shares one
             # secret; remote access keeps running across the UI restart.
-            runtime.stop_ui(stop_remote_access=False)
-            live_ui_pid = None
+        runtime.stop_ui(stop_remote_access=False)
+        live_ui_pid = None
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
 
     )
-    if service_reused and ui_pid != live_ui_pid:
-        logger.warning(
-            "Started UI pid=%s against reused service pid=%s without a shared Memory UI proof secret; "
-            "Memory profile, search and clear stay unavailable until both processes restart together",
-            ui_pid,
-            service_pid,
-        )
-        if bool(getattr(getattr(config, "memory", None), "enabled", False)):
-            language = normalize_language(getattr(config, "language", None))
-            print(i18n_t("memory.cli.partialRestartWarning", language))
-            print("")
     # The WAIT below is asked unconditionally. The predicate that used to guard
     # it is the lock, which is taken before the database is migrated -- so it is
     # already true of a process that has not finished starting and may never, and
@@ -17863,12 +17842,6 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
     ("debug", "prompt", "export"): None,
-    # Memory owns its own verified identity and proof lifecycle.
-    ("memory", "status"): None,
-    ("memory", "profile"): None,
-    ("memory", "list"): None,
-    ("memory", "search"): None,
-    ("memory", "remember"): None,
     # Runtime, configuration and retention are operational management.
     (): "member",
     ("start",): "member",

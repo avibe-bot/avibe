@@ -393,7 +393,7 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
 def test_public_definition_routes_hide_owner_without_changing_runtime_metadata():
     from tests.ui_server_test_helpers import csrf_headers
 
-    private = {"delegated_memory_owner": {"platform": "slack", "user_id": "fixture", "is_dm": True},
+    private = {"resource_user_context": {"platform": "slack", "user_id": "fixture", "is_dm": True},
                "resource_user_context": {"sub": "fixture"}}
     store = SQLiteBackgroundTaskStore()
     try:
@@ -427,9 +427,9 @@ def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
     from core.watches import ManagedWatchService, ManagedWatchStore
 
     owner = {"platform": "slack", "user_id": "fixture", "is_dm": True}
-    metadata = {"delegated_memory_owner": owner, "resource_user_context": {"sub": "fixture"},
+    metadata = {"resource_user_context": owner, "resource_user_context": {"sub": "fixture"},
                 "scheduled_provenance": {"platform_specific": {"message_metadata": {
-                    "delegated_memory_owner": owner, "visible": "retained",
+                    "resource_user_context": owner, "visible": "retained",
                 }}}}
     store = SQLiteBackgroundTaskStore()
     requests = TaskExecutionStore()
@@ -445,7 +445,7 @@ def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
         requests.enqueue(hook)
         client = app.test_client()
         for run in (scheduled, hook):
-            assert requests.get_run(run.id)["metadata"]["delegated_memory_owner"] == owner
+            assert requests.get_run(run.id)["metadata"]["resource_user_context"] == owner
             shown = client.get(f"/api/harness/runs/{run.id}").get_json()["run"]
             listed = next(row for row in client.get("/api/harness/runs?page=1&limit=20").get_json()["runs"]
                           if row["id"] == run.id)
@@ -453,11 +453,11 @@ def test_definition_to_run_public_projection_keeps_raw_execution_owner(capsys):
             cli_run = json.loads(capsys.readouterr().out)["run"]
             for output in (shown, listed, cli_run):
                 public = output["metadata"]
-                assert "delegated_memory_owner" not in public
+                assert "resource_user_context" not in public
                 assert "resource_user_context" not in public
                 assert public["scheduled_provenance"]["platform_specific"]["message_metadata"] == {"visible": "retained"}
             reloaded = TaskExecutionStore().get_run(run.id)
-            assert reloaded["metadata"]["delegated_memory_owner"] == owner
+            assert reloaded["metadata"]["resource_user_context"] == owner
             assert reloaded["metadata"]["resource_user_context"] == metadata["resource_user_context"]
     finally:
         requests.sqlite_backend.close()

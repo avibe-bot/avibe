@@ -39,7 +39,7 @@ _CODEX_SKILL_REUSE_GUIDANCE = (
 )
 
 
-def _inputs(backend="codex", memory=True, history="managed", skill_mode="pages"):
+def _inputs(backend="codex", history="managed", skill_mode="pages"):
     options = {
         "context": {
             "user_id": "reviewer",
@@ -50,7 +50,6 @@ def _inputs(backend="codex", memory=True, history="managed", skill_mode="pages")
                 "agent_session_target": {"native_session_fork": {"source_session_id": "sessource"}},
             },
         },
-        "memory_enabled": memory,
         "include_codex_generated_images": backend == "codex",
         "skills_cwd": "/fixture/project",
         "enabled_agents": [
@@ -76,12 +75,12 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
     monkeypatch.setattr(managed_skills, "resolve_skills", lambda *_args, **_kwargs: skills)
 
 
-@pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
-    ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "single", "pages"),
+@pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
+    ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "single", "pages"),
 ))
-def test_export_reconstructs_production_text_with_source_for_every_block(monkeypatch, backend, memory, history, skill_mode):
+def test_export_reconstructs_production_text_with_source_for_every_block(monkeypatch, backend, history, skill_mode):
     _environment(monkeypatch, history, skill_mode)
-    request = _inputs(backend, memory, history, skill_mode)
+    request = _inputs(backend, history, skill_mode)
     result = render_prompt_context(request)
     options = dict(request["options"])
     options["backend"] = backend
@@ -129,8 +128,6 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
         assert "skills-manual-prompt" not in ids
     assert "Before acting on a task covered" not in production
     assert "reuse an earlier successful load that remains in context" not in production
-    assert ("## Personal Memory" in production) == memory
-    assert ("preferences.md" in production) != memory
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
@@ -201,13 +198,13 @@ def test_skill_reuse_clarification_is_codex_only(monkeypatch, backend, skill_mod
         assert guidance["text"].count(_CODEX_SKILL_REUSE_GUIDANCE) == 1
 
 
-@pytest.mark.parametrize("backend,memory,history,skill_mode", itertools.product(
-    ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"),
+@pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
+    ("claude", "codex", "opencode"), ("off", "managed", "self-managed"),
     ("empty", "manual", "single", "pages"),
 ))
-def test_separated_capabilities_keep_independent_markdown_sections(monkeypatch, backend, memory, history, skill_mode):
+def test_separated_capabilities_keep_independent_markdown_sections(monkeypatch, backend, history, skill_mode):
     _environment(monkeypatch, history, skill_mode)
-    rendered = render_prompt_context(_inputs(backend, memory, history, skill_mode))
+    rendered = render_prompt_context(_inputs(backend, history, skill_mode))
     parser = MarkdownIt()
     tokens = parser.parse(rendered["text"])
     section = None
@@ -265,11 +262,11 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
 
 def test_exported_sources_cover_all_rendered_branches(monkeypatch):
     visited = set()
-    for backend, memory, history, skill_mode in itertools.product(
-        ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
+    for backend, history, skill_mode in itertools.product(
+        ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
-        result = render_prompt_context(_inputs(backend, memory, history, skill_mode))
+        result = render_prompt_context(_inputs(backend, history, skill_mode))
         visited.update(block["id"] for block in result["blocks"])
     assert visited == {module.id for module in PROMPT_MODULES}
 
@@ -398,7 +395,6 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     ({"context": {"user_id": "u", "channel_id": "c", "platform_specific": "text"}}, "options.context.platform_specific", "invalidField"),
     ({"context": {"user_id": "u", "channel_id": "c", "unknown": 1}}, "options.context.unknown", "unknownField"),
     ({"context": {"user_id": "u"}}, "options.context.channel_id", "invalidField"),
-    ({"memory_enabled": "false"}, "options.memory_enabled", "invalidField"),
     ({"include_show_pages": False}, "options.include_show_pages", "unknownField"),
     ({"agent_instructions": "second owner"}, "options.agent_instructions", "unknownField"),
     ({"enabled_agents": 123}, "options.enabled_agents", "invalidField"),
@@ -501,11 +497,11 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
 def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
     changed = {"skills-prompt", "skills-manual-prompt", "codex-skill-reuse"}
-    for backend, memory, history, skill_mode in itertools.product(
-        ("claude", "codex", "opencode"), (False, True), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
+    for backend, history, skill_mode in itertools.product(
+        ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
-        blocks = render_prompt_context(_inputs(backend, memory, history, skill_mode))["blocks"]
+        blocks = render_prompt_context(_inputs(backend, history, skill_mode))["blocks"]
         text = "".join(block["text"] for block in blocks if block["id"] not in changed)
         assert text.count(_EVIDENCE_LED_PRINCIPLE) == 1
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
@@ -514,4 +510,4 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # omitting only the approved Skill-loading guidance blocks (including the
     # Codex-only reuse sentence) and restoring the previous verification principle.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
-    assert digest == "fd82657d51e3193f54f939a3f159e7c7034a40d0b44388399e34a4aa17b14ea6"
+    assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"

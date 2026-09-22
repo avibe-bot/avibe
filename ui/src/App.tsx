@@ -18,7 +18,6 @@ import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
 import { VaultsPage } from './components/workbench/VaultsPage';
-import { SettingsMemoryPage } from './components/settings/SettingsMemoryPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { ChannelList } from './components/steps/ChannelList';
@@ -715,7 +714,6 @@ const settingsRoute = () => (
       }
     />
     <Route path="dependencies" element={<SettingsDependenciesPage />} />
-    <Route path="memory" element={<SettingsMemoryPage />} />
     <Route path="replies" element={<SettingsMessagingPage />} />
     <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
     <Route path="diagnostics/logs" element={<SettingsLogsPage />} />

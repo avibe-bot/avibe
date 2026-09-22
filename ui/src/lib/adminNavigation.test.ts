@@ -4,7 +4,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
   isLocalOnlyMessagingField,
-  isMemorySettingsPath,
   isOwnerOnlyPath,
   SETTINGS_LANDING_PATH,
 } from './adminNavigation';
@@ -22,7 +21,6 @@ describe('isOwnerOnlyPath', () => {
       '/settings/backends/claude',
       '/settings/models',
       '/settings/dependencies',
-      '/settings/memory',
       '/settings/diagnostics/logs',
     ];
     expect(ownerOnly.every(isOwnerOnlyPath)).toBe(true);
@@ -57,10 +55,4 @@ describe('isLocalOnlyMessagingField', () => {
   });
 });
 
-describe('isMemorySettingsPath', () => {
-  it('matches the canonical Memory route at a path boundary', () => {
-    expect(isMemorySettingsPath('/settings/memory')).toBe(true);
-    expect(isMemorySettingsPath('/settings/memory/details')).toBe(true);
-    expect(isMemorySettingsPath('/settings/memory-tools')).toBe(false);
-  });
-});
+

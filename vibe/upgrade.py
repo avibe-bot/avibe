@@ -92,9 +92,6 @@ _PRE_ORDER = {
 }
 
 
-class MemoryRequirementUnreadableError(ValueError):
-    """Persisted configuration cannot safely decide Memory package shape."""
-
 
 class RestartState(str, Enum):
     """Closed restart-state vocabulary and its retention policy."""
@@ -1237,16 +1234,7 @@ def build_upgrade_plan(
     package_spec: str | None = None,
     core_spec: str | None = None,
 ) -> UpgradePlan:
-    """How to install avibe: the newest release, or `version` exactly.
-
-    Exact-version plans support the explicit Memory package install action. They
-    replace the ordinary upgrade request and force the installer so the matching
-    optional distribution is applied even when core is already satisfied.
-
-    Memory always comes from the target's GitHub Release, not an index.
-    Exact repairs may supply the recorded core/companion pair. Forward plans
-    derive the companion from the selected target version and core artifact.
-    """
+    """How to install avibe: the newest release, or `version` exactly."""
 
     executable = python_executable or sys.executable
     # A caller targeting another interpreter (for example a test-owned venv)

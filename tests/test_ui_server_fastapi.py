@@ -157,7 +157,7 @@ def test_session_archive_delegates_terminal_mutation_to_controller(
     async def _noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _archive_via_controller)
+    monkeypatch.setattr(internal_client, "archive_session", _archive_via_controller)
     monkeypatch.setattr(sessions_service, "archive_session", _archive)
     monkeypatch.setattr(ui_server, "_archive_cancel_turn", _noop)
 
@@ -199,7 +199,7 @@ def test_session_archive_fails_closed_when_controller_is_unavailable(
     async def _unavailable(_session_id: str):
         raise internal_client.InternalServerUnavailable("controller unavailable")
 
-    monkeypatch.setattr(internal_client, "memory_archive_session", _unavailable)
+    monkeypatch.setattr(internal_client, "archive_session", _unavailable)
     client = app.test_client()
     response = client.delete(
         f"/api/sessions/{session_id}",
@@ -245,7 +245,7 @@ def test_session_archive_preflight_skips_controller_lifecycle_for_ineligible_row
             archive_session(conn, session_id)
 
     archive_session = AsyncMock()
-    monkeypatch.setattr(internal_client, "memory_archive_session", archive_session)
+    monkeypatch.setattr(internal_client, "archive_session", archive_session)
     client = app.test_client()
 
     response = client.delete(

@@ -408,8 +408,8 @@ def is_original_human_workbench_text(payload: object, quick_reply_for: object) -
     """Classify a Workbench submit the same way the IM adapters classify events.
 
     Quick replies and forwarded messages are not ordinary human turns. Uploads
-    remain eligible here so Memory admission can decide from the attachments it
-    can actually convert.
+    remain eligible here so downstream handlers can decide from the attachments
+    they can actually convert.
     """
 
     return workbench_message_kind(payload, quick_reply_for) == "original"

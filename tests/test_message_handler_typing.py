@@ -12,12 +12,6 @@ from unittest.mock import AsyncMock, Mock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-async def _wait_capture_tasks(handler) -> None:
-    adapter = handler.controller.memory_adapter
-    while adapter.capture_tasks:
-        tasks = tuple(adapter.capture_tasks)
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.sleep(0)
 
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
@@ -183,18 +177,11 @@ class _RecordingMemoryAdapter:
     def __init__(self) -> None:
         self.events = []
 
-    @property
-    def capture_tasks(self) -> set:
-        return set()
 
     def offer(self, event) -> None:
         self.events.append(event)
 
-    def quiesce_memory_capture_tasks(self) -> None:
-        return None
 
-    async def cancel_memory_capture_tasks(self) -> None:
-        return None
 
 
 class _StubController:
@@ -220,7 +207,6 @@ class _StubController:
         self.command_handler = type("Cmd", (), {"handle_start": staticmethod(lambda context, args: None)})()
         self.agent_auth_service = type("Auth", (), {})()
         self.processing_indicator = ProcessingIndicatorService(self)
-        self.memory_adapter = _RecordingMemoryAdapter()
 
     def update_thread_message_id(self, context):
         return None
@@ -300,8 +286,6 @@ class _StubController:
         return "en"
 
 
-def _capture_reservation(generation: int | None = 1):
-    return types.SimpleNamespace(config_generation=generation, release=Mock())
 
 
 class _StubSessionHandler:
@@ -328,32 +312,6 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_durable_input_keeps_canonical_text_for_memory_and_user_message(self):
-        """Scenario: MESSAGE-DELIVERY-317."""
-        for platform in ("avibe", "slack"):
-            with self.subTest(platform=platform):
-                controller = _StubController(platform=platform, ack_mode="reaction", typing_result=True)
-                controller.config.include_time_info = True
-                controller.config.include_user_info = True
-                handler = MessageHandler(controller)
-                handler.set_session_handler(_StubSessionHandler())
-                original = "original user text\n[Now: literal example]"
-                context = MessageContext(
-                    user_id="sender", channel_id="session", platform=platform,
-                    message_id="message", is_original_human_text=True,
-                    platform_specific={
-                        "delivery_ids": ["delivery"],
-                        "message_content": {"text": original},
-                        "author_id": "sender", "author_name": "Sender",
-                    },
-                )
-                await handler.handle_user_message(context, "[Recovery context]\n" + original)
-                _, request = controller.agent_service.requests[0]
-                self.assertEqual(request.user_message, original)
-                self.assertEqual(request.message, "[Recovery context]\n" + original)
-                self.assertEqual(request.input_metadata.user_name, "Sender")
-                self.assertEqual([event.text for event in controller.memory_adapter.events], [original])
-                self.assertEqual(context.platform_specific["message_content"]["text"], original)
 
     async def test_im_human_input_enters_delivery_owner_before_backend(self):
         controller = _StubController(

@@ -555,7 +555,7 @@ class CommandHandlers(BaseHandler):
             session_anchor, _ = self._session_anchors_for_new(context)
             # ``/new`` deletes the session rows that scheduled tasks and watches may
             # be pinned to. Wait briefly for in-flight capture, then always reset
-            # (a stalled or failed Memory flush must not fail the command).
+            # (a stalled or failed session reset must not fail the command).
             async def _reset_session() -> tuple[bool, list[dict[str, Any]]]:
                 if platform == "telegram" and hasattr(im_client, "start_new_topic_session"):
                     topic_context = await im_client.start_new_topic_session(context)

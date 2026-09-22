@@ -1364,7 +1364,7 @@ def _is_local_request(config: V2Config | None = None) -> bool:
 def _is_direct_loopback_browser_request() -> bool:
     """Strict same-origin browser admission for local author attribution.
 
-    Memory content and settings never accept proxy forwarding, Docker bridge
+    Protected content and settings never accept proxy forwarding, Docker bridge
     allowances, LAN setup hosts, or remote-access cookies. The browser must be
     directly connected over loopback and present a same-origin header.
     """
@@ -1382,7 +1382,7 @@ def _trusted_browser_author_key() -> str | None:
     admitted only through the configured Avibe Cloud origin with a valid signed
     session cookie; LAN and arbitrary proxy routes remain closed. Reads require
     the same origin evidence as mutations so a remote session cookie cannot be
-    used as a cross-origin Memory oracle.
+    used as a cross-origin data oracle.
     """
 
     if _is_direct_loopback_browser_request():
@@ -6318,7 +6318,7 @@ def _web_push_user_key() -> str:
 
 
 def _workbench_author_id() -> str | None:
-    """Return an author only when the browser passes strict Memory admission."""
+    """Return an author only when the browser passes strict admission."""
 
     author_key = _trusted_browser_author_key()
     prefix = "avibe:"

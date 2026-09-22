@@ -821,5 +821,3 @@ def health_sync(
             return resp.status_code == 200 and (resp.json() or {}).get("ok") is True
     except Exception:
         return False
-
-

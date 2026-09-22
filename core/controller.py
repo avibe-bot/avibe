@@ -223,20 +223,121 @@ class Controller:
         self._runtime_work_shutdown_grace_seconds = (
             _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
         )
+        self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
+        self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
+        self._reconcile_lock: Optional[asyncio.Lock] = None
+        self._removed_im_clients: Dict[str, BaseIMClient] = {}
+
+        # Session tracking (must be initialized before handlers)
+        self.claude_sessions: Dict[str, Any] = {}
+        self.receiver_tasks: Dict[str, asyncio.Task] = {}
+        self.stored_session_mappings: Dict[str, str] = {}
+        self.session_last_activity: Dict[str, float] = {}
+        # Monotonic baseline of when each session's CURRENT turn went active
+        # (idle→active transition). Unlike ``session_last_activity`` — which is
+        # bumped on every streamed event — this is NOT touched mid-turn, so the
+        # Running tab can report an accurate "busy for" duration instead of
+        # seconds-since-last-chunk.
+        self.session_turn_started: Dict[str, float] = {}
+        self.claude_active_sessions: set[str] = set()
+
+        # The live streaming turn-sink registry now lives on the turn owner
+        # (``self.session_turns.active_turn_sinks``); the register/pop/get methods +
+        # the ``active_turn_sinks`` property below delegate to it.
+
+        # Per-session turn gate, published by ``core.internal_server.create_app``
+        # once the internal server is built on the loop. Persisted Session inputs
+        # route through it so their source policy can queue, steer, or replace via
+        # the same durable lifecycle (in_flight + turn.start / turn.end + Stop).
+        # ``None`` until the server is up; callers then fall back to the direct path.
+        self.session_turn_gate: Optional[Any] = None
+
+        # Per-session turn owner (FSM). Created here so the controller owns it from
+        # birth — boot stale-reset (below) and the OpenCode poll restore both run
+        # before the internal server binds. ``core.internal_server.create_app`` later
+        # binds the routing-context builder + exposes the gate endpoints; the gate,
+        # dispatcher, and scheduler all share this one owner's in_flight + flush state.
+        from core.session_turns import SessionTurnManager
+
+        self.runtime_activation = RuntimeActivationRegistry()
+        self.session_turns = SessionTurnManager(self)
+        self.runtime_ownership = RuntimeOwnershipProvider(
+            self.session_turns._sqlite_engine()
+        )
+        self.runtime_work_supervisor = RuntimeWorkSupervisor(
+            on_lease_lost=lambda: self.request_shutdown("service lease lost")
+        )
+        self._runtime_work_tokens = [
+            self.runtime_work_supervisor.register(
+                RuntimeWorkLane.SESSION_DELIVERIES,
+                SessionDeliveryRecoveryHandler(self.session_turns),
+            )
+        ]
+        # The internal server publishes the Session gate before waiting on this
+        # event. Controller startup owns backend restoration, durable owner
+        # recovery, and supervisor activation, then releases HTTP serving and
+        # the scheduler/watch services together.
+        self._delivery_recovery_complete = asyncio.Event()
+
+        self._init_model_hub()
+
+        # Initialize core modules
         self._init_modules()
-        self._migrate_discord_guild_scope_from_config()
 
-        # Migrate legacy per-channel language into global config
-        self._migrate_language_from_settings()
+        # Initialize handlers
+        self._init_handlers()
 
-        # Legacy backend router. It is kept for platform runtime compatibility;
-        # product routing is resolved through VibeAgentStore.
-        self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform)
-        for platform in self.enabled_platforms:
-            if platform not in self.agent_router.platform_routes:
-                self.agent_router.platform_routes[platform] = self.agent_router.platform_routes[self.primary_platform]
-        if "avibe" not in self.agent_router.platform_routes:
-            self.agent_router.platform_routes["avibe"] = self.agent_router.platform_routes[self.primary_platform]
+        # Initialize agents (depends on handlers/session handler)
+        self._init_agents()
+        self.agent_auth_service = AgentAuthService(self)
+        from core.backend_restart import BackendRestartCoordinator
+
+        self.backend_restart_coordinator = BackendRestartCoordinator(
+            self,
+            self.agent_auth_service._apply_backend_runtime_refresh,
+        )
+        if self.model_hub_service is not None:
+            self.model_hub_service.migration_guard = self.backend_restart_coordinator.migration_guard
+            self.model_hub_service.migration_reconcile_auth = self.backend_restart_coordinator.reconcile_migration_auth
+        self.backend_restart_coordinator.restore_migration_blocks()
+
+        self.vibe_agent_store = VibeAgentStore()
+        self.vibe_agent_store.ensure_builtin_default_agents(
+            self._enabled_agent_backends(),
+        )
+
+        # Setup callbacks
+        self._setup_callbacks()
+
+        # Consolidated message dispatcher
+        self.message_dispatcher = ConsolidatedMessageDispatcher(self)
+        self.scheduled_task_service = ScheduledTaskService(self)
+        self._runtime_work_tokens.extend(
+            self.scheduled_task_service.register_controller_runtime_work_lanes()
+        )
+        self.watch_service = ManagedWatchService(self)
+        self.runtime_command_watcher = RuntimeCommandWatcher(self)
+        self.show_git_checkpoint_service = ShowGitCheckpointService()
+
+        # Background task for cleanup
+        self.cleanup_task: Optional[asyncio.Task] = None
+        self.trace_retention_task: Optional[asyncio.Task] = None
+        self._trace_retention_executor: Optional[Any] = None
+        self._trace_retention_cancel_event: Optional[threading.Event] = None
+        self._trace_retention_future: Optional[Any] = None
+
+        # Initialize update checker (use default config if not present)
+        from config.v2_config import UpdateConfig
+
+        update_config = getattr(config, "update", None) or UpdateConfig()
+        self.update_checker = UpdateChecker(self, update_config)
+
+        # Restore session mappings on startup (after handlers are initialized)
+        self.session_handler.restore_session_mappings()
+
+        # Clean only pre-durable status projections. Durable Turn owners remain
+        # running until backend restoration and exact reconciliation complete.
+        self.session_turns.reset_legacy_ownerless_status()
 
 
 
@@ -2308,3 +2409,324 @@ class Controller:
             logger.debug(f"OpenCode server cleanup skipped: {e}")
 
         logger.info("Controller cleanup (sync) complete")
+
+    def _model_hub_snapshot_refresh_completed(self) -> None:
+        """Move a worker completion onto the controller's event loop."""
+
+        if getattr(self, "_shutdown_requested", False) or getattr(
+            self,
+            "_model_hub_snapshot_reconcile_stopping",
+            False,
+        ):
+            return
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        if pending is None:
+            return
+        pending.set()
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(self._schedule_model_hub_snapshot_reconcile)
+
+    def _schedule_model_hub_snapshot_reconcile(self) -> None:
+        if getattr(self, "_shutdown_requested", False) or getattr(
+            self,
+            "_model_hub_snapshot_reconcile_stopping",
+            False,
+        ):
+            return
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        service = getattr(self, "model_hub_service", None)
+        if pending is None or not pending.is_set() or service is None:
+            return
+        task = getattr(self, "_model_hub_snapshot_reconcile_task", None)
+        if task is not None and not task.done():
+            return
+        pending.clear()
+
+        async def reconcile() -> None:
+            try:
+                await service.reconcile_builtin_models()
+            except Exception:
+                logger.warning(
+                    "Model Hub built-in reconciliation failed after snapshot refresh",
+                    exc_info=True,
+                )
+            finally:
+                self._model_hub_snapshot_reconcile_task = None
+                if (
+                    pending.is_set()
+                    and not getattr(self, "_shutdown_requested", False)
+                    and not getattr(
+                        self,
+                        "_model_hub_snapshot_reconcile_stopping",
+                        False,
+                    )
+                ):
+                    self._schedule_model_hub_snapshot_reconcile()
+
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            loop = asyncio.get_running_loop()
+        self._model_hub_snapshot_reconcile_task = loop.create_task(
+            reconcile(),
+            name="model-hub-snapshot-refresh-reconcile",
+        )
+
+    async def _model_hub_snapshot_reconcile_loop(self) -> None:
+        """Re-read cross-process snapshot inputs on the controller cadence."""
+
+        try:
+            while True:
+                interval = max(
+                    0.01,
+                    float(
+                        getattr(
+                            self,
+                            "_model_hub_snapshot_reconcile_interval_seconds",
+                            _MODEL_HUB_SNAPSHOT_RECONCILE_INTERVAL_SECONDS,
+                        )
+                    ),
+                )
+                await asyncio.sleep(interval)
+                if getattr(self, "_shutdown_requested", False) or getattr(
+                    self,
+                    "_model_hub_snapshot_reconcile_stopping",
+                    False,
+                ):
+                    return
+                pending = getattr(
+                    self,
+                    "_model_hub_snapshot_refresh_pending",
+                    None,
+                )
+                if pending is None:
+                    return
+                pending.set()
+                self._schedule_model_hub_snapshot_reconcile()
+        finally:
+            if getattr(
+                self,
+                "_model_hub_snapshot_reconcile_loop_task",
+                None,
+            ) is asyncio.current_task():
+                self._model_hub_snapshot_reconcile_loop_task = None
+
+    def _start_model_hub_snapshot_reconcile_loop(self) -> None:
+        if (
+            getattr(self, "model_hub_service", None) is None
+            or getattr(self, "_shutdown_requested", False)
+            or getattr(self, "_model_hub_snapshot_reconcile_stopping", False)
+        ):
+            return
+        task = getattr(self, "_model_hub_snapshot_reconcile_loop_task", None)
+        if task is not None and not task.done():
+            return
+        self._model_hub_snapshot_reconcile_loop_task = asyncio.create_task(
+            self._model_hub_snapshot_reconcile_loop(),
+            name="model-hub-snapshot-reconcile-loop",
+        )
+
+    async def _stop_model_hub_snapshot_reconciliation(self) -> None:
+        """Quiesce snapshot tasks before the Model Hub service is stopped."""
+
+        self._model_hub_snapshot_reconcile_stopping = True
+        pending = getattr(self, "_model_hub_snapshot_refresh_pending", None)
+        if pending is not None:
+            pending.clear()
+
+        loop_task = getattr(
+            self,
+            "_model_hub_snapshot_reconcile_loop_task",
+            None,
+        )
+        if loop_task is not None and not loop_task.done():
+            loop_task.cancel()
+            await asyncio.gather(loop_task, return_exceptions=True)
+        self._model_hub_snapshot_reconcile_loop_task = None
+
+        reconcile_task = getattr(
+            self,
+            "_model_hub_snapshot_reconcile_task",
+            None,
+        )
+        if reconcile_task is not None and not reconcile_task.done():
+            await asyncio.gather(reconcile_task, return_exceptions=True)
+        self._model_hub_snapshot_reconcile_task = None
+        if pending is not None:
+            pending.clear()
+
+    def _init_model_hub(self) -> None:
+        """Own the CPA dependency and the default-on Model Hub aggregate."""
+
+        from config.v2_config import V2Config, is_model_hub_enabled
+        from vibe.model_hub_runtime import get_model_hub_engine_adapter
+
+        self.model_hub_service = None
+        self.model_hub_turn_gateway = None
+        self.model_hub_runtime = None
+        self.model_hub_engine_adapter = get_model_hub_engine_adapter()
+        self._model_hub_snapshot_refresh_pending = threading.Event()
+        self._model_hub_snapshot_reconcile_task = None
+        self._model_hub_snapshot_reconcile_loop_task = None
+        self._model_hub_snapshot_reconcile_stopping = False
+        if not is_model_hub_enabled():
+            return
+
+        # The controller is the single Model Hub aggregate and engine owner.
+        # The UI process reaches this instance through the internal Unix socket.
+        from core.handlers.model_hub import create_default_service
+        from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+        from modules.agents.model_hub import ModelHubRuntimeRouter
+        from vibe.api import resolve_cli_paths
+        from vibe.backend_model_catalog import set_remote_catalog_refresh_completed
+
+        def default_vibe_agent_model(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend:
+                return None
+            return agent.model
+
+        def default_vibe_agent_name(backend: str) -> Optional[str]:
+            agent = self.vibe_agent_store.get_default_agent()
+            if agent is None or agent.backend != backend or not str(agent.model or "").strip():
+                return None
+            return agent.name
+
+        def named_vibe_agents(backend: str) -> list[tuple[str, Optional[str]]]:
+            return [
+                (agent.name, agent.model)
+                for agent in self.vibe_agent_store.list_agents(include_disabled=False)
+                if agent.backend == backend
+            ]
+
+        cli_presence: dict[str, bool] = {}
+        cli_presence_lock = threading.Lock()
+        cli_presence_generation: dict[str, int] = {}
+        next_cli_presence_generation = 0
+
+        def cli_present(backend: str) -> bool:
+            # Payload assembly runs on the controller loop. Read only the last
+            # complete worker-produced snapshot here.
+            return cli_presence.get(backend, False)
+
+        def refresh_cli_presence(
+            include_npm_global: bool,
+            backends: tuple[str, ...] | None = None,
+        ) -> None:
+            nonlocal cli_presence, next_cli_presence_generation
+            selected_backends = backends or ("claude", "codex", "opencode")
+            with cli_presence_lock:
+                next_cli_presence_generation += 1
+                generation = next_cli_presence_generation
+                for backend in selected_backends:
+                    cli_presence_generation[backend] = generation
+            try:
+                v2_config = V2Config.load()
+            except FileNotFoundError:
+                v2_config = None
+            except Exception:
+                logger.warning("Model Hub CLI config probe failed", exc_info=True)
+                v2_config = None
+            configured_paths: dict[str, str] = {}
+            for backend in selected_backends:
+                backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
+                configured_paths[backend] = str(
+                    getattr(backend_config, "cli_path", None) or backend
+                )
+            try:
+                resolved_paths = resolve_cli_paths(
+                    list(configured_paths.values()),
+                    include_npm_global=include_npm_global,
+                )
+            except Exception:
+                logger.warning("Model Hub CLI presence probe failed", exc_info=True)
+                return
+            refreshed = {
+                backend: resolved_paths.get(configured_path) is not None
+                for backend, configured_path in configured_paths.items()
+            }
+            with cli_presence_lock:
+                cli_presence = {
+                    **cli_presence,
+                    **{
+                        backend: present
+                        for backend, present in refreshed.items()
+                        if cli_presence_generation.get(backend) == generation
+                    },
+                }
+
+        # Seed only filesystem and PATH facts before the internal RPC surface
+        # exists. The page publishes npm-only installs through an explicit
+        # post-paint refresh, so controller readiness never waits on npm.
+        refresh_cli_presence(False, None)
+
+        async def backend_catalog_changed(backend: str) -> None:
+            try:
+                latest = V2Config.load()
+            except FileNotFoundError:
+                return
+            self.config.model_hub = latest.model_hub
+            if latest.model_hub.agents[backend].mode != "hub":
+                if backend == "codex":
+                    agent_service = getattr(self, "agent_service", None)
+                    if agent_service is None:
+                        raise RuntimeError("Agent service is unavailable")
+                    await agent_service.invalidate_model_hub_runtime(backend)
+                return
+            runtime_config = getattr(latest.agents, backend, None)
+            if runtime_config is None:
+                return
+            coordinator = getattr(self, "backend_restart_coordinator", None)
+            if coordinator is None:
+                raise RuntimeError("Backend restart coordinator is unavailable")
+            await coordinator.request_restart(backend)
+
+        async def repair_model_selections(addresses: frozenset[str]) -> int:
+            # A Vibe Agent's model, a channel's routing override, and a
+            # session's pin are each a copy of an id the Model Hub menu once
+            # offered. The hub proves which addresses are addresses; this
+            # process owns the rows that copied them.
+            from storage.model_selection_addresses import (
+                remove_credential_addresses_from_selections,
+            )
+
+            return await asyncio.to_thread(
+                remove_credential_addresses_from_selections, addresses
+            )
+
+        self.model_hub_service = create_default_service(
+            adapter=self.model_hub_engine_adapter,
+            requested_model_override=default_vibe_agent_model,
+            selected_agent_override=default_vibe_agent_name,
+            named_agents_override=named_vibe_agents,
+            cli_present_override=cli_present,
+            cli_presence_refresh=refresh_cli_presence,
+            backend_catalog_changed=backend_catalog_changed,
+            repair_model_selections=repair_model_selections,
+        )
+        set_remote_catalog_refresh_completed(
+            self._model_hub_snapshot_refresh_completed
+        )
+        try:
+            asyncio.run(
+                self.model_hub_service.reconcile_builtin_models(notify=False)
+            )
+        except Exception:
+            logger.warning(
+                "Model Hub built-in reconciliation failed during startup",
+                exc_info=True,
+            )
+        self.model_hub_turn_gateway = ModelHubTurnGateway(
+            self.model_hub_service,
+            language_provider=lambda: self.config.language,
+        )
+        from core.model_hub_progress import publish_recovery_changed
+
+        self.model_hub_turn_gateway.correlation.on_recovery_changed = (
+            lambda turn_id: publish_recovery_changed(self, turn_id)
+        )
+        self.model_hub_runtime = ModelHubRuntimeRouter(
+            service=self.model_hub_service,
+            turn_gateway=self.model_hub_turn_gateway,
+        )

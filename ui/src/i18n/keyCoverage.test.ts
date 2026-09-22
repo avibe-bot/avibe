@@ -1444,17 +1444,6 @@ describe('app i18n key coverage', () => {
 
     // A `returnObjects` consumer is READ rather than pinned, and it buys a list
     // and only a list: the object that a prefix may be is still residue here.
-    const listConsumer = collectReferences("const rows = t('memory.settings.disclosure', { returnObjects: true });");
-    const withList = containersFor(listConsumer);
-    expect(withList('memory.settings.disclosure')).toEqual(['list']);
-    const rows = (value: unknown) => ({ memory: { settings: { disclosure: value } } });
-    const asList = [{ lng: 'en', bundle: rows(['One']) }, { lng: 'zh', bundle: rows(['一']) }];
-    const asNode = [{ lng: 'en', bundle: rows({ a: 'One' }) }, { lng: 'zh', bundle: rows({ a: '一' }) }];
-    expect(residueOf(['memory.settings.disclosure'], asList, withList)).toEqual([]);
-    expect(residueOf(['memory.settings.disclosure'], asNode, withList)).toEqual(['memory.settings.disclosure']);
-
-    // Losing the whole subtree in one locale is still a gap: the pin relaxes the
-    // container, never the requirement that both locales carry copy.
     expect(
       parityGaps(['harness.runStatus'], [prefixed[0], { lng: 'zh', bundle: { harness: {} } }], containersFor([])),
     ).toEqual([{ key: 'harness.runStatus', present: ['en'], absent: ['zh'] }]);

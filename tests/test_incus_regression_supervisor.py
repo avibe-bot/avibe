@@ -179,12 +179,10 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
     monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: False)
     launch_secrets: dict[str, str | None] = {}
 
-    def start_service(*, wait_for_ready=True, memory_ui_secret=None):
-        launch_secrets["service"] = memory_ui_secret
+    def start_service(*, wait_for_ready=True):
         return 100
 
-    def start_ui(host, port, *, memory_ui_secret=None):
-        launch_secrets["ui"] = memory_ui_secret
+    def start_ui(host, port):
         return 333
 
     monkeypatch.setattr(runtime, "start_service", start_service)

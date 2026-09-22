@@ -427,8 +427,8 @@
     "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
     "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}",
     "opencodeBackendError": "OpenCode error: {error}",
-        "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted.",
-        "opencodePollTransportFailure": "OpenCode was unreachable after {count} consecutive polling failures; the native turn was aborted and recorded as failed."
+    "opencodeActiveTurnTimeout": "OpenCode did not produce a result within the configured active-turn limit ({seconds} seconds). The native turn was aborted.",
+    "opencodePollTransportFailure": "OpenCode was unreachable after {count} consecutive polling failures; the native turn was aborted and recorded as failed."
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -477,7 +477,6 @@
     "infoUnavailable": "Update information unavailable. Please try again later.",
     "upgradeFailed": "Upgrade failed. Please check logs.",
     "upgradeFailedShort": "Upgrade failed",
-    "memoryRequirementUnreadable": "Upgrade blocked because the persisted Memory requirement could not be read safely.",
     "upgradeFailedSlack": "❌ *Upgrade Failed*\n\nPlease check the logs for details.",
     "updating": "Updating Avibe...",
     "updatingSlack": "⏳ *Updating Avibe...*\n\nPlease wait, the service will restart shortly.",
@@ -812,117 +811,6 @@
       }
     }
   },
-  "memory": {
-    "sender": {
-      "user": "User",
-      "agent": "Agent"
-    },
-    "cli": {
-      "help": {
-        "command": "Use local Memory through the running controller",
-        "status": "Show Memory status",
-        "profile": "Show the Memory profile",
-        "list": "List processed Memory episodes",
-        "search": "Search local Memory",
-        "remember": "Submit personal context for best-effort capture",
-        "query": "Search query",
-        "project": "Memory project: default or a named slug such as billing",
-        "page": "Page number (1-based)",
-        "pageLimit": "Episodes per page (1-100)",
-        "limit": "Maximum results (1-100)",
-        "mode": "Recall mode (default: hybrid)",
-        "text": "Text to remember",
-        "json": "Print machine-readable output"
-      },
-      "error": "Memory {operation} failed: {code}",
-      "status": "Memory: {state}",
-      "provider": "EverOS {version}: {state}",
-      "attachmentCapture": "IM attachment capture: {state}",
-      "sourceReason": "Source reason: {reason}",
-      "runtimeState": {
-        "disabled": "disabled",
-        "starting": "starting",
-        "running": "running",
-        "degraded": "degraded",
-        "needsRepair": "needs repair",
-        "unknown": "unknown"
-      },
-      "providerState": {
-        "ok": "healthy",
-        "unknown": "unknown"
-      },
-      "attachmentCaptureState": {
-        "ready": "ready",
-        "notConfigured": "not configured",
-        "unavailable": "unavailable",
-        "unknown": "unknown"
-      },
-      "unknownVersion": "unknown version",
-      "reason": {
-        "memoryDisabled": "Memory is disabled",
-        "invalidInput": "invalid Memory input",
-        "accessDenied": "Memory access denied",
-        "inputTooLarge": "Memory input is too large",
-        "queueFull": "Memory queue is full",
-        "lowDiskSpace": "low disk space",
-        "storeUnavailable": "Memory store unavailable",
-        "runtimeMissing": "Memory runtime missing",
-        "runtimeUnsupported": "Memory runtime unsupported",
-        "runtimeInstallFailed": "Memory runtime installation failed",
-        "runtimeInstallRequiresStoppedMemory": "Memory is running. Turn it off in Settings > Memory before repairing the runtime.",
-        "runtimePreparationImportTimeout": "Memory runtime import readiness check timed out",
-        "runtimePreparationImportFailed": "Memory runtime import readiness check failed",
-        "runtimePreparationScrubberTimeout": "Memory runtime error-scrubber readiness check timed out",
-        "runtimePreparationScrubberFailed": "Memory runtime error-scrubber readiness check failed",
-        "runtimePreparationSyncContractFailed": "Memory runtime sync contract verification failed",
-        "runtimePreparationFailed": "Memory runtime preparation failed",
-        "reconcileFailed": "Memory reconciliation failed",
-        "wakeFailed": "Memory wake failed without deleting data",
-        "runtimeBusy": "Memory could not stop safely",
-        "permissionDenied": "Memory data-path permission denied",
-        "diskUnavailable": "Memory disk unavailable",
-        "localDataUnusable": "local Memory data needs repair",
-        "legacyRecoveryRequired": "legacy recovery state needs explicit repair",
-        "sidecarUnavailable": "Memory sidecar unavailable",
-        "providerTimeout": "Memory provider timed out",
-        "providerResponseInvalid": "invalid Memory provider response",
-        "capabilityUnavailable": "Memory capability unavailable",
-        "processingFailed": "Memory processing failed",
-        "lossConfirmationRequired": "Memory data loss confirmation is required",
-        "embeddingUnavailable": "Memory embedding is unavailable",
-        "llmUnavailable": "Memory language model is unavailable",
-        "rerankUnavailable": "Memory reranking is unavailable",
-        "multimodalUnavailable": "Memory multimodal processing is unavailable",
-        "repairFailed": "Memory repair failed",
-        "repairNotRequired": "Memory repair is not required",
-        "deleteDataFailed": "Memory data deletion failed",
-        "reconfigureFailed": "Memory reconfiguration failed",
-        "operationInProgress": "another Memory operation is in progress",
-        "implementationUnavailable": "Memory implementation unavailable",
-        "implementationIncompatible": "Memory implementation is incompatible",
-        "unknown": "unknown reason"
-      },
-      "fault": {
-        "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
-        "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."
-      },
-      "empty": "No memory items found.",
-      "originPrefix": "[{origin}] ",
-      "origin": {
-        "user": "User memory",
-        "agent": "Agent memory",
-        "both": "User + Agent"
-      },
-      "remembered": "Memory request acknowledged for best-effort processing; persistence is not guaranteed.",
-      "listWarning": {
-        "truncated": "Memory listing reached the provider ordering limit. Later pages may be incomplete."
-      },
-      "readWarning": {
-        "partial": "Some user, Agent, or project Memory sources could not be loaded. Results may be incomplete."
-      },
-      "partialRestartWarning": "Memory Settings content is unavailable: the Web UI restarted while the service kept running,\n  and their shared Memory proof exists only inside the running processes.\n  Run 'vibe stop' and then 'vibe' to restart both together."
-    }
-  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
@@ -1060,7 +948,7 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
+      "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
     }
   },
   "runtime": {
@@ -1130,7 +1018,6 @@
       "unknown": "unknown",
       "unknownError": "unknown error",
       "missing": "missing",
-      "memoryRuntime": "Memory Runtime",
       "modelHubEngine": "Model Hub engine (CPA)",
       "currentPlatform": "this platform",
       "selectedDependencyUrl": "the selected dependency URL",
@@ -1229,8 +1116,6 @@
       "dependencyPlatformUnsupported": "{label} is not published for this platform",
       "dependencyArchiveUrlUnsupported": "{label} archive URL uses an unsupported scheme: {url}",
       "dependencyNotReady": "{label} is not ready",
-      "memoryRuntimeMissing": "Memory Runtime is missing: {reason}",
-      "memoryRuntimeError": "Memory Runtime failed readiness: {reason}",
       "dependencyReachable": "{label} download endpoint is reachable: {url}",
       "dependencyProbeUnsupported": "{label} server does not support a body-free probe",
       "dependencyProbeUnavailable": "{label} archive could not be resolved",
@@ -1416,10 +1301,6 @@
       "dependencyReadyDefault": "Dependency is ready.",
       "dependencyResultFailed": "{target} repair failed: {detail}",
       "dependencyException": "{target} installer failed: {error}",
-      "dryMemoryRuntime": "Would ask the running Avibe controller to install or repair Memory Runtime.",
-      "memoryRuntimeReady": "Memory Runtime was installed or repaired through the running Avibe controller.",
-      "memoryRuntimeFailed": "Memory Runtime repair failed: {reason}",
-      "memoryRuntimeControllerUnavailable": "The running Avibe controller could not be reached for Memory Runtime repair: {reason}",
       "dependencyDownloadHttp": "Dependency download returned HTTP {status} after {attempts} attempts.",
       "dependencyDownloadDns": "Dependency host DNS lookup failed after {attempts} attempts.",
       "dependencyDownloadTls": "Dependency TLS verification failed.",

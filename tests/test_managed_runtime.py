@@ -542,7 +542,6 @@ def test_subclass_relative_runtime_directory_persists_an_admissible_absolute_pat
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     monkeypatch.chdir(tmp_path)
     relative_runtime_dir = Path("relative-runtimes") / runtime_kind
@@ -569,7 +568,6 @@ def test_installed_subclass_status_and_resolution_survive_unavailable_manifest(
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -624,7 +622,6 @@ def test_subclass_operational_resolution_uses_disk_snapshot_when_manifest_is_mis
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -715,7 +712,6 @@ def test_subclass_derives_released_missing_bin_path_from_safe_spec_default(
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -762,7 +758,6 @@ def test_subclass_status_rejects_an_unreadable_installed_binary(
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -789,7 +784,6 @@ def test_subclass_projects_deep_installed_json_as_an_inspection_failure(
     runtime_kind: str,
     state_file: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -850,7 +844,6 @@ def test_invalid_manifest_keeps_disk_resolution_but_blocks_repair(
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest, monkeypatch)
     installed = manager.ensure()
@@ -892,7 +885,6 @@ def test_existing_subclass_adopts_released_manifest_digest_layout_without_write_
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest_path, monkeypatch)
     installed = manager.ensure()
@@ -954,7 +946,6 @@ def test_clean_dry_run_is_read_only_and_creates_no_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     versions = runtime_dir / "versions" / "v1" / "linux-x64" / "aaa"
     versions.mkdir(parents=True)
@@ -978,7 +969,6 @@ def _retention_fixture(
     *,
     current_is_newest: bool,
 ) -> tuple[ManagedRuntimeManager, Path, list[Path]]:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest_path = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     manager = _subclass_runtime_manager(tmp_path, runtime_kind, manifest_path, monkeypatch)
     installed = manager.ensure()
@@ -1788,7 +1778,6 @@ def test_clean_dry_run_reports_inspection_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     manager = GitRuntimeManager(
         runtime_dir=tmp_path / "git-runtime",
         manifest_path=tmp_path / "missing-manifest.json",
@@ -1810,7 +1799,6 @@ def test_clean_reports_inspection_failure_on_real_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     manager = GitRuntimeManager(
         runtime_dir=tmp_path / "git-runtime",
         manifest_path=tmp_path / "missing-manifest.json",
@@ -1832,7 +1820,6 @@ def test_clean_dry_run_holds_preview_guard_through_planning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     (runtime_dir / ".install.lock").write_text("", encoding="utf-8")
@@ -1870,7 +1857,6 @@ def test_subclass_install_refuses_symlinked_mutation_guard_without_external_writ
     monkeypatch: pytest.MonkeyPatch,
     runtime_kind: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     runtime_dir = tmp_path / f"{runtime_kind}-runtime"
     runtime_dir.mkdir()
@@ -1899,7 +1885,6 @@ def test_real_cleanup_refuses_hardlinked_mutation_guard_without_external_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     victim = tmp_path / "victim.txt"
@@ -1931,7 +1916,6 @@ def test_mutation_reports_uninspectable_guard_as_lock_failure(
     operation: str,
     expected_reason: str,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
@@ -1961,7 +1945,6 @@ def test_subclass_preview_classifies_special_guard_as_inspection_failure(
 ) -> None:
     if not hasattr(os, "mkfifo"):
         pytest.skip("FIFO creation unavailable")
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, runtime_kind)
     runtime_dir = tmp_path / f"{runtime_kind}-runtime"
     runtime_dir.mkdir()
@@ -1984,7 +1967,6 @@ def test_preview_classifies_uninspectable_guard_as_inspection_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     lock_path = runtime_dir / ".install.lock"
@@ -2015,7 +1997,6 @@ def test_preview_classifies_special_guard_created_during_planning_as_inspection_
 ) -> None:
     if not hasattr(os, "mkfifo"):
         pytest.skip("FIFO creation unavailable")
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     manager = GitRuntimeManager(
         runtime_dir=runtime_dir,
@@ -2040,7 +2021,6 @@ def test_windows_preview_classifies_reparse_guard_as_inspection_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     lock_path = runtime_dir / ".install.lock"
@@ -2081,7 +2061,6 @@ def test_install_refuses_guard_replaced_after_lock_acquisition(
 ) -> None:
     from storage import lock as storage_lock
 
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     _archive, manifest = _write_subclass_runtime_fixture(tmp_path, "git")
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
@@ -2116,7 +2095,6 @@ def test_install_refuses_guard_replaced_after_lock_acquisition(
 
 
 def test_windows_preview_detects_held_git_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     (runtime_dir / ".install.lock").write_text("", encoding="utf-8")
@@ -2136,7 +2114,6 @@ def test_git_preview_refuses_lock_identity_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
     runtime_dir = tmp_path / "git-runtime"
     runtime_dir.mkdir()
     lock_path = runtime_dir / ".install.lock"
