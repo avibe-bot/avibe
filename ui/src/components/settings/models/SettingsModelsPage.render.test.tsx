@@ -1544,13 +1544,21 @@ describe('SettingsModelsPage surface branches', () => {
       reader.mockRejectedValueOnce(new TypeError('still offline'));
       await userEvent.click(retry);
       await flushRouteFocus();
-      expect(document.activeElement).toBe(retry);
+      expect(document.activeElement).toBe(opener);
 
       const nextRead = deferred<AgentSupply[] & Source[]>();
       reader.mockReturnValueOnce(nextRead.promise);
       await userEvent.click(retry);
       await flushRouteFocus();
-      expect(document.activeElement).toBe(retry);
+      expect(document.activeElement).toBe(opener);
+      expect((retry as HTMLButtonElement).disabled).toBe(true);
+      const agentCalls = vi.mocked(modelsApi.listAgents).mock.calls.length;
+      const sourceCalls = vi.mocked(modelsApi.listSources).mock.calls.length;
+      const presenceCalls = vi.mocked(modelsApi.refreshAgentPresence).mock.calls.length;
+      await userEvent.click(retry);
+      expect(modelsApi.listAgents).toHaveBeenCalledTimes(agentCalls);
+      expect(modelsApi.listSources).toHaveBeenCalledTimes(sourceCalls);
+      expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(presenceCalls);
       await act(async () => { nextRead.resolve((member === 'agents' ? [takeoverAgent] : sources) as AgentSupply[] & Source[]); });
       await flushRouteFocus();
       expect(retry.isConnected).toBe(false);
@@ -1585,6 +1593,153 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(retry.isConnected).toBe(false));
     await flushRouteFocus();
     expect(document.activeElement).toBe(opener);
+  });
+
+  it.each([false, true])(
+    'MH-ROUTING-007 preserves a suspended attempt focus origin (another editor: %s)',
+    async (anotherEditor) => {
+      const sources = [
+        { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+        { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+      ];
+      const otherModel = 'gpt-other';
+      const otherChain = { ...takeoverChain, model_id: otherModel };
+      const agent = {
+        ...takeoverAgent,
+        builtin_models: [takeoverChain.model_id, otherModel],
+        model_supply: [...takeoverAgent.model_supply!, { ...takeoverAgent.model_supply![0], model_id: otherModel }],
+      };
+      const inferred = deferred<AgentChain>();
+      const retryRead = deferred<AgentSupply[]>();
+      vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([takeoverChain, otherChain]);
+      const chainRead = vi.spyOn(modelsApi, 'getAgentChain')
+        .mockResolvedValueOnce(takeoverChain)
+        .mockImplementation((_backend, modelId) =>
+          modelId === otherModel ? Promise.resolve(otherChain) : inferred.promise);
+      vi.spyOn(modelsApi, 'putAgentChain').mockRejectedValueOnce(new ApiCallError('direct_mode'));
+      renderPage(sources, [agent]);
+      const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+      await userEvent.click(opener);
+      await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+      await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      // The Direct handoff lands in Hub again and acquires the suspended exact
+      // chain read only after its fresh Sources projection.
+      await waitFor(() => expect(chainRead).toHaveBeenCalledTimes(2));
+      if (anotherEditor) {
+        await userEvent.click(screen.getByRole('button', { name: /Open gpt-other route chain/i }));
+        await screen.findAllByRole('button', { name: /^Remove hop$/i });
+      }
+      vi.mocked(modelsApi.listAgents)
+        .mockRejectedValueOnce(new TypeError('offline after inferred commit'))
+        .mockReturnValueOnce(retryRead.promise);
+      await act(async () => {
+        inferred.resolve({
+          ...takeoverChain,
+          manual_override: { hops: [takeoverChain.chain[0]] },
+          chain: [takeoverChain.chain[0]],
+          current: takeoverChain.chain[0],
+        });
+      });
+      await flushRouteFocus();
+      if (anotherEditor) {
+        expect(document.activeElement?.closest('[role="dialog"]')).toBeTruthy();
+        await userEvent.click(
+          within(screen.getByRole('dialog')).getAllByRole('button', { name: /^Close$/i })
+            .find((button) => button.classList.contains('model-hub-dialog-action'))!,
+        );
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+        await flushRouteFocus();
+      }
+      const retry = await screen.findByRole('button', { name: /^Retry$/i });
+      await userEvent.click(retry);
+      // A's commit cannot borrow B's opener from the current dialog selection.
+      expect(document.activeElement).toBe(opener);
+      expect((retry as HTMLButtonElement).disabled).toBe(true);
+      await act(async () => { retryRead.resolve([agent]); });
+      await waitFor(() => expect(retry.isConnected).toBe(false));
+      await flushRouteFocus();
+      expect(document.activeElement).toBe(opener);
+      expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('MH-ROUTING-007 transfers Retry focus before a background inferred commit disables it', async () => {
+    const sources = [
+      { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+      { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+    ];
+    const claudeChain = { ...takeoverChain, backend: 'claude' as const };
+    const claudeAgent = { ...takeoverAgent, backend: 'claude' as const };
+    const inferred = deferred<AgentChain>();
+    const reconciliation = deferred<AgentSupply[]>();
+    vi.spyOn(modelsApi, 'getAgentChains').mockImplementation((backend) =>
+      Promise.resolve([backend === 'claude' ? claudeChain : takeoverChain]));
+    const exactRead = vi.spyOn(modelsApi, 'getAgentChain')
+      .mockResolvedValueOnce(takeoverChain)
+      .mockImplementation((backend) =>
+        backend === 'claude' ? Promise.resolve(claudeChain) : inferred.promise);
+    vi.spyOn(modelsApi, 'putAgentChain')
+      .mockRejectedValueOnce(new ApiCallError('direct_mode'))
+      .mockResolvedValueOnce({
+        chain: {
+          ...claudeChain,
+          manual_override: { hops: [claudeChain.chain[0]] },
+          chain: [claudeChain.chain[0]],
+          current: claudeChain.chain[0],
+        },
+        removed_hops: [],
+        interrupted: [],
+      });
+    renderPage(sources, [takeoverAgent, claudeAgent]);
+    const codexGroup = await waitFor(() => {
+      const group = document.querySelector('[data-agent-backend="codex"]');
+      expect(group).not.toBeNull();
+      return group as HTMLElement;
+    });
+    const codexOpener = within(codexGroup).getByRole('button', {
+      name: /Open gpt-5\.6-sol route chain/i,
+    });
+    await userEvent.click(codexOpener);
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await waitFor(() => expect(exactRead).toHaveBeenCalledTimes(2));
+
+    const claudeGroup = document.querySelector('[data-agent-backend="claude"]') as HTMLElement;
+    await userEvent.click(within(claudeGroup).getByRole('button', {
+      name: /Open gpt-5\.6-sol route chain/i,
+    }));
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+    vi.mocked(modelsApi.listSources).mockRejectedValueOnce(new Error('post-commit sources failed'));
+    await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    const retry = await screen.findByRole('button', { name: /^Retry$/i }) as HTMLButtonElement;
+    await flushRouteFocus();
+    expect(retry.disabled).toBe(false);
+    retry.focus();
+    expect(document.activeElement).toBe(retry);
+
+    // The late Codex evidence starts a new collection batch while focus is on
+    // Claude's old failure Retry, without clicking Retry or opening an editor.
+    vi.mocked(modelsApi.listAgents).mockReturnValueOnce(reconciliation.promise);
+    await act(async () => {
+      inferred.resolve({
+        ...takeoverChain,
+        manual_override: { hops: [takeoverChain.chain[0]] },
+        chain: [takeoverChain.chain[0]],
+        current: takeoverChain.chain[0],
+      });
+    });
+    await flushRouteFocus();
+    expect(retry.disabled).toBe(true);
+    expect(document.activeElement).toBe(codexOpener);
+
+    await act(async () => { reconciliation.resolve([takeoverAgent, claudeAgent]); });
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(codexOpener);
+    expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the source projection intact after a lost Direct-mode response', async () => {

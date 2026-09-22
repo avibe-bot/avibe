@@ -72,4 +72,23 @@ describe("model hub projection focus", () => {
     expect(document.activeElement).toBe(current);
     root.remove();
   });
+
+  it("focuses the opener inside a remounted nonfocusable model row", () => {
+    const root = document.createElement("main");
+    root.innerHTML = [
+      '<button data-destination="first">First control</button>',
+      '<div data-route-backend="claude" data-route-model="模型">',
+      '<button data-opener>Open route</button></div>',
+    ].join("");
+    document.body.append(root);
+    const focused = focusModelHubProjection({
+      root,
+      activeTarget: document.createElement("button"),
+      backend: "claude",
+      modelId: "模型",
+    });
+    expect(focused).toBe(root.querySelector("[data-opener]"));
+    expect(document.activeElement).toBe(focused);
+    root.remove();
+  });
 });

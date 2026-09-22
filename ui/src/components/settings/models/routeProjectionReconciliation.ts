@@ -5,6 +5,7 @@ export type RouteProjectionMember = "agents" | "sources";
 
 export type RouteProjectionStatus = {
   report: RouteReport;
+  reports: readonly RouteReport[];
   failed: ReadonlySet<RouteProjectionMember>;
   pending: boolean;
 };
@@ -16,8 +17,8 @@ type RouteProjectionReaders = {
   onStatus: (status: RouteProjectionStatus) => void;
 };
 
-/** M6 is page-owned: closing the modal changes presentation ownership but never
- * cancels, restarts or broadens the projection generation. */
+/** One page-owned collection reader, with exact evidence for every outstanding
+ * commit. Failed reports do not block a later commit's newer collection reads. */
 export const createRouteProjectionReconciler = ({
   readAgents,
   readSources,
@@ -25,82 +26,80 @@ export const createRouteProjectionReconciler = ({
   onStatus,
 }: RouteProjectionReaders) => {
   let generation = 0;
-  let failed = new Set<RouteProjectionMember>();
-  let activeReport: RouteReport | null = null;
-  const pendingReports: RouteReport[] = [];
+  let pending = false;
+  const failed = new Set<RouteProjectionMember>();
+  let reports: RouteReport[] = [];
+  const queuedReports: RouteReport[] = [];
 
-  const publish = (pending: boolean) => {
-    if (activeReport) {
-      onStatus({ report: activeReport, pending, failed: new Set(failed) });
-    }
+  const publish = () => {
+    const report = reports[reports.length - 1];
+    if (report) onStatus({ report, reports: [...reports], pending, failed: new Set(failed) });
   };
 
-  const settle = async (
-    token: number,
-    members: ReadonlySet<RouteProjectionMember>,
-  ) => {
-    failed = new Set();
-    publish(true);
-
-    if (members.has("agents")) {
-      try {
-        const observation = await readAgents();
-        if (token !== generation) return;
-        observation.install();
-      } catch {
-        if (token !== generation) return;
-        failed.add("agents");
-        onFailure("agents");
-        publish(false);
-        return;
+  const settle = async (members: ReadonlySet<RouteProjectionMember>) => {
+    const token = ++generation;
+    pending = true;
+    publish();
+    try {
+      if (members.has("agents")) {
+        try {
+          const observation = await readAgents();
+          if (token !== generation) return;
+          observation.install();
+          failed.delete("agents");
+        } catch {
+          if (token !== generation) return;
+          failed.add("agents");
+          onFailure("agents");
+          return;
+        }
+      }
+      if (members.has("sources") || members.has("agents")) {
+        try {
+          const observation = await readSources();
+          if (token !== generation) return;
+          observation.install();
+          failed.delete("sources");
+        } catch {
+          if (token !== generation) return;
+          failed.add("sources");
+          onFailure("sources");
+        }
+      }
+    } finally {
+      if (token === generation) {
+        pending = false;
+        publish();
+        if (failed.size === 0) reports = [];
+        beginNext();
       }
     }
-
-    if (members.has("sources") || members.has("agents")) {
-      try {
-        const observation = await readSources();
-        if (token !== generation) return;
-        observation.install();
-      } catch {
-        if (token !== generation) return;
-        failed.add("sources");
-        onFailure("sources");
-      }
-    }
-    if (token === generation) publish(false);
   };
 
   const beginNext = () => {
-    if (activeReport || pendingReports.length === 0) return;
-    activeReport = pendingReports.shift() ?? null;
-    if (!activeReport) return;
-    const token = ++generation;
-    void settle(token, new Set(["agents"])).then(() => {
-      if (token !== generation || failed.size > 0) return;
-      activeReport = null;
-      beginNext();
-    });
+    if (pending || queuedReports.length === 0) return;
+    // All reads in this batch begin after every included commit. A newer full
+    // collection can satisfy older failed obligations without losing evidence.
+    reports.push(...queuedReports.splice(0));
+    void settle(new Set(["agents"]));
   };
 
   return {
     start: (committed: RouteReport) => {
-      // The page owns each complete received/inferred response before the editor
-      // closes. Queue later commits so an in-flight reconciliation never drops
-      // an earlier report or cancels its projection settlement.
-      pendingReports.push(committed);
-      beginNext();
+      queuedReports.push(committed);
+      if (pending) publish();
+      else beginNext();
     },
     retry: () => {
-      if (failed.size === 0 || !activeReport) return;
-      const token = ++generation;
-      void settle(token, failed).then(() => {
-        if (token !== generation || failed.size > 0) return;
-        activeReport = null;
-        beginNext();
-      });
+      if (pending || failed.size === 0) return;
+      void settle(new Set(failed));
     },
     invalidate: () => {
       generation += 1;
+      pending = false;
+      reports = [];
+      queuedReports.length = 0;
+      failed.clear();
     },
   };
 };
