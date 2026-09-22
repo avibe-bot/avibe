@@ -63,8 +63,10 @@ afterEach(() => {
 beforeEach(() => {
   projects.value = [];
   projects.error = null;
+  makeDir.mockReset().mockResolvedValue({ ok: true });
+  searchNames.mockReset().mockResolvedValue({ results: [], truncated: false });
   systemFavorites.mockReset().mockResolvedValue([{ key: 'home', path: '/workspace' }]);
-  resolveDirectoryPath.mockImplementation(async (path: string) => path);
+  resolveDirectoryPath.mockReset().mockImplementation(async (path: string) => path);
   listDir.mockReset().mockImplementation(async (path: string) => ({
     ok: true as const,
     path,
@@ -561,4 +563,217 @@ it('reports truncated directory listings', async () => {
 
   await screen.findByText('src');
   expect(screen.getByText(/apps\.fileBrowser\.listTruncated/)).toBeTruthy();
+});
+
+const currentDirectory = () => screen.getByRole('dialog').querySelector('code')?.textContent;
+const selectButton = () => screen.getByRole('button', { name: 'directoryBrowser.select' }) as HTMLButtonElement;
+const emptyListing = (path: string): FsListing => ({ ok: true, path, parent: '/', entries: [] });
+
+it.each(['success', 'failure'] as const)('ignores an older listing %s while a favorite resolves, without canceling it when a draft opens', async (outcome) => {
+  const stale = deferred<FsListing>();
+  const favorite = deferred<string>();
+  systemFavorites.mockResolvedValue([{ key: 'home', path: '/favorite' }]);
+  resolveDirectoryPath.mockImplementation((path: string) => path === '/favorite' ? favorite.promise : Promise.resolve(path));
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  listDir.mockReturnValueOnce(stale.promise);
+  fireEvent.click(screen.getByText('src'));
+  fireEvent.click(screen.getAllByRole('button', { name: 'favorite' })[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(editor, { target: { value: '/new-draft' } });
+
+  await act(async () => {
+    if (outcome === 'success') stale.resolve(emptyListing('/workspace/src'));
+    else stale.reject(new Error('stale listing'));
+  });
+  expect(currentDirectory()).toBe('/workspace');
+  expect(selectButton().disabled).toBe(true);
+  expect(screen.queryByText('apps.fileBrowser.errors.listFailed')).toBeNull();
+
+  await act(async () => favorite.resolve('/canonical-favorite'));
+  expect(currentDirectory()).toBe('/canonical-favorite');
+  expect(selectButton().disabled).toBe(false);
+  expect((editor as HTMLInputElement).value).toBe('/new-draft');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.back' }));
+  await waitFor(() => expect(currentDirectory()).toBe('/workspace'));
+});
+
+it.each(['success', 'failure'] as const)('ignores a favorite resolver %s after a manual submission supersedes it', async (outcome) => {
+  const favorite = deferred<string>();
+  systemFavorites.mockResolvedValue([{ key: 'home', path: '/favorite' }]);
+  resolveDirectoryPath.mockImplementation((path: string) => path === '/favorite' ? favorite.promise : Promise.resolve(path));
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  fireEvent.click(screen.getAllByRole('button', { name: 'favorite' })[0]);
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(editor, { target: { value: '/manual' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  await waitFor(() => expect(currentDirectory()).toBe('/manual'));
+  await act(async () => {
+    if (outcome === 'success') favorite.resolve('/favorite');
+    else favorite.reject(new Error('stale favorite'));
+  });
+  expect(currentDirectory()).toBe('/manual');
+  expect(selectButton().disabled).toBe(false);
+  expect(screen.queryByText('apps.fileBrowser.errors.listFailed')).toBeNull();
+  expect(listDir).not.toHaveBeenCalledWith('/favorite', expect.anything());
+});
+
+it.each([
+  ['resolve', 'success'], ['resolve', 'failure'], ['list', 'success'], ['list', 'failure'],
+] as const)('cancels a manual submission in the %s phase before its %s', async (phase, outcome) => {
+  const resolution = deferred<string>();
+  const listing = deferred<FsListing>();
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  if (phase === 'resolve') resolveDirectoryPath.mockReturnValueOnce(resolution.promise);
+  else listDir.mockReturnValueOnce(listing.promise);
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(editor, { target: { value: '/cancelled' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  await waitFor(() => expect(phase === 'resolve' ? resolveDirectoryPath : listDir).toHaveBeenCalledWith(
+    ...phase === 'resolve' ? ['/cancelled'] : ['/cancelled', false],
+  ));
+  fireEvent.keyDown(editor, { key: 'Escape' });
+  expect(selectButton().disabled).toBe(false);
+  await act(async () => {
+    if (outcome === 'failure') (phase === 'resolve' ? resolution : listing).reject(new Error('cancelled request'));
+    else if (phase === 'resolve') resolution.resolve('/cancelled');
+    else listing.resolve(emptyListing('/cancelled'));
+  });
+  expect(currentDirectory()).toBe('/workspace');
+  expect(selectButton().disabled).toBe(false);
+  expect(screen.queryByText('directoryBrowser.pathNotFound')).toBeNull();
+  expect((screen.getByRole('button', { name: 'directoryBrowser.back' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it.each(['success', 'failure'] as const)('discards stale mkdir %s without overriding a pending destination', async (outcome) => {
+  const creation = deferred<{ ok: true }>();
+  const destination = deferred<FsListing>();
+  makeDir.mockReturnValueOnce(creation.promise);
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.newFolder' }));
+  const editor = screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder');
+  fireEvent.change(editor, { target: { value: 'new-folder' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  expect(makeDir).toHaveBeenCalledWith('/workspace/new-folder');
+  listDir.mockReturnValueOnce(destination.promise);
+  fireEvent.click(screen.getByText('src'));
+  await act(async () => {
+    if (outcome === 'success') creation.resolve({ ok: true });
+    else creation.reject(new Error('old creation'));
+  });
+  expect(listDir).toHaveBeenCalledTimes(2);
+  expect(selectButton().disabled).toBe(true);
+  expect(screen.queryByText('apps.fileBrowser.errors.createFolderFailed')).toBeNull();
+  await act(async () => destination.resolve(emptyListing('/workspace/src')));
+  expect(currentDirectory()).toBe('/workspace/src');
+  expect(selectButton().disabled).toBe(false);
+});
+
+it.each(['success', 'failure'] as const)('keeps a newer creation draft after an older mkdir %s', async (outcome) => {
+  const creation = deferred<{ ok: true }>();
+  makeDir.mockReturnValueOnce(creation.promise);
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.newFolder' }));
+  const editor = screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder') as HTMLInputElement;
+  fireEvent.change(editor, { target: { value: 'old' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  fireEvent.change(editor, { target: { value: 'new draft' } });
+  await act(async () => {
+    if (outcome === 'success') creation.resolve({ ok: true });
+    else creation.reject(new Error('old creation'));
+  });
+  expect(editor.isConnected).toBe(true);
+  expect(editor.value).toBe('new draft');
+  expect(listDir).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText('apps.fileBrowser.errors.createFolderFailed')).toBeNull();
+});
+
+it('records successful navigation only and preserves history intent across hidden-file refresh', async () => {
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  fireEvent.click(screen.getByText('src'));
+  await waitFor(() => expect(currentDirectory()).toBe('/workspace/src'));
+  const back = screen.getByRole('button', { name: 'directoryBrowser.back' }) as HTMLButtonElement;
+  const forward = screen.getByRole('button', { name: 'directoryBrowser.forward' }) as HTMLButtonElement;
+  const stale = deferred<FsListing>();
+  listDir.mockReturnValueOnce(stale.promise);
+  fireEvent.click(back);
+  fireEvent.click(screen.getByRole('checkbox'));
+  await waitFor(() => expect(currentDirectory()).toBe('/workspace'));
+  await act(async () => stale.reject(new Error('superseded back listing')));
+  expect(back.disabled).toBe(true);
+  expect(forward.disabled).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.refresh' }));
+  await waitFor(() => expect(selectButton().disabled).toBe(false));
+  expect(back.disabled).toBe(true);
+  expect(forward.disabled).toBe(false);
+  listDir.mockRejectedValueOnce(new Error('forward failed'));
+  fireEvent.click(forward);
+  await screen.findByText('apps.fileBrowser.errors.listFailed');
+  expect(currentDirectory()).toBe('/workspace');
+  expect(back.disabled).toBe(true);
+  expect(forward.disabled).toBe(false);
+  fireEvent.click(forward);
+  await waitFor(() => expect(currentDirectory()).toBe('/workspace/src'));
+  expect(back.disabled).toBe(false);
+  expect(forward.disabled).toBe(true);
+});
+
+it.each(['results', 'error'] as const)('does not carry search %s from the source into a pending destination', async (outcome) => {
+  const destination = deferred<FsListing>();
+  const targetSearch = deferred<{ results: []; truncated: boolean }>();
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  listDir.mockReturnValueOnce(destination.promise);
+  fireEvent.click(screen.getByText('src'));
+  if (outcome === 'error') searchNames.mockRejectedValueOnce(new Error('source search'));
+  else searchNames.mockResolvedValueOnce({
+    results: [{ name: 'source-hit', kind: 'dir', path: '/workspace/source-hit', rel: 'source-hit', size: null, mtime: null, ext: '' }],
+    truncated: false,
+  });
+  searchNames.mockReturnValueOnce(targetSearch.promise);
+  fireEvent.change(screen.getByPlaceholderText('apps.fileBrowser.searchPlaceholder'), { target: { value: 'hit' } });
+  await screen.findByText(outcome === 'error' ? 'apps.fileBrowser.errors.searchFailed' : 'source-hit');
+  await act(async () => destination.resolve(emptyListing('/workspace/src')));
+  expect(currentDirectory()).toBe('/workspace/src');
+  expect(screen.queryByText('source-hit')).toBeNull();
+  expect(screen.queryByText('apps.fileBrowser.errors.searchFailed')).toBeNull();
+  expect(screen.queryByText('apps.fileBrowser.noMatches')).toBeNull();
+  await waitFor(() => expect(searchNames).toHaveBeenLastCalledWith('/workspace/src', 'hit', false, expect.any(AbortSignal)));
+  await act(async () => targetSearch.resolve({ results: [], truncated: false }));
+  expect(await screen.findByText('apps.fileBrowser.noMatches')).toBeTruthy();
+});
+
+it.each(['cancel', 'failure'] as const)('reconciles hidden entries in the source after manual navigation %s', async (outcome) => {
+  const resolution = deferred<string>();
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  resolveDirectoryPath.mockReturnValueOnce(resolution.promise);
+  listDir.mockResolvedValueOnce({
+    ...emptyListing('/workspace'),
+    entries: [{ name: '.hidden', kind: 'dir', size: null, mtime: null, ext: '' }],
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const editor = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(editor, { target: { value: '/pending' } });
+  fireEvent.keyDown(editor, { key: 'Enter' });
+  fireEvent.click(screen.getByRole('checkbox'));
+  if (outcome === 'cancel') {
+    fireEvent.keyDown(editor, { key: 'Escape' });
+    await act(async () => resolution.resolve('/pending'));
+  } else {
+    await act(async () => resolution.reject(new Error('manual path failed')));
+    expect(screen.getByText('directoryBrowser.pathNotFound')).toBeTruthy();
+  }
+  await screen.findByText('.hidden');
+  expect(listDir).toHaveBeenLastCalledWith('/workspace', true);
+  expect(currentDirectory()).toBe('/workspace');
+  expect(selectButton().disabled).toBe(false);
 });

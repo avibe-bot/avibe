@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Folder, FolderPlus, File as FileIcon, FolderOpen, Keyboard, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -32,6 +32,16 @@ interface FolderBrowserProps {
   onSelect: (path: string) => void;
   onClose: () => void;
 }
+
+type NavigationRequest = {
+  path: string;
+  resolve?: boolean;
+  history: 'push' | 'refresh' | number;
+  // Only a manual submission can dismiss its own, unchanged editor.
+  editRevision?: number;
+};
+
+type SearchResult = { key: string; rows: FileBrowserRow[]; truncated: boolean; error?: string };
 
 function sortEntries(entries: FsEntry[]): FsEntry[] {
   return [...entries].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
@@ -74,30 +84,36 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
   const [sysFavsLoaded, setSysFavsLoaded] = useState(false);
   const [query, setQuery] = useState('');
-  const [searchRows, setSearchRows] = useState<FileBrowserRow[] | null>(null);
-  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchResult, setSearchResult] = useState<SearchResult | null>(null);
   const [searchRevision, setSearchRevision] = useState(0);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
-  const [searchTruncated, setSearchTruncated] = useState(false);
   const [pathEditing, setPathEditing] = useState(false);
   const [pathInput, setPathInput] = useState('');
   const [pathError, setPathError] = useState<string | null>(null);
+  const [history, setHistory] = useState<{ paths: string[]; index: number }>({ paths: [], index: -1 });
   const navSeq = useRef(0);
-  const pendingNavigation = useRef<string | null>(null);
-  const pendingPathResolution = useRef<string | null>(null);
+  const pendingNavigation = useRef<NavigationRequest | null>(null);
+  const lastNavigation = useRef<NavigationRequest | null>(null);
+  const loadedDirectory = useRef<{ path: string; hidden: boolean } | null>(null);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
-  const initialPathResolving = useRef<string | null>(null);
   const pathInputRef = useRef<HTMLInputElement | null>(null);
-  const pathRequestSeq = useRef(0);
+  const pathEditRevision = useRef(0);
+  const pathSelection = useRef<{ start: number; end: number; direction: 'forward' | 'backward' | 'none' } | null>(null);
+  const createSeq = useRef(0);
   const mounted = useRef(true);
-  const previousShowHidden = useRef(showHidden);
   const showHiddenRef = useRef(showHidden);
+  const foreground = useRef(surfaceActive);
+  // A search result/error is valid only for the directory, query and options
+  // that produced it. Navigation can finish while the user is still searching.
+  const searchKey = JSON.stringify([cwd, query.trim(), showHidden, searchRevision]);
+  const currentSearch = searchResult?.key === searchKey ? searchResult : null;
+  const searchRows = currentSearch?.rows ?? null;
+  const searchTruncated = currentSearch?.truncated ?? false;
+  const searchBusy = !!query.trim() && !currentSearch;
 
-  useEffect(() => {
-    showHiddenRef.current = showHidden;
-  }, [showHidden]);
+  useLayoutEffect(() => { foreground.current = surfaceActive; }, [surfaceActive]);
 
   useEffect(() => {
     mounted.current = true;
@@ -106,92 +122,144 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     };
   }, []);
 
-  const changeQuery = useCallback((value: string) => {
-    searchAbort.current?.abort();
-    setQuery(value);
-    if (value.trim()) {
-      setCreatingFolder(false);
-      setNewFolderName('');
-    }
-    setSearchRows(null);
-    setSearchTruncated(false);
-    setSearchBusy(value.trim().length > 0);
+  const cancelCreateFolder = useCallback(() => {
+    createSeq.current += 1;
+    setCreatingFolder(false);
+    setNewFolderName('');
     setError(null);
   }, []);
 
-  useEffect(() => {
-    if (pathEditing && surfaceActive) pathInputRef.current?.focus();
-  }, [pathEditing, surfaceActive]);
+  const changeQuery = useCallback((value: string) => {
+    searchAbort.current?.abort();
+    setQuery(value);
+    if (value.trim()) cancelCreateFolder();
+    setSearchResult(null);
+    setError(null);
+  }, [cancelCreateFolder]);
 
-  const cancelPathEdit = useCallback(() => {
-    pathRequestSeq.current += 1;
-    setPathEditing(false);
-    setPathError(null);
+  const capturePathSelection = (input: HTMLInputElement) => {
+    if (!foreground.current || !input.isConnected || input.ownerDocument.activeElement !== input) return;
+    pathSelection.current = {
+      start: input.selectionStart ?? 0,
+      end: input.selectionEnd ?? 0,
+      direction: input.selectionDirection ?? 'none',
+    };
+  };
+
+  const focusPathInput = useCallback(() => {
+    const input = pathInputRef.current;
+    if (!input || !foreground.current) return;
+    input.focus();
+    if (pathSelection.current) {
+      const { start, end, direction } = pathSelection.current;
+      input.setSelectionRange(start, end, direction);
+    } else {
+      input.select();
+    }
   }, []);
 
-  const navigate = useCallback(
-    (path: string, options: { preserveQuery?: boolean } = {}) => {
-      pathRequestSeq.current += 1;
-      pendingPathResolution.current = null;
-      setPathEditing(false);
-      setPathError(null);
-      initialPathHandled.current = true;
-      previousShowHidden.current = showHiddenRef.current;
+  useEffect(() => {
+    if (pathEditing && surfaceActive) focusPathInput();
+  }, [focusPathInput, pathEditing, surfaceActive]);
+
+  const publishListing = useCallback((result: FsListing, hidden: boolean) => {
+    loadedDirectory.current = { path: result.path, hidden };
+    setCwd(result.path);
+    setListing(result);
+  }, []);
+
+  const runNavigation = useCallback(
+    async (request: NavigationRequest) => {
+      // Resolution and listing belong to the same intent. Every completion
+      // (including errors/finally) checks this one owner before publishing.
       const seq = ++navSeq.current;
-      pendingNavigation.current = path;
-      if (options.preserveQuery) {
-        setError(null);
-      } else {
-        changeQuery('');
-      }
-      setCreatingFolder(false);
-      setNewFolderName('');
+      const current = () => mounted.current && seq === navSeq.current;
+      pendingNavigation.current = request;
+      lastNavigation.current = request;
+      initialPathHandled.current = true;
+      setPathError(null);
+      cancelCreateFolder();
       setListingError(null);
       setLoading(true);
-      listDir(path, showHiddenRef.current)
-        .then((result) => {
-          if (seq !== navSeq.current) return;
-          setCwd(result.path);
-          setListing(result);
-        })
-        .catch((cause: unknown) => {
-          if (seq === navSeq.current) {
-            setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+      try {
+        if (request.resolve) {
+          const resolved = await resolveDirectoryPath(request.path);
+          if (!current()) return;
+          // Refreshes reuse this canonical destination and the history intent.
+          request = { ...request, path: resolved, resolve: false };
+          pendingNavigation.current = request;
+          lastNavigation.current = request;
+        }
+        const hidden = showHiddenRef.current;
+        const result = await listDir(request.path, hidden);
+        if (!current()) return;
+        publishListing(result, hidden);
+        setHistory((previous) => {
+          if (request.history === 'refresh') return previous;
+          if (typeof request.history === 'number') {
+            const paths = [...previous.paths];
+            paths[request.history] = result.path;
+            return { paths, index: request.history };
           }
-        })
-        .finally(() => {
-          if (seq === navSeq.current) {
-            pendingNavigation.current = null;
-            setLoading(false);
-          }
+          if (previous.paths[previous.index] === result.path) return previous;
+          const paths = [...previous.paths.slice(0, previous.index + 1), result.path];
+          return { paths, index: paths.length - 1 };
         });
+        if (request.editRevision !== undefined && request.editRevision === pathEditRevision.current) {
+          setPathEditing(false);
+        }
+      } catch (cause: unknown) {
+        if (!current()) return;
+        if (request.editRevision !== undefined) {
+          if (request.editRevision === pathEditRevision.current) {
+            setPathError(fileBrowserErrorMessage(cause, t, t('directoryBrowser.pathNotFound')));
+          }
+        } else {
+          setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+        }
+        // The failed destination did not change cwd, but a hidden-file toggle
+        // may have invalidated its retained source listing. Reconcile that
+        // source once, under this same owner, without hiding the path error.
+        const source = loadedDirectory.current;
+        if (source && source.hidden !== showHiddenRef.current) {
+          const hidden = showHiddenRef.current;
+          pendingNavigation.current = { path: source.path, history: 'refresh' };
+          try {
+            const result = await listDir(source.path, hidden);
+            if (current()) publishListing(result, hidden);
+          } catch (refreshCause: unknown) {
+            if (current()) setListingError(fileBrowserErrorMessage(refreshCause, t, t('apps.fileBrowser.errors.listFailed')));
+          }
+        }
+      } finally {
+        if (current()) {
+          pendingNavigation.current = null;
+          setLoading(false);
+        }
+      }
     },
-    [changeQuery, t],
+    [cancelCreateFolder, publishListing, t],
   );
 
-  const submitPath = useCallback(async () => {
+  const navigate = useCallback((path: string, resolve = false) => {
+    changeQuery('');
+    void runNavigation({ path, resolve, history: 'push' });
+  }, [changeQuery, runNavigation]);
+
+  const submitPath = useCallback(() => {
     const target = pathInput.trim();
     if (!target) return;
-    const requestSeq = ++pathRequestSeq.current;
-    setPathError(null);
-    try {
-      const resolved = await resolveDirectoryPath(target);
-      if (mounted.current && requestSeq === pathRequestSeq.current && resolved) {
-        setPathEditing(false);
-        navigate(resolved);
-      }
-    } catch (cause: unknown) {
-      if (mounted.current && requestSeq === pathRequestSeq.current) {
-        setPathError(fileBrowserErrorMessage(cause, t, t('directoryBrowser.pathNotFound')));
-      }
-    }
-  }, [navigate, pathInput, t]);
+    changeQuery('');
+    void runNavigation({ path: target, resolve: true, history: 'push', editRevision: pathEditRevision.current });
+  }, [changeQuery, pathInput, runNavigation]);
 
   useEffect(() => {
+    let cancelled = false;
     systemFavorites()
-      .then(setSysFavs)
+      .then((favorites) => { if (!cancelled) setSysFavs(favorites); })
       .catch(() => {})
-      .finally(() => setSysFavsLoaded(true));
+      .finally(() => { if (!cancelled) setSysFavsLoaded(true); });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -201,88 +269,51 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     const home = sysFavs.find((favorite) => favorite.key === 'home')?.path;
     const start = initialPath || recentProject || (sysFavsLoaded ? home || '~' : undefined);
     if (!start) return;
-    if (initialPathResolving.current === start) return;
-    initialPathResolving.current = start;
+    let cancelled = false;
     Promise.resolve().then(() => {
-      return resolveDirectoryPath(start);
-    }).then((resolved) => {
-      if (mounted.current && !initialPathHandled.current && resolved) navigate(resolved);
-    }).catch((cause: unknown) => {
-      if (mounted.current && !initialPathHandled.current) {
-        setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
-      }
-    }).finally(() => {
-      if (initialPathResolving.current === start) initialPathResolving.current = null;
+      if (!cancelled && !initialPathHandled.current) navigate(start, true);
     });
-  }, [initialPath, navigate, projects, projectsError, sysFavs, sysFavsLoaded, t]);
+    return () => { cancelled = true; };
+  }, [initialPath, navigate, projects, projectsError, sysFavs, sysFavsLoaded]);
 
   const refreshSearch = useCallback(() => {
     searchAbort.current?.abort();
-    setSearchRows(null);
-    setSearchTruncated(false);
-    setSearchBusy(true);
+    setSearchResult(null);
     setError(null);
     setSearchRevision((revision) => revision + 1);
   }, []);
 
   const refreshCurrent = useCallback(() => {
-    if (pendingPathResolution.current) return;
-    const target = pendingNavigation.current || cwd;
-    if (!target) return;
-    if (query.trim()) {
-      navigate(target, { preserveQuery: true });
-      refreshSearch();
-    } else {
-      navigate(target);
+    // A resolver will read the latest hidden setting before starting its list.
+    // Never reissue an unresolved external path directly to the Files API.
+    if (pendingNavigation.current?.resolve) return;
+    const request = pendingNavigation.current || (cwd ? { path: cwd, history: 'refresh' as const } : lastNavigation.current);
+    if (request) void runNavigation(request);
+    if (query.trim()) refreshSearch();
+  }, [cwd, query, refreshSearch, runNavigation]);
+
+  const cancelPathEdit = useCallback(() => {
+    pathEditRevision.current += 1;
+    // Editing is independent of navigation, but Escape cancels an admitted
+    // manual submission in either its resolver or listing phase.
+    if (pendingNavigation.current?.editRevision !== undefined) {
+      navSeq.current += 1;
+      pendingNavigation.current = null;
+      lastNavigation.current = null;
+      setLoading(false);
+      const source = loadedDirectory.current;
+      if (source && source.hidden !== showHiddenRef.current) {
+        void runNavigation({ path: source.path, history: 'refresh' });
+      }
     }
-  }, [cwd, navigate, query, refreshSearch]);
-
-  useEffect(() => {
-    if (previousShowHidden.current === showHidden || !cwd) return;
-    previousShowHidden.current = showHidden;
-    let cancelled = false;
-    Promise.resolve().then(() => {
-      if (!cancelled) refreshCurrent();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [cwd, refreshCurrent, showHidden]);
-
-  const navigateFavorite = useCallback((path: string) => {
-    const requestSeq = ++pathRequestSeq.current;
-    initialPathHandled.current = true;
     setPathEditing(false);
     setPathError(null);
+  }, [runNavigation]);
+
+  const goToHistory = (index: number) => {
     changeQuery('');
-    setCreatingFolder(false);
-    setNewFolderName('');
-    setListingError(null);
-    pendingNavigation.current = path;
-    pendingPathResolution.current = path;
-    setLoading(true);
-    resolveDirectoryPath(path)
-      .then((resolved) => {
-        if (mounted.current && requestSeq === pathRequestSeq.current && resolved) {
-          pendingPathResolution.current = null;
-          navigate(resolved);
-        }
-      })
-      .catch((cause: unknown) => {
-        if (mounted.current && requestSeq === pathRequestSeq.current) {
-          pendingNavigation.current = null;
-          pendingPathResolution.current = null;
-          setLoading(false);
-          setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
-        }
-      })
-      .finally(() => {
-        if (requestSeq === pathRequestSeq.current && pendingNavigation.current === path) {
-          pendingNavigation.current = null;
-          setLoading(false);
-        }
-      });
-  }, [changeQuery, navigate, t]);
+    void runNavigation({ path: history.paths[index], history: index });
+  };
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -295,22 +326,21 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       searchNames(cwd, trimmed, showHidden, controller.signal)
         .then((result) => {
           if (controller.signal.aborted) return;
-          setSearchRows(result.results.map(searchRow));
-          setSearchTruncated(result.truncated);
+          setSearchResult({ key: searchKey, rows: result.results.map(searchRow), truncated: result.truncated });
         })
         .catch((cause: unknown) => {
           if (controller.signal.aborted) return;
-          setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.searchFailed')));
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setSearchBusy(false);
+          setSearchResult({
+            key: searchKey, rows: [], truncated: false,
+            error: fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.searchFailed')),
+          });
         });
     }, 220);
     return () => {
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [cwd, query, searchRevision, showHidden, t]);
+  }, [cwd, query, searchKey, showHidden, t]);
 
   const projectFavs = useMemo(
     () => (projects || []).filter((project) => !!project.folder_path).map((project) => ({ label: project.display_name, path: project.folder_path as string })),
@@ -329,14 +359,9 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const showEmpty =
     !loading &&
     !listingError &&
+    !currentSearch?.error &&
     !creatingFolder &&
     (inSearch ? !searchBusy && searchRows !== null && searchRows.length === 0 : listing !== null && listing.entries.length === 0);
-
-  const cancelCreateFolder = () => {
-    setCreatingFolder(false);
-    setNewFolderName('');
-    setError(null);
-  };
 
   const createFolder = async (name: string) => {
     const trimmed = name.trim();
@@ -348,12 +373,16 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       setError(t('apps.fileBrowser.errors.invalid_name'));
       return;
     }
+    const seq = ++createSeq.current;
     try {
       await makeDir(joinPath(cwd, trimmed));
+      if (!mounted.current || seq !== createSeq.current) return;
       cancelCreateFolder();
-      navigate(cwd);
+      refreshCurrent();
     } catch (cause: unknown) {
-      setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.createFolderFailed')));
+      if (mounted.current && seq === createSeq.current) {
+        setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.createFolderFailed')));
+      }
     }
   };
 
@@ -367,7 +396,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
         onOpenAutoFocus={(event) => {
           if (pathEditing) {
             event.preventDefault();
-            pathInputRef.current?.focus();
+            focusPathInput();
           }
         }}
         onEscapeKeyDown={(event) => {
@@ -399,6 +428,10 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           onQueryChange={changeQuery}
           onRefresh={refreshCurrent}
           onNavigate={navigate}
+          history={{
+            onBack: history.index > 0 ? () => goToHistory(history.index - 1) : undefined,
+            onForward: history.index < history.paths.length - 1 ? () => goToHistory(history.index + 1) : undefined,
+          }}
           navigationControl={
             pathEditing ? (
               <div className="flex min-w-0 flex-1 flex-col gap-1">
@@ -409,10 +442,12 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     value={pathInput}
                     aria-label={t('directoryBrowser.editPath')}
                     onChange={(event) => {
-                      pathRequestSeq.current += 1;
+                      capturePathSelection(event.currentTarget);
+                      pathEditRevision.current += 1;
                       setPathInput(event.target.value);
                       setPathError(null);
                     }}
+                    onSelect={(event) => capturePathSelection(event.currentTarget)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter') {
                         event.preventDefault();
@@ -441,7 +476,8 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                 aria-label={t('directoryBrowser.editPath')}
                 title={t('directoryBrowser.editPath')}
                 onClick={() => {
-                  pathRequestSeq.current += 1;
+                  pathEditRevision.current += 1;
+                  pathSelection.current = null;
                   setPathInput(cwd);
                   setPathError(null);
                   setPathEditing(true);
@@ -452,9 +488,13 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
             )
           }
           showHidden={showHidden}
-          onShowHiddenChange={setShowHidden}
-          onFavoriteNavigate={navigateFavorite}
-          error={listingError || error}
+          onShowHiddenChange={(hidden) => {
+            showHiddenRef.current = hidden;
+            setShowHidden(hidden);
+            refreshCurrent();
+          }}
+          onFavoriteNavigate={(path) => navigate(path, true)}
+          error={listingError || error || currentSearch?.error}
           toolbarActions={
             <Button
               type="button"
@@ -489,7 +529,11 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     <InlineNameInput
                       initial=""
                       value={newFolderName}
-                      onChange={setNewFolderName}
+                      onChange={(value) => {
+                        createSeq.current += 1;
+                        setNewFolderName(value);
+                        setError(null);
+                      }}
                       placeholder={t('apps.fileBrowser.newFolderPlaceholder')}
                       onCommit={(value) => void createFolder(value)}
                       onCancel={cancelCreateFolder}

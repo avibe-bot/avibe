@@ -37,10 +37,11 @@ const back = (page: Page) => page.getByRole('button', { name: 'Back to app' }).c
 const picker = (page: Page) => page.getByRole('dialog', { name: en.directoryBrowser.title });
 const manualPath = (page: Page) => page.getByPlaceholder(en.directoryBrowser.editPathPlaceholder);
 const resolvedPath = (page: Page) => picker(page).locator('code');
+const initialDirectory = '/fixture/中文项目';
 async function openProjectPicker(page: Page) {
   await open(page);
   await page.getByRole('button', { name: en.newSession.newProject, exact: true }).click();
-  await expect(resolvedPath(page)).toHaveText('/fixture');
+  await expect(resolvedPath(page)).toHaveText(initialDirectory);
   await expect(picker(page).getByRole('button', { name: en.directoryBrowser.select, exact: true })).toBeEnabled();
 }
 const holdBrowse = (page: Page, path: string) => page.evaluate((path) => { window.homeMedia.heldBrowsePaths.push(path); }, path);
@@ -53,13 +54,35 @@ const releaseBrowse = (page: Page, path: string) => page.evaluate((path) => {
 }, path);
 const selection = (page: Page) => manualPath(page).evaluate((input: HTMLInputElement) => ({ start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection }));
 
+for (const width of [390, 1366]) test(`Files picker ${width} searches, refreshes hidden entries and creates a folder through the real API client`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 768 });
+  await openProjectPicker(page);
+  const search = picker(page).getByPlaceholder(en.apps.fileBrowser.searchPlaceholder);
+  await search.fill('另一个');
+  await expect(picker(page).getByRole('button', { name: /^另一个项目(?: |$)/ })).toBeVisible();
+  await picker(page).getByRole('checkbox', { name: en.apps.fileBrowser.showHidden, exact: true }).check();
+  await picker(page).getByRole('button', { name: en.apps.fileBrowser.refresh, exact: true }).click();
+  await expect(search).toHaveValue('另一个');
+  await search.fill('');
+  await expect(picker(page).getByRole('button', { name: /^\.hidden(?: |$)/ })).toBeVisible();
+  expect((await page.evaluate(() => window.homeMedia.listRequests)).at(-1)).toEqual({ path: initialDirectory, showHidden: true });
+  await picker(page).getByRole('button', { name: en.apps.fileBrowser.newFolder, exact: true }).click();
+  const name = picker(page).getByPlaceholder(en.apps.fileBrowser.newFolderPlaceholder);
+  await name.fill('新建文件夹🌱');
+  await name.press('Enter');
+  await expect(picker(page).getByRole('button', { name: /^新建文件夹🌱(?: |$)/ })).toBeVisible();
+  expect((await writes(page, '/api/files/mkdir')).at(-1)?.body.path).toBe(`${initialDirectory}/新建文件夹🌱`);
+  await expect(picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true })).toBeDisabled();
+  await picker(page).screenshot({ path: testInfo.outputPath('files-picker.png') });
+});
+
 for (const width of [390, 1366]) for (const suspended of [false, true]) {
   test(`directory draft ${width}: pending browse preserves text and selection ${suspended ? 'through Settings' : 'in foreground'}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 768 });
     await openProjectPicker(page);
-    const destination = '/fixture/另一个项目';
+    const destination = `${initialDirectory}/另一个项目`;
     await holdBrowse(page, destination);
-    await picker(page).getByRole('button', { name: '另一个项目', exact: true }).click();
+    await picker(page).getByRole('button', { name: /^另一个项目(?: |$)/ }).click();
     await pendingBrowse(page, destination);
     await picker(page).getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
     const text = '/未确认的路径/草稿🌱';
@@ -109,9 +132,9 @@ for (const width of [390, 1366]) for (const suspended of [false, true]) {
 
 test('directory draft survives history and hidden refresh while an obsolete browse cannot replace a manual target', async ({ page }) => {
   await openProjectPicker(page);
-  const start = '/fixture';
-  const destination = '/fixture/另一个项目';
-  await picker(page).getByRole('button', { name: '另一个项目', exact: true }).click();
+  const start = initialDirectory;
+  const destination = `${initialDirectory}/另一个项目`;
+  await picker(page).getByRole('button', { name: /^另一个项目(?: |$)/ }).click();
   await expect(resolvedPath(page)).toHaveText(destination);
   await holdBrowse(page, start);
   await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
@@ -129,7 +152,7 @@ test('directory draft survives history and hidden refresh while an obsolete brow
   await expect(resolvedPath(page)).toHaveText(destination);
   await expect(manualPath(page)).toHaveValue('/隐藏文件刷新草稿');
   await holdBrowse(page, destination);
-  await picker(page).getByRole('button', { name: en.directoryBrowser.hiddenFiles, exact: true }).click();
+  await picker(page).getByRole('checkbox', { name: en.apps.fileBrowser.showHidden, exact: true }).click();
   await pendingBrowse(page, destination);
   const target = '/用户明确提交的路径';
   await manualPath(page).fill(target);
@@ -164,7 +187,7 @@ for (const width of [390, 1366]) for (const reopen of [false, true]) test(`direc
     await page.keyboard.press('Escape');
     await expect(manualPath(page)).toHaveCount(0);
     await edit.click();
-    await expect(manualPath(page)).toHaveValue('/fixture');
+    await expect(manualPath(page)).toHaveValue(initialDirectory);
   }
   await page.keyboard.press('ControlOrMeta+a');
   await page.keyboard.insertText('/提交后的新草稿🌱');
@@ -175,7 +198,10 @@ for (const width of [390, 1366]) for (const reopen of [false, true]) test(`direc
   await expect.poll(() => page.evaluate((path) => window.homeMedia.browseCompletions.includes(path), submitted)).toBe(true);
   await expect(picker(page)).toHaveCount(0);
   await back(page);
-  await expect(resolvedPath(page)).toHaveText(submitted);
+  // Escape is an explicit cancellation; typing an unsubmitted newer draft is
+  // not. Both cases retain the new draft/caret through route withdrawal.
+  const committed = reopen ? initialDirectory : submitted;
+  await expect(resolvedPath(page)).toHaveText(committed);
   await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱');
   // Observe after deferred modal cleanup, before a key could repair focus.
   await page.waitForTimeout(300);
@@ -187,13 +213,18 @@ for (const width of [390, 1366]) for (const reopen of [false, true]) test(`direc
   await expect(manualPath(page)).toHaveValue('/提交后的新草稿🌱x续写🌿');
   await page.keyboard.press('Escape');
   await edit.click();
-  await expect(manualPath(page)).toHaveValue(submitted);
-  expect(await selection(page)).toMatchObject({ start: 0, end: submitted.length });
+  await expect(manualPath(page)).toHaveValue(committed);
+  expect(await selection(page)).toMatchObject({ start: 0, end: committed.length });
   await page.keyboard.press('Escape');
-  await picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
-  await expect(resolvedPath(page)).toHaveText('/fixture');
-  await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
-  await expect(resolvedPath(page)).toHaveText(submitted);
+  const backButton = picker(page).getByRole('button', { name: en.directoryBrowser.back, exact: true });
+  if (reopen) {
+    await expect(backButton).toBeDisabled();
+  } else {
+    await backButton.click();
+    await expect(resolvedPath(page)).toHaveText(initialDirectory);
+    await picker(page).getByRole('button', { name: en.directoryBrowser.forward, exact: true }).click();
+    await expect(resolvedPath(page)).toHaveText(submitted);
+  }
 });
 
 for (const width of [390, 1366]) test(`directory selection ${width} follows text insertion, deletion and caret-only changes through repeated withdrawal`, async ({ page }) => {
@@ -336,7 +367,7 @@ for (const timing of ['pending', 'completed'] as const) test(`actual close disca
 });
 
 async function pickFolder(page: Page) {
-  await page.getByRole('button', { name: '另一个项目', exact: true }).click();
+  await page.getByRole('button', { name: /^另一个项目(?: |$)/ }).click();
   await page.getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
 }
 
@@ -345,7 +376,7 @@ test('no-project handoff preserves picker path/history/manual input and confirma
   await draft(page).fill('没有项目时也保留的中文任务');
   await send(page).click();
   await expect(page.getByRole('dialog', { name: en.directoryBrowser.title })).toBeVisible();
-  await page.getByRole('button', { name: '另一个项目', exact: true }).click();
+  await page.getByRole('button', { name: /^另一个项目(?: |$)/ }).click();
   await page.getByRole('button', { name: en.directoryBrowser.editPath, exact: true }).click();
   const path = page.getByPlaceholder(en.directoryBrowser.editPathPlaceholder);
   await path.fill('/未确认的路径/草稿');
@@ -356,16 +387,16 @@ test('no-project handoff preserves picker path/history/manual input and confirma
   await page.keyboard.press('End');
   await page.keyboard.insertText('/继续编辑');
   await expect(path).toHaveValue('/未确认的路径/草稿/继续编辑');
-  await expect(page.getByPlaceholder(en.directoryBrowser.newFolderPlaceholder)).toHaveCount(0);
+  await expect(page.getByPlaceholder(en.apps.fileBrowser.newFolderPlaceholder)).toHaveCount(0);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: en.directoryBrowser.newFolder, exact: true }).click();
-  const folderName = page.getByPlaceholder(en.directoryBrowser.newFolderPlaceholder);
+  await page.getByRole('button', { name: en.apps.fileBrowser.newFolder, exact: true }).click();
+  const folderName = page.getByPlaceholder(en.apps.fileBrowser.newFolderPlaceholder);
   await folderName.fill('未创建文件夹');
   await settings(page);
   await back(page);
   await expect(folderName).toHaveValue('未创建文件夹');
   await expect(folderName).toBeFocused();
-  expect(await writes(page, '/api/browse/mkdir')).toHaveLength(0);
+  expect(await writes(page, '/api/files/mkdir')).toHaveLength(0);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: en.directoryBrowser.back, exact: true }).click();
   await expect(page.getByRole('button', { name: en.directoryBrowser.forward, exact: true })).toBeEnabled();

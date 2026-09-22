@@ -2,6 +2,7 @@ import type { HTMLAttributes, ReactNode } from 'react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  ChevronLeft,
   ChevronRight,
   Download,
   FileSearch,
@@ -59,6 +60,7 @@ export interface FileBrowserProps {
   onRefresh?: () => void;
   onNavigate: (path: string) => void;
   onFavoriteNavigate?: (path: string) => void;
+  history?: { onBack?: () => void; onForward?: () => void };
   onClearQuery?: () => void;
   navigationControl?: ReactNode;
   showHidden: boolean;
@@ -104,6 +106,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   onRefresh,
   onNavigate,
   onFavoriteNavigate,
+  history,
   onClearQuery,
   navigationControl,
   showHidden,
@@ -158,6 +161,32 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           )}
         >
           <div className={clsx('flex min-w-0 items-center gap-0.5 overflow-x-auto', mobileRoute ? 'order-1 w-full' : 'flex-1')}>
+            {history && (
+              <>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7 shrink-0 text-muted"
+                  aria-label={t('directoryBrowser.back')}
+                  disabled={!history.onBack || loading}
+                  onClick={history.onBack}
+                >
+                  <ChevronLeft className="size-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  className="size-7 shrink-0 text-muted"
+                  aria-label={t('directoryBrowser.forward')}
+                  disabled={!history.onForward || loading}
+                  onClick={history.onForward}
+                >
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </>
+            )}
             {onRefresh && (
               <Button
                 type="button"
