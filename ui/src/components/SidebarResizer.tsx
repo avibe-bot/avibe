@@ -2,28 +2,29 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-/** The one width the sidebar, every desktop content offset and the Settings
- *  overlay edge read. Declared in `index.css` at MIN_SIDEBAR_WIDTH so the
- *  default shell needs no JS; this component overrides it inline while it is
- *  mounted, which is also how the value reaches the overlay's portal. */
-export const SIDEBAR_WIDTH_VAR = '--app-sidebar-w';
-/** The shipped width is the minimum, so the default shell is unchanged. */
-export const MIN_SIDEBAR_WIDTH = 248;
-export const MAX_SIDEBAR_WIDTH = 496;
-const KEYBOARD_STEP = 16;
+import {
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  SIDEBAR_WIDTH_VAR,
+  clampSidebarWidth as clampWidth,
+  currentViewportWidth,
+  maxSidebarWidth,
+} from '../lib/sidebarWidth';
 
-const clampWidth = (width: number) => (
-  Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)))
-);
+const KEYBOARD_STEP = 16;
 
 // This component is the only writer, so the inline value is either a width it
 // set or nothing at all — no need to resolve the stylesheet's own default.
-const readWidth = () => {
+// Unclamped on purpose: it is what the DOM currently shows, which is the only
+// thing a viewport change can find too wide.
+const readPublishedWidth = () => {
   const inline = Number.parseFloat(
     document.documentElement.style.getPropertyValue(SIDEBAR_WIDTH_VAR),
   );
-  return Number.isFinite(inline) ? clampWidth(inline) : MIN_SIDEBAR_WIDTH;
+  return Number.isFinite(inline) ? inline : null;
 };
+
+const readWidth = () => clampWidth(readPublishedWidth() ?? MIN_SIDEBAR_WIDTH);
 
 type Gesture = {
   pointerId: number;
@@ -44,6 +45,7 @@ type Gesture = {
 export const SidebarResizer = () => {
   const { t } = useTranslation();
   const [width, setWidth] = useState(readWidth);
+  const [maxWidth, setMaxWidth] = useState(() => maxSidebarWidth(currentViewportWidth()));
   const [dragging, setDragging] = useState(false);
   const gesture = useRef<Gesture | null>(null);
 
@@ -65,6 +67,21 @@ export const SidebarResizer = () => {
     document.body.style.cursor = active.bodyCursor;
     document.body.style.userSelect = active.bodyUserSelect;
   }, []);
+
+  // Narrowing the window after a wide drag reaches the same starved layout the
+  // cap exists to prevent — the drag is simply earlier in time — so the cap has
+  // to follow the viewport, not just the gesture. Re-clamp only when the width
+  // no longer fits, so an untouched shell keeps needing no JS at all.
+  useEffect(() => {
+    const sync = () => {
+      const max = maxSidebarWidth(window.innerWidth);
+      setMaxWidth(max);
+      const published = readPublishedWidth();
+      if (published !== null && published > max) apply(max);
+    };
+    window.addEventListener('resize', sync);
+    return () => window.removeEventListener('resize', sync);
+  }, [apply]);
 
   // Unmount is also how a gesture ends when the viewport leaves desktop layout:
   // give the borrowed styling back, and the width back to the stylesheet, so one
@@ -121,7 +138,7 @@ export const SidebarResizer = () => {
       aria-label={t('appShell.resizeSidebar')}
       aria-valuenow={width}
       aria-valuemin={MIN_SIDEBAR_WIDTH}
-      aria-valuemax={MAX_SIDEBAR_WIDTH}
+      aria-valuemax={maxWidth}
       tabIndex={0}
       // Read by the Settings overlay, which is dismissed by an interaction
       // outside itself and would otherwise close the moment this edge — which

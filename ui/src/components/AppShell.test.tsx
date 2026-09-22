@@ -3,9 +3,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { closeSettingsOverlay, useSettingsOverlayOrigin } from '../lib/settingsOverlay';
+import {
+  closeSettingsOverlay,
+  settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
+  useSettingsOverlayOrigin,
+} from '../lib/settingsOverlay';
 
 import { APP_TAB_PARAM } from '../apps/appLaunch';
 import {
@@ -15,6 +21,11 @@ import {
   readMobileProjectsListSnapshot,
 } from '../lib/mobileProjectsListMemory';
 import { selectLanguage } from '../lib/useLanguageSelection';
+import {
+  SETTINGS_MENU_PLACEMENT_STORAGE_KEY,
+  useStandaloneSettingsMenu,
+} from '../lib/settingsMenuPlacement';
+import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '../lib/settingsSectionMemory';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -100,13 +111,31 @@ vi.mock('../context/DockProvider', () => ({
     <div data-testid="dock-provider" data-enabled={String(enabled)}>{children}</div>
   ),
 }));
+// Captures the one prop the shell hands the manager: what to do when a window is
+// about to come forward. The real manager calls it from `focus`/`openApp`; here
+// the test calls it directly, which is the same event from the shell's side.
+const windowManager = vi.hoisted(() => ({ foreground: null as (() => void) | null }));
 vi.mock('../context/WindowManagerProvider', () => ({
-  WindowManagerProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+  WindowManagerProvider: ({ children, onWindowForeground }: {
+    children: ReactNode;
+    onWindowForeground?: () => void;
+  }) => {
+    windowManager.foreground = onWindowForeground ?? null;
+    return <>{children}</>;
+  },
 }));
 vi.mock('../context/ShowPageDragProvider', () => ({
   ShowPageDragProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
-vi.mock('./AppsLauncher', () => ({ AppsLauncher: () => <div data-testid="apps-launcher" /> }));
+// Stands down when its boundary suspends it, exactly as the real launcher does
+// (`useRouteSurfaceActive() ? … : null`) — a stub that always rendered would
+// report a live Apps button in every state the shell retires it.
+vi.mock('./AppsLauncher', async () => {
+  const { useRouteSurfaceActive } = await import('../lib/routeSurfaceActivity');
+  return {
+    AppsLauncher: () => (useRouteSurfaceActive() ? <div data-testid="apps-launcher" /> : null),
+  };
+});
 vi.mock('./AccountMenu', () => ({ AccountMenu: () => <div data-testid="account-menu" /> }));
 vi.mock('./LanguageSwitcher', () => ({ LanguageSwitcher: () => <div data-testid="language-switcher" /> }));
 vi.mock('./ThemeToggle', () => ({ ThemeToggle: () => <div data-testid="theme-toggle" /> }));
@@ -114,7 +143,11 @@ vi.mock('./VersionBadge', () => ({ VersionBadge: () => null }));
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
-vi.mock('./apps/WindowLayer', () => ({ WindowLayer: () => <div data-testid="window-layer" /> }));
+vi.mock('./apps/WindowLayer', () => ({
+  WindowLayer: ({ active }: { active: boolean }) => (
+    <div data-testid="window-layer" data-active={String(active)} />
+  ),
+}));
 vi.mock('./workbench/NewSessionSheet', () => ({
   NewSessionSheet: () => null,
 }));
@@ -140,8 +173,32 @@ const SettingsExit = ({ testId }: { testId: string }) => {
   </div>;
 };
 
+// Stands in for a background route the shell can land back on, and for the one
+// thing the real Settings surface reads from the shell on its way out: whether
+// this close is handing focus to a window (`SettingsFocusHandoffContext`).
+const chatProbe = { handoff: null as boolean | null };
+const ChatProbe = () => {
+  const { sessionId } = useParams();
+  const handoffRef = useSettingsFocusHandoff();
+  // Child effects run before the shell's own, so this reads the flag as the
+  // Settings surface's deferred close callback would find it on this commit.
+  useEffect(() => {
+    chatProbe.handoff = handoffRef?.current ?? null;
+  });
+  return <div data-testid="chat">{sessionId}</div>;
+};
+
+// Stands in for the Settings surfaces, which read this and nothing else to
+// decide whether their menu replaces the app sidebar or opens beside it.
+const StandaloneMenuProbe = () => (
+  <span data-testid="standalone-menu">{String(useStandaloneSettingsMenu())}</span>
+);
+
 beforeEach(() => {
   viewport.isDesktop = false;
+  windowManager.foreground = null;
+  chatProbe.handoff = null;
+  window.localStorage.clear();
   clearMobileProjectsListSnapshot();
   instanceAuth.remote = true;
   instanceAuth.instanceKind = null;
@@ -334,6 +391,246 @@ describe('AppShell sidebar width', () => {
       .toHaveLength(expected);
   });
 
+  // Standalone Settings stands IN FOR this column, so the two have to agree on
+  // one width or the left edge jumps as Settings opens. Inline Settings opens
+  // beside the column, which therefore has to stay live — navigable, keyboard
+  // reachable, and able to raise the palettes, which float above the surface.
+  it.each([
+    ['standalone', true],
+    ['inline', false],
+  ] as const)('retires the sidebar only where Settings replaces it (%s)', async (
+    placement,
+    covered,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    const aside = document.querySelector('aside');
+    expect(aside?.hasAttribute('inert')).toBe(covered);
+    expect(aside?.className.includes('invisible')).toBe(covered);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className
+      .includes('md:ml-[var(--app-sidebar-w)]')).toBe(!covered);
+
+    // ⌘K belongs to whichever surface owns the shell.
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'k',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    })));
+    expect(screen.getByTestId('search-palette').getAttribute('data-open')).toBe(String(!covered));
+  });
+
+  // The exception to the rule above, and the reason the two flags exist at all.
+  // The window layer spans the whole viewport at z-20 so a window can be dragged
+  // over the sidebar; inline Settings is opaque from the sidebar's trailing edge
+  // at z-30. Left live, a window would show as a strip over the very column
+  // inline exists to keep, with everything that makes it a window — title bar,
+  // controls, content — behind Settings. Live-but-invisible is worse than
+  // retired, so this one retires in both placements.
+  it.each(['standalone', 'inline'] as const)(
+    'retires the window layer under %s Settings',
+    async (placement) => {
+      viewport.isDesktop = true;
+      window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+      renderShell('/settings/general');
+      await screen.findByTestId('surface');
+
+      expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
+      expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('false');
+    },
+  );
+
+  // ...and comes back, so retiring it is not a way of losing it.
+  it('restores the window layer once Settings closes', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    renderShell('/');
+    await screen.findByTestId('surface');
+
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+    expect(screen.getByTestId('window-layer').getAttribute('data-active')).toBe('true');
+    expect(screen.getByTestId('apps-launcher')).toBeTruthy();
+  });
+
+  // The launcher does NOT go with the layer. It is a sidebar control, and it
+  // retires with the column it sits in like every other control there: gone
+  // under standalone, which stands in for that column, present under inline,
+  // which keeps it. Taking Apps away under inline is the sidebar losing a button
+  // that is on screen the rest of the time, for no reason the user can see.
+  it.each([
+    ['standalone', false],
+    ['inline', true],
+  ] as const)('keeps the Apps launcher wherever the sidebar stays live (%s)', async (
+    placement,
+    live,
+  ) => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    expect(Boolean(screen.queryByTestId('apps-launcher'))).toBe(live);
+  });
+
+  // What makes keeping it safe: the layer a window arrives in is hidden while
+  // Settings is open, so coming forward has to leave Settings first — the same
+  // exit a sidebar link takes by navigating, and the toggle beside it by closing.
+  // The shell says it once, to the manager, rather than each caller working out
+  // what is covering the layer.
+  it('leaves Settings when a window comes forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(true);
+
+    act(() => windowManager.foreground?.());
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(screen.getByTestId('window-layer').parentElement?.hasAttribute('hidden')).toBe(false);
+  });
+
+  // Coming forward is announced per window, and one gesture can raise many: the
+  // Dock's "Show all windows" restores every minimized window in a loop, so the
+  // announcements all land before React can re-render with Settings closed.
+  // Leaving is not per window — it is per gesture. Answering each would run the
+  // exit's history traversal once per window and land that many entries before
+  // the origin, on a route the user never asked to see.
+  it('leaves Settings once however many windows come forward', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    // The exit walks history back to the origin when it can tell where that is,
+    // which is the path a repeat overshoots; the fallback replace is idempotent
+    // and would hide the defect.
+    const origin = {
+      historyIndex: 1,
+      location: {
+        pathname: '/chat/session-2', search: '', hash: '', state: null, key: 'origin',
+      },
+    };
+    window.history.replaceState({ idx: 2 }, '');
+    try {
+      render(
+        <MemoryRouter
+          initialEntries={[
+            '/chat/session-1',
+            '/chat/session-2',
+            { pathname: '/settings/general', state: settingsOverlayStateForOrigin(origin, null) },
+          ]}
+          initialIndex={2}
+        >
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="chat/:sessionId" element={<ChatProbe />} />
+              <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+      expect(await screen.findByTestId('settings')).toBeTruthy();
+
+      // One gesture, three windows: the same synchronous batch the Dock produces.
+      act(() => {
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+        windowManager.foreground?.();
+      });
+
+      // The origin, not two entries further back.
+      expect((await screen.findByTestId('chat')).textContent).toBe('session-2');
+    } finally {
+      window.history.replaceState(null, '', '/');
+    }
+  });
+
+  // Who holds DOM focus after this exit is not the Settings surface's usual
+  // answer. The window that caused it has already taken focus, and the window
+  // chords read their target from focus, so handing it back to the control that
+  // opened Settings would put a window on screen that ⌘W no longer closes. Only
+  // the shell knows this close had a cause, so the shell is what says so.
+  it('marks the window exit as a focus handoff, and spends it only there', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="chat/:sessionId" element={<ChatProbe />} />
+            <Route path="settings/general" element={<SettingsExit testId="settings" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    expect(await screen.findByTestId('settings')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(true);
+
+    // The same flag, one visit later. Nothing about the toggle's own close hands
+    // focus anywhere, so a flag still standing from the previous exit would take
+    // the return focus away from the control that asked for it.
+    await user.click(screen.getByRole('link', { name: 'appShell.openControlPanel' }));
+    await user.click(await screen.findByRole('button', { name: 'settings.close' }));
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+    expect(chatProbe.handoff).toBe(false);
+  });
+
+  // The window it opens is the foreground, not a reason to leave one route for
+  // another: with Settings closed there is nothing to clear out of the way.
+  it('stays put when a window comes forward outside Settings', async () => {
+    viewport.isDesktop = true;
+    render(
+      <MemoryRouter initialEntries={['/chat/session-1']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="chat/:sessionId" element={<div data-testid="chat" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId('chat')).toBeTruthy();
+
+    act(() => windowManager.foreground?.());
+
+    expect(screen.getByTestId('chat')).toBeTruthy();
+    expect(screen.queryByTestId('workbench')).toBeNull();
+  });
+
+  it('covers the shell below md even when inline is the stored preference', async () => {
+    viewport.isDesktop = false;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    renderShell('/settings/general');
+    await screen.findByTestId('surface');
+
+    // A phone has no room for two rails, so the preference is not in force.
+    expect(document.querySelector('aside')?.hasAttribute('inert')).toBe(true);
+    expect(document.getElementById(APP_SHELL_SCROLL_ID)?.className)
+      .not.toContain('md:ml-[var(--app-sidebar-w)]');
+  });
+
   it('leaves a standalone app tab without a sidebar to resize', async () => {
     viewport.isDesktop = true;
     // The shell reads standalone mode from the document URL, once, at mount.
@@ -344,6 +641,35 @@ describe('AppShell sidebar width', () => {
 
       expect(document.querySelector('aside')).toBeNull();
       expect(screen.queryByRole('separator', { name: 'appShell.resizeSidebar' })).toBeNull();
+    } finally {
+      window.history.replaceState({}, '', '/');
+    }
+  });
+
+  // The same tab, asked the question Settings actually asks. `inline` is a claim
+  // about the app sidebar being on screen to open beside; here there is none, so
+  // Settings has to come up standalone however the owner set the preference for
+  // the windows that do have one. The shell states that, because only the shell
+  // can: standalone mode comes from a document flag frozen at mount, which no
+  // pathname predicate can recover — and the route Settings lands on says
+  // nothing about the shell it opened over anyway, as with the config-recovery
+  // banner's Diagnostics link in a single-app tab.
+  it('publishes a sidebar-free shell to the Settings surfaces above it', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    window.history.replaceState({}, '', `/apps/editor?${APP_TAB_PARAM}=1`);
+    try {
+      render(
+        <MemoryRouter initialEntries={['/apps/editor']}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="*" element={<StandaloneMenuProbe />} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      expect((await screen.findByTestId('standalone-menu')).textContent).toBe('true');
     } finally {
       window.history.replaceState({}, '', '/');
     }
@@ -456,6 +782,66 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.queryByTestId('language-switcher')).toBeNull();
     expect(screen.queryByTestId('theme-toggle')).toBeNull();
     expect(screen.queryByTestId('account-menu')).toBeNull();
+  });
+
+  it('opens Settings on the section this device was left on', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="settings/backends" element={<div data-testid="backends" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    // Resolved on the link itself, not left to the Settings root to redirect,
+    // so the section is what the click paints rather than what a second frame
+    // corrects — and so the href a user hovers names where they will land.
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/backends');
+
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('backends')).toBeTruthy();
+  });
+
+  it('follows the section another tab moved to', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/backends');
+
+    // A second tab of the same origin selecting a different row reaches this
+    // one as a storage event. Without a subscriber the link keeps offering the
+    // section the rail has left, for as long as nothing else rerenders here.
+    act(() => {
+      window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/replies');
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: SETTINGS_LAST_SECTION_STORAGE_KEY,
+        newValue: '/settings/replies',
+      }));
+    });
+
+    expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href'))
+      .toBe('/settings/replies');
   });
 
   it('uses the Settings button to return to the route that opened Settings', async () => {

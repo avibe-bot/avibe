@@ -1,0 +1,337 @@
+# Official feedback intake — first launch
+
+Owner: local PM Session seskmjhgq2476. Owner requested launch on 2026-09-20.
+The user-facing outcome is: an Avibe user without a GitHub account asks their
+current Agent to report a bug or feature, reviews the sanitized publication,
+and receives the actual Issue link after official submission succeeds.
+
+## Scope and reuse
+
+Use the existing dedicated avibe-feedback VM on ad, Session `ses9u23mgw6dr`,
+Share ID `132vCvND49U`, and its paired origin
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/. Reuse public Show server API admission
+from merged PR2039 and the use-avibe feedback guidance from merged PR2037.
+This is an installed Show application, not a new Cloud service or general
+cross-instance Agent execution API. No GitHub webhook is required. No model
+Agent runs in the intake VM. All GitHub writes target github.com/avibe-bot/avibe.
+
+First launch covers bug/feature submission and retrieving its public Issue URL.
+Existing local GitHub-authorized submission remains available. Follow-up comments,
+anonymous identity, arbitrary attachments/URLs, triage/merge automation and a new
+interactive browser form are outside this first launch. Issue activity can use
+the existing user-side Watch after an Issue URL is known. Do not promise releases
+or resolution events unsupported by that waiter.
+
+## Fixed protocol (v1)
+
+PM accepted the allocated public Show Session `ses9u23mgw6dr`, share ID
+`132vCvND49U`, on 2026-09-20. PM observed it private at access revision 2 with the same staged binding; the
+intake remains unavailable until commissioning verifies the reviewed app. This
+source change does not change page visibility. No client accepts a destination
+from report text, issues or redirects. POST endpoint is
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/api/feedback; GET receipt
+endpoint is
+https://avibe-feedback-app.avibe.bot/p/132vCvND49U/api/feedback-status?request_id=<UUIDv4>.
+
+POST JSON has exactly these fields:
+
+```json
+{
+  "schema_version": 1,
+  "request_id": "an RFC4122 UUIDv4 generated once by the submitting client",
+  "kind": "bug",
+  "title": "component: observed symptom or requested capability",
+  "body": "The complete sanitized Markdown approved for publication.",
+  "public_consent": true
+}
+```
+
+kind is bug or feature; title is nonempty, single-line, at most200characters;
+body is nonempty and at most20000UTF-8 bytes. Entire request <=32768bytes.
+Unknown fields, unsupported versions/kinds, malformed encodings and false
+consent fail before writes. No labels, assignees, target repo, executable paths,
+callback URLs, credentials or priority are accepted. Text is data throughout.
+
+The existing native POST ingress returns a status-only generic body. Do not
+change that core contract to carry an Issue URL. The client retains request_id
+before POST and reads GET feedback-status with that same ID for a receipt.
+The ID is a correlation key, not authority to mutate anything or a credential;
+the public GET response contains no report body/title, personal identity, PAT or
+raw upstream errors. It is permitted in the URL because the only disclosed
+success value is a public GitHub Issue reference. No supplemental write route.
+
+Receipt JSON: schema_version=1, request_id, state; state is pending, created,
+unknown or failed. Only created includes issue_number and canonical issue_url
+under https://github.com/avibe-bot/avibe/issues/<number>. Absent ID returns404.
+Controlled failures may carry an allowlisted error code, no internal details.
+Receipts are no-store. Bound GET requests and return only known record results;
+do not make GitHub requests on every status read.
+
+## Submission correctness
+
+One app-owned SQLite ledger, outside Avibe internal storage, durably reserves
+request_id+payload hash before issuing a GitHub POST. Concurrent same-ID same-body
+submissions coalesce; changed payload with same ID returns409. Exact repeats can
+read the recorded receipt and must not issue another GitHub write. Record unknown
+before the write is attempted; a crash/timeout after it may have reached GitHub
+must remain unknown without automatic retry. An interrupted pending reservation
+cannot be silently reset into a fresh submission. Do not infer success from
+content search or manufacture an exactly-once guarantee GitHub does not provide.
+
+A successful upstream201 supplies the operation-bound issue ID/URL. Read that
+specific Issue back, validate pinned repo/author/title/body, and then expose its
+receipt as created. If readback is temporarily unavailable, retain the returned
+identity and distinguish created/unverified until bounded reconciliation; the
+client must not claim fully verified success early. The implementation may use
+pending while this bounded readback completes, with the receipt identity retained
+privately. Unknown outcome is terminal for automatic writes, not a retry signal.
+Requests definitely rejected before any GitHub write can fail explicitly.
+
+## Boundaries
+
+- Credentials stay in this VM's Vault: named static Standard reference
+  AVIBE_FEEDBACK_GITHUB_TOKEN, only target-repo Issues read/write and Metadata.
+  Use the installed supported Vault API/CLI with opaque named injection, never
+  copy the Mac/e2e developer credential or print secrets. Missing PAT disables
+  writes without blocking isolated implementation/tests.
+- The operator binding is actor `cs-agent-bot` (user ID `272811739`) and
+  repository `avibe-bot/avibe` (repository ID `1035030370`); neither is
+  accepted from report data or ambient configuration.
+- Fixed HTTPS api.github.com endpoints; no redirects or ambient proxies selecting
+  another destination. Verify effective GitHub actor using the same credential;
+  operator binds it to the official service, client discloses official submission.
+- The deployed compatibility fixture must support packaged Show Runtime
+  `5e31eda3536db3ea4de018fb253d0ed7d5c69a09`, Linux archive SHA256
+  `ea1079eca7bf532192c72950e1c9cd6f183192fb3c30af6a87f7fa0a63305b6e`, and
+  manifest SHA256 `98725b13df13c206ba689609f5df198bd5cd9b83d3484b58142944a2775e7698`.
+- Native manifest32KiB bound before Runtime. Handler/service also bound bytes,
+  strings, execution time, subprocess output and upstream response. Use argv/stdin
+  JSON, no shell evaluation of report text. No URL fetches from report content.
+- Bounded global admission/concurrency: default5new submissions/minute,
+  30/day, at most2upstream writes concurrently. Durable counters survive restart;
+  repeats/status must not multiply writes. Do not trust forwarded user headers as
+  identity or claim these are per-user quotas. This bounds public abuse but cannot
+  prevent an attacker exhausting the public quota; document that limitation.
+- Bound ledger capacity (e.g.10000receipts) and fail closed when full; do not
+  evict uncertain/in-flight evidence or permit an old ID to recreate a write.
+- Public ingress does not invoke an Agent, shell script from content, merge,
+  Task or Watch. Keep original instance/config/Vault/terminal/other Sessions
+  protected. Preserve guest isolation and cloud pairing.
+- Security/vulnerability/private reports remain local or use a verified private
+  policy destination; client must not send them to this public Issue service.
+
+## Code ownership and deployment
+
+Single product writer owns examples/feedback-intake/**, focused
+tests/test_feedback_intake*.py, integration fixture/script inside that app,
+skills/use-avibe/SKILL.md and references/feedback.md, an optional small existing
+skill client helper, and this plan. Reuse existing Python/Node tooling, no new
+framework or core/runtime/UI changes by default. Report a proven contract gap
+before widening scope. No edits in the dirty primary checkout.
+
+Existing deployment operator sesbqrgqcq576 owns VM preparation and installation,
+not source edits. It allocates the Show Session, prepares a fixed reviewed runtime
+that includes PR2039, preserves systemd and state, installs only the independently
+accepted app artifact, warms Runtime, and verifies live behavior. No changes to
+ad host runtime, e2e webhook, nightly, Cloud acceptance or sibling guests.
+Deployment and necessary guest service restart are authorized by launch request;
+no GitHub merge or public release authority is inferred.
+
+## Acceptance
+
+Hermetic tests use synthetic secrets, tempSQLite/HOME/config, real production
+validation/ledger code, and an isolated fake GitHub server behind a test-only seam.
+Demonstrate actual HTTP through UI->pinnedRuntime->TS handler->Vault invocation
+adapter->receiver->testGitHub->readback and receipt GET with Unicode/newlines.
+Concurrent repeats, conflicting ID, ambiguous timeout/restart, limits and secret
+leak boundary must be tested. Fake seams cannot claim live credential acceptance.
+All product changes require current-head Codex clean pass, full applicable CI,
+zero unresolved threads and PM actual diff/consumer review. Cyhhao triggers review;
+do not manually mention Codex. Circuit breaker applies. No merge by lane.
+
+Live launch gate: reviewed bytes installed; actual public URL/discovery bound;
+PAT present/actor validated; bad requests cannot publish; one explicit authorized
+smoke submission and repeat return one actual Issue with rendered readback and
+link. Do not publish a synthetic public Issue until PM has reconciled concrete
+content and publication authority. Do not call deployment complete if PAT or
+public end-to-end submission is missing. Return a precise remaining prerequisite.
+
+## Implementation and artifact acceptance
+
+The app supervisor validates/reserves the report before calling named Vault run.
+Only request ID and an internal reservation token cross argv; report content is
+read from the app ledger because the supported Vault CLI uses stdin for sealed
+envelopes. The same injected credential binds actor/repository/create/readback.
+The 201 immutable Issue ID, number and canonical URL are committed before GET.
+Public GET projects only state and verified public URL, without upstream egress.
+An operator-only `worker.py reconcile <request_id>` permits at most three bounded
+read-only reconciliations of a retained Issue identity after the prior deadline.
+
+Kernel-owned file locks bound active upstream workers to two and release only
+on actual worker exit. Workers enforce an absolute 20-second reservation
+cutoff with SIGALRM; delayed Vault delivery cannot start a stale write. The
+supervisor tracks and kills actual descendants, including avault's separate
+process session, on timeout or excess output. Expired pending reservations become durable failed without a write; unknown
+reservations never become new writes. The remote GitHub operation may still
+complete after disconnection: no exactly-once or remote cancellation claim.
+
+The app requires an explicit private ledger directory outside AVIBE_HOME and
+all Show workspaces, plus an explicit app root for bundled TS handlers. Existing
+Python/Node tooling and avibe-os's psutil dependency suffice. No core changes.
+See examples/feedback-intake/README.md for deployment and recovery instructions.
+
+The client helper ships under the existing use-avibe identity in the normal
+wheel and built-in content-addressed publication. A deployed receiver does not
+update installed clients. PM reconciles the exact reviewed wheel/hash and
+normal install authority separately; no release/merge is granted by this plan.
+The app integration verifies the frozen manifest hash and platform archive hash
+before using packaged Runtime 5e31. Local macOS compatibility is not proof of
+Linux live commissioning, write permission or universal client distribution.
+
+First review refinement: worker slot rejection before claiming a pending row
+persists a known no-write failed receipt. A native pre-reservation 429 instead
+leaves no service receipt; the client durably records the directly observed POST
+status before polling its receipt, even when the following status request is
+busy, unavailable, malformed or interrupted. That observation is history, not
+proof that no concurrent delivery exists. Only a later explicit identical
+submit that gets a fresh minimal 404 may send the same saved ID and bytes.
+Resume remains status-only. Saved verified terminal receipts survive polling
+outages, and client state honors AVIBE_HOME. Artifact verification uses explicit
+errors so optimized Python cannot remove commissioning checks.
+
+## PM R2 whole-class decision (2026-09-20)
+
+PM independently reproduced retry-intent interruption, wrong-platform archive
+acceptance and unsupported extraction-filter invocation at head d9933a310.
+Reviews 5259791943 (f8b630568) and 5259828654 (d9933a310) are two findings-bearing
+heads. Admission/outcome lifecycle and artifact acceptance each appeared on
+both; the writer paused cleanly. PM completed the whole-class diagnosis and
+authorized this bounded continuation in the original scope. Counts do not reset;
+any further finding in either class returns to PM before another edit/push.
+No queue, daemon, new endpoint, receiver schema rewrite or core/runtime change.
+
+The receiver remains the durable owner of GitHub write admission. A same-ID,
+same-bytes recovery delivery can coalesce with an older arriving delivery only
+because reserve/claim are atomic and no receipt is reset or evicted. Delivery
+recovery is not permission for a second GitHub operation.
+
+The current state table below incorporates the R4 amendment; R2 originally
+required both POST429 and GET404 to acquire history, now superseded. Client
+state separates the historical rejection flag (`retryable`, meaning a
+directly observed POST429 with no saved receipt) from phase and send generation.
+It is retained independently of the next status request; a new explicit submit
+still needs a fresh minimal 404 before it may send:
+
+| Evidence / phase | Publicly reported result | Explicit identical submit | resume |
+| --- | --- | --- | --- |
+| Initial sending/unknown, no rejection history | unknown until valid receipt | GET only, even after404 | GET only |
+| Observed429, rate_limited | local rate_limited admission; another delivery may exist | GET first; minimal404 permits one same-ID/bytes send | GET only |
+| Observed429, sending interrupted/uncertain | unknown; prior rejection does not describe current send | GET first; minimal404 permits one recovery delivery | GET only |
+| Any observed pending/unknown receipt | saved server state | GET only permanently | GET only |
+| Verified created/failed | saved terminal receipt, including URL | GET only permanently | GET only |
+
+Before every explicit recovery send, valid pending/unknown/created/failed settles
+eligibility permanently. Unavailable, malformed, redirected or other responses
+suppress delivery. A GET404 without historical observed429 grants nothing. A
+fresh minimal404 permits exactly one delivery attempt in that invocation; the
+client commits sending plus a generation while retaining historical evidence.
+Only a directly observed 429 for that generation records rate_limited. All
+receipt merges run in transactions: terminal evidence never regresses, unknown
+never returns to pending, and late rejection cannot restore rights over an
+observed reservation. Old rows lacking eligibility remain conservative; no
+unknown reset is added.
+
+Artifact preparation imports the existing side-effect-free platform selector
+and safe extractor from core.managed_runtime. The executing platform chooses
+exactly one manifest entry; manifest SHA/version, entry filename and actual hash
+are checked before extraction. The shared extractor supplies legacy Python3.10
+member/link containment, type and collision checks as well as modern data_filter.
+All acceptance/confinement checks remain explicit under -O. Local platform
+success is not Linux guest acceptance. The staged share is private revision2.
+
+## PM R3 independent test evidence reconciliation (2026-09-20)
+
+At exact head 6365f99dc, PM's independent archived-source run produced31passes
+and1failure: the race test queried final status after only the recovery helper
+finished. PM independently reproduced the diagnostic ordering: original handler
+owned the write, ledger held the201identity and unknown while readback was gated,
+and both handler/worker were incomplete. After explicit completion events,
+worker exit0 and verified created appeared, with one upstream POST/Issue throughout.
+The original failed run and diagnostic evidence remain preserved; that head's
+race acceptance was withdrawn pending correction. This is PM consumer evidence,
+not a third Codex findings-bearing head or a product state-model defect.
+
+PM authorized only the recovery fixture/test and this evidence wording to change.
+The test now controls both original-wins/recovery-wins reservation orders,
+observes legitimate unknown during real gated readback, and waits boundedly for
+both upload handlers and the owning worker before asserting verified created.
+It retains exact ID/bytes, one POST/Issue, actual readback and GET-only resume
+assertions; cleanup releases barriers and joins/reaps owned resources. Production
+bytes remain identical. No subsequent head is pushed during the pending6365f99
+Codex review; actual findings must first be reconciled against the two-head history.
+
+## PM R4 rejection-evidence decision (2026-09-20)
+
+At exact head e32351d5b, Codex finding4056419180 identified a second boundary in
+the same admission/outcome lifecycle class: a POST429 was discarded when the
+following public status request was itself busy. PM independently reproduced
+POST429 followed by GET429 and GET503, then a later GET404; resume and identical
+submit performed no second POST. The prior requirement that eligibility needed
+429 plus 404 is superseded only by the rules in this section. The durable counts
+remain three findings-bearing heads; lifecycle appears on all three, and the
+writer paused before editing.
+
+The client now records a directly observed POST429 with the current generation,
+phase and absence of a saved receipt before reading an optional POST body or
+starting another request. That local rejection is evidence about that delivery,
+not proof that no concurrent or prior delivery exists. A later failure, busy
+response, timeout, disconnect, malformed body or invalid status receipt cannot
+erase it. A new explicit identical submit must still receive a fresh minimal
+GET404 before one same-ID, same-byte delivery; resume remains GET-only. Any
+valid pending, unknown, failed or created receipt permanently wins and removes
+replay eligibility. An initial timeout, 5xx or disconnect without observed429
+remains conservative and cannot become replayable merely because a later GET404
+appears. POST status is authoritative for this local observation; its body is
+optional data and cannot select a destination or grant permission.
+
+The exact e323 source was exercised through an isolated UI HTTP server and the
+packaged Runtime5e31. The candidate TS handler and `runWorker` were unchanged.
+The probe used only a fixed temporary executable through `AVIBE_FEEDBACK_PYTHON`
+to hold child slots by loopback IPC; it did not invoke Vault or GitHub. Runtime
+compilation showed that POST and GET have separate active counters: four held
+POST children caused the fifth POST to return the native status-only rejection
+and left no receipt, while GET still started an independent child and returned
+404. Four held GET children caused the fifth GET to return429 while POST still
+started an independent child and returned202. All child processes, handlers,
+listeners and the Runtime exited cleanly. The probe's JSON evidence and source
+hashes were delivered to PM; this admission probe does not replace the
+separately recorded real Vault/GitHub-fake integration.
+
+The bounded continuation updates only the existing Skill helper, focused client
+consumers, Skill reference and launch documentation. It adds no queue, endpoint,
+receiver schema, Runtime/core/UI change or automatic retry. Tests cover every
+status-query outcome after observed429, status-independent POST body handling,
+interruption after the durable observation, fresh404-gated recovery, monotonic
+server receipt precedence and the existing one-write race. Any new finding in
+this lifecycle class returns to PM before another edit or push.
+
+## Post-merge public edge compatibility finding (2026-09-20)
+
+After PR #2066 was merged, the first read-only request through the allocated
+public edge exposed a client compatibility defect. The default
+`Python-urllib/3.x` user agent was rejected by the edge with Cloudflare 1010,
+while the same GET request with `avibe-feedback-intake/1` reached the application
+and returned the expected empty receipt (`404` and `{}`). A browser user agent
+also reached the application. This was an edge admission policy interaction;
+the receiver protocol, status-only POST contract, receipt semantics, and fixed
+destination were unchanged. No credential or GitHub write was involved.
+
+The smallest correction fixes the existing use-avibe helper's product
+`User-Agent` to `avibe-feedback-intake/1` for every request. Content-Type,
+redirect blocking, proxy disabling, deadlines, POST status handling, unknown
+outcome protection, and GET-only resume remain unchanged. A focused consumer
+test sends both GET and POST through the helper's real `urllib.request.Request`
+and loopback HTTP path and asserts that the product user agent arrives at the
+server for both methods. The public-edge observation is operational evidence,
+not a CI dependency; no external request or public Issue creation is required
+for this correction.

@@ -1184,7 +1184,7 @@ export const RouteChainDialog: React.FC<{
             phase === "refreshing" ||
             phase === "reconciling"
           }
-          className="model-hub-route-dialog fixed left-1/2 z-50 flex -translate-x-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
+          className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             cancelButtonRef.current?.focus();

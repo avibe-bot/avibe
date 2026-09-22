@@ -152,6 +152,12 @@ class ModelHubScenarioAdapter:
     async def gateway_token(self) -> str:
         return "scenario-engine-token"
 
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        return None
+
+    async def credential_address(self, credential_ref: str) -> str | None:
+        return None
+
     async def provision_transient_credential(
         self,
         vendor: str,
@@ -183,6 +189,9 @@ class ModelHubScenarioAdapter:
 
     async def revoke_credential(self, credential_ref: str) -> None:
         self.revoked.append(credential_ref)
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        await self.revoke_credential(credential_ref)
 
     async def sync_sources(self, bindings) -> None:
         self.synced.append(tuple(bindings))

@@ -1,9 +1,17 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-import { MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, SIDEBAR_WIDTH_VAR, SidebarResizer } from './SidebarResizer';
+import {
+  MAX_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  MIN_WIDTH_BESIDE_SIDEBAR,
+  SIDEBAR_WIDTH_VAR,
+  maxSidebarWidth,
+} from '../lib/sidebarWidth';
+import { DESKTOP_MIN_WIDTH } from '../lib/useIsDesktop';
+import { SidebarResizer } from './SidebarResizer';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -218,5 +226,76 @@ describe('SidebarResizer keyboard', () => {
     expect(handle.getAttribute('aria-valuemin')).toBe(String(MIN_SIDEBAR_WIDTH));
     expect(handle.getAttribute('aria-valuemax')).toBe(String(MAX_SIDEBAR_WIDTH));
     expect(handle.tabIndex).toBe(0);
+  });
+});
+
+// `MAX_SIDEBAR_WIDTH` is a constant, so on its own it lets the sidebar take a
+// share of a narrow window that leaves nothing workable beside it: at 768 a full
+// drag leaves 272px, and inline Settings spends 196 of that on its rail before
+// the page gets any. The cap is the sidebar's own business — every consumer
+// would otherwise re-derive the same budget — and it is expressed as the width
+// the shell keeps free, not as a second magic number.
+describe('SidebarResizer viewport budget', () => {
+  const setViewport = (width: number) => Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+
+  afterEach(() => setViewport(1024));
+
+  it.each([
+    // [viewport, widest allowed, why]
+    [1920, MAX_SIDEBAR_WIDTH, 'room to spare: the plain maximum'],
+    [1016, MAX_SIDEBAR_WIDTH, 'exactly enough for the maximum and the reserve'],
+    [900, 380, 'the reserve wins, so the sidebar stops early'],
+    [DESKTOP_MIN_WIDTH, MIN_SIDEBAR_WIDTH, 'the narrowest desktop affords no growth'],
+    [600, MIN_SIDEBAR_WIDTH, 'below md nothing is rendered, so nothing to constrain'],
+  ])('caps the sidebar at %ipx viewport (%s)', (viewport, widest) => {
+    expect(maxSidebarWidth(viewport)).toBe(widest);
+    expect(viewport - maxSidebarWidth(viewport)).toBeGreaterThanOrEqual(
+      Math.min(MIN_WIDTH_BESIDE_SIDEBAR, viewport - MIN_SIDEBAR_WIDTH),
+    );
+  });
+
+  it('stops the drag at the cap and says so', () => {
+    setViewport(900);
+    render(<SidebarResizer />);
+
+    expect(separator().getAttribute('aria-valuemax')).toBe('380');
+    drag(900);
+    expect(reportedWidth()).toBe(380);
+    // `End` asks for the constant maximum and lands on the affordable one.
+    fireEvent.keyDown(separator(), { key: 'End' });
+    expect(reportedWidth()).toBe(380);
+  });
+
+  // Dragging wide and then narrowing the window reaches the same starved layout
+  // the cap exists to prevent, so the cap follows the viewport too.
+  it('gives width back when the window narrows under it', async () => {
+    render(<SidebarResizer />);
+    drag(900);
+    expect(reportedWidth()).toBe(MAX_SIDEBAR_WIDTH);
+
+    setViewport(900);
+    fireEvent(window, new Event('resize'));
+    await waitFor(() => expect(reportedWidth()).toBe(380));
+    expect(publishedWidth()).toBe('380px');
+    expect(separator().getAttribute('aria-valuemax')).toBe('380');
+  });
+
+  // An untouched shell needs no JS to lay itself out, and a resize must not
+  // quietly take that over just because the budget moved.
+  it('leaves the stylesheet in charge while nothing has been dragged', async () => {
+    setViewport(900);
+    render(<SidebarResizer />);
+    expect(separator().getAttribute('aria-valuemax')).toBe('380');
+    expect(publishedWidth()).toBe('');
+
+    setViewport(1400);
+    fireEvent(window, new Event('resize'));
+    await waitFor(() => expect(separator().getAttribute('aria-valuemax'))
+      .toBe(String(MAX_SIDEBAR_WIDTH)));
+    expect(publishedWidth()).toBe('');
   });
 });

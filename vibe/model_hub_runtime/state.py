@@ -16,12 +16,17 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url
-from vibe.model_hub_runtime.api_key_vendors import official_api_key_base_url
+from core.handlers.model_hub.identifiers import model_id_without_credential_address
+from vibe.model_hub_runtime.api_key_vendors import (
+    official_api_key_base_url,
+    validate_api_key_auth_scheme,
+)
 
 
 logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
+_BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _PROTOCOLS = {"anthropic", "openai_responses", "openai_chat"}
 
@@ -34,6 +39,66 @@ class EngineStateError(RuntimeError):
 class RuntimeSecrets:
     management_key: str
     gateway_token: str
+
+
+def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
+    """Read a record an earlier release stored with addressed model names.
+
+    The address belongs to the outbound call, not to the file, but releases
+    before this one persisted whatever the engine's management API answered
+    with — which is already addressed. Healing on load rather than in a
+    one-shot script keeps one spelling in memory no matter which release wrote
+    the file, and the next ordinary write persists it.
+
+    A record names the prefix it is addressed by, so only that exact address is
+    removed. Nothing is claimed about any other name: a model whose own identity
+    happens to be spelled like an address belongs to whoever named it.
+
+    Unwrapping can collapse two stored names onto one identity. The strict
+    parse below refuses a repeated reasoning key and a repeated route target,
+    so this keeps the first of each instead: a file that loads today must keep
+    loading, and a healed duplicate is the same model named twice, not a
+    conflict to report. Any shape this cannot read is left exactly as it was,
+    so the parse still reports it.
+    """
+
+    prefix = payload.get("prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return payload
+
+    healed = dict(payload)
+    model_ids = payload.get("model_ids")
+    if isinstance(model_ids, list):
+        healed["model_ids"] = list(
+            dict.fromkeys(
+                model_id_without_credential_address(str(model), prefix)
+                for model in model_ids
+            )
+        )
+    route_model_ids = payload.get("route_model_ids")
+    if isinstance(route_model_ids, list) and all(
+        isinstance(model, str) for model in route_model_ids
+    ):
+        healed["route_model_ids"] = list(
+            dict.fromkeys(
+                model_id_without_credential_address(model, prefix)
+                for model in route_model_ids
+            )
+        )
+    reasoning_efforts = payload.get("model_reasoning_efforts")
+    if isinstance(reasoning_efforts, list) and all(
+        isinstance(item, list) and len(item) == 2 and isinstance(item[0], str)
+        for item in reasoning_efforts
+    ):
+        healed_efforts: dict[str, Any] = {}
+        for model_id, efforts in reasoning_efforts:
+            healed_efforts.setdefault(
+                model_id_without_credential_address(model_id, prefix), efforts
+            )
+        healed["model_reasoning_efforts"] = [
+            [model_id, efforts] for model_id, efforts in healed_efforts.items()
+        ]
+    return healed
 
 
 @dataclass(frozen=True)
@@ -51,6 +116,7 @@ class SourceRecord:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> SourceRecord:
+        payload = _without_credential_addresses(payload)
         try:
             raw_reasoning_efforts = payload["model_reasoning_efforts"]
         except KeyError as exc:
@@ -164,6 +230,7 @@ class EngineStateStore:
         vendor: str = "custom",
         protocol: str = "openai_chat",
         base_url: str | None = None,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         if not isinstance(value, str) or not value:
@@ -173,9 +240,16 @@ class EngineStateStore:
             raise EngineStateError("credential vendor is empty")
         if protocol not in _PROTOCOLS:
             raise EngineStateError("unsupported source protocol")
+        try:
+            validate_api_key_auth_scheme(
+                normalized_vendor, protocol, base_url, value, auth_scheme,
+            )
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         with self._lock:
-            credential_ref = f"cred_{secrets.token_hex(16)}"
+            prefix = "cred_auth_bearer_" if auth_scheme == "bearer" else "cred_"
+            credential_ref = f"{prefix}{secrets.token_hex(16)}"
             credential_path, credential_tmp, stage_path, stage_tmp = (
                 self._reserve_credential_namespace(credential_ref)
             )
@@ -190,6 +264,7 @@ class EngineStateStore:
                         "protocol": protocol,
                         "base_url": normalized_base_url,
                         "value": value,
+                        **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                     },
                     temporary_path=credential_tmp,
                     credential_ref=credential_ref,
@@ -443,17 +518,24 @@ class EngineStateStore:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         """Compare transient native material with an engine-owned API key."""
 
         metadata = self.credential_metadata(credential_ref)
         if metadata.get("kind") != "api_key":
             return False
+        try:
+            validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+        except ValueError:
+            raise EngineStateError("unsupported API key authentication scheme") from None
         normalized_base_url = _validated_base_url(base_url)
         if (
             metadata.get("vendor") != vendor.strip().lower()
             or metadata.get("protocol") != protocol
             or metadata.get("base_url") != normalized_base_url
+            or metadata.get("auth_scheme") != auth_scheme
         ):
             return False
         if not isinstance(secret, str):
@@ -512,24 +594,52 @@ class EngineStateStore:
                 if credential["kind"] == "oauth" and not allowed_origins:
                     raise EngineStateError("OAuth source requires at least one allowed origin")
                 previous = existing.get(source_id)
-                model_ids = tuple(dict.fromkeys(str(model).strip() for model in binding.model_ids))
+                # Settle the address this Source is reached by before reading any
+                # model name, so a name carrying it is unwrapped against the one
+                # prefix that owns it rather than against the shape of a prefix.
+                prefix = (
+                    str(credential["prefix"])
+                    if credential.get("prefix")
+                    else previous.prefix
+                    if previous
+                    else f"avibe-{secrets.token_hex(12)}"
+                )
+                model_ids = tuple(
+                    dict.fromkeys(
+                        model_id_without_credential_address(str(model).strip(), prefix)
+                        for model in binding.model_ids
+                    )
+                )
                 if any(not model for model in model_ids):
                     raise EngineStateError("model id cannot be empty")
                 route_model_ids = tuple(binding.route_model_ids)
                 if any(not isinstance(model, str) or not model or model != model.strip() for model in route_model_ids):
                     raise EngineStateError("invalid route model id")
                 reasoning_by_model: dict[str, tuple[str, ...]] = {}
+                # Which spelling each entry arrived under. A caller naming one
+                # model twice is still refused, but two names that meet only
+                # because the address came off collapse onto the first — the
+                # same collision ``model_ids`` above absorbs, and the same one a
+                # stored record absorbs on load. A Source may legitimately hold
+                # both spellings until its rows are repaired, and refusing the
+                # pair here would leave the engine unsynchronized instead.
+                spellings: dict[str, str] = {}
                 for model_id, efforts in binding.model_reasoning_efforts:
-                    normalized_model_id = str(model_id).strip()
+                    answered = str(model_id).strip()
+                    normalized_model_id = model_id_without_credential_address(answered, prefix)
                     if not normalized_model_id or normalized_model_id not in model_ids:
                         raise EngineStateError("reasoning model id is not registered")
-                    if normalized_model_id in reasoning_by_model:
-                        raise EngineStateError("duplicate reasoning model id")
                     normalized_efforts = tuple(
                         dict.fromkeys(str(effort).strip() for effort in efforts)
                     )
                     if any(not effort for effort in normalized_efforts):
                         raise EngineStateError("reasoning effort cannot be empty")
+                    held = spellings.get(normalized_model_id)
+                    if held is not None:
+                        if held == answered:
+                            raise EngineStateError("duplicate reasoning model id")
+                        continue
+                    spellings[normalized_model_id] = answered
                     reasoning_by_model[normalized_model_id] = normalized_efforts
                 records.append(
                     SourceRecord(
@@ -540,14 +650,15 @@ class EngineStateStore:
                         credential_ref=credential_ref,
                         allowed_origins=allowed_origins,
                         model_ids=model_ids,
-                        route_model_ids=tuple(sorted(set(route_model_ids))),
-                        prefix=(
-                            str(credential["prefix"])
-                            if credential.get("prefix")
-                            else previous.prefix
-                            if previous
-                            else f"avibe-{secrets.token_hex(12)}"
+                        route_model_ids=tuple(
+                            sorted(
+                                {
+                                    model_id_without_credential_address(model, prefix)
+                                    for model in route_model_ids
+                                }
+                            )
                         ),
+                        prefix=prefix,
                         model_reasoning_efforts=tuple(reasoning_by_model.items()),
                     )
                 )
@@ -565,7 +676,14 @@ class EngineStateStore:
             current = next((source for source in sources if source.source_id == source_id), None)
             if current is None:
                 raise EngineStateError("source is not registered")
-            models = tuple(dict.fromkeys(str(model).strip() for model in model_ids))
+            models = tuple(
+                dict.fromkeys(
+                    model_id_without_credential_address(
+                        str(model).strip(), current.prefix
+                    )
+                    for model in model_ids
+                )
+            )
             if not models:
                 raise EngineStateError("source requires at least one model id")
             if any(not model for model in models):
@@ -604,12 +722,79 @@ class EngineStateStore:
             if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
                 raise EngineStateError("credential permissions are unsafe")
             payload = self._read_json(path)
-            kind = payload.get("kind") if payload else None
-            if kind == "reservation" and payload.get("credential_ref") == credential_ref:
+            if payload is None:
                 return None
-            if kind not in {"api_key", "oauth"}:
-                raise EngineStateError("credential is unavailable")
+            if payload.get("kind") == "reservation" and payload.get("credential_ref") == credential_ref:
+                return None
+            _validate_credential_auth_scheme(credential_ref, payload)
             return payload
+
+    def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        """Recover replacement transport without requiring the previous secret.
+
+        Only a safe missing or content-corrupt document permits ref fallback.
+        Readable identity conflicts, unsafe paths and I/O failures stay errors.
+        Plain refs predate explicit transport; intact unpublished Bearer
+        metadata is supported, but its complete loss cannot be reconstructed.
+        """
+        with self._lock:
+            ref_scheme = _credential_ref_auth_scheme(credential_ref)
+            payload = self._read_replacement_credential_document(credential_ref)
+            if payload is None:
+                return ref_scheme
+            _validate_credential_auth_scheme(credential_ref, payload, require_secret=False)
+            if payload.get("kind") != "api_key":
+                raise EngineStateError("API key credential is unavailable")
+            return payload.get("auth_scheme")
+
+    def _private_credential_directory_present(self, directory: Path) -> bool:
+        """Observe owned directories without creating or repairing them."""
+        for path in (self.root, directory):
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise EngineStateError("unable to inspect credential directory") from exc
+            if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+                raise EngineStateError("credential directory permissions are unsafe")
+        return True
+
+    def _read_replacement_credential_document(
+        self, credential_ref: str,
+    ) -> dict[str, Any] | None:
+        """Read safe identity evidence; only missing/corrupt contents are absent."""
+        _credential_ref_auth_scheme(credential_ref)
+        directory = self.root / "credentials"
+        if not self._private_credential_directory_present(directory):
+            return None
+        path = directory / f"{credential_ref}.json"
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise EngineStateError("unable to inspect credential file") from exc
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            raise EngineStateError("credential permissions are unsafe")
+        try:
+            # Do not turn an open/read failure into content corruption. Ref
+            # recovery is safe only after a private regular file was read.
+            descriptor = os.open(
+                path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+            with os.fdopen(descriptor, "rb") as handle:
+                mode = os.fstat(handle.fileno()).st_mode
+                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                    raise EngineStateError("credential permissions are unsafe")
+                raw = handle.read()
+        except OSError as exc:
+            raise EngineStateError("unable to read credential file") from exc
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def has_current_source_credential(
         self,
@@ -629,8 +814,7 @@ class EngineStateStore:
         remain entirely engine-owned and are not opened by this observation.
         """
         try:
-            if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-                return False
+            _credential_ref_auth_scheme(credential_ref)
             _validated_source_id(source_id)
             credential_kind = {"api_key": "api_key", "subscription": "oauth"}.get(kind)
             if credential_kind is None or not isinstance(vendor, str) or protocol not in _PROTOCOLS:
@@ -653,7 +837,12 @@ class EngineStateStore:
                 payload.get("kind") != credential_kind or payload.get("vendor") != normalized_vendor
             ):
                 return False
+            _validate_credential_auth_scheme(credential_ref, payload)
             if credential_kind == "api_key":
+                validate_api_key_auth_scheme(
+                    normalized_vendor, protocol, normalized_base_url,
+                    payload.get("value"), payload.get("auth_scheme"),
+                )
                 return (
                     payload.get("protocol") == protocol
                     and payload.get("base_url") == normalized_base_url
@@ -705,6 +894,30 @@ class EngineStateStore:
             self._remove_private_file_if_present(stage_temporary_path)
             self._remove_private_file_if_present(temporary_path)
             self._remove_private_file_if_present(path)
+
+    def revoke_api_key_credential(self, credential_ref: str) -> None:
+        """Retire a known API-key ref, never a watched OAuth auth file.
+
+        The caller's durable API-key-only intent permits cleanup when the old
+        document is missing/content-corrupt. Readable identity conflicts still
+        reject. Exact private namespace ownership does not depend on a secret.
+        """
+        with self._lock:
+            self.assert_credential_unbound(credential_ref)
+            self.credential_auth_scheme(credential_ref)
+            paths = self._credential_namespace_paths(credential_ref, create=False)
+            present_directories = {
+                directory
+                for directory in {path.parent for path in paths}
+                if self._private_credential_directory_present(directory)
+            }
+            # Validate every owned path before deleting any, including temp and
+            # staging remnants. Never follow an auth_name in document contents.
+            for path in paths:
+                self._assert_private_file(path, "engine state path is unsafe")
+            for path in reversed(paths):
+                if path.parent in present_directories:
+                    self._remove_private_file_if_present(path)
 
     def clear_runtime_configs(self) -> None:
         """Remove persisted engine configs after any credential is revoked."""
@@ -778,8 +991,7 @@ class EngineStateStore:
             entry.chmod(0o600)
 
     def _credential_path(self, credential_ref: str) -> Path:
-        if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-            raise EngineStateError("invalid credential reference")
+        _credential_ref_auth_scheme(credential_ref)
         self._ensure_private_dir(self.root)
         credentials_dir = self.root / "credentials"
         self._ensure_private_dir(credentials_dir)
@@ -788,9 +1000,18 @@ class EngineStateStore:
     def _credential_namespace_paths(
         self,
         credential_ref: str,
+        *,
+        create: bool = True,
     ) -> tuple[Path, Path, Path, Path]:
-        credential_path = self._credential_path(credential_ref)
-        stage_path = self._oauth_stage_path(credential_ref)
+        _credential_ref_auth_scheme(credential_ref)
+        credential_path = (
+            self._credential_path(credential_ref)
+            if create else self.root / "credentials" / f"{credential_ref}.json"
+        )
+        stage_path = (
+            self._oauth_stage_path(credential_ref)
+            if create else self.oauth_staging_dir / f"{credential_ref}.json"
+        )
         return (
             credential_path,
             credential_path.with_name(f".{credential_path.name}.tmp"),
@@ -821,8 +1042,7 @@ class EngineStateStore:
         return paths
 
     def _oauth_stage_path(self, credential_ref: str) -> Path:
-        if _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
-            raise EngineStateError("invalid credential reference")
+        _credential_ref_auth_scheme(credential_ref)
         self._ensure_private_dir(self.oauth_staging_dir)
         return self.oauth_staging_dir / f"{credential_ref}.json"
 
@@ -838,8 +1058,10 @@ class EngineStateStore:
             credential_ref = path.stem
             if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
                 raise EngineStateError("credential state contains an unsafe entry")
+            _credential_ref_auth_scheme(credential_ref)
             payload = self._read_json(path)
             if payload and payload.get("kind") == "oauth":
+                _validate_credential_auth_scheme(credential_ref, payload)
                 result.append((credential_ref, payload))
         return result
 
@@ -1111,6 +1333,52 @@ class EngineStateStore:
             return
         if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
             raise EngineStateError(message)
+
+
+def _credential_ref_auth_scheme(credential_ref: str) -> str | None:
+    """Decode private immutable transport identity; callers keep refs opaque."""
+    if not isinstance(credential_ref, str) or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+        raise EngineStateError("invalid credential reference")
+    if credential_ref.startswith("cred_auth_"):
+        if _BEARER_CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
+            raise EngineStateError("unsupported credential reference authentication scheme")
+        return "bearer"
+    return None
+
+
+def _validate_credential_auth_scheme(
+    credential_ref: str,
+    payload: dict[str, Any],
+    *,
+    require_secret: bool = True,
+) -> None:
+    ref_scheme = _credential_ref_auth_scheme(credential_ref)
+    kind = payload.get("kind")
+    if not isinstance(kind, str) or kind not in {"api_key", "oauth"}:
+        raise EngineStateError("credential is unavailable")
+    scheme = payload.get("auth_scheme")
+    if ref_scheme is not None and (kind != "api_key" or scheme != ref_scheme):
+        raise EngineStateError("unsupported API key authentication scheme")
+    if kind == "oauth":
+        if scheme is not None:
+            raise EngineStateError("unsupported API key authentication scheme")
+        return
+    try:
+        # Metadata-only replacement validates transport independently of the
+        # old value. The new value must pass ordinary provisioning/discovery.
+        validate_api_key_auth_scheme(
+            payload.get("vendor"), payload.get("protocol"), payload.get("base_url"),
+            payload.get("value") if require_secret else None, scheme,
+        )
+        if scheme is not None and (
+            payload.get("protocol") != "anthropic"
+            or (require_secret and (
+                not isinstance(payload.get("value"), str) or not payload["value"]
+            ))
+        ):
+            raise ValueError
+    except ValueError:
+        raise EngineStateError("unsupported API key authentication scheme") from None
 
 
 def _validated_oauth_auth_name(value: str) -> str:

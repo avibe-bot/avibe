@@ -690,3 +690,10 @@ scenarios:
     # The shared mapper cases in harnessLifecycle.test.ts cover timeout, nonzero,
     # and unknown Task/Watch failures, including stderr that looks like another
     # category. The Watch rendering case proves the same collapsed disclosure.
+  - id: SCT-062
+    name: command fires carry their current binding and Run without borrowing the service caller
+    status: covered
+    kind: routing
+    layer: scenario
+    backend: shared
+    test: tests/test_scheduled_command_task_integration.py::test_sct_062_command_fire_replaces_service_caller_with_definition_binding

@@ -54,12 +54,13 @@ class NativeFileEdit:
     before: bytes | None
     after: bytes | None
     mode: int = 0o600
+    before_mode: int | None = None
 
     @classmethod
     def plan(cls, path: Path, after: bytes | None) -> NativeFileEdit:
         before = _read_regular(path)
         mode = stat.S_IMODE(path.stat().st_mode) if before is not None else 0o600
-        return cls(path.absolute(), before, after, mode)
+        return cls(path.absolute(), before, after, mode, mode if before is not None and before != after else None)
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -67,14 +68,20 @@ class NativeFileEdit:
             "before": _encoded(self.before),
             "after": _encoded(self.after),
             "mode": self.mode,
+            **({"before_mode": self.before_mode} if self.before_mode is not None else {}),
         }
 
     @classmethod
     def from_payload(cls, payload: object) -> NativeFileEdit:
-        if not isinstance(payload, dict) or set(payload) != {"path", "before", "after", "mode"}:
+        required = {"path", "before", "after", "mode"}
+        if (
+            not isinstance(payload, dict) or not required <= set(payload)
+            or set(payload) - required - {"before_mode"}
+        ):
             raise TakeoverStateError("invalid takeover snapshot")
         path = payload["path"]
         mode = payload["mode"]
+        before_mode = payload.get("before_mode")
         if (
             not isinstance(path, str)
             or not Path(path).is_absolute()
@@ -82,23 +89,38 @@ class NativeFileEdit:
             or isinstance(mode, bool)
             or mode < 0
             or mode > 0o777
+            or (
+                before_mode is not None and (
+                    not isinstance(before_mode, int) or isinstance(before_mode, bool)
+                    or not 0 <= before_mode <= 0o777
+                )
+            )
         ):
             raise TakeoverStateError("invalid takeover snapshot")
-        return cls(Path(path), _decoded(payload["before"]), _decoded(payload["after"]), mode)
+        return cls(Path(path), _decoded(payload["before"]), _decoded(payload["after"]), mode, before_mode)
 
     def check(self, *, applied: bool = False) -> None:
         expected = self.after if applied else self.before
-        if _read_regular(self.path) != expected:
-            raise TakeoverStateError("native configuration changed")
+        mode = (self.mode if applied else self.before_mode) if self.before != self.after else None
+        self._verify(expected, mode)
 
     def apply(self, *, reverse: bool = False) -> None:
         """Compare before writing; replay accepts only either recorded state."""
         source, target = (self.after, self.before) if reverse else (self.before, self.after)
+        target_mode = self.before_mode if reverse and self.before_mode is not None else self.mode
         actual = _read_regular(self.path)
         if actual == target:
+            if self.before != self.after:
+                if target is not None:
+                    # Bytes and mode were published together. Replay may complete
+                    # durability, but never chmod someone else's replacement.
+                    self._verify(target, self.before_mode if reverse else self.mode, sync=True)
+                _fsync_directory(self.path.parent)
             return
         if actual != source:
             raise TakeoverStateError("native configuration changed")
+        source_mode = self.mode if reverse else self.before_mode
+        self._verify(source, source_mode)
         if target is None:
             self.path.unlink()
             # The absence is part of the ownership decision, not best effort.
@@ -106,12 +128,41 @@ class NativeFileEdit:
                 raise TakeoverStateError("native cleanup did not persist")
             _fsync_directory(self.path.parent)
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Authentication-bearing files must never become more permissive.
-        write_atomic(self.path, target)
+        # Keep one publication owner. The caller owns source consent and
+        # strict durability; the primitive publishes captured mode WITH bytes.
+        write_atomic(
+            self.path, target, mode=target_mode,
+            before_replace=lambda: self._verify(source, source_mode),
+        )
         _fsync_directory(self.path.parent)
-        if _read_regular(self.path) != target:
-            raise TakeoverStateError("native configuration did not persist")
+        self._verify(target, target_mode)
+
+    def _verify(self, expected: bytes | None, mode: int | None, *, sync: bool = False) -> None:
+        if expected is None:
+            if _read_regular(self.path) is not None:
+                raise TakeoverStateError("native configuration changed")
+            return
+        descriptor = os.open(
+            self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+        try:
+            current = os.fstat(descriptor)
+            if not stat.S_ISREG(current.st_mode):
+                raise TakeoverStateError("native configuration is not a regular file")
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                content = handle.read()
+            current = os.fstat(descriptor)
+            entry = self.path.lstat()
+            if (
+                content != expected
+                or (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino)
+                or (mode is not None and stat.S_IMODE(current.st_mode) != mode)
+            ):
+                raise TakeoverStateError("native configuration changed")
+            if sync:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -127,8 +178,39 @@ def _fsync_directory(path: Path) -> None:
 class NativeTakeoverJournal:
     """One controller-owned transaction, plus the last idempotency receipt."""
 
+    _OAUTH_BACKENDS = frozenset({"claude", "codex"})
+
     def __init__(self, path: Path):
         self.path = path
+
+    @classmethod
+    def oauth_custody_backends(cls, record: dict[str, Any] | None) -> frozenset[str]:
+        """Require proof or reauthorization without retaining older grants."""
+        if record is None:
+            return frozenset()
+        if "oauth_custody_backends" in record:
+            marker = record["oauth_custody_backends"]
+            if (
+                not isinstance(marker, list)
+                or any(not isinstance(value, str) or value not in cls._OAUTH_BACKENDS for value in marker)
+                or len(set(marker)) != len(marker)
+            ):
+                raise TakeoverStateError("invalid takeover custody evidence")
+            backends = set(marker)
+        elif record["phase"] == "complete":
+            # An old last receipt cannot exclude overwritten batches, even
+            # when its own batch was empty. Absence is not explicit [].
+            backends = set(cls._OAUTH_BACKENDS)
+        else:
+            backends = set()
+        if record["source_ids"]:
+            # A mixed opaque container/Source bundle cannot prove which
+            # container was empty. Keep the existing conservative policy.
+            backends.update(
+                item["backend"] for item in record["items"]
+                if item.get("kind") == "oauth_native" and item["backend"] in cls._OAUTH_BACKENDS
+            )
+        return frozenset(backends)
 
     def _prepare(self) -> None:
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -165,6 +247,14 @@ class NativeTakeoverJournal:
                 or not isinstance(item.get("id"), str)
                 or item.get("backend") not in payload["backends"]
                 for item in payload["items"]
+            )
+            or (
+                "inventory_ids" in payload
+                and (
+                    not isinstance(payload["inventory_ids"], list)
+                    or len(payload["inventory_ids"]) != len(payload["items"])
+                    or any(not isinstance(value, str) or not value for value in payload["inventory_ids"])
+                )
             )
             or not isinstance(payload.get("clean_native_stores", {}), dict)
             or any(
@@ -259,9 +349,12 @@ class NativeTakeoverJournal:
                     raise TakeoverStateError("invalid takeover terminal configuration")
         elif payload.get("outcome", "success") not in {"success", "needs_auth", "reauth_requested"}:
             raise TakeoverStateError("invalid takeover receipt")
+        self.oauth_custody_backends(payload)
         return payload
 
     def save(self, payload: dict[str, Any]) -> None:
+        if "oauth_custody_backends" in payload:
+            self.oauth_custody_backends(payload)
         self._prepare()
         if self.path.exists():
             self.load()  # Refuse unsafe/corrupt state, never silently overwrite.
@@ -280,9 +373,11 @@ class NativeTakeoverJournal:
 
     def complete(self, record: dict[str, Any]) -> None:
         receipt = NativeTakeoverJournal(self.path.with_name("last-completed.json"))
+        previous = receipt.load()
+        custody_backends = self.oauth_custody_backends(previous) | self.oauth_custody_backends(record)
         clean_stores = {
             backend: revision
-            for backend, revision in (receipt.load() or {}).get("clean_native_stores", {}).items()
+            for backend, revision in (previous or {}).get("clean_native_stores", {}).items()
             if backend not in record["backends"]
         }
         clean_stores.update(record.get("clean_native_stores", {}))
@@ -290,6 +385,7 @@ class NativeTakeoverJournal:
             "version": 1,
             "phase": "complete",
             "items": record["items"],
+            **({"inventory_ids": record["inventory_ids"]} if "inventory_ids" in record else {}),
             "backends": record["backends"],
             "source_ids": record["source_ids"],
             "outcome": (
@@ -303,6 +399,7 @@ class NativeTakeoverJournal:
                 if source["id"] in record["source_ids"]
             },
             "clean_native_stores": clean_stores,
+            "oauth_custody_backends": sorted(custody_backends),
         })
         self.forget()
 

@@ -168,7 +168,11 @@ for name, module in _STUBBED_MODULES.items():
 _SPEC = importlib.util.spec_from_file_location("test_codex_agent_module", _AGENT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_MODULE)
+sys.modules[_SPEC.name] = _MODULE
+try:
+    _SPEC.loader.exec_module(_MODULE)
+finally:
+    sys.modules.pop(_SPEC.name, None)
 CodexAgent = _MODULE.CodexAgent
 CODEX_PROMPT_STRATEGY_METADATA_KEY = _MODULE.CODEX_PROMPT_STRATEGY_METADATA_KEY
 CodexConnectionProbeRuntimeMismatchError = (

@@ -595,6 +595,33 @@ def test_source_client_nonce_round_trips_and_is_unique():
         ModelHubConfig.from_payload(duplicate.to_payload())
 
 
+def test_the_usage_count_maximum_is_the_bound_the_producer_can_prove():
+    """The contract's ceiling on a count has to be one the producer cannot exceed.
+
+    It is a product of two limits that already exist — how many rows the file
+    keeps, and how large a counter it admits — so a change to either silently
+    moves what the producer can publish. Asserting the derivation here is what
+    keeps the declared maximum from drifting into one of the two shapes this
+    contract has already been through: a bound the producer could violate, and no
+    bound at all.
+
+    Nothing clamps to it. It states the range, it does not enforce one.
+    """
+
+    from core.handlers.model_hub.usage import (
+        USAGE_COUNTER_CEILING,
+        USAGE_MAX_ROWS,
+        USAGE_PUBLISHED_COUNT_BOUND,
+    )
+
+    count = _schema("usage-summary.schema.json")["definitions"]["Count"]
+    assert USAGE_PUBLISHED_COUNT_BOUND == USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
+    assert count["maximum"] == USAGE_PUBLISHED_COUNT_BOUND
+    assert count["minimum"] == 0
+    # A finite double, so no consumer of this document can be handed an Infinity.
+    assert float(USAGE_PUBLISHED_COUNT_BOUND) < float("inf")
+
+
 def test_every_frozen_schema_example_is_valid_and_json_round_trips():
     for path in sorted(CONTRACTS.glob("*.schema.json")):
         schema = json.loads(path.read_text(encoding="utf-8"))
@@ -1802,7 +1829,7 @@ def test_config_reload_does_not_replace_file_when_migration_backup_fails(monkeyp
     config_path.write_text(original, encoding="utf-8")
     monkeypatch.setattr(v2_config, "_backup_config_file", lambda *args, **kwargs: None)
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.model_hub.to_payload() != payload["model_hub"]
     assert config_path.read_text(encoding="utf-8") == original
@@ -2188,7 +2215,7 @@ def test_config_reload_defaults_omitted_legacy_backend_entries(monkeypatch, tmp_
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current), encoding="utf-8")
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.model_hub.agents["codex"].mode == "direct"
     assert loaded.load_warnings == ()
@@ -2354,7 +2381,7 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
         persist_after_concurrent_save,
     )
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2393,7 +2420,7 @@ def test_config_reload_does_not_overwrite_config_changed_before_replace(
         write_after_concurrent_save,
     )
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.show_duration is True
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2808,7 +2835,7 @@ def test_config_reload_drops_valid_retired_consent_metadata(monkeypatch, tmp_pat
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    loaded = V2Config.load(config_path=config_path)
+    loaded = V2Config.load(config_path=config_path, persist_migrations=True)
 
     assert loaded.load_warnings == ()
     persisted = json.loads(config_path.read_text(encoding="utf-8"))

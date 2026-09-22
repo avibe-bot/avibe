@@ -70,25 +70,6 @@ const OFF_RULE = {
     why: 'owner-set: themed blur (2026-08-14) and 0.6 alpha, not from design.pen',
     holds: /^0 0 \d+px -4px rgba\(\d+, \d+, \d+, 0\.6\)$/,
   },
-  // The approved onboarding reference draws its active card with no spread at all
-  // and at #5BFFA060, so the two fields the general rule fixes -- spread = -blur/4
-  // and alpha 0.44 -- are the two this role is excused from, and `holds` pins both
-  // at the reference's own numbers. Its blur is not excused: it is asserted from
-  // ROLE_BLUR like every other role's, because a role is still a name for a size.
-  //
-  // Two patterns, because the two frames drew this card separately: Light's own
-  // (waUhu) is 16/-4 at #10B98170, so the fields excused here are the ones that
-  // differ. An exception that named one theme would have left the other
-  // unasserted, which is this file's recurring failure shape -- so a themed
-  // exception states BOTH themes, and a theme it says nothing about fails rather
-  // than passing by default.
-  onboarding: {
-    why: 'the owner-approved active-card halo: spreadless #5BFFA060 in dark, and the light frame\'s own 16/-4 #10B98170',
-    holds: {
-      dark: /^0 0 \d+px 0px color-mix\(in srgb, var\(--[a-z]+\) 37\.6%, transparent\)$/,
-      light: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
-    },
-  },
   // The sidebar's selected nav row keeps the general rule's geometry and alpha --
   // spread = -blur/4 and 0.44 -- and departs on one field only: the design table
   // gives it #10B98170 in Light beside #5BFFA070 in Dark, so its hue is mixed from
@@ -99,6 +80,18 @@ const OFF_RULE = {
   nav: {
     why: 'the approved sidebar selection halo: the scale\'s own 16/-4 and 0.44, themed through var(--mint) for #10B98170 in light and #5BFFA070 in dark',
     holds: /^0 0 \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 44%, transparent\)$/,
+  },
+  // The onboarding card's active and hovered halo is the one shadow the design
+  // draws with an offset, so centring cannot describe it: `0 2px 12px #5BFFA038`
+  // in dark and `0 2px 16px -4px #10B98124` in light. Blur stays asserted from
+  // ROLE_BLUR; the y offset, the spread and the alpha are pinned here, per theme,
+  // because an exception that named one theme would leave the other unasserted.
+  onboarding: {
+    why: 'the approved active/hover card halo: an offset drop shadow, not a centred glow',
+    holds: {
+      dark: /^0 2px \d+px 0px color-mix\(in srgb, var\(--[a-z]+\) 22%, transparent\)$/,
+      light: /^0 2px \d+px -4px color-mix\(in srgb, var\(--[a-z]+\) 14\.1%, transparent\)$/,
+    },
   },
 };
 
@@ -117,7 +110,7 @@ const OFF_RULE = {
 const ROLE_BLUR = {
   dot: 8, wire: 4, xs: 12, sm: 16, md: 24, lg: 32, xl: 48, nav: 16,
   cta: { dark: 16, light: 20 },
-  onboarding: { dark: 28, light: 16 },
+  onboarding: { dark: 12, light: 16 },
 };
 
 const blurOf = (role, theme) => {
@@ -138,7 +131,9 @@ const THEMES = ['dark', 'light'];
 // palette on its own -- `color-mix(in srgb, var(--mint) …)` is whichever mint the
 // theme declares -- but a blur is a number, and a number that has to change per
 // theme has to be named and re-anchored where the palette is. `--brand-glow-blur`
-// is that shape and `--onboarding-glow-*` follows it.
+// is that shape; the onboarding card's active and hovered shadow left this scale
+// entirely when the design's reading of it turned out to be an offset drop shadow
+// (`0 2px 12px #5BFFA038`), which a centred scale cannot carry.
 //
 // So a rung is resolved through the numbers its theme declares before anything is
 // asserted about it. Only the numbers: a colour name is left as written, because
@@ -346,7 +341,11 @@ describe('the accent glow scale', () => {
   it.each(rungs)('$token has its role\'s blur in $theme', ({ role, theme, value }) => {
     const blur = blurOf(role, theme);
     expect(blur, `${role} names no blur for the ${theme} theme it is declared in`).toBeDefined();
-    expect(Number(value.match(/^0 0 (\d+)px/)?.[1])).toBe(blur);
+    // The blur is the third length of a box shadow whatever its offset: `0 0 12px …`
+    // for the centred rungs and `0 2px 12px …` for the one offset role. Reading it by
+    // position keeps an offset from being mistaken for an absence of blur.
+    const blurLength = value.split(/\s+/)[2];
+    expect(Number(blurLength?.replace(/px$/, ''))).toBe(blur);
   });
 
   it.each(Object.entries(OFF_RULE))('states why %s is off the rule', (role, { why }) => {

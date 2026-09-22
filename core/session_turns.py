@@ -23,6 +23,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iterator, Literal, Optional
 
 from sqlalchemy import and_, exists, literal, or_, select, update
@@ -2490,11 +2491,6 @@ class SessionTurnManager:
             has_attachments=bool(specs),
         )
 
-    @staticmethod
-    def _delivery_has_attachment_references(delivery: dict[str, Any]) -> bool:
-        payload = delivery_store.delivery_payload(delivery)
-        return bool((payload.get("content") or {}).get("attachments"))
-
     def _hydrate_delivery_batch_context(
         self,
         context: "MessageContext",
@@ -2691,27 +2687,6 @@ class SessionTurnManager:
                 error_type=type(exc).__name__,
             )
 
-    def _compatible_steer_memory_authority(self, turn_id: str, deliveries: list[dict[str, Any]]) -> bool:
-        if not bool(getattr(getattr(self.controller.config, "memory", None), "enabled", False)):
-            return True
-        from avibe_memory.admission import InboundTurnFacts
-
-        with self._sqlite_engine().connect() as conn:
-            initial = delivery_store.delivery_for_turn(conn, turn_id)
-            active = delivery_store.execution_delivery_payload(conn, initial) if initial else {}
-            incoming = [delivery_store.execution_delivery_payload(conn, row) for row in deliveries]
-        payloads = [active, *incoming]
-        admission = self.controller._memory_admission()
-        delegated = [delivery_store.memory_owner_from_payload(payload)
-                     for payload in payloads if payload.get("source") == "harness"]
-        # Revoking a binding must not let foreign input enter a native Turn whose
-        # existing scope could become readable again when access is restored.
-        has_scope = active.get("session_id") in getattr(self.controller, "_memory_scopes_by_session", {})
-        if not any(owner and (has_scope or admission.admits(InboundTurnFacts(**owner))) for owner in delegated):
-            return True  # Human-only and Memory-ineligible group steering keep their policy.
-        authority = delivery_store.memory_authority_for_payload(active)
-        return all(delivery_store.memory_authority_for_payload(payload) == authority for payload in incoming)
-
     async def _dispatch_steer_batch(
         self,
         backend: str,
@@ -2723,11 +2698,30 @@ class SessionTurnManager:
         context: "MessageContext",
     ) -> DeliveryResult:
         delivery_id = str(deliveries[0]["id"])
-        if not self._compatible_steer_memory_authority(logical_turn_id, deliveries):
-            return await self._finish_steer(
-                delivery_id, steer_result(SteerOutcome.REFUSED, reason="memory_authority_changed"), context=context
-            )
+        # The steering claim has committed. Other viewers must see the same
+        # read-only pending row while the native write is in flight.
+        self._publish_queue_update(str(deliveries[0]["session_id"]))
         try:
+            from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
+
+            attachments = [
+                attachment
+                for row in deliveries
+                for attachment in ((delivery_store.delivery_payload(row).get("content") or {}).get("attachments") or [])
+            ]
+            with self._sqlite_engine().connect() as conn:
+                specs = resolve_attachment_specs(
+                    conn, session_id=str(deliveries[0]["session_id"]), attachments=attachments
+                )
+            files = tuple(file_attachments_from_specs(specs) or ())
+            # Never accept the text while silently losing one of its attachments.
+            # Resolve only session-bound tokens, never caller-supplied local paths.
+            if len(files) != len(attachments) or any(not Path(file.local_path).is_file() for file in files):
+                return await self._finish_steer(
+                    delivery_id,
+                    steer_result(SteerOutcome.REFUSED, reason="attachments_unavailable"),
+                    context=context,
+                )
             metadata = await self._steer_input_metadata(deliveries)
             request = SteerRequest(
                 target_session_id=str(deliveries[0]["session_id"]),
@@ -2736,6 +2730,7 @@ class SessionTurnManager:
                 text=_segment_dispatch_text(deliveries),
                 attempt_id=attempt_id,
                 input_metadata=metadata,
+                files=files,
             )
         except asyncio.CancelledError:
             await self._finish_steer(
@@ -3038,23 +3033,7 @@ class SessionTurnManager:
                 and identity is not None
                 and identity[0] == observed_id
             )
-            if current is not None and self._delivery_has_attachment_references(delivery):
-                claimed = delivery_store.cas_delivery(
-                    conn,
-                    str(delivery["id"]),
-                    expected_version=int(delivery["version"]),
-                    expected_states=("reserved",),
-                    values={"priority": "p3", "state": "queued"},
-                    history_event={
-                        "kind": "steer",
-                        "turn_id": str(current["id"]),
-                        "outcome": "attachments_require_new_turn",
-                    },
-                )
-                if claimed is None:
-                    raise RuntimeError("attachment P1 fallback claim lost")
-                delivery = claimed
-            elif same_active:
+            if same_active:
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
                 turn_id = observed_id
@@ -3248,17 +3227,6 @@ class SessionTurnManager:
                         )
                 else:
                     claimed_rows = claimed["deliveries"]
-            elif any(
-                self._delivery_has_attachment_references(row)
-                for row in delivery_rows
-            ):
-                return DeliveryResult(
-                    delivery_id,
-                    None,
-                    "queued",
-                    str(current_turn["id"]),
-                    reason="attachments_wait_for_new_turn",
-                )
             elif (
                 observed_turn_id
                 and str(current_turn["id"]) == observed_turn_id
@@ -3392,14 +3360,12 @@ class SessionTurnManager:
                         receipt=body,
                     )
                     saved = unknown_rows[0] if unknown_rows else None
-                    return DeliveryResult(
-                        delivery_id,
-                        None,
-                        "reconciling_steer",
-                        target_turn_id or None,
-                        None if unknown_rows and all(unknown_rows) else "receipt_cas_lost",
-                    )
-                if not materialized:
+                    if not unknown_rows or not all(unknown_rows):
+                        return DeliveryResult(
+                            delivery_id, None, "reconciling_steer",
+                            target_turn_id or None, "receipt_cas_lost",
+                        )
+                elif not materialized:
                     session_status = conn.execute(
                         select(agent_sessions.c.status).where(
                             agent_sessions.c.id == str(delivery["session_id"])
@@ -3456,6 +3422,8 @@ class SessionTurnManager:
                     "failed to persist steer receipt recovery fence for delivery=%s",
                     delivery_id,
                 )
+            if session_id:
+                self._publish_queue_update(session_id)
             return DeliveryResult(
                 delivery_id,
                 None,
@@ -3483,16 +3451,19 @@ class SessionTurnManager:
                 target_turn_id or None,
                 admission="steered",
             )
+        if saved is not None:
+            # Publish only after the receipt transaction commits, including
+            # recovery refusal: otherwise a viewer stays stuck in confirming.
+            self._publish_queue_update(session_id)
         if should_drain:
             await self.drain_delivery_queue(session_id)
-            return self._committed_delivery_result(
-                delivery_id,
-            )
+            committed = self._committed_delivery_result(delivery_id)
+            return replace(committed, reason=body["reason"]) if committed.state == "queued" else committed
         return DeliveryResult(
             delivery_id,
             None,
             str((saved or {}).get("state") or "reconciling_steer"),
-            None,
+            str((saved or {}).get("current_target_turn_id") or "") or None,
         )
 
     async def _admit_p0(
@@ -8406,6 +8377,7 @@ class SessionTurnManager:
             "session_id": session_id,
             "status": result.state,
             "delivery_id": result.delivery_id,
+            **({"reason": result.reason} if result.reason else {}),
         }
 
     # --- shared turn chokepoints (status + Show checkpoint projection) ------------

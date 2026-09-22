@@ -11,13 +11,31 @@ from pathlib import Path
 
 import pytest
 
-from config.v2_config import ModelHubBackendModelConfig
+from config.v2_config import (
+    ModelHubBackendModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+)
+from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.codex.transport import CodexTransport
-from modules.agents.model_hub import ModelHubLaunch, build_codex_hub_launch
+from modules.agents.model_hub import (
+    ModelHubLaunch,
+    ModelHubRuntimeRouter,
+    build_codex_hub_launch,
+)
 from tests.e2e.drivers import mock_llm_upstream as upstream
 from tests.e2e.test_model_hub_catalog_consumer import (
     codex_catalog_runtime,  # noqa: F401 -- fixture dependency
     rejected_external_proxy,  # noqa: F401 -- fixture dependency
+)
+from tests.scenario_harness.model_hub import (
+    MemoryModelHubStore,
+    ModelHubScenarioAdapter,
+    ScenarioCallResult,
+    config_with_sources,
+    service_for,
+    source,
 )
 from vibe.backend_model_catalog import _codex_hub_catalog_bytes
 
@@ -361,3 +379,140 @@ def test_codex_transport_retry_keeps_metadata(metadata_runtime, monkeypatch, fai
     for request in requests:
         _assert_identity(request, identity)
     assert len({json.loads(request["headers"][METADATA_HEADER])["turn_id"] for request in requests}) == 1
+
+
+# A model change re-serialises the thread under the OUTGOING model, so that hop
+# reaches the gateway on the NEW turn's handle naming the OLD model. Two real
+# catalog slugs from different comp_hash groups are required to provoke it.
+SWITCH_OLD, SWITCH_NEW = "gpt-5.5", "gpt-6-astra"
+SWITCH_TARGET = "relay-upstream"
+
+
+@pytest.fixture
+def switch_runtime(codex_catalog_runtime):
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    Path(runtime.env["CODEX_HOME"], "config.toml").write_text(
+        'cli_auth_credentials_store = "file"\n',
+    )
+    catalog_path = runtime.home / "switch-models.json"
+    # Native rows carry the comp_hash this test depends on; reuse them by id.
+    catalog_path.write_bytes(_codex_hub_catalog_bytes(
+        raw_catalog,
+        [ModelHubBackendModelConfig(id=model).to_payload()
+         for model in (SWITCH_OLD, SWITCH_NEW)],
+    ))
+    return binary, runtime, catalog_path
+
+
+def test_codex_mid_thread_model_switch_routes_its_compaction(switch_runtime, tmp_path):
+    """MH-PROTOCOL-004: the pre-turn re-serialisation is routed and attributed.
+
+    Rejecting it stranded the thread permanently: the re-serialisation never
+    landed, so the thread kept its old format and every later turn repeated it
+    and failed the same way. Driven through the real gateway because the defect
+    was in route admission, which the wire-only fixtures never reach.
+    """
+    binary, runtime, catalog_path = switch_runtime
+    src = source("src_switch", [SWITCH_TARGET], vendor="custom", protocol="openai_responses")
+    config = config_with_sources(
+        [src], backend="codex", menu_model=SWITCH_OLD, hops=((src.id, SWITCH_TARGET),),
+    )
+    agent = config.agents["codex"]
+    agent.sources.order = [src.id]
+    agent.models = [
+        ModelHubBackendModelConfig(
+            id=model, origin="manual", native_protocol="openai_responses",
+        )
+        for model in (SWITCH_OLD, SWITCH_NEW)
+    ]
+    agent.routes[SWITCH_NEW] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(src.id, SWITCH_TARGET),),
+    )
+    adapter = ModelHubScenarioAdapter(invoke_results=(
+        ScenarioCallResult(
+            RawOutcomeKind.SUCCESS, status=200,
+            body=b"".join(upstream._responses_stream_frames(SWITCH_TARGET)),
+            stream_started=True,
+        )
+        for _ in range(8)
+    ))
+    service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
+    hub_gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=hub_gateway)
+
+    async def spawn(launch):
+        args, env = build_codex_hub_launch(
+            [], runtime.env, launch, model_catalog_path=catalog_path,
+        )
+        transport = CodexTransport(
+            binary=binary, cwd=str(runtime.home), runtime_args=args, runtime_env=env,
+        )
+        queue = asyncio.Queue()
+
+        async def notify(method, params):
+            if method == "turn/completed":
+                await queue.put(params)
+
+        transport.on_notification(notify)
+        await transport.start()
+        return transport, queue
+
+    async def exercise():
+        outcomes = []
+        launch = await router.resolve(
+            "codex", SWITCH_OLD, process_scope=str(runtime.home), turn_id="turn-old",
+        )
+        transport, queue = await spawn(launch)
+        try:
+            started = await transport.send_request("thread/start", {
+                "model": SWITCH_OLD, "cwd": str(runtime.home), "approvalPolicy": "never",
+            })
+            thread_id = started["thread"]["id"]
+            await transport.send_request("turn/start", {
+                "threadId": thread_id, "model": SWITCH_OLD,
+                "input": [{"type": "text", "text": "第一轮，保留中文与 café。"}],
+                "responsesapiClientMetadata": dict(launch.gateway_request_metadata),
+            })
+            outcomes.append(await _completed(queue))
+        finally:
+            await transport.stop()
+        hub_gateway.correlation.settle("turn-old", settled_by="test")
+
+        # The owner's shape: a new app-server resumes the thread, then the first
+        # turn on the new model. comp_hash lives in the rollout, so the change is
+        # detected here even though this process never ran the old model.
+        switched = await router.resolve(
+            "codex", SWITCH_NEW, process_scope=str(runtime.home), turn_id="turn-new",
+        )
+        transport, queue = await spawn(switched)
+        try:
+            await transport.send_request(
+                "thread/resume", {"threadId": thread_id, "excludeTurns": True},
+            )
+            await transport.send_request("turn/start", {
+                "threadId": thread_id, "model": SWITCH_NEW, "approvalPolicy": "never",
+                "input": [{"type": "text", "text": "第二轮"}],
+                "responsesapiClientMetadata": dict(switched.gateway_request_metadata),
+            })
+            outcomes.append(await _completed(queue))
+        finally:
+            await transport.stop()
+        hub_gateway.correlation.settle("turn-new", settled_by="test")
+        await hub_gateway.close()
+        return outcomes
+
+    asyncio.run(exercise())
+    wire_models = [request.get("model") for request in adapter.requests]
+    assert wire_models[0] == SWITCH_OLD, wire_models
+    # The switch is only exercised if the new turn really re-serialised first.
+    assert wire_models[1:].count(SWITCH_OLD) >= 1, wire_models
+    assert wire_models[-1] == SWITCH_NEW, wire_models
+
+    rows = json.loads((tmp_path / "model-hub-state" / "provenance.json").read_text())
+    entries = rows if isinstance(rows, list) else rows.get("entries", [])
+    by_turn = {row.get("turn_id"): row for row in entries}
+    assert {"turn-old", "turn-new"} <= set(by_turn), entries
+    # The re-serialisation rode the new turn's handle without renaming the turn
+    # or stranding it: both requests settle under the model the user switched to.
+    assert by_turn["turn-new"]["requested_model_id"] == SWITCH_NEW, by_turn
+    assert by_turn["turn-new"]["outcome"] == "served", by_turn

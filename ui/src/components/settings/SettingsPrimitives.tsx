@@ -14,8 +14,8 @@ type SettingsPanelProps = {
   /**
    * `panel` (default) is the machine-management section: a header ruled off from
    * a list of rows. `preference` is the quieter single-preference card used by
-   * ordinary Settings (design.pen le5QU / Q8zxF1) — surface-2, one 22px pad, and
-   * no internal divider, because its header and its control are one statement.
+   * ordinary Settings (design.pen le5QU / Q8zxF1) — one 22px pad and no internal
+   * divider, because its header and its control are one statement.
    */
   variant?: 'panel' | 'preference';
 };
@@ -56,9 +56,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
   // radius 12 (`rounded-lg` here), not the 16 the `panel` variant renders:
   // le5QU and Q8zxF1 both draw this card at 12.
+  //
+  // The fill is `bg-background`, not the surface-2 those two boards draw. A card
+  // is one concept across Settings, and every other page (Backends,
+  // Dependencies, Service) renders it as border-only on the page fill; a white
+  // card on General alone read as a different kind of object rather than as the
+  // same card holding a quieter control. Deliberate divergence from the boards,
+  // recorded in the PR rather than silently reconciled here.
   if (variant === 'preference') {
     return (
-      <section className={clsx('rounded-lg border border-border bg-surface-2', className)}>
+      <section className={clsx('rounded-lg border border-border bg-background', className)}>
         <div className="flex flex-col gap-5 p-[22px]">
           {header}
           {children}
@@ -155,11 +162,25 @@ export const SearchField: React.FC<SearchFieldProps> = ({
 // fill --mint, blur 8 #5BFFA055 glow, 38×22 with knob inset 3.
 // Off state mirrors fcMl6 (Switch/Unchecked): fill + stroke = --border-strong
 // (14% white dark / 14% black light) for sufficient contrast against bg-background.
-export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; disabled?: boolean; label?: string }> = ({
+interface ToggleSwitchProps {
+  enabled: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  label?: string;
+  /** `settings` is the dense mint switch the settings rows use; `onboarding` is
+      the larger themed switch the setup cards draw in the identity header's
+      trailing slot — same role, ARIA state, thumb motion and disabled behaviour,
+      different geometry and palette, owned by `onboarding.css` through the
+      managed `--switch-onboarding-*` tokens. */
+  variant?: 'settings' | 'onboarding';
+}
+
+export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
   enabled,
   onClick,
   disabled,
   label,
+  variant = 'settings',
 }) => (
   <button
     type="button"
@@ -168,18 +189,22 @@ export const ToggleSwitch: React.FC<{ enabled: boolean; onClick: () => void; dis
     aria-label={label}
     disabled={disabled}
     onClick={onClick}
-    className={clsx(
-      'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
-      enabled
-        ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
-        : 'border-border-strong bg-border-strong'
-    )}
+    className={variant === 'onboarding'
+      ? 'onboarding-enable-switch'
+      : clsx(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-mint/40 disabled:opacity-50',
+          enabled
+            ? 'border-mint/50 bg-mint shadow-glow-xs-mint'
+            : 'border-border-strong bg-border-strong'
+        )}
   >
     <span
-      className={clsx(
-        'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
-        enabled ? 'translate-x-[18px]' : 'translate-x-1'
-      )}
+      className={variant === 'onboarding'
+        ? undefined
+        : clsx(
+            'inline-block size-3.5 rounded-full bg-background shadow transition-transform',
+            enabled ? 'translate-x-[18px]' : 'translate-x-1'
+          )}
     />
   </button>
 );

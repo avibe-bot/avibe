@@ -41,7 +41,7 @@ def _persistent_takeover(monkeypatch, tmp_path, *, oauth=False):
     else:
         config.agents.claude.auth_mode = "api_key"
         config.agents.claude.api_key = "fixture-old-key"
-        config.agents.claude.base_url = "https://fixture.example"
+        config.agents.claude.base_url = "https://api.anthropic.com/fixture-path"
         config.agents.claude.auth_mode_set = True
     config.save(config_path=config_path)
     service, _, adapter = _service(tmp_path, migration_home=home)

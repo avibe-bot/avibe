@@ -251,6 +251,14 @@ target. This deliberately leaves the wire relation rather than following it into
 
 #### The active-card halo is one managed semantic token, themed through variables
 
+> Superseded 2026-09-20 by
+> [2026-09-20-setup-design-alignment](2026-09-20-setup-design-alignment.md): the frames'
+> active and hovered card shadow turned out to be an offset drop shadow
+> (`0 2px 12px #5BFFA038` dark, `0 2px 16px -4px #10B98124` light), which the centred glow
+> scale cannot carry. The token and its per-theme numbers are deleted; the component
+> stylesheet holds the literals. The continuous card-height and headline rules above are
+> superseded the same way, by the design's authored tiers.
+
 The reference's dark halo is a spread-less 28px mint at `#5BFFA060`; Light has its own tighter
 16/-4 at `#10B98170` over a `#10B98160` border. Both are now carried by one managed token,
 `--shadow-glow-onboarding-mint`, instead of approximated by stacking two rungs of the sized scale.

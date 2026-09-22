@@ -46,9 +46,11 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py
     - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py
+    - tests/test_model_hub_persisted_migration.py
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
     - tests/e2e/test_model_hub_guards.py
     - tests/e2e/test_model_hub_migration.py
+    - tests/e2e/test_model_hub_migration_persisted.py
     - tests/e2e/test_model_hub_mock_upstream.py
     - tests/e2e/test_model_hub_routing.py
     - tests/e2e/test_model_hub_backend_settings.py
@@ -759,6 +761,17 @@ scenarios:
     related_tests:
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
       - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action
+  - id: MH-MIG-005
+    name: Persisted migration ignores runtime authentication and preserves shared-file custody
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/test_model_hub_persisted_migration.py::test_mh_mig_005_runtime_auth_cannot_disable_saved_opencode_keys
+    related_tests:
+      - tests/test_model_hub_persisted_migration.py::test_runtime_auth_alone_is_not_a_saved_configuration
+      - tests/test_model_hub_persisted_migration.py::test_shell_saved_key_takeover_keeps_unrelated_bytes_and_runtime
+      - tests/test_model_hub_persisted_migration.py::test_new_shell_layer_during_provision_cannot_escape_consent
+      - tests/test_model_hub_persisted_migration.py::test_shared_shell_key_requires_both_backend_consents
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered
@@ -1110,6 +1123,18 @@ scenarios:
     reason: first-visit banner rendering is not executable from the pytest API layer
     owning_layer: Playwright lane (ui/e2e)
     evidence: docs/plans/model-hub-e2e-test-plan.md#f-migration-c61c67
+  - id: F4
+    name: Saved CLI and shell credentials migrate while runtime authentication stays untouched
+    status: assert
+    kind: migration
+    layer: e2e-auto
+    test: tests/e2e/test_model_hub_migration_persisted.py::test_f4_persisted_configuration_migrates_with_runtime_auth_present
+    related_tests:
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_not_removed
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_transport_is_refused_without_cleanup
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_oauth_history_fence_survives_later_api_batch_over_http
   - id: G1
     name: A guard echo missing agents remains confirmable
     status: assert

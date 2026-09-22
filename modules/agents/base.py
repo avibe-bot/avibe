@@ -7,7 +7,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 AGENT_RUNTIME_TURN_KEY = "agent_runtime_turn_key"
 AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
 AGENT_TURN_TOKEN = "turn_token"
+
+
+def message_with_files(message: str, files: Sequence[FileAttachment] | None) -> str:
+    """Use the same attachment context for new turns and native steering."""
+    local_files = [file for file in files or () if file.local_path]
+    if not local_files:
+        return message
+    # Preserve the established native prompt format: images, then other files.
+    images = [file for file in local_files if (file.mimetype or "").startswith("image/")]
+    other_files = [file for file in local_files if not (file.mimetype or "").startswith("image/")]
+    lines = ["", "[User Attachments]"]
+    for label, group in (("Image", images), ("File", other_files)):
+        for file in group:
+            size = f", {file.size} bytes" if file.size else ""
+            lines.append(f"- {label}: {file.local_path} ({file.mimetype}{size})")
+    file_info = "\n".join(lines)
+    return f"{message}{file_info}" if message.strip() else file_info.lstrip()
 
 
 @dataclass

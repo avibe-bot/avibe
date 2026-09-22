@@ -1,0 +1,1 @@
+Choose skills by task relevance, but load a skill only if it has not already been read in this conversation; reuse already-loaded instructions across turns, callbacks, and resumed work instead of reloading them for each turn.

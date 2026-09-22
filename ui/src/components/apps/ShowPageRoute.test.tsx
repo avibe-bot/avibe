@@ -1,9 +1,11 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
+import type { Navigator } from 'react-router-dom';
 
+import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import { ShowPageRoute } from './ShowPageRoute';
 
 const api = vi.hoisted(() => ({
@@ -12,19 +14,24 @@ const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(),
 }));
 const shareControl = vi.hoisted(() => ({ canManageInstance: undefined as boolean | undefined }));
+const viewport = vi.hoisted(() => ({ isDesktop: false }));
+const wm = vi.hoisted(() => ({
+  windows: [] as unknown[],
+  openApp: vi.fn(),
+  focus: vi.fn(),
+  restore: vi.fn(),
+}));
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/DockContext', () => ({ useDock: () => ({ unpin: vi.fn() }) }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }),
 }));
-vi.mock('../../context/WindowManagerContext', () => ({
-  useWindowManager: () => ({ windows: [], openApp: vi.fn(), focus: vi.fn(), restore: vi.fn() }),
-}));
+vi.mock('../../context/WindowManagerContext', () => ({ useWindowManager: () => wm }));
 vi.mock('../../context/showPageDrag', () => ({
   useShowPageDrag: () => ({ active: false, begin: vi.fn(), end: vi.fn(), dropToDock: vi.fn() }),
 }));
-vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => false }));
+vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.isDesktop }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 vi.mock('../workbench/ShowPageShareControl', () => ({
   ShowPageShareControl: ({ canManageInstance }: { canManageInstance?: boolean }) => {
@@ -37,6 +44,11 @@ const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid="location">{location.pathname}{location.search}</output>;
 };
+
+beforeEach(() => {
+  viewport.isDesktop = false;
+  wm.windows = [];
+});
 
 afterEach(() => {
   cleanup();
@@ -100,5 +112,47 @@ describe('mobile Show Page app route', () => {
     expect(screen.queryByRole('button', { name: 'chat.showPage.annotate.unavailable' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'chat.showPage.backToChat' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'chat.showPage.share' })).toBeNull();
+  });
+});
+
+// Desktop turns this route into a handoff: open the window, then get out of the
+// way. It is a command, not a place — and because it is lazily loaded, Settings
+// can take the foreground before its chunk arrives. It runs anyway, both halves,
+// because a command held back is a command that fires later, once the user has
+// asked for something else. Neither half reaches over the top of Settings: the
+// window manager withholds the foreground announcement from a retired surface,
+// and the surface takes the redirect through its own replacement.
+describe('desktop Show Page window handoff', () => {
+  const renderRoute = (active: boolean, inactiveReplace?: Navigator['replace']) => render(
+    <MemoryRouter initialEntries={['/apps/show/session-1']}>
+      <RouteSurfaceActivityBoundary active={active} inactiveReplace={inactiveReplace}>
+        <Routes>
+          <Route path="/apps/show/:sessionId" element={<ShowPageRoute />} />
+          <Route path="/" element={<div data-testid="canvas" />} />
+        </Routes>
+      </RouteSurfaceActivityBoundary>
+      <LocationProbe />
+    </MemoryRouter>,
+  );
+
+  it('runs whole while the surface is retired, handing the redirect to it', () => {
+    viewport.isDesktop = true;
+    const inactiveReplace = vi.fn();
+    renderRoute(false, inactiveReplace);
+
+    expect(wm.openApp).toHaveBeenCalledWith('showpage', { params: { sessionId: 'session-1' } });
+    // The retired surface decides where its own origin goes — here it just
+    // records the ask — so the foreground url is untouched while Settings owns it.
+    expect(inactiveReplace).toHaveBeenCalledTimes(1);
+    expect(inactiveReplace.mock.calls[0][0]).toMatchObject({ pathname: '/' });
+    expect(screen.getByTestId('location').textContent).toBe('/apps/show/session-1');
+  });
+
+  it('opens the window and hands back to the canvas on the live surface', () => {
+    viewport.isDesktop = true;
+    renderRoute(true);
+
+    expect(wm.openApp).toHaveBeenCalledWith('showpage', { params: { sessionId: 'session-1' } });
+    expect(screen.getByTestId('location').textContent).toBe('/');
   });
 });

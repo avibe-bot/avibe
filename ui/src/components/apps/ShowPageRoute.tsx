@@ -33,6 +33,16 @@ export const ShowPageRoute: React.FC = () => {
 
   // Desktop: open (or focus) the Show Page window for this session and hand back
   // to the canvas. Guarded so the effect runs once even as window state ticks.
+  //
+  // This runs whether or not the surface is the live one, and it has to. This
+  // route is a command, not a place: it is lazily loaded, so Settings can take
+  // the foreground before its chunk arrives, and a command held back is a
+  // command that fires later — after the user has asked for something else.
+  // Running it now is safe in both halves. `useWindowManager` withholds the
+  // foreground announcement from a retired surface, so the window opens and
+  // waits behind Settings instead of evicting it, and the redirect is diverted
+  // to that surface's `inactiveReplace`, which moves the retained origin here
+  // so leaving Settings lands on the canvas rather than back on this command.
   useEffect(() => {
     if (!isDesktop || handledRef.current || !sessionId) return;
     handledRef.current = true;

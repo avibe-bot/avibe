@@ -4392,6 +4392,15 @@ scenarios:
     # snapshot capture must converge without a resume or another definition write.
     # Unchanged snapshots retain worker identity; consumed disables still stop it.
     test: tests/test_watches.py::test_hfr_485_watch_reconciles_after_another_reader_consumes_reload
+  - id: HFR-486
+    name: Watch commands and Vault callbacks use the current binding without inherited service identity
+    status: covered
+    kind: routing
+    layer: scenario
+    backend: shared
+    test: tests/test_background_command_caller_context.py::test_hfr_486_watch_child_vault_callback_uses_only_current_binding
+    # Real argv/shell children with clean/contaminated parents, bound/unbound
+    # targets, isolated Vault expiry, retargeting, and remote snapshot transport.
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

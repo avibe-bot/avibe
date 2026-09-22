@@ -51,6 +51,21 @@ export const InboxPage: React.FC<{ onOpenSearch: () => void }> = ({ onOpenSearch
     writeInboxFilter(next, readInboxFilter().leftAt);
   }, []);
 
+  // Entering /inbox while this page is already mounted — the user is on the inbox
+  // and something navigates to it again — keeps the same element, so the resolve
+  // in the initializer above never runs a second time and the tab would simply
+  // not move. Re-entry has to mean what entry means, so redo exactly what mount
+  // does: resolve from the store, and align the store with what is now shown.
+  // Keyed on location.key, which changes once per navigation and not on renders.
+  const entryKeyRef = useRef(location.key);
+  useEffect(() => {
+    if (entryKeyRef.current === location.key) return;
+    entryKeyRef.current = location.key;
+    const resumed = resolveInboxFilter(readInboxFilter(), Date.now());
+    setFilterState(resumed);
+    writeInboxFilter(resumed, 0);
+  }, [location.key]);
+
   // Stamp when the user leaves the inbox (route change → unmount, app/tab
   // backgrounded, reload/close) so the next entry can measure the absence. If
   // they background the page itself for a long time, revert to Unread on return.

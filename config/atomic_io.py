@@ -1,4 +1,4 @@
-"""One owner for replacing an agent-owned state document atomically.
+"""One owner for publishing a complete local state document atomically.
 
 Nineteen modules used to hand-roll "write a temp file, then ``os.replace`` it
 over the destination", and no two of them hand-rolled it quite the same way.
@@ -19,14 +19,17 @@ formats stay where they are (``indent=2`` for human-read state, compact for
 machine-read projections, ``sort_keys`` for diffable manifests): those are real
 per-file decisions, unlike the durability and permission gaps above.
 
-**Scope.** This owns replacing one *whole* state document that Avibe itself
-owns. It is deliberately not the owner of every rename in the repository, and
+**Scope.** This owns the mechanics of replacing one *whole* state document.
+It is deliberately not the owner of every rename in the repository, and
 several callers stay outside it on purpose: a compare-and-swap that re-reads
 before replacing (``config/v2_config``), an editor writing *user* files whose
 existing mode and mtime must survive (``core/file_browser_service``), a
 database swap that must move sidecars with the file (``storage/backups``), and
 anything reserving a temp *name* without writing content (``vibe/screenshot``).
 Reach for this when the write is "these bytes, entirely, or nothing".
+Native migration's user-file transaction delegates publication here with an
+explicit captured mode and a final consent check, retaining ownership of its
+compare-before-write, strict directory durability and recovery policy.
 
 The guarantees, for every caller:
 
@@ -37,20 +40,17 @@ The guarantees, for every caller:
   each other's fragments.
 * A failed write never leaves a temp file behind, and never truncates the
   destination — the old contents survive until the rename succeeds.
-* The replacement is owner-private (0600) from the moment it exists, because
-  ``mkstemp`` creates it that way and the rename preserves it. There is no
-  window in which a file holding agent credentials is world-readable.
-
-Every path written through here is agent-owned or user-owned local state, so
-0600 is the right mode for all of them and this module does not take a
-parameter for it. A caller that genuinely needs a looser mode should say so
-explicitly rather than inherit one by accident.
+* By default the replacement is owner-private (0600) from creation through
+  publication. A user-file editor may explicitly supply its captured mode;
+  that mode is applied only to the unpublished inode, before its fsync.
+  No caller widens a published path through this primitive.
 """
 
 from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 __all__ = ["write_atomic"]
@@ -74,7 +74,14 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def write_atomic(path: Path, data: str | bytes, *, follow_symlinks: bool = False) -> None:
+def write_atomic(
+    path: Path,
+    data: str | bytes,
+    *,
+    follow_symlinks: bool = False,
+    mode: int = 0o600,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Replace *path* with *data* atomically, creating parent directories.
 
     ``follow_symlinks`` writes *through* a symlink to its real target instead of
@@ -84,15 +91,24 @@ def write_atomic(path: Path, data: str | bytes, *, follow_symlinks: bool = False
     setup. Off by default, because for state this process owns, resolving a
     symlink an attacker planted is the wrong answer.
 
-    Raises ``OSError`` if the write fails; the destination is left untouched.
+    ``mode`` is an explicit publication mode, not a request to inherit the
+    destination's current permissions. Agent-owned state keeps the 0600 default.
+    ``before_replace`` may reject stale caller-owned consent after the temporary
+    bytes and permissions are flushed, immediately before publication. This is
+    a comparison hook, not a cross-process atomic compare-and-swap guarantee.
+
+    Failures before publication leave the destination untouched by this writer
+    and remove the unpublished temporary file. Callback exceptions propagate.
     """
 
+    if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+        raise ValueError("invalid publication mode")
     target = Path(os.path.realpath(path)) if follow_symlinks else Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = data.encode("utf-8") if isinstance(data, str) else data
 
-    # mkstemp creates the file 0600 without relying on Unix-only APIs, and the
-    # rename carries that mode onto the destination.
+    # mkstemp starts owner-private. Its creation mode is still filtered by
+    # umask, so set the exact publication mode on the unpublished inode.
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target.name}.",
         suffix=".tmp",
@@ -104,7 +120,13 @@ def write_atomic(path: Path, data: str | bytes, *, follow_symlinks: bool = False
             descriptor = -1
             handle.write(payload)
             handle.flush()
+            if hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), mode)
+            else:  # pragma: no cover - platform permission fallback
+                os.chmod(temporary_name, mode)
             os.fsync(handle.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary_name, target)
         unpublished = None
         _fsync_directory(target.parent)

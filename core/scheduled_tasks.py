@@ -75,6 +75,7 @@ from storage.agent_session_rows import (
 from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from core import failure_notices
 from core.backend_failure import emit_replayed_backend_failure
+from core.caller_context import background_command_env
 from core.command_runner import (
     SupervisedCommandStartupError,
     command_line_preview,
@@ -8691,6 +8692,12 @@ class ScheduledTaskService:
                         execution_id, identity
                     ),
                     max_output_bytes=COMMAND_TASK_OUTPUT_CAP_BYTES,
+                    env=background_command_env(
+                        session_id=task.session_id,
+                        source="scheduled_task",
+                        metadata=task.metadata,
+                        run_id=execution_id,
+                    ),
                 )
             except SupervisedCommandStartupError as exc:
                 # Its own clause, BEFORE the broad one: the class subclasses

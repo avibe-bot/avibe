@@ -36,7 +36,7 @@ def _seed_native_configs(app, upstream_url: str) -> list[Path]:
         json.dumps(
             {
                 "env": {
-                    "ANTHROPIC_API_KEY": SYNTHETIC_MIGRATION_API_KEY,
+                    "ANTHROPIC_AUTH_TOKEN": SYNTHETIC_MIGRATION_API_KEY,
                     "ANTHROPIC_BASE_URL": upstream_url,
                 },
                 "permissions": {"allow": ["Read"]},
@@ -183,7 +183,7 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         "anthropic",
         models=[{"id": "claude-sonnet-4-6"}],
     )
-    mock_llm_upstream.configure(required_api_key=seeded_api_key)
+    mock_llm_upstream.configure(required_api_key=seeded_api_key, required_auth_scheme="bearer")
     launch, seeded_paths = _launch_seeded_app(
         model_hub_app_factory, mock_llm_upstream
     )
@@ -256,7 +256,11 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
             for request in mock_llm_upstream.requests()
             if request["path"] == "/v1/models"
         ]
-        assert any(headers.get("x-api-key") == seeded_api_key for headers in catalogue_headers)
+        assert any(
+            headers.get("authorization") == f"Bearer {seeded_api_key}"
+            and "x-api-key" not in headers
+            for headers in catalogue_headers
+        )
         assert any(
             not headers.get("x-api-key") and not headers.get("authorization")
             for headers in catalogue_headers
@@ -275,7 +279,7 @@ def test_f2_unproven_key_keeps_all_native_material(
         mock_llm_upstream, "anthropic",
         models=[{"id": "claude-sonnet-4-6"}],
     )
-    mock_llm_upstream.configure(required_api_key=required_api_key)
+    mock_llm_upstream.configure(required_api_key=required_api_key, required_auth_scheme="bearer")
     launch, seeded_paths = _launch_seeded_app(
         model_hub_app_factory, mock_llm_upstream,
     )

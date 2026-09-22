@@ -59,8 +59,7 @@ for (const width of [1200, 1366, 1920]) {
     const denied = await serveProduct(page);
     await page.setViewportSize({ width, height: 768 });
     await open(page, '/');
-    await page.getByRole('separator').focus();
-    await page.keyboard.press('End');
+    const sidebarWidth = (await page.locator('aside.fixed').boundingBox())!.width;
     await textarea(page).fill(draft);
     await toggle(page).click();
     await expect(settings(page)).toBeVisible();
@@ -70,7 +69,9 @@ for (const width of [1200, 1366, 1920]) {
     await expect(textarea(page)).toBeHidden();
     expect(await textarea(page).evaluate((node) => Boolean(node.closest('[inert][aria-hidden="true"]')))).toBe(true);
     const retained = await frame(page);
-    expect(retained.rail?.width).toBe(196);
+    // Standalone Settings stands in for the sidebar, so its rail is that
+    // sidebar's width: the left column cannot move when Settings opens.
+    expect(retained.rail?.width).toBe(sidebarWidth);
     expect(retained.content?.width).toBe(944);
     // Keyboard focus may only visit foreground controls; Ctrl+K may not awaken
     // the Workbench palette behind Settings or change its state for the return.
@@ -82,12 +83,26 @@ for (const width of [1200, 1366, 1920]) {
     await settings(page).getByRole('button', { name: 'Close Settings' }).click();
     await expect(textarea(page)).toHaveValue(draft);
     await expect(toggle(page)).toBeFocused();
-    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
     await open(page, '/settings/general');
     await expect(rail(page)).toBeVisible();
     expect(await frame(page)).toEqual(retained);
     expect(await page.locator('main#app-shell-scroll').boundingBox()).toMatchObject({ x: 0, width });
     await expect(page.locator('aside.fixed')).toBeHidden();
+
+    // A width the owner dragged the sidebar to is still the width Settings has
+    // to stand in at — a default-only match would jump for everyone who resized
+    // — and the divider's own value has to survive Settings taking the column.
+    await open(page, '/');
+    await page.getByRole('separator').focus();
+    await page.keyboard.press('End');
+    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
+    const dragged = (await page.locator('aside.fixed').boundingBox())!.width;
+    expect(dragged).toBe(496);
+    await toggle(page).click();
+    await expect(settings(page)).toBeVisible();
+    expect((await frame(page)).rail?.width).toBe(dragged);
+    await settings(page).getByRole('button', { name: 'Close Settings' }).click();
+    await expect(page.getByRole('separator')).toHaveAttribute('aria-valuenow', '496');
     expect(denied).toEqual([]);
   });
 }
@@ -135,14 +150,14 @@ for (const width of [320, 375, 390]) {
     await page.setViewportSize({ width, height: 568 });
     await open(page, '/settings/appearance');
     await expect(page).toHaveURL(/\/settings\/general$/);
-    await expect(page.getByRole('radiogroup')).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
     await expect(page.locator('aside.fixed')).toBeHidden();
     expect(await page.locator('main#app-shell-scroll').boundingBox()).toMatchObject({ x: 0, width });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
     await page.getByRole('link', { name: 'All settings' }).click();
     await expect(rail(page)).toBeVisible();
     await rail(page).getByRole('link', { name: 'General', exact: true }).click();
-    await expect(page.getByRole('radiogroup')).toBeVisible();
+    await expect(page.getByRole('radiogroup', { name: 'Appearance' })).toBeVisible();
     await page.getByRole('link', { name: 'All settings' }).click();
     await page.getByRole('link', { name: 'Back to Workbench' }).click();
     await expect(textarea(page)).toBeVisible();
@@ -529,6 +544,98 @@ test('C-SETTINGS-09: a held sidebar create cannot navigate through foreground Se
   await expect(page).toHaveURL(/\/chat\/ses-sidebar-create$/);
   expect(creates).toBe(2);
   expect(await page.evaluate(() => history.state.idx)).toBe(beforeCreate + 1);
+  expect(denied).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
+// A command route is a route only in the url bar: /apps/show/:id opens its
+// window and replaces itself with the canvas. It is lazily loaded, so the user
+// can open Settings before its chunk lands, and the window it then opens has to
+// wait behind Settings instead of evicting it. The half that outlived two
+// attempts at this is the way OUT. The exit prefers a history pop back to the
+// entry the origin was read from — that entry still holds the command url — so
+// leaving Settings mounts the command a second time and raises its window over
+// whatever the user actually asked for. Only a browser has the history stack
+// that decision turns on, which is why it is settled here and not in jsdom.
+test('C-SETTINGS-10: a command route finished under Settings does not re-run over the app the user picks', async ({ page }) => {
+  const denied = await serveProduct(page);
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await page.route('**/api/show-pages', (route) => route.fulfill({ json: { pages: [] } }));
+  await page.route('**/api/sessions/ses-show**', (route) => route.fulfill({ json: {
+    id: 'ses-show', title: 'Pinned page', status: 'active', scope_id: 'scope-1', project_id: 'proj-1',
+  } }));
+
+  // Hold the chunk the way a cold load does, then let it land while Settings is
+  // in front — the one ordering this is about.
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let chunkRequests = 0;
+  await page.route('**/ShowPageRoute.tsx*', async (route) => {
+    chunkRequests += 1;
+    if (chunkRequests === 1) await held;
+    return route.fallback();
+  });
+
+  // Inline, because that is where this is reachable: it is the placement that
+  // keeps the Apps launcher beside Settings, so picking another app is the
+  // ordinary way out rather than a second gesture.
+  await page.addInitScript(() => {
+    window.localStorage.setItem('avibe.settings.menu-placement.v1', 'inline');
+  });
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await open(page, '/apps/show/ses-show');
+  await expect(toggle(page)).toBeVisible();
+
+  await toggle(page).click();
+  await expect(settings(page)).toHaveAttribute('data-settings-menu-placement', 'inline');
+  const originIndex = await page.evaluate(() => history.state.idx);
+  release();
+
+  // The command runs while retired: its window opens behind Settings, which
+  // does not move, and the origin it will return to becomes the canvas.
+  const windows = page.locator('[data-window-id]');
+  await expect(windows).toHaveCount(1);
+  await expect(settings(page)).toBeVisible();
+  await expect(page).toHaveURL(/\/settings\/general$/);
+
+  // Now the reported gesture: a different app, chosen from the launcher that
+  // inline keeps on screen. It opens its window and that is what closes
+  // Settings.
+  await page.getByRole('button', { name: 'Apps', exact: true }).click();
+  await page.getByRole('menu', { name: 'Apps', exact: true })
+    .getByRole('button', { name: 'Files', exact: true }).click();
+  await expect(settings(page)).toHaveCount(0);
+  await expect(windows).toHaveCount(2);
+
+  // The window the user just picked is the one in front, and stays there: a
+  // re-run of the command would focus the Show Page window over it.
+  const topWindow = () => page.evaluate(() => Array.from(
+    document.querySelectorAll<HTMLElement>('[data-window-id]'),
+  ).sort((a, b) => Number(a.style.zIndex || 0) - Number(b.style.zIndex || 0))
+    .at(-1)?.getAttribute('aria-label') ?? null);
+  await expect(page).toHaveURL(`${origin}/`);
+  await page.waitForTimeout(400);
+  expect(await topWindow()).toBe('Files');
+  await expect(page).toHaveURL(`${origin}/`);
+  // Left forward, not popped back onto the entry the command already spent.
+  expect(await page.evaluate(() => history.state.idx)).toBe(originIndex);
+
+  // Back still reaches that entry, and should: leaving Settings forward cannot
+  // erase a history entry it is not standing on, and no browser API can. What
+  // saves it is who put the entry there. On desktop nothing in the product
+  // navigates to this url — the Dock, the App Library and app search all open
+  // the window directly, and only mobile, which has neither this Settings
+  // placement nor this launcher, routes to it. So a desktop session holds this
+  // entry only because the user opened that url themselves, and Back returning
+  // them to the page they opened, raising its window, is what that url means.
+  // Both halves are the same rule read twice: an exit the user did not aim at
+  // the Show Page must not raise it, and a Back they did aim there must.
+  await page.goBack();
+  await expect(page).toHaveURL(`${origin}/`);
+  await expect(windows).toHaveCount(2); // raised, not duplicated
+  await page.waitForTimeout(400);
+  expect(await topWindow()).toBe('Show Page');
   expect(denied).toEqual([]);
   expect(pageErrors).toEqual([]);
 });

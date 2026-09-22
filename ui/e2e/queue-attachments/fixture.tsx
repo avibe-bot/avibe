@@ -109,7 +109,9 @@ const QUEUE: WorkbenchMessage[] = [
 const GALLERY = ['/api/media/med_1', '/api/media/med_2'];
 
 export function Fixture() {
-  const [queue, setQueue] = useState(QUEUE);
+  const [queue, setQueue] = useState(() => new URLSearchParams(location.search).has('confirming')
+    ? [{ ...queued('q-confirming', '', [media('med_1', '队列图片.png')]), state: 'reconciling_steer' }]
+    : QUEUE);
   const [sent, setSent] = useState(0);
   return (
     // ThemeProvider is what the app puts above the chat, and the file viewer's

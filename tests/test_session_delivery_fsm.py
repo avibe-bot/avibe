@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from sqlalchemy import select, update
@@ -67,6 +67,10 @@ from storage.models import (
     session_turns,
     show_session_events,
 )
+from vibe.memory_contract import (
+    MemoryImplementationIncompatibleError,
+    MemoryImplementationUnavailableError,
+)
 
 
 @pytest.fixture
@@ -79,6 +83,8 @@ class _Controller:
         self.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
         self.agent_service = SimpleNamespace(agents={}, _turn_gates={})
         self.config = SimpleNamespace(language="en")
+        self.memory_runtime = SimpleNamespace()
+        self._memory_implementation_error = None
         self.statuses: list[tuple[str, str]] = []
 
     @staticmethod
@@ -1283,6 +1289,83 @@ async def test_steering_preparation_failure_preserves_a_definitively_unwritten_b
     assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
+async def test_delivery_path_reaches_native_write_without_memory_admission(managers, priority):
+    """Memory is not consulted by any delivery priority."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    if priority == "p1":
+        await _activate(manager, text="active")
+    manager.controller._memory_admission = Mock(
+        side_effect=AssertionError("Memory admission must not be called")
+    )
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority=priority,
+            content="steer" if priority != "p0" else "replacement",
+        ),
+        context=_context(),
+    )
+
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    else:
+        manager._steer.assert_not_awaited()
+    manager.controller._memory_admission.assert_not_called()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
+@pytest.mark.parametrize(
+    "memory_state",
+    ["disabled", "missing", "incompatible", "runtime_raising", "conflicting", "matching"],
+)
+async def test_delivery_state_is_memory_independent(managers, priority, memory_state):
+    """Every Memory state preserves the delivery result of the disabled path."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    await _activate(manager, text="active") if priority == "p1" else None
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    manager.controller._memory_admission = Mock()
+    admission = Mock()
+    if memory_state == "disabled":
+        manager.controller.config.memory = SimpleNamespace(enabled=False)
+    else:
+        manager.controller.config.memory = SimpleNamespace(enabled=True)
+        manager.controller.memory_runtime = SimpleNamespace()
+        manager.controller._memory_implementation_error = None
+        if memory_state == "missing":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
+        elif memory_state == "incompatible":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationIncompatibleError("incompatible")
+        elif memory_state == "runtime_raising":
+            manager.controller._memory_admission = Mock(side_effect=RuntimeError("runtime unavailable"))
+        else:
+            admission.admits.return_value = True
+            manager.controller._memory_admission = Mock(return_value=admission)
+    if memory_state == "disabled":
+        manager.controller._memory_admission = Mock(side_effect=AssertionError("disabled Memory must not run"))
+
+    request = DeliveryRequest(
+        session_id="ses_fsm",
+        priority=priority,
+        content="memory-independent delivery" if priority != "p0" else "replacement",
+    )
+    result = await manager.deliver(request, context=_context())
+
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    manager.controller._memory_admission.assert_not_called()
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
@@ -2452,11 +2535,14 @@ def test_legacy_workbench_strict_author_keeps_memory_admission(managers) -> None
 def test_durable_workbench_turn_restores_memory_admission_facts(
     managers,
     launch_path: str,
+    monkeypatch,
 ) -> None:
     from core.controller import Controller
     from core.memory_cli_access import configure_memory_cli_access
 
     manager, _other, engine, _engine_b, _starts = managers
+    # The Memory boundary reads the cached store; bind it to this fixture's engine.
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
     manager.controller.config.memory = SimpleNamespace(enabled=True)
     classifications: list[bool | None] = []
     routing_users: list[str | None] = []
@@ -8156,33 +8242,36 @@ def test_stale_send_now_does_not_mutate_the_deferred_queue(managers) -> None:
     assert _row(engine, str(queued.delivery_id))["state"] == "queued"
 
 
-def test_send_now_keeps_attachment_head_for_the_next_turn(
+@pytest.mark.parametrize("text", ["", "看看这张图片"])
+def test_send_now_steers_attachment_head_into_the_active_turn(
     managers,
     tmp_path: Path,
+    text: str,
 ) -> None:
     from storage import media_service
 
     manager, _other, engine, _engine_b, _starts = managers
-    asyncio.run(_activate(manager, text="active turn"))
-    attachment = tmp_path / "queued-input.txt"
-    attachment.write_text("queued attachment", encoding="utf-8")
+    turn_id, _ = asyncio.run(_activate(manager, text="active turn"))
+    attachment = tmp_path / "队列图片.png"
+    attachment.write_bytes(b"queued image bytes")
     with engine.begin() as conn:
         token = media_service.register(
             conn,
             scope_id=None,
             session_id="ses_fsm",
-            kind="file",
+            kind="image",
             source="user_upload",
             local_path=str(attachment),
             file_name=attachment.name,
-            content_type="text/plain",
+            content_type="image/png",
         )
     queued = asyncio.run(
         manager.deliver(
             DeliveryRequest(
                 session_id="ses_fsm",
                 priority="p3",
-                content="review this file",
+                content=text,
+                has_content=True,
                 content_json={"attachments": [{"token": token}]},
             ),
             context=_context(),
@@ -8202,20 +8291,25 @@ def test_send_now_keeps_attachment_head_for_the_next_turn(
         )
     )
 
-    assert promoted.state == "queued"
-    assert promoted.reason == "attachments_wait_for_new_turn"
-    manager._steer.assert_not_awaited()
-    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    assert promoted.state == "accepted"
+    assert promoted.turn_id == turn_id
+    request = manager._steer.await_args.args[1]
+    assert request.text == text
+    assert request.files[0].local_path == str(attachment)
+    assert request.files[0].mimetype == "image/png"
+    assert request.files[0].name == "队列图片.png"
+    assert _row(engine, str(queued.delivery_id))["state"] == "accepted"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
 
 
-def test_content_p1_with_attachment_queues_behind_an_active_turn(
+def test_content_p1_with_attachment_steers_the_active_turn(
     managers,
     tmp_path: Path,
 ) -> None:
     from storage import media_service
 
     manager, _other, engine, _engine_b, _starts = managers
-    asyncio.run(_activate(manager, text="active turn"))
+    turn_id, _ = asyncio.run(_activate(manager, text="active turn"))
     attachment = tmp_path / "priority-input.txt"
     attachment.write_text("priority attachment", encoding="utf-8")
     with engine.begin() as conn:
@@ -8243,11 +8337,58 @@ def test_content_p1_with_attachment_queues_behind_an_active_turn(
         )
     )
 
-    assert admitted.state == "queued"
-    manager._steer.assert_not_awaited()
+    assert admitted.state == "accepted"
+    assert admitted.turn_id == turn_id
+    request = manager._steer.await_args.args[1]
+    assert request.text == "review this first"
+    assert request.files[0].local_path == str(attachment)
     row = _row(engine, str(admitted.delivery_id))
-    assert row["priority"] == "p3"
-    assert row["state"] == "queued"
+    assert row["priority"] == "p1"
+    assert row["state"] == "accepted"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("invalid", ["foreign_session", "revoked", "missing_file", "missing_token"])
+def test_send_now_does_not_partially_steer_unavailable_attachments(managers, tmp_path, invalid):
+    from storage import media_service
+
+    manager, _other, engine, _engine_b, _starts = managers
+    asyncio.run(_activate(manager))
+    attachment = tmp_path / "图片.png"
+    attachment.write_bytes(b"image bytes")
+    with engine.begin() as conn:
+        if invalid == "foreign_session":
+            _seed_session(engine, "ses_foreign")
+        token = media_service.register(
+            conn,
+            scope_id=None,
+            session_id="ses_foreign" if invalid == "foreign_session" else "ses_fsm",
+            kind="image",
+            source="user_upload",
+            local_path=str(attachment),
+            file_name=attachment.name,
+            content_type="image/png",
+        )
+        if invalid == "revoked":
+            conn.execute(update(media_objects).where(media_objects.c.token == token).values(revoked_at="now"))
+    if invalid == "missing_file":
+        attachment.unlink()
+    queued = asyncio.run(manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm", priority="p3", content="must keep my image",
+            content_json={"attachments": [{"token": "missing" if invalid == "missing_token" else token}]},
+        ),
+        context=_context(),
+    ))
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    result = asyncio.run(manager.send_now("ses_fsm", expected_delivery_id=queued.delivery_id))
+
+    assert result["status"] == "queued"
+    assert result["reason"] == "attachments_unavailable"
+    manager._steer.assert_not_awaited()
+    assert _row(engine, str(queued.delivery_id))["state"] == "queued"
+    manager.controller.command_handler.handle_stop.assert_not_awaited()
 
 
 def test_archive_keeps_unknown_and_materializes_late_positive_evidence(managers) -> None:

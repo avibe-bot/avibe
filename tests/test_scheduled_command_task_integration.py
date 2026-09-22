@@ -11,9 +11,13 @@ Hermetic: state, definition store, and the fallback spawn cwd all land in `tmp_p
 """
 
 import asyncio
+import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 import config.paths as paths
 from core.caller_context import (
@@ -309,3 +313,65 @@ def test_cli_created_argv_command_task_runs(
 
     assert run["status"] == "succeeded", f"the argv run failed: {run['error']!r}"
     assert marker.read_text().strip() == "argv"
+
+
+@pytest.mark.parametrize("bound_session", [False, True])
+def test_sct_062_command_fire_replaces_service_caller_with_definition_binding(
+    tmp_path: Path, monkeypatch, bound_session
+) -> None:
+    """SCT-062: real claimed Run -> supervisor -> Vault CLI context."""
+    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    _isolate(tmp_path, monkeypatch)
+    session_id = None
+    if bound_session:
+        engine = create_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with engine.begin() as conn:
+                session_id = create_agent_session_row(
+                    conn, scope_id=None, session_anchor="command-context",
+                    agent_backend="codex", agent_variant="codex",
+                    native_session_id="test-native", workdir=str(tmp_path),
+                    require_workdir=False,
+                )
+        finally:
+            engine.dispose()
+    root = str(Path(__file__).resolve().parents[1])
+    script = f"""
+import json, os, sys
+from types import SimpleNamespace
+sys.path.insert(0, {root!r})
+from core.caller_context import CALLER_CONTEXT_ENV_NAMES, AVIBE_CALLER_SESSION_PROOF_ENV
+from vibe.cli import _vault_cli_delivery_context
+keys = CALLER_CONTEXT_ENV_NAMES | {{AVIBE_CALLER_SESSION_PROOF_ENV}}
+print(json.dumps({{"context": {{key: os.environ[key] for key in keys if key in os.environ}},
+    "vault": _vault_cli_delivery_context(SimpleNamespace(), mode="run")}}))
+"""
+    store = _store(tmp_path)
+    task = store.add_task(
+        session_key="", session_id=session_id, prompt="", schedule_type="cron",
+        cron="0 * * * *", timezone_name="UTC", cwd=str(tmp_path),
+        command=[sys.executable, "-c", script],
+        metadata={
+            "on_failure": "agent" if bound_session else "none",
+            "created_by": {"caller": {"session_id": "ses_original_creator"}},
+        },
+    )
+    for key in (*_CALLER_ENV_VARS, AVIBE_CALLER_SESSION_PROOF_ENV):
+        monkeypatch.setenv(key, "stale-service-caller")
+    calls = []
+    run = _fire(_service(tmp_path, calls), task)
+    assert run["status"] == "succeeded", run["error"]
+    child = json.loads(run["stdout"])
+    assert child["context"] == {
+        **({"AVIBE_SESSION_ID": session_id} if session_id else {}),
+        "AVIBE_CALLER_SOURCE": "scheduled_task",
+        "AVIBE_RUN_ID": run["id"],
+    }
+    requester, delivery, actual_session = child["vault"]
+    assert actual_session == session_id
+    assert requester.get("session_id") == session_id
+    assert delivery.get("session_id") == session_id
+    assert calls == []

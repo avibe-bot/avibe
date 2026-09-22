@@ -54,7 +54,7 @@ for (const osTheme of ['light', 'dark'] as const) {
     await serveProduct(page);
     await page.setViewportSize(DESKTOP);
     await open(page, '/settings/general', { theme: 'system' });
-    await page.locator('[role="radiogroup"]').waitFor({ state: 'visible' });
+    await page.locator('[role="radiogroup"]').first().waitFor({ state: 'visible' });
     await page.waitForTimeout(400);
     await page.screenshot({ path: `${SHOTS}/general-system-os-${osTheme}-desktop.png` });
   });

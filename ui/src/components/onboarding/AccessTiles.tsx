@@ -5,9 +5,9 @@ import { useOnboardingMotion } from './motion';
 
 const PLATFORMS = ['avibe', 'slack', 'discord', 'telegram', 'lark', 'wechat'] as const;
 
-export function AccessTiles() {
+export function AccessTiles({ active = true }: { active?: boolean }) {
   const { t } = useTranslation();
-  const { ref, running } = useOnboardingMotion();
+  const { ref, running } = useOnboardingMotion(active);
   const [pointerInside, setPointerInside] = useState(false);
   const [focusInside, setFocusInside] = useState(false);
   const [emphasis, setEmphasis] = useState<number | null>(null);
@@ -25,7 +25,7 @@ export function AccessTiles() {
   }, [automatic]);
 
   return (
-    <section ref={ref} className="onboarding-access" aria-label={t('onboarding.access.label')}>
+    <section ref={ref} className="onboarding-access" hidden={!active} inert={!active} aria-label={t('onboarding.access.label')}>
       <p>{t('onboarding.access.description')}</p>
       <ul className="onboarding-access-grid" onPointerEnter={() => setPointerInside(true)} onPointerLeave={() => setPointerInside(false)}
         onFocus={() => setFocusInside(true)} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocusInside(false); }}>

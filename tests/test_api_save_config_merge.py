@@ -668,12 +668,20 @@ def test_config_load_ignores_retired_show_pages_prompt(tmp_path, legacy_fields):
     payload.update(legacy_fields)
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
+    original = config_path.read_bytes()
 
     created = V2Config.load(config_path)
 
     assert created.load_warnings == ()
     assert not hasattr(created, "show_pages_prompt")
-    assert api.config_to_payload(created) == api.config_to_payload(V2Config.from_payload(_full_config_payload()))
+    expected = V2Config.from_payload(_full_config_payload())
+    # An observer does not turn the fixture's missing legacy Hub into a
+    # committed fresh-install default while discarding unrelated retired data.
+    expected.model_hub.enabled = False
+    expected.model_hub.runtime_default_applied = False
+    assert api.config_to_payload(created) == api.config_to_payload(expected)
+    assert config_path.read_bytes() == original
+    assert not list(tmp_path.glob("config.json.bak-*"))
 
 
 def test_config_load_preserves_pre_upgrade_audio_asr_false_as_opt_out():

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Link,
   MemoryRouter,
@@ -19,10 +20,13 @@ import {
 
 import {
   closeSettingsOverlay,
+  SettingsFocusHandoffContext,
   useSettingsOverlayOrigin,
   useSettingsOverlayContext,
 } from '@/lib/settingsOverlay';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
+import { ShellSidebarContext } from '@/context/ShellSidebarContext';
+import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsOverlayRouteSurface } from './SettingsOverlayRouteSurface';
@@ -147,6 +151,16 @@ const ChatProbe = () => {
     }
   }, [location, navigate, routeSurfaceActive]);
 
+  // Stands in for a command route — /apps/show/:id, /apps/library — reaching the
+  // end of its errand while Settings holds the foreground: it opens its window
+  // and replaces itself with the canvas. Retired is exactly when this happens,
+  // because those routes are lazily loaded and the chunk can land after the
+  // user has opened Settings.
+  useEffect(() => {
+    const handoff = (location.state as { handoff?: string } | null)?.handoff;
+    if (!routeSurfaceActive && handoff === 'pending') navigate('/', { replace: true });
+  }, [location, navigate, routeSurfaceActive]);
+
   return (
     <main>
       <div data-testid="chat-location">{`${location.pathname}${location.search}${location.hash}`}</div>
@@ -171,6 +185,11 @@ const ChatProbe = () => {
 };
 
 const SetupProbe = () => <Link to="/settings/models">open-model-hub</Link>;
+
+const PortaledShellControl = () => createPortal(
+  <button type="button">sidebar-portaled</button>,
+  document.body,
+);
 
 const SettingsFrame = () => {
   const location = useLocation();
@@ -224,9 +243,50 @@ const SettingsToggle = () => {
   );
 };
 
-const Harness = ({ desktop }: { desktop: boolean }) => (
+// Stands in for the shell's own way out of Settings when a window comes
+// forward: it raises the one-shot handoff flag and then leaves, in that order,
+// exactly as AppShell does. Driven by `fireEvent.click` rather than a user
+// gesture, because the real caller is not a control at all — the window manager
+// announces the foreground change — so there is no pointer, nothing outside the
+// surface is pressed, and nothing here becomes the origin's new focus owner.
+const WindowForegroundExit = ({ handoffRef }: { handoffRef: { current: boolean } }) => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const origin = useSettingsOverlayOrigin(location);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!origin) return;
+        handoffRef.current = true;
+        closeSettingsOverlay(navigate, origin);
+      }}
+    >
+      leave-for-window
+    </button>
+  );
+};
+
+const Harness = ({ desktop }: { desktop: boolean }) => {
+  const handoffRef = useRef(false);
+  return (
+  <SettingsFocusHandoffContext.Provider value={handoffRef}>
   <SettingsOverlayNavigationBoundary desktop={desktop}>
     <SettingsToggle />
+    <WindowForegroundExit handoffRef={handoffRef} />
+    {/* Shell chrome that lives OUTSIDE the overlay. Inline, the app sidebar is
+        still on screen beside Settings and still live, so what an outside
+        interaction means stops being hypothetical. */}
+    <aside>
+      <button type="button" data-sidebar-resizer="true">shell-resizer</button>
+      <button type="button">sidebar-idle</button>
+      <Link to="/chat/ses_2">sidebar-chat-link</Link>
+    </aside>
+    {/* The launcher and its Dock keep a layout slot in that column but portal
+        themselves to `document.body` to clear the route panel's stacking
+        context, so they belong to the sidebar without descending from it. */}
+    <PortaledShellControl />
+    <button type="button">shell-elsewhere</button>
     <SettingsOverlayRouteSurface fallbackElement={<Navigate to="/" replace />}>
       <Route path="/setup" element={<SetupProbe />} />
       <Route path="/chat/:sessionId" element={<ChatProbe />} />
@@ -236,7 +296,9 @@ const Harness = ({ desktop }: { desktop: boolean }) => (
       <Route path="/" element={<div>workbench</div>} />
     </SettingsOverlayRouteSurface>
   </SettingsOverlayNavigationBoundary>
-);
+  </SettingsFocusHandoffContext.Provider>
+  );
+};
 
 const RoutedHarness = ({ desktop = true }: { desktop?: boolean }) => (
   <Routes>
@@ -258,6 +320,10 @@ const settleDeferredFocus = async () => {
 beforeEach(() => {
   chatMounts = 0;
   chatUnmounts = 0;
+  window.localStorage.clear();
+  // The exit reads the real history stack to decide between a pop and a
+  // replace, so tests that care about which one it takes set `idx` themselves.
+  window.history.replaceState(null, '');
   vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
     matches: true,
     addEventListener: vi.fn(),
@@ -321,6 +387,57 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('button', { name: 'close-settings' }));
     expect(router.state.location.pathname).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1?view=chat#tail');
+    expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
+  });
+
+  // With a real history stack behind it the exit prefers a pop back to the
+  // entry the origin was read from — cheaper, and it keeps the stack honest.
+  // That entry is only the origin for as long as nobody has moved the origin.
+  // A command route finishing under Settings moves it, and the pop would undo
+  // that: back to the url the command was already spent on, which mounts it
+  // again and puts its window over whatever the user opened Settings to reach.
+  it('returns to a rewritten origin instead of the entry it was read from', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { handoff: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    // The browser pushed an entry for Settings; the origin still points at 0.
+    window.history.replaceState({ idx: 1 }, '');
+
+    // The command ran while retired and handed the canvas back to the surface,
+    // so the retained route is already gone before the user leaves Settings.
+    await waitFor(() => expect(screen.queryByTestId('chat-location')).toBeNull());
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByText('workbench')).toBeTruthy();
+    expect(screen.queryByTestId('chat-location')).toBeNull();
+  });
+
+  // The same rule with nothing but state rewritten. The pop would land on the
+  // right url carrying the wrong payload, which is the same staleness wearing a
+  // smaller hat — and it is what a browser, unlike a memory router, would
+  // actually have done to the assertion two tests up.
+  it('returns to a state-only rewrite of the origin as well', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState({ idx: 0 }, '');
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat/ses_1', state: { maintenance: 'pending' } }]}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    window.history.replaceState({ idx: 1 }, '');
+    await waitFor(() => expect(screen.getByTestId('chat-maintenance').textContent).toBe('done'));
+
+    await user.click(screen.getByRole('button', { name: 'close-settings' }));
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
     expect(screen.getByTestId('chat-maintenance').textContent).toBe('done');
   });
 
@@ -400,6 +517,29 @@ describe('SettingsOverlayRouteSurface', () => {
       screen.getByRole('link', { name: 'shell-settings' }),
     ));
     expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: inputName }));
+  });
+
+  // The exception to the rule above, and the only one. A retained window that
+  // refocuses itself does not get to outrank the control that opened Settings —
+  // unless that window is why Settings is closing. The window chords read their
+  // target from DOM focus, so taking focus back here would leave the window the
+  // user just asked for on screen and deaf to ⌘W, which would then fall through
+  // to the browser's close-tab.
+  it('leaves focus with the window that closed Settings', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'open-app-window' }));
+    await user.click(screen.getByRole('button', { name: 'open-settings-from-app-window' }));
+    fireEvent.click(screen.getByRole('button', { name: 'leave-for-window' }));
+
+    const input = await screen.findByRole('textbox', { name: 'retained app-window input' });
+    await settleDeferredFocus();
+    expect(document.activeElement).toBe(input);
   });
 
   it('does not let a stale close callback focus the old origin after Settings reopens', async () => {
@@ -523,11 +663,150 @@ describe('SettingsOverlayRouteSurface', () => {
     await user.click(screen.getByRole('link', { name: 'shell-settings' }));
     expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
     expect(document.body.style.pointerEvents).not.toBe('none');
-    expect(document.querySelector('[data-dialog-surface-backdrop="true"]')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'shell-settings' }));
 
     await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
     expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  // Standalone Settings replaces the app sidebar, so it starts at the screen
+  // edge with nothing on that side to divide from. Inline Settings opens beside
+  // a sidebar that is still there, so it takes the primitive's own
+  // `--app-sidebar-w` offset — the same variable the sidebar sizes itself with,
+  // which is what keeps the two edges together while it is dragged.
+  it.each([
+    ['standalone', 'md:left-0', 'md:left-[var(--app-sidebar-w)]', false],
+    ['inline', 'md:left-[var(--app-sidebar-w)]', 'md:left-0', true],
+  ] as const)('starts the %s surface at the right edge', async (
+    placement,
+    offset,
+    rejected,
+    dividedFromSidebar,
+  ) => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, placement);
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe(placement);
+    // Exact class tokens: `md:border-l-0` would satisfy a substring match for
+    // `md:border-l` and quietly invert what this asserts.
+    expect(surface.classList.contains(offset)).toBe(true);
+    expect(surface.classList.contains(rejected)).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(dividedFromSidebar);
+  });
+
+  it('never dismisses inline on an outside interaction, and still lets the user leave', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    const open = async () => {
+      await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+      expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+      // Inline's whole premise is that the shell behind stays reachable, so
+      // this dialog must never go modal: Radix's modal path inerts the page
+      // behind it. Whether a layer *covers* the sidebar is a hit test, which
+      // only a browser can run — `geometry.spec.ts` settles that half.
+      expect(document.body.style.pointerEvents).not.toBe('none');
+    };
+    const stillOpen = () => expect(
+      document.querySelector('[data-settings-overlay="true"]'),
+    ).toBeTruthy();
+
+    await open();
+
+    // Grabbing the divider moves this surface's OWN left edge. Dismissing on it
+    // would close the thing the drag is laying out.
+    await user.click(screen.getByRole('button', { name: 'shell-resizer' }));
+    stillOpen();
+
+    // Nor is the sidebar's own quiet space a dismissal: inline puts these two
+    // surfaces side by side, so the sidebar is a neighbour, not "outside".
+    await user.click(screen.getByRole('button', { name: 'sidebar-idle' }));
+    stillOpen();
+
+    // The launcher and Dock belong to that column but portal above this layer,
+    // so they are not descendants of it. Anything deciding this by DOM ancestry
+    // passes the two cases above and fails here — which is the whole point of
+    // not deciding it that way.
+    await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
+    stillOpen();
+
+    // Not even the rest of the shell: inline covers everything right of the
+    // sidebar, so there is no neutral background left to click at.
+    await user.click(screen.getByRole('button', { name: 'shell-elsewhere' }));
+    stillOpen();
+
+    // Leaving is never in doubt, though. Escape still closes to the retained
+    // origin...
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+
+    // ...and a sidebar link takes the user out by its own navigation, which is
+    // exactly ONE navigation. Were dismissal to fire too, `closeSettingsOverlay`
+    // would traverse history asynchronously and race this synchronous push back
+    // to the retained origin.
+    await open();
+    await user.click(screen.getByRole('link', { name: 'sidebar-chat-link' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_2');
+  });
+
+  it('keeps the shipped outside dismissal for the standalone surface', async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <RoutedHarness />
+      </MemoryRouter>,
+    );
+
+    // Standalone really does own the viewport — anything that floats above it is
+    // outside in the ordinary sense, and closes it back to the retained origin.
+    await user.click(screen.getByRole('link', { name: 'shell-settings' }));
+    expect(screen.getByRole('dialog', { name: 'nav.settings' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'sidebar-portaled' }));
+    await waitFor(() => expect(document.querySelector('[data-settings-overlay="true"]')).toBeNull());
+    expect(screen.getByTestId('chat-location').textContent).toBe('/chat/ses_1');
+  });
+
+  // Some shells draw no app sidebar at all — the setup wizard, a single-app tab.
+  // Inline over one of those would offset Settings past an empty strip and give
+  // it a rail narrowed for a neighbour that does not exist, so the stored
+  // preference is simply not in force there. Which shells those are is the
+  // shell's own business: this surface reads the answer it publishes rather
+  // than trying to recognise them by pathname.
+  it('opens standalone where the shell draws no sidebar, even when inline is stored', async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(SETTINGS_MENU_PLACEMENT_STORAGE_KEY, 'inline');
+    render(
+      <MemoryRouter initialEntries={['/chat/ses_1']}>
+        <ShellSidebarContext.Provider value={false}>
+          <RoutedHarness />
+        </ShellSidebarContext.Provider>
+      </MemoryRouter>,
+    );
+
+    // An ordinary workbench route, so nothing about the path suggests the
+    // answer: only the shell's own claim does.
+    await user.click(screen.getByRole('link', { name: 'open-settings' }));
+    const surface = document.querySelector('[data-settings-overlay="true"]') as HTMLElement;
+
+    expect(surface.getAttribute('data-settings-menu-placement')).toBe('standalone');
+    expect(surface.classList.contains('md:left-0')).toBe(true);
+    expect(surface.classList.contains('md:left-[var(--app-sidebar-w)]')).toBe(false);
+    expect(surface.classList.contains('md:border-l')).toBe(false);
   });
 
   it('keeps legacy redirects out of origins while preserving real ingress origins', async () => {

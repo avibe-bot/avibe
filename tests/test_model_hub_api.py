@@ -272,6 +272,9 @@ class FakeAdapter:
     async def credential_supports_refresh(self, credential_ref):
         return credential_ref in self.refreshable_credential_refs
 
+    async def credential_auth_scheme(self, credential_ref):
+        return None
+
     async def provision_transient_credential(self, vendor, secret, base_url):
         self.secret_lengths.append(len(secret))
         self.credential_count += 1
@@ -279,6 +282,9 @@ class FakeAdapter:
 
     async def revoke_credential(self, credential_ref):
         self.revoked.append(credential_ref)
+
+    async def revoke_api_key_credential(self, credential_ref):
+        await self.revoke_credential(credential_ref)
 
     async def cleanup_orphaned_oauth_material(self, credential_ref):
         self.orphan_cleanup_calls.append(credential_ref)

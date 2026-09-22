@@ -1,9 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check } from 'lucide-react';
+import { Check, Languages } from 'lucide-react';
 import clsx from 'clsx';
 import { useLanguageSelection } from '../lib/useLanguageSelection';
 
-export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
+interface LanguageSwitcherProps {
+  openUpward?: boolean;
+  /** `label` is the compact square used by the settings shells; `icon-round` is
+      the circular Languages button the onboarding header draws. Same menu, same
+      state handling, same selection flow — only the trigger and the wrapper
+      classes differ. */
+  variant?: 'label' | 'icon-round';
+}
+
+export const LanguageSwitcher: React.FC<LanguageSwitcherProps> = ({ openUpward = false, variant = 'label' }) => {
   const { languages, current: currentLang, select } = useLanguageSelection();
   const [isOpen, setIsOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -14,10 +23,17 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
         setIsOpen(false);
       }
     };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
     if (isOpen) {
       document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleEscape);
     }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEscape);
+    };
   }, [isOpen]);
 
   const shortLabel = (code: string) => {
@@ -30,8 +46,9 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
     await select(code);
   };
 
+  const round = variant === 'icon-round';
   return (
-    <div className="relative" ref={wrapRef}>
+    <div className={round ? 'onboarding-language' : 'relative'} ref={wrapRef}>
       <button
         type="button"
         onClick={() => setIsOpen((v) => !v)}
@@ -39,18 +56,22 @@ export const LanguageSwitcher: React.FC<{ openUpward?: boolean }> = ({ openUpwar
         title={currentLang.label}
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2/40 text-[11px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        className={round
+          ? 'onboarding-language-button'
+          : 'inline-flex h-8 w-8 items-center justify-center rounded-md border border-border-strong bg-surface-2/40 text-[11px] font-semibold text-muted transition hover:bg-surface-2 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-ring'}
       >
-        {shortLabel(currentLang.code)}
+        {round ? <Languages size={22} /> : shortLabel(currentLang.code)}
       </button>
 
       {isOpen && (
         <div
           role="listbox"
-          className={clsx(
-            'absolute z-50 min-w-[10rem] rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
-            openUpward ? 'bottom-full left-0 mb-2' : 'top-full right-0 mt-2'
-          )}
+          className={round
+            ? 'onboarding-language-menu'
+            : clsx(
+                'absolute z-50 min-w-[10rem] rounded-lg border border-border bg-popover py-1 text-popover-foreground shadow-xl',
+                openUpward ? 'bottom-full left-0 mb-2' : 'top-full right-0 mt-2'
+              )}
         >
           {languages.map((lang) => {
             const active = lang.code === currentLang.code;

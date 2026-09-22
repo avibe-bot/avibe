@@ -70,6 +70,10 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
+from .address_repair import (
+    payload_carries_credential_address,
+    repair_credential_addresses,
+)
 from .async_owner import await_owned_task
 from .catalog_admission import (
     admissible_backend_model,
@@ -94,6 +98,7 @@ from .identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL, canonical_model_i
 from .migration import (
     MigrationConflictError,
     MigrationCredentialsInvalidError,
+    MigrationReauthorizationRequiredError,
     apply_native_migration,
     prepare_takeover_reauthentication,
     recover_native_migration,
@@ -405,7 +410,7 @@ class UnavailableEngineAdapter:
 
     async def provision_credential(
         self, vendor: str, protocol: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
@@ -427,16 +432,23 @@ class UnavailableEngineAdapter:
     async def matches_api_key_credential(
         self, credential_ref: str, vendor: str, protocol: str,
         secret: str, base_url: str | None,
+        *, auth_scheme: str | None = None,
     ) -> bool:
+        raise EngineUnavailableError
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         raise EngineUnavailableError
 
     async def provision_transient_credential(
         self, vendor: str, secret: str, base_url: str | None,
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         raise EngineUnavailableError
 
     async def revoke_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
         raise EngineUnavailableError
 
     async def sync_sources(self, bindings) -> None:
@@ -640,9 +652,11 @@ async def _provision_transient_credential_with_cancellation_ownership(
     vendor: str,
     key: str,
     base_url: str | None,
-    *, on_reserved: Callable[[str], None] | None = None,
+    *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
 ) -> str:
-    options = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    options: dict[str, Any] = {"on_reserved": on_reserved} if on_reserved is not None else {}
+    if auth_scheme is not None:
+        options["auth_scheme"] = auth_scheme
     return await _acquire_credential_ref_with_cancellation_ownership(
         service,
         service.adapter.provision_transient_credential(vendor, key, base_url, **options),
@@ -861,6 +875,9 @@ class ModelHubService:
         backend_catalog_changed: Optional[
             Callable[[BackendName], Awaitable[None]]
         ] = None,
+        repair_model_selections: Optional[
+            Callable[[frozenset[str]], Awaitable[int]]
+        ] = None,
         now: Callable[[], datetime] = _utc_now,
         recovery: RecoveryPolicy | None = None,
     ):
@@ -902,6 +919,7 @@ class ModelHubService:
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
+        self.repair_model_selections = repair_model_selections
         self.now = now
         self.recovery = recovery or RecoveryPolicy(now=lambda: self.now())
         self.native_source_ready: Callable[[BackendName, ModelHubSourceConfig], bool] = (
@@ -1189,6 +1207,110 @@ class ModelHubService:
             raise ModelHubError("source_create_in_progress", status=409)
         self._source_create_nonces.add(client_nonce)
 
+    async def _repair_credential_addresses(self) -> None:
+        """Take a credential's address out of ids an older release stored.
+
+        Discovery no longer writes one, but a file written before it stopped
+        can still hold an addressed id, and composition then addresses it a
+        second time — the model the user picked resolves to nothing. Every
+        demand for the engine passes here, so an installation upgrading into
+        this release is repaired the first time it needs a model.
+
+        This is the seam because it is the only one where both halves are in
+        hand. The engine state store can prove which address belongs to which
+        Source, so nothing is renamed on the strength of how it is spelled; and
+        the whole config is loaded, so every collection keyed by a model id
+        moves in one write instead of half the joins being left naming
+        something gone. Persisting goes through the same projection owner as
+        any other mutation, so the engine is reconciled with what was written.
+
+        A stored id reaches past this config, too. A Vibe Agent's model, a
+        channel's routing override, and a session's pin are each a copy of an
+        id the menu once offered, and each is read back to decide what a turn
+        asks for — repairing only the catalog would leave them naming a model
+        that no longer exists under that name. The owner of those rows repairs
+        them through ``repair_model_selections``, against this same proof.
+
+        Best effort by design: an id left alone is exactly the state the
+        previous release was already in, which is not worth failing a demand
+        over. The next demand tries again.
+        """
+
+        async with self._mutation_lock:
+            config = self.store.load()
+            payload = config.to_payload()
+            if not payload_carries_credential_address(payload):
+                return
+            addresses: dict[str, str] = {}
+            for source in config.sources:
+                if not source.credential_ref:
+                    continue
+                try:
+                    address = await self.adapter.credential_address(
+                        source.credential_ref
+                    )
+                except Exception:
+                    # An address that cannot be read proves nothing about this
+                    # Source's ids, and a guess is what this design avoids.
+                    logger.debug(
+                        "model hub: no provable address for source %s", source.id
+                    )
+                    continue
+                if address:
+                    addresses[source.id] = address
+            try:
+                repair = repair_credential_addresses(payload, addresses)
+                if not repair.changed:
+                    return
+                # Selections move before the config is committed, because the
+                # config is the witness that anything needs repairing at all.
+                # Committing it first would clear that witness while a copy of
+                # one of its ids is still stored as somebody's selection; this
+                # order retries the whole pass instead, and both halves are
+                # idempotent.
+                selections = await self._repair_selections(
+                    frozenset(addresses.values())
+                )
+                await self._commit_synced(
+                    config,
+                    ModelHubConfig.from_payload(repair.payload),
+                )
+            except Exception:
+                logger.warning(
+                    "model hub: could not repair stored credential addresses",
+                    exc_info=True,
+                )
+                return
+        logger.info(
+            "model hub: removed credential addresses from stored ids "
+            "(%d source models, %d route hops, %d routes, %d agent menu "
+            "entries, %d model selections)",
+            repair.models,
+            repair.hops,
+            repair.routes,
+            repair.menu_entries,
+            selections,
+        )
+        # A running backend answers from the catalog it was started with, so
+        # reconciling the engine leaves it offering the ids that were just
+        # renamed. Same follow-up any other catalog mutation makes.
+        for backend in repair.backends:
+            try:
+                await self._refresh_backend_catalog(cast(BackendName, backend))
+            except Exception:
+                logger.warning(
+                    "model hub: could not refresh %s after an address repair",
+                    backend,
+                    exc_info=True,
+                )
+
+    async def _repair_selections(self, addresses: frozenset[str]) -> int:
+        """Hand the proven addresses to the owner of persisted selections."""
+
+        if self.repair_model_selections is None or not addresses:
+            return 0
+        return await self.repair_model_selections(addresses)
+
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
         has_hub_sources = any(
@@ -1285,6 +1407,13 @@ class ModelHubService:
                         continue
                     if not cleaned:
                         continue
+                elif pending.operation == "revoke_api_key_credential":
+                    try:
+                        await self.adapter.revoke_api_key_credential(pending.credential_ref)
+                    except Exception:
+                        # Only successful exact-namespace cleanup establishes
+                        # absence. Metadata errors are not retirement proof.
+                        continue
                 else:
                     try:
                         await self.adapter.revoke_credential(
@@ -1304,6 +1433,7 @@ class ModelHubService:
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
             await self._ensure_runtime_dependency()
+            await self._repair_credential_addresses()
             if already_synced:
                 self._engine_preparation_failed = False
                 return
@@ -1671,6 +1801,7 @@ class ModelHubService:
         payload: Mapping[str, Any],
         *,
         require_proven: bool = False,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         if set(payload) - {"vendor", "base_url", "key", "protocol"}:
@@ -1690,6 +1821,7 @@ class ModelHubService:
             vendor,
             key.strip(),
             base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
         try:
@@ -1716,10 +1848,11 @@ class ModelHubService:
     async def _require_proven_source_payload(
         self,
         payload: Mapping[str, Any],
-        *, on_reserved: Callable[[str], None] | None = None,
+        *, auth_scheme: str | None = None, on_reserved: Callable[[str], None] | None = None,
     ) -> SourceObservation:
         return await self._observe_source_payload(
             payload, require_proven=True, on_reserved=on_reserved,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
 
     async def _provision_oauth_credential(
@@ -3222,12 +3355,16 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
 
             old_credential_ref = source.credential_ref
+            auth_scheme = await self._engine_call(
+                self.adapter.credential_auth_scheme(old_credential_ref)
+            )
             replacement_ref = await self._engine_call(
                 self.adapter.provision_credential(
                     source.vendor,
                     source.protocol,
                     key,
                     source.base_url,
+                    **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
                 )
             )
             committed = False
@@ -3238,7 +3375,20 @@ class ModelHubService:
                 source.masked_credential = _mask_credential(key)
                 discovered = await self._discover(source)
                 if old_credential_ref != replacement_ref:
-                    self.revocations.add(source.id, old_credential_ref)
+                    if any(
+                        pending.source_id == source.id
+                        and pending.credential_ref == old_credential_ref
+                        and pending.operation == "revoke_credential"
+                        for pending in self.revocations.list()
+                    ):
+                        # Replay also discards intents for the current active
+                        # ref. Do that here for a pre-upgrade generic intent:
+                        # syncing the damaged old credential is not required
+                        # to establish that it is still the committed ref.
+                        self.revocations.remove(source.id, old_credential_ref)
+                    self.revocations.add(
+                        source.id, old_credential_ref, operation="revoke_api_key_credential",
+                    )
                     old_revocation_recorded = True
                 removed_hops, interrupted = await self._finalize_successful_discovery(
                     previous,
@@ -3277,7 +3427,7 @@ class ModelHubService:
 
             if old_credential_ref != replacement_ref:
                 try:
-                    await self.adapter.revoke_credential(old_credential_ref)
+                    await self.adapter.revoke_api_key_credential(old_credential_ref)
                 except Exception:
                     pass
                 else:
@@ -6337,6 +6487,7 @@ class ModelHubService:
                 previous = self.store.load()
                 updated = self._clone_config(previous)
                 updated.enabled = True
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
             await self._prepare_engine_for_demand()
             status = await self._engine_call(self.adapter.start())
@@ -6366,6 +6517,7 @@ class ModelHubService:
                     raise ModelHubError("runtime_busy", status=409)
                 updated = self._clone_config(previous)
                 updated.enabled = False
+                updated.runtime_default_applied = True
                 self._save_projection_neutral(previous, updated)
                 return _runtime_payload(status, enabled=False)
 
@@ -6421,6 +6573,8 @@ class ModelHubService:
             applied, added_to = await await_owned_task(task)
         except MigrationCredentialsInvalidError:
             raise ModelHubError("migration_credentials_invalid", status=409) from None
+        except MigrationReauthorizationRequiredError:
+            raise ModelHubError("migration_reauthorization_required", status=409) from None
         except NativeMigrationBlockedError:
             raise ModelHubError("migration_native_busy", status=409) from None
         except (NativeOAuthPermissionError, PermissionError):
@@ -7703,6 +7857,9 @@ def create_default_service(
     backend_catalog_changed: Optional[
         Callable[[BackendName], Awaitable[None]]
     ] = None,
+    repair_model_selections: Optional[
+        Callable[[frozenset[str]], Awaitable[int]]
+    ] = None,
 ) -> ModelHubService:
     if adapter is None:
         from vibe.model_hub_runtime import get_model_hub_engine_adapter
@@ -7756,4 +7913,5 @@ def create_default_service(
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
+        repair_model_selections=repair_model_selections,
     )

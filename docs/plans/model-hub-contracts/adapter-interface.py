@@ -450,6 +450,7 @@ class EngineAdapter(Protocol):
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an API-key secret in the ENGINE-OWNED credential store and
@@ -461,7 +462,8 @@ class EngineAdapter(Protocol):
         reservation and before any secret bytes are written. A callback failure
         forbids the write. Hub OAuth credentials never pass through here —
         they are created engine-side by the OAuth flow and surfaced via
-        ``OAuthFlowState.credential_ref``."""
+        ``OAuthFlowState.credential_ref``. ``auth_scheme`` optionally preserves
+        an explicit static transport; omission retains legacy semantics."""
         ...
 
     async def provision_oauth_credential(
@@ -511,8 +513,40 @@ class EngineAdapter(Protocol):
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         """Compare transient native material inside custody; return no secrets."""
+        ...
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        """Resolve immutable static transport without requiring the old secret.
+
+        A safe missing/content-corrupt private document may recover from its
+        ref. Readable wrong-kind/unknown/conflicting metadata, unsafe paths and
+        I/O errors reject. The replacement still needs normal key validation.
+        """
+        ...
+
+    async def credential_address(self, credential_ref: str) -> str | None:
+        """Report the address outbound calls reach this credential through.
+
+        The engine addresses a credential through the model field and no other,
+        so a call spells ``<address>/<model>``. Custody mints that address and
+        is the only place it is recorded, which makes this the one answer that
+        can *prove* an id an older release stored carries one — as opposed to
+        guessing from its shape and renaming a vendor's own model.
+
+        Whichever address the engine would actually compose, however custody
+        happens to hold it: one credential records its own, another is
+        addressed by the record its Source is bound through. An implementation
+        that answers from only one of those reports no address for a Source the
+        engine addresses perfectly well.
+
+        None when nothing records an address for this credential, including
+        when it is gone. A caller that cannot prove ownership must leave the
+        id alone.
+        """
         ...
 
     async def retarget_api_key_credential(
@@ -539,7 +573,17 @@ class EngineAdapter(Protocol):
         ...
 
     async def revoke_credential(self, credential_ref: str) -> None:
-        """Release the stored credential (source deletion / key replacement)."""
+        """Release a stored credential, preserving OAuth auth-file ordering."""
+        ...
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        """Retire an unbound ref under durable API-key-only caller intent.
+
+        Remove only the exact safe private ref namespace, even if the old
+        document is missing/content-corrupt. Reject readable identity conflicts
+        and unsafe paths. Never delete watched OAuth auth files or call OAuth
+        management APIs. Return only after durable cleanup; failure is retryable.
+        """
         ...
 
     async def provision_transient_credential(
@@ -548,6 +592,7 @@ class EngineAdapter(Protocol):
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Provision an unbound credential for an unsaved observation.

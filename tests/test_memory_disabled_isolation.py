@@ -142,7 +142,9 @@ def test_memory_state_inventory_keeps_runtime_assets_and_lock_lookalikes(
     assert Path(relative_path) in _memory_state_entries(tmp_path)
 
 
-def test_memory_cli_session_keeps_authenticated_boundary_when_implementation_is_unavailable() -> None:
+def test_memory_cli_session_keeps_authenticated_boundary_when_implementation_is_unavailable(monkeypatch) -> None:
+    # This controller owns no delivery store; the Turn-authority check is not under test here.
+    monkeypatch.setattr("storage.message_deliveries.current_turn_memory_authority_conflict", lambda _sid: False)
     controller = Controller.__new__(Controller)
     controller.config = types.SimpleNamespace(
         memory=types.SimpleNamespace(enabled=True),

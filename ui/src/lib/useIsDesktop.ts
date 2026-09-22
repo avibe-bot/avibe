@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 
-export const DESKTOP_MEDIA_QUERY = '(min-width: 768px)';
+/** The shell's `md` breakpoint. Exported as a number too, because layout
+ *  budgeting has to do arithmetic with it and a second literal would drift. */
+export const DESKTOP_MIN_WIDTH = 768;
+export const DESKTOP_MEDIA_QUERY = `(min-width: ${DESKTOP_MIN_WIDTH}px)`;
 
 type MatchMediaOwner = Pick<Window, 'matchMedia'>;
 

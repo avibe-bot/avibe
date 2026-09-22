@@ -13,8 +13,10 @@ import {
   locationPath,
   SettingsOverlayOriginContext,
   settingsOverlayStateForOrigin,
+  useSettingsFocusHandoff,
   useSettingsOverlayOrigin,
 } from '@/lib/settingsOverlay';
+import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
 
 type SettingsOverlayRouteSurfaceProps = {
   children: ReactNode;
@@ -47,6 +49,7 @@ export const SettingsOverlayRouteSurface = ({
   const location = useLocation();
   const navigate = useNavigate();
   const origin = useSettingsOverlayOrigin(location);
+  const standaloneMenu = useStandaloneSettingsMenu();
   const settingsSurfaceOpen = isSettingsEntryPath(location.pathname) && origin !== null;
   const lastFocusRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -54,6 +57,7 @@ export const SettingsOverlayRouteSurface = ({
   const locationRef = useRef(location);
   const settingsVisitRef = useRef(0);
   const focusFrameRef = useRef<number | null>(null);
+  const focusHandoffRef = useSettingsFocusHandoff();
   useLayoutEffect(() => {
     settingsSurfaceOpenRef.current = settingsSurfaceOpen;
     locationRef.current = location;
@@ -78,11 +82,26 @@ export const SettingsOverlayRouteSurface = ({
   // it in place, so the setup handoff reads it from here rather than guessing
   // from a component's lifecycle.
   useSetupHandoffDeparture(backgroundLocation.pathname);
+  // A retained route replacing itself while Settings is open — a command route
+  // like /apps/show/:id opening its window and handing back to the canvas —
+  // moves the origin this surface returns to. The rewrite has to reach the
+  // recorded history index as well as the recorded location, because that index
+  // names the entry the origin was READ from and that entry still holds what
+  // was there before. Left in place it outranks the rewrite: the exit prefers
+  // its history pop, lands on the old entry, and re-runs the command the user
+  // has already moved on from. Dropped, the exit replaces forward onto where
+  // the origin now is, which is the only thing the rewrite ever claimed.
+  //
+  // Unconditional, including a rewrite that only carries new state. An origin
+  // that has been rewritten is not that entry any more in either case, and one
+  // rule for both is what makes this surface's answer the same one a browser
+  // with a real history stack gives.
   const replaceBackground = useCallback<Navigator['replace']>((to, state) => {
     if (!origin) return;
     const path = resolvePath(to, origin.location.pathname);
     const nextOrigin = {
       ...origin,
+      historyIndex: null,
       location: {
         ...origin.location,
         ...path,
@@ -123,17 +142,51 @@ export const SettingsOverlayRouteSurface = ({
           <SettingsOverlayOriginContext.Provider value={origin}>
             <DialogSurfaceContent
               data-settings-overlay="true"
-              // Settings owns the whole viewport. The retained Workbench origin
-              // remains mounted behind this portal for drafts and return state,
-              // but its sidebar is not part of the Settings surface at any width.
-              className="left-0 border-l-0 md:left-0 md:border-l-0"
+              data-settings-menu-placement={standaloneMenu ? 'standalone' : 'inline'}
+              // Standalone: Settings owns the whole viewport, so it starts at the
+              // screen edge and draws no left border — there is nothing on that
+              // side to divide from. The retained Workbench origin stays mounted
+              // behind this portal for drafts and return state, but its sidebar
+              // is not part of the surface at any width.
+              //
+              // Inline: the app sidebar is still there and still live, so the
+              // surface starts at its trailing edge and takes the primitive's
+              // own `--app-sidebar-w` offset — the same variable the sidebar
+              // sizes itself with, which is what keeps the two edges together
+              // while that sidebar is being dragged. Below md there is no
+              // sidebar to divide from, so the border only applies from md up.
+              className={standaloneMenu
+                ? 'left-0 border-l-0 md:left-0 md:border-l-0'
+                : 'left-0 border-l-0 md:border-l'}
               aria-describedby={undefined}
               onInteractOutside={(event) => {
+                // Inline has no outside in the sense this handler assumes. It is
+                // a pane beside a live shell, not a popup over an inert one, and
+                // everything still reachable belongs to that shell: the sidebar
+                // column left of this surface, plus the launcher, Dock, menus and
+                // floating details it portals to `document.body` above this
+                // layer. Each of those already owns what it does. The resize edge
+                // moves this surface's own left edge, so grabbing it must not
+                // close what the drag is laying out; a sidebar link navigates,
+                // and that navigation IS the way out — were dismissal to fire
+                // too, `closeSettingsOverlay`'s asynchronous history traversal
+                // would race the link's synchronous push and could land on the
+                // retained origin instead of the route that was clicked.
+                //
+                // Naming those surfaces is what a portal defeats: they are not
+                // DOM descendants of the column they belong to, so any ancestry
+                // test can only cover the ones someone remembered. Inline is left
+                // by Escape, by the Settings toggle, or by navigating — never by
+                // clicking its neighbour — so it simply does not dismiss.
+                if (!standaloneMenu) {
+                  event.preventDefault();
+                  return;
+                }
+                // Standalone does own the whole viewport, and keeps the dismissal
+                // that shipped with it. Only the toggle is exempt there, because
+                // it closes this surface itself and must not do it twice.
                 const target = event.target;
-                if (
-                  target instanceof Element
-                  && target.closest('[data-settings-toggle="true"]')
-                ) {
+                if (target instanceof Element && target.closest('[data-settings-toggle="true"]')) {
                   event.preventDefault();
                 }
               }}
@@ -150,6 +203,15 @@ export const SettingsOverlayRouteSurface = ({
               }}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
+                // This close IS a focus handoff: the shell left Settings because
+                // a window came forward, and that window has already claimed DOM
+                // focus. Returning it to the control that opened Settings would
+                // take the window chords away from the window the user just
+                // asked for. One-shot, so it is cleared as it is spent.
+                if (focusHandoffRef?.current) {
+                  focusHandoffRef.current = false;
+                  return;
+                }
                 const visit = settingsVisitRef.current;
                 const expectedOrigin = origin;
                 const target = returnFocusRef.current;

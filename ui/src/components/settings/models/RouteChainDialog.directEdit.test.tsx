@@ -106,6 +106,7 @@ describe('direct route editing', () => {
     await user.keyboard('{Escape}');
     expect(close).not.toHaveBeenCalled();
     await user.click(edit);
+    await user.click(screen.getByRole('button', { name: 'Enter a model ID manually' }));
     await user.type(screen.getByLabelText('Exact model ID'), 'gpt-test');
     expect(screen.getByRole('button', { name: 'Replace' })).toHaveProperty('disabled', true);
     await user.click(screen.getByRole('button', { name: 'Replace' }));

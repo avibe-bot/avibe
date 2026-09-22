@@ -20,11 +20,38 @@ export const SettingsOverlayOriginContext = createContext<SettingsOverlayOrigin 
 export const useSettingsOverlayContext = (): SettingsOverlayOrigin | null =>
   useContext(SettingsOverlayOriginContext);
 
+/**
+ * Closing Settings hands focus back to the control that opened it. One exit must
+ * not: when Settings closes BECAUSE a window came forward, that window is the
+ * new focus owner — the window chords (⌘W / ⌘M) resolve their target from DOM
+ * focus, so returning focus to the sidebar toggle would leave the window on
+ * screen and deaf, and ⌘W would fall through to the browser's close-tab.
+ *
+ * The surface owns the focus decision, only the shell knows the reason, and the
+ * shell is the ancestor here — so the shell publishes a one-shot flag that the
+ * surface reads and clears on its way out. A ref rather than state: nothing
+ * renders differently for it, and it has to be readable from Radix's deferred
+ * close callback, which runs after the render that closed the surface.
+ */
+export const SettingsFocusHandoffContext = createContext<{ current: boolean } | null>(null);
+
+export const useSettingsFocusHandoff = (): { current: boolean } | null =>
+  useContext(SettingsFocusHandoffContext);
+
 export const isSettingsRoutePath = (pathname: string): boolean =>
   pathname === '/settings' || pathname.startsWith('/settings/');
 
 export const isSettingsEntryPath = (pathname: string): boolean =>
   isSettingsRoutePath(pathname) || isLegacySettingsEntryPath(pathname);
+
+/**
+ * The setup wizard owns the whole window: AppShell renders its outlet alone,
+ * with no sidebar, header or bottom nav around it. Stated once here because
+ * three separate decisions turn on it — whether the shell draws its chrome at
+ * all, and, for a Settings surface opened from there, whether the Settings menu
+ * has an app sidebar to sit beside.
+ */
+export const isChromelessShellPath = (pathname: string): boolean => pathname === '/setup';
 
 export const settingsOverlayOriginFromState = (state: unknown): SettingsOverlayOrigin | null => {
   if (!state || typeof state !== 'object') return null;

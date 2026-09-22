@@ -51,7 +51,7 @@ from core.scheduled_tasks import (
 from core.caller_context import (
     caller_context_from_env,
     caller_resource_user_context,
-    env_declares_remote_caller,
+    caller_resource_user_context_from_env,
 )
 from core.command_runner import command_line_preview
 from core.install_integrity import verify_python_environment, verify_site_packages
@@ -18673,9 +18673,8 @@ def _cli_invocation_authority(env: Optional[Mapping[str, str]] = None):
     )
     from vibe.authorization import AuthorizationContext
 
-    source = os.environ if env is None else env
-    snapshot = caller_resource_user_context(caller_context_from_env(source))
-    if snapshot is None and not env_declares_remote_caller(source):
+    snapshot = caller_resource_user_context_from_env(env)
+    if snapshot is None:
         return None
     context = resource_user_context_from_metadata({RESOURCE_USER_CONTEXT_METADATA_KEY: snapshot})
     return AuthorizationContext(is_remote=True) if context is None else context

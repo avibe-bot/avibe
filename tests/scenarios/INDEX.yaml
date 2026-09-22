@@ -131,6 +131,7 @@ capabilities:
       - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
       - tests/e2e/test_model_hub_guards.py
       - tests/e2e/test_model_hub_migration.py
+      - tests/e2e/test_model_hub_migration_persisted.py
       - tests/e2e/test_model_hub_mock_upstream.py
       - tests/e2e/test_model_hub_routing.py
       - tests/e2e/test_model_hub_backend_settings.py
@@ -147,6 +148,7 @@ capabilities:
       - tests/test_model_hub_admission.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_legacy_opencode_migration.py
+      - tests/test_model_hub_persisted_migration.py
       - tests/test_member_management_parity.py
       - tests/test_model_hub_provenance.py
       - tests/test_model_hub_retention.py
@@ -199,6 +201,7 @@ capabilities:
       - tests/test_agent_run_target.py
       - tests/test_watches.py
       - tests/test_cli_watch_command.py
+      - tests/test_background_command_caller_context.py
   - id: harness_command_task
     name: Scheduled command tasks and their failure visibility
     status: active

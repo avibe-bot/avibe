@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_vendor_id
 
@@ -17,6 +18,96 @@ _LEGACY_OFFICIAL_BASE_URLS = {
     # treating it like OpenAI for persisted Sources that omit ``base_url``.
     "codex": "https://api.openai.com/v1",
 }
+
+
+def _validated_cpa_anthropic_origin(base_url: str | None) -> bool:
+    """Share CPA's authority gate, rejecting ambiguous HTTP URL spellings."""
+    if not isinstance(base_url, str) or any(ord(char) <= 32 or ord(char) == 127 for char in base_url):
+        raise ValueError
+    normalized = normalize_model_hub_base_url(base_url)
+    if normalized is None:
+        raise ValueError
+    parsed = urlsplit(normalized)
+    hostname = parsed.hostname
+    if not hostname or "%" in parsed.netloc or "\\" in parsed.netloc or parsed.port == 0:
+        raise ValueError
+    ascii_hostname = hostname.encode("idna").decode("ascii").lower()
+    if ascii_hostname == "api.anthropic.com" and hostname.lower() != ascii_hostname:
+        # Python's HTTP client can normalize these to the official host while
+        # Go's URL authority gate sees the original spelling. Admit neither.
+        raise ValueError
+    return (
+        parsed.scheme == "https"
+        and hostname.lower() == "api.anthropic.com"
+        # CPA compares URL.Port() as text: :0443 is not its official origin.
+        and (parsed.port is None or parsed.netloc.rsplit(":", 1)[-1] == "443")
+    )
+
+
+def validate_api_key_auth_scheme(
+    vendor: str,
+    protocol: str | None,
+    base_url: str | None,
+    secret: str | None,
+    auth_scheme: str | None,
+) -> str | None:
+    """Validate explicit static transport without reinterpreting legacy keys.
+
+    A missing protocol is only for an unbound observation credential. A missing
+    secret is only for the credentialless contrast of an already validated
+    transport. The pinned CPA sends ordinary custom Claude keys as Bearer, but
+    interprets ``sk-ant-oat`` anywhere in a key as OAuth independently of kind.
+    """
+    if auth_scheme is None:
+        return None
+    try:
+        if (
+            auth_scheme != "bearer"
+            or not isinstance(vendor, str)
+            or vendor.strip().lower() != "anthropic"
+            or protocol not in (None, "anthropic")
+        ):
+            raise ValueError
+        if _validated_cpa_anthropic_origin(base_url):
+            raise ValueError
+        if secret is not None and (
+            not isinstance(secret, str)
+            or not secret.strip()
+            or "sk-ant-oat" in secret
+            or any(ord(char) < 32 or ord(char) == 127 for char in secret)
+        ):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("unsupported API key authentication scheme") from None
+    return "bearer"
+
+
+def validate_migration_api_key_transport(
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str | None,
+    auth_scheme: str | None,
+) -> None:
+    """Admit native static auth only when proof and pinned CPA preserve it.
+
+    This is a migration gate, not a new default for public Sources or legacy
+    credential metadata. Anthropic SDK/API_KEY inputs mean x-api-key; CPA uses
+    that header only at its official origin. Static keys matching its OAuth
+    heuristic are unsafe at either origin, regardless of successful proof.
+    """
+    try:
+        validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
+        if protocol != "anthropic":
+            return
+        if not isinstance(secret, str) or not secret.strip() or "sk-ant-oat" in secret:
+            raise ValueError
+        if auth_scheme is None and not _validated_cpa_anthropic_origin(
+            base_url if base_url is not None else official_api_key_base_url(vendor)
+        ):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValueError("unsupported native API key transport") from None
 
 
 @dataclass(frozen=True)

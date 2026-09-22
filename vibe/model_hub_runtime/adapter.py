@@ -34,6 +34,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -44,7 +45,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
-from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
+from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol, validate_api_key_auth_scheme
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -724,10 +725,12 @@ async def _probe_protocol_response(
     protocol: str,
     base_url: str | None,
     secret: str,
+    auth_scheme: str | None = None,
     timeout: float = 15.0,
 ) -> _ProtocolEvidence:
     """Require a response from the candidate protocol's distinct request path."""
 
+    validate_api_key_auth_scheme(vendor, protocol, base_url, secret, auth_scheme)
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")
@@ -744,11 +747,10 @@ async def _probe_protocol_response(
         "Accept": "application/json",
     }
     if protocol == "anthropic":
-        headers = {
-            "x-api-key": secret,
-            "anthropic-version": "2023-06-01",
-            "Accept": "application/json",
-        }
+        headers["anthropic-version"] = "2023-06-01"
+        if auth_scheme != "bearer":
+            headers.pop("Authorization")
+            headers["x-api-key"] = secret
     client_timeout = aiohttp.ClientTimeout(total=timeout)
     async def observe() -> _ProtocolEvidence:
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
@@ -923,6 +925,7 @@ async def _authenticate_with_models_witness(
     protocol: str,
     base_url: str | None,
     secret: str,
+    auth_scheme: str | None = None,
 ) -> _ModelsWitnessResult:
     """Read the owned interface's model listing as the authentication witness.
 
@@ -957,12 +960,14 @@ async def _authenticate_with_models_witness(
     listing, so one call both authenticates the source and populates it.
     """
 
+    scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
     try:
         models = await probe_models(
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
             secret=secret,
+            **scheme_options,
         )
     except EngineClientError as exc:
         if exc.status_code in _AUTHENTICATION_ERROR_STATUSES:
@@ -974,6 +979,7 @@ async def _authenticate_with_models_witness(
             protocol=protocol,
             base_url=base_url,
             secret=None,
+            **scheme_options,
         )
     except EngineClientError as refusal:
         if refusal.status_code in _AUTHENTICATION_ERROR_STATUSES:
@@ -1724,6 +1730,7 @@ class CLIProxyEngineAdapter:
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         return await run_owned_in_thread(
@@ -1732,6 +1739,7 @@ class CLIProxyEngineAdapter:
             vendor=vendor,
             protocol=protocol,
             base_url=base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
 
@@ -1896,6 +1904,8 @@ class CLIProxyEngineAdapter:
         protocol: str,
         secret: str,
         base_url: str | None,
+        *,
+        auth_scheme: str | None = None,
     ) -> bool:
         return await asyncio.to_thread(
             self.state_store.matches_api_key_credential,
@@ -1904,7 +1914,39 @@ class CLIProxyEngineAdapter:
             protocol,
             secret,
             base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
         )
+
+    async def credential_auth_scheme(self, credential_ref: str) -> str | None:
+        return await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
+
+    async def credential_address(self, credential_ref: str) -> str | None:
+        return await asyncio.to_thread(self._credential_address, credential_ref)
+
+    def _credential_address(self, credential_ref: str) -> str | None:
+        """Settle the address the same way ``bind_source`` settles it.
+
+        Only an OAuth credential records an address of its own, and one written
+        by an older release may not have even that. Every other bound Source is
+        addressed by the prefix its record holds, which ``bind_source`` reaches
+        for next. Reading just the credential would therefore report no address
+        for a Source the engine addresses perfectly well, and the repair would
+        decline exactly the ids that need it.
+        """
+
+        metadata = self.state_store.credential_metadata_if_present(credential_ref)
+        prefix = (metadata or {}).get("prefix")
+        if isinstance(prefix, str) and prefix:
+            return prefix
+        record = next(
+            (
+                source
+                for source in self.state_store.list_sources()
+                if source.credential_ref == credential_ref
+            ),
+            None,
+        )
+        return record.prefix if record is not None and record.prefix else None
 
     async def retarget_api_key_credential(
         self,
@@ -1934,6 +1976,7 @@ class CLIProxyEngineAdapter:
             vendor=normalized_vendor,
             protocol=protocol,
             base_url=base_url,
+            **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
         )
 
     async def credential_supports_refresh(self, credential_ref: str) -> bool:
@@ -1949,24 +1992,33 @@ class CLIProxyEngineAdapter:
         secret: str,
         base_url: str | None,
         *,
+        auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
         """Store an unbound observation key until the observation settles.
 
         The observation seam determines protocol from upstream responses, so the
-        temporary record deliberately uses a neutral engine-store protocol marker;
-        ``observe_source`` reads only the opaque ref's secret and never treats that
-        marker as a protocol conclusion.
+        legacy temporary record uses a neutral engine-store protocol marker.
+        Explicit Bearer is restricted to the Anthropic interface. Neither marker
+        supplies authentication evidence; observation still needs upstream proof.
         """
 
+        validate_api_key_auth_scheme(vendor, None, base_url, secret, auth_scheme)
         return await run_owned_in_thread(
             self.state_store.store_api_key,
             secret,
             vendor=vendor,
-            protocol="openai_chat",
+            protocol="anthropic" if auth_scheme == "bearer" else "openai_chat",
             base_url=base_url,
+            **({"auth_scheme": auth_scheme} if auth_scheme is not None else {}),
             on_reserved=on_reserved,
         )
+
+    async def revoke_api_key_credential(self, credential_ref: str) -> None:
+        await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
+        await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
+        await asyncio.to_thread(self.supervisor.invalidate_configs)
+        await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
     async def revoke_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(
@@ -2076,7 +2128,11 @@ class CLIProxyEngineAdapter:
                 "/auth-files/models",
                 query={"name": str(metadata["auth_name"])},
             )
-            return _discovered_models(payload)
+            prefix = metadata.get("prefix")
+            return _discovered_models(
+                payload,
+                str(prefix) if isinstance(prefix, str) and prefix else None,
+            )
         normalized_base_url = await asyncio.to_thread(
             self.state_store.validate_api_key_target,
             credential_ref,
@@ -2091,6 +2147,7 @@ class CLIProxyEngineAdapter:
                 protocol=protocol,
                 base_url=normalized_base_url,
                 secret=secret,
+                **({"auth_scheme": metadata["auth_scheme"]} if metadata.get("auth_scheme") is not None else {}),
             )
         except EngineClientError as exc:
             raise ModelDiscoveryError("model discovery failed") from exc
@@ -2133,12 +2190,19 @@ class CLIProxyEngineAdapter:
         if metadata.get("vendor") != normalized_vendor:
             raise EngineStateError("credential does not match observation target")
         credential_kind = metadata.get("kind")
+        auth_scheme = metadata.get("auth_scheme")
+        scheme_options = {"auth_scheme": auth_scheme} if auth_scheme is not None else {}
         secret: str | None = None
         oauth_auth: _AuthRecord | None = None
         if credential_kind == "api_key":
             if metadata.get("base_url") != normalized_base_url:
                 raise EngineStateError("credential does not match observation target")
             secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+            if auth_scheme is not None:
+                for protocol in protocol_order:
+                    validate_api_key_auth_scheme(
+                        normalized_vendor, protocol, base_url, secret, auth_scheme,
+                    )
         elif credential_kind == "oauth":
             if normalized_base_url is not None:
                 raise EngineStateError("credential does not match observation target")
@@ -2185,6 +2249,7 @@ class CLIProxyEngineAdapter:
                         protocol=protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 elif credential_kind == "oauth" and owner_scoped_protocol:
                     # A pinned subscription has no upstream to probe: the engine
@@ -2226,6 +2291,7 @@ class CLIProxyEngineAdapter:
                     protocol=protocol,
                     base_url=base_url,
                     secret=secret or "",
+                    **scheme_options,
                 )
                 if witness.credential is _ModelsWitness.REJECTED:
                     received_rejection = True
@@ -2264,6 +2330,7 @@ class CLIProxyEngineAdapter:
                         protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 else:
                     models = await self.discover_models(
@@ -2304,6 +2371,7 @@ class CLIProxyEngineAdapter:
                         protocol=proved_protocol,
                         base_url=base_url,
                         secret=secret or "",
+                        **scheme_options,
                     )
                 else:
                     models = await self.discover_models(
@@ -2868,29 +2936,60 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     return inventory
 
 
-def _discovered_models(payload: Mapping[str, Any]) -> tuple[DiscoveredModel, ...]:
+def _discovered_models(
+    payload: Mapping[str, Any],
+    prefix: str | None = None,
+) -> tuple[DiscoveredModel, ...]:
     models = payload.get("models")
     if not isinstance(models, list):
         return ()
-    result: list[DiscoveredModel] = []
-    seen: set[str] = set()
+    coalesced: dict[str, tuple[str, ...] | None] = {}
+    # Which spellings the engine used for each name, so a row it listed twice
+    # under one name stays distinguishable from two rows that became one here.
+    spellings: dict[str, set[str]] = {}
     for item in models:
         value = item.get("id") or item.get("alias") or item.get("name") if isinstance(item, dict) else item
-        if not isinstance(value, str) or not value or value in seen:
+        if not isinstance(value, str) or not value:
             continue
-        seen.add(value)
+        answered = value
+        # This is the one place an address enters the product: the engine answers
+        # with the name it addresses this credential by. It is removed here, at
+        # that boundary, rather than by every later reader of the inventory — and
+        # only the address of the credential being discovered, so a model whose
+        # own name is spelled like one is left as upstream named it.
+        value = model_id_without_credential_address(value, prefix)
+        if not value:
+            continue
         supported_parameters = None
         if isinstance(item, dict) and isinstance(item.get("supported_parameters"), list):
             parameters = item["supported_parameters"]
             if all(isinstance(parameter, str) and parameter for parameter in parameters):
                 supported_parameters = tuple(dict.fromkeys(parameters))
-        result.append(
-            DiscoveredModel(
-                id=value,
-                supported_parameters=supported_parameters,
-            )
-        )
-    return tuple(result)
+        if value not in coalesced:
+            coalesced[value] = supported_parameters
+            spellings[value] = {answered}
+            continue
+        if answered in spellings[value]:
+            # The engine listed one name twice and said different things about
+            # it. That is the engine contradicting itself and the first answer
+            # has always been the one kept.
+            continue
+        # Two names the engine kept apart, landing on one only because the
+        # address came off. The inventory holds one row per name, so the rows
+        # are coalesced rather than the later one dropped: this merge is ours,
+        # and nothing the engine said may be lost to the order it said it in.
+        spellings[value].add(answered)
+        held = coalesced[value]
+        if supported_parameters is None:
+            continue
+        if held is None:
+            coalesced[value] = supported_parameters
+            continue
+        coalesced[value] = tuple(dict.fromkeys(held + supported_parameters))
+    return tuple(
+        DiscoveredModel(id=model_id, supported_parameters=parameters)
+        for model_id, parameters in coalesced.items()
+    )
 
 
 _adapter: CLIProxyEngineAdapter | None = None

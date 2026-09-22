@@ -1,6 +1,12 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-010
+    source: local-regression-persisted-migration-2026-09-20
+    summary: Already-Hub backends were all disabled because inherited process authentication was represented as migration blockers. Saved Claude AUTH_TOKEN was mislabeled as permission failure. Migration must inventory persisted files independently of runtime injection, and preserve Bearer transport for supported custom Anthropic endpoints rather than treating it as x-api-key or OAuth.
+    affects:
+      - MH-MIG-005
+      - F4
   - id: MH-OBS-009
     source: codex-0.154.0-hermetic-native-wire-2026-09-19
     summary: Route-bound bearer tokens caused model changes to replace shared Codex processes. Per-turn responsesapiClientMetadata survives concurrent threads, tool continuations, retries and local automatic compaction in both the native metadata header and body. The header provides identity before body parsing; a legacy remote compact wire-only probe carries metadata only in its header.

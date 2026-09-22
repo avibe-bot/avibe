@@ -23,7 +23,7 @@ natural-language content.
 
 ## Native Steering Contract
 
-The shared backend request has exactly these fields:
+The shared backend request has these fields:
 
 ```text
 SteerRequest
@@ -31,6 +31,9 @@ SteerRequest
   expected_logical_turn_id: str
   expected_native_turn_id: str
   text: str
+  attempt_id: str = ""
+  input_metadata: AgentInputMetadata | None = None
+  files: tuple[FileAttachment, ...] = ()
 ```
 
 - `target_session_id` is the target Avibe Agent Session identity.
@@ -41,6 +44,12 @@ SteerRequest
   client/receiver generation, or the OpenCode native session/runner generation.
 - `text` is the original, unmodified input. Adapters must pass it to the native
   backend byte-for-byte as text, including non-ASCII and Markdown/code content.
+- `files` contains session-bound attachments resolved from the durable Delivery
+  tokens immediately before native dispatch. Never accept arbitrary caller paths.
+  If any reference is revoked, foreign, missing, or no longer local, refuse before
+  writing any part of the batch and keep the original Delivery queued.
+- `attempt_id` is the durable attempt identity; `input_metadata` renders only at
+  the native boundary. Neither changes the original text or attachment snapshot.
 
 The typed result has one `outcome` with exactly four possible values. Optional
 `reason` and `details` fields are subordinate diagnostics and do not create
@@ -68,18 +77,26 @@ receiver.
 ## Backend Acknowledgements
 
 - **Codex:** call the installed app-server `turn/steer` method with `threadId`,
-  `expectedTurnId`, and one text `input`. A response is accepted only when its
-  `turnId` equals the expected native turn. Never fall back to `turn/start`.
+  `expectedTurnId`, and the same text / `localImage` input builder as `turn/start`.
+  Include the durable steer attempt id as `clientUserMessageId`; Codex persists it
+  on the resulting `userMessage` item. A response is accepted only when its
+  `turnId` equals the expected native turn. If the acknowledgement is ambiguous,
+  recovery reads the exact thread turn and accepts only a matching `clientId`;
+  absence of that evidence remains `unknown` and fenced. Never fall back to
+  `turn/start`.
 - **Claude:** call `query()` on the existing live client using the existing
   runtime session id while retaining the same receiver generation. Successful
   completion of the SDK transport write is the acknowledgement. A timeout,
   disconnect, or failed write with an ambiguous partial-write boundary is
   `unknown`; a pre-write unavailable state is `refused`.
+  Use the same attachment-path context as normal turns; receipt tracking includes
+  the complete rendered prompt, including image/file paths.
 - **OpenCode:** call `prompt_async` on the existing native session and runner.
   HTTP 200/204 is the acknowledgement. A definitive HTTP rejection is
   `refused` (or `not_active` when the native session is absent); a timeout or
   disconnect after request dispatch is `unknown`. The adapter never calls abort
-  or stop.
+  or stop. Use the normal-turn attachment-path context and track that full prompt
+  for reconciliation.
 
 These acknowledgement strengths are intentionally different because the native
 protocols expose different boundaries. The common result preserves that truth
@@ -99,9 +116,34 @@ instead of claiming equivalent durability.
 | Stop | Empty P0 | Stops the exact live Turn. Definitive terminal settlement immediately starts the oldest claimable P3 segment. |
 | Send Now existing head | Empty P1 | Promotes only the exact observed FIFO head. |
 
-Attachments remain part of the same Delivery. Because native steer adapters
-accept text only, an attachment-bearing P1 is preserved as P3 and starts a new
-Turn after the current one finishes.
+Attachments remain part of the same Delivery and follow the same P1 admission
+as text. Send Now can steer pure-image and mixed text/file messages into the
+active Turn without stopping it. Definitive refusal preserves the queue; an
+ambiguous acknowledgement retains the existing reconciliation fence. The
+send-now response exposes queued refusal reasons so the UI never implies that
+the attachment was sent when it was not.
+
+The queue and bootstrap read projections retain unaccepted `pending_steer`,
+`steering`, and `reconciling_steer` rows in FIFO order with their original content.
+These rows remain inspectable after reload but cannot be recalled, deleted, or
+sent again; a fenced head blocks Send Now without blocking removal of queued
+followers. The strict queued-only storage default and native ordering fences
+remain unchanged. Receipt settlement publishes a queue refresh after commit:
+acceptance transfers the input to the transcript, while definitive refusal
+restores the editable queued row (or retires it for an inactive Session).
+
+Attachment steering acceptance scenarios:
+
+- `QUEUE-IMAGE-001`: pure image and Chinese text/image queue heads reach the exact
+  active native turn, preserving token, filename and transcript identity.
+- `QUEUE-IMAGE-002`: Codex uses `localImage`; Claude/OpenCode use their normal
+  attachment context; all retain their current receiver/runner and never Stop.
+- `QUEUE-IMAGE-003`: foreign/revoked/missing media refuses the whole input before
+  writing text; unknown acknowledgements never retry or duplicate the input.
+- `QUEUE-IMAGE-004`: queued thumbnails and send feedback survive refresh and
+  reload while steering is unconfirmed; pending rows are read-only, and receipt
+  settlement restores queued actions or moves the input to the transcript.
+  Text-only rows use the same delivery-state projection.
 
 ## Ownership Closure
 

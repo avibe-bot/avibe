@@ -62,7 +62,7 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
 )
-from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.base import AgentRequest, BaseAgent, message_with_files
 from modules.agents.model_hub import (
     ModelHubLaunch,
     OpenCodeOverlay,
@@ -2082,7 +2082,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                         backend=self.name,
                     )
                 before_insert = _SteeringAwareOpenCodeServer._message_ids(messages)
-                prompt_text = self.render_input(request.text, request.input_metadata)
+                prompt_text = self.render_input(message_with_files(request.text, request.files), request.input_metadata)
                 try:
                     prompt_kwargs = {
                         "session_id": native_session_id,
@@ -2994,54 +2994,4 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 restoration_ready.set_result(False)
 
     def _prepare_message_with_files(self, request: AgentRequest) -> str:
-        """Prepare message with file attachment information.
-
-        If there are file attachments, append file info to the message
-        so the agent knows what files are available to read.
-        Files are stored in ~/.vibe_remote/attachments/{channel_id}/.
-
-        Args:
-            request: The agent request containing message and files
-
-        Returns:
-            Message string, potentially with file info appended
-        """
-        if not request.files:
-            return request.message
-
-        # Build file info section
-        images = []
-        other_files = []
-
-        for attachment in request.files:
-            if not attachment.local_path:
-                continue
-
-            is_image = (attachment.mimetype or "").startswith("image/")
-            if is_image:
-                images.append(attachment)
-            else:
-                other_files.append(attachment)
-
-        if not images and not other_files:
-            return request.message
-
-        # Format file info as a clear block at the end
-        file_lines = ["", "[User Attachments]"]
-
-        for img in images:
-            size_str = f", {img.size} bytes" if img.size else ""
-            file_lines.append(f"- Image: {img.local_path} ({img.mimetype}{size_str})")
-
-        for f in other_files:
-            size_str = f", {f.size} bytes" if f.size else ""
-            file_lines.append(f"- File: {f.local_path} ({f.mimetype}{size_str})")
-
-        file_info = "\n".join(file_lines)
-
-        # If there's no text message, just use file info (without leading newline)
-        if not request.message or not request.message.strip():
-            return file_info.lstrip()
-
-        # Append file info to message
-        return f"{request.message}{file_info}"
+        return message_with_files(request.message, request.files)

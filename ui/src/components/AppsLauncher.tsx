@@ -172,19 +172,16 @@ const LauncherPresentation = ({ pinned, setPinned }: {
         aria-expanded={visible}
         aria-pressed={pinned}
         className={clsx(
-          // Keep the Apps control soft and mint scoped to this shell affordance.
-          // Its label stays ordinary foreground text; the fill and icon carry
-          // the brand without changing shared mint-soft tokens or adding glow.
-          'group flex w-full items-center gap-2.5 rounded-full border bg-mint/[0.16] px-4 py-2.5 text-[13px] font-bold text-foreground transition-colors',
+          'group flex h-[39px] w-full items-center gap-2.5 rounded-full border bg-cyan-soft px-4 py-0 text-[13px] font-bold text-foreground transition-colors',
           visible
-            ? 'border-mint'
-            : 'border-mint/45 hover:border-mint/70',
+            ? 'border-cyan shadow-glow-md-cyan'
+            : 'border-cyan/45 shadow-glow-sm-cyan hover:border-cyan/70',
         )}
       >
-        <LayoutGrid className="size-4 shrink-0 text-mint-ink" />
+        <LayoutGrid className="size-4 shrink-0 text-cyan-ink" />
         <span className="flex-1 whitespace-nowrap text-left">{t('apps.title')}</span>
         {pinned ? (
-          <Pin className="size-3.5 shrink-0 rotate-45 fill-mint text-mint-ink" />
+          <Pin className="size-3.5 shrink-0 rotate-45 fill-cyan text-cyan-ink" />
         ) : (
           <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !visible && 'rotate-180')} />
         )}
@@ -205,7 +202,7 @@ const LauncherPresentation = ({ pinned, setPinned }: {
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)} width={184} itemCount={1}>
           <ContextMenuItem
-            icon={<LayoutGrid className="size-[15px] text-mint-ink" />}
+            icon={<LayoutGrid className="size-[15px] text-cyan-ink" />}
             label={t('apps.launcher.openLibrary')}
             onClick={openLibrary}
           />

@@ -140,6 +140,25 @@ test('a queued image is visible, 20px, centred, and costs the row no height', as
     .toBeGreaterThan(0);
 });
 
+test('an unconfirmed image survives reload and can be inspected but not resent or removed', async ({ page }) => {
+  await page.goto('/e2e/queue-attachments/fixture.html?confirming');
+  for (let visit = 0; visit < 2; visit += 1) {
+    if (visit) await page.reload();
+    const pendingRow = page.locator('[data-queue-row]');
+    await expect(pendingRow).toContainText('队列图片.png');
+    const image = pendingRow.locator('img');
+    await expect.poll(() => image.evaluate((el: HTMLImageElement) => el.naturalWidth)).toBeGreaterThan(0);
+    const pending = page.getByRole('button', { name: 'Send status not confirmed' });
+    await expect(pending).toBeDisabled();
+    await expect(pending.locator('.animate-spin')).toHaveCount(0);
+    await expect(pendingRow.getByRole('button', { name: 'Remove from queue' })).toBeDisabled();
+    await activate(page, pendingRow.locator('[data-queue-attachment]').first());
+    await expect(page.getByRole('dialog')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('queue-fixture')).toHaveAttribute('data-sent', '0');
+  }
+});
+
 test('a single-line queued message is vertically centred in its row', async ({ page }) => {
   const queuedRow = await boxOf(row(page, 'q-text'), 'the text-only row');
   const text = await boxOf(row(page, 'q-text').locator('div[role="button"]'), 'the queued message text');

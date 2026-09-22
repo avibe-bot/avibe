@@ -164,3 +164,114 @@ def test_write_atomic_does_not_require_optional_os_attributes(
     write_atomic(target, "portable")
 
     assert target.read_text(encoding="utf-8") == "portable"
+
+
+@pytest.mark.parametrize("mode", [0o400, 0o600, 0o640, 0o644, 0o755])
+def test_explicit_mode_is_durable_before_guard_and_publication(tmp_path, monkeypatch, mode):
+    target = tmp_path / "profile"
+    target.write_bytes(b"before")
+    target.chmod(0o600)
+    flushed = []
+    fsync = os.fsync
+
+    def record_sync(descriptor):
+        info = os.fstat(descriptor)
+        flushed.append((info.st_ino, info.st_mode & 0o777))
+        fsync(descriptor)
+
+    def guard():
+        assert target.read_bytes() == b"before"
+        [temporary] = tmp_path.glob(".profile.*")
+        assert temporary.read_bytes() == b"after"
+        info = temporary.stat()
+        assert info.st_mode & 0o777 == mode
+        assert (info.st_ino, mode) in flushed
+
+    monkeypatch.setattr(atomic_io.os, "fsync", record_sync)
+    write_atomic(target, b"after", mode=mode, before_replace=guard)
+    assert target.read_bytes() == b"after"
+    assert target.stat().st_mode & 0o777 == mode
+    assert list(tmp_path.glob(".profile.*")) == []
+
+
+def test_failed_before_replace_guard_preserves_external_state_and_cleans_temporary(tmp_path):
+    target = tmp_path / "profile"
+    target.write_bytes(b"before")
+
+    def guard():
+        target.write_bytes(b"external state")
+        target.chmod(0o600)
+        raise RuntimeError("fixture consent changed")
+
+    with pytest.raises(RuntimeError, match="fixture consent changed"):
+        write_atomic(target, b"after", mode=0o644, before_replace=guard)
+    assert target.read_bytes() == b"external state"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.glob(".profile.*")) == []
+
+
+@pytest.mark.parametrize("mode", [-1, 0o1000, True, "0644", None])
+def test_invalid_explicit_mode_cannot_create_or_replace_state(tmp_path, mode):
+    target = tmp_path / "uncreated" / "state"
+    with pytest.raises(ValueError):
+        write_atomic(target, b"no write", mode=mode)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["fchmod", "fsync", "replace"])
+def test_explicit_mode_failure_cleans_temporary_without_changing_target(tmp_path, monkeypatch, failure):
+    target = tmp_path / "profile"
+    target.write_bytes(b"before")
+    target.chmod(0o600)
+
+    def fail(*args, **kwargs):
+        raise OSError("fixture publication failed")
+
+    monkeypatch.setattr(atomic_io.os, failure, fail)
+    with pytest.raises(OSError):
+        write_atomic(target, b"after", mode=0o644)
+    assert target.read_bytes() == b"before"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert list(tmp_path.glob(".profile.*")) == []
+
+
+def test_explicit_mode_fallback_changes_only_the_unpublished_inode(tmp_path, monkeypatch):
+    target = tmp_path / "profile"
+    calls = []
+    chmod = os.chmod
+    monkeypatch.delattr(atomic_io.os, "fchmod")
+
+    def record_chmod(path, mode):
+        assert path != target
+        calls.append(mode)
+        chmod(path, mode)
+
+    monkeypatch.setattr(atomic_io.os, "chmod", record_chmod)
+    write_atomic(target, b"after", mode=0o640)
+    assert calls == [0o640]
+    assert target.stat().st_mode & 0o777 == 0o640
+
+
+@pytest.mark.parametrize("mask", [0o200, 0o400, 0o777])
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_captured_publication_mode_is_not_narrowed_by_umask(tmp_path, mask, mode):
+    target = tmp_path / "profile"
+    target.write_bytes(b"before")
+    previous_mask = os.umask(mask)
+    try:
+        write_atomic(target, b"after", mode=mode)
+    finally:
+        os.umask(previous_mask)
+    assert target.read_bytes() == b"after"
+    assert target.stat().st_mode & 0o777 == mode
+
+
+def test_default_publication_mode_is_exact_under_restrictive_umask(tmp_path):
+    target = tmp_path / "state"
+    previous_mask = os.umask(0o777)
+    try:
+        write_atomic(target, b"state")
+    finally:
+        os.umask(previous_mask)
+    assert target.read_bytes() == b"state"
+    assert target.stat().st_mode & 0o777 == 0o600

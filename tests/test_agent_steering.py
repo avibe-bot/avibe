@@ -31,6 +31,7 @@ from modules.agents.opencode.agent import (
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
 from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
+from modules.im.base import FileAttachment
 
 from tests.test_memory_delegated_reads import (
     _create_definition,
@@ -284,6 +285,83 @@ async def _cancel_tasks(*tasks: asyncio.Task) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["codex", "claude", "opencode"])
+@pytest.mark.parametrize("text", ["", STEER_TEXT])
+async def test_native_steer_uses_normal_attachment_input_without_replacing_primary(backend, text, tmp_path):
+    """QUEUE-IMAGE-002: attachment delivery shares each adapter's start format."""
+    image = tmp_path / "队列图片.png"
+    image.write_bytes(b"test image")
+    document = tmp_path / "说明.txt"
+    document.write_text("附件说明", encoding="utf-8")
+    files = (
+        FileAttachment(name=image.name, local_path=str(image), mimetype="image/png"),
+        FileAttachment(name=document.name, local_path=str(document), mimetype="text/plain"),
+    )
+    primary = _primary_request(backend=backend)
+    gate_task = await _held_task()
+    receiver_task = await _held_task()
+    transport = _CodexTransport()
+    client = _ClaudeClient()
+    server = _OpenCodeServer()
+    if backend == "codex":
+        agent = object.__new__(CodexAgent)
+        agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+        agent._session_mgr = _CodexSessionManager(primary.base_session_id, "codex-thread", primary.working_path)
+        agent._transports = {primary.working_path: transport}
+    elif backend == "claude":
+        agent = object.__new__(ClaudeAgent)
+        agent.claude_sessions = {"runtime-key": client}
+        agent.receiver_tasks = {"runtime-key": receiver_task}
+        agent.session_handler = _ClaudeSessionHandler("runtime-key")
+        agent._pending_requests = {"runtime-key": [primary]}
+    else:
+        agent = _opencode_agent(primary, gate_task, server)
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    try:
+        identity = active_steer_identity(controller, backend, "avibe-session")
+        assert identity is not None
+        request = SteerRequest(
+            target_session_id="avibe-session",
+            expected_logical_turn_id=identity[0],
+            expected_native_turn_id=identity[1],
+            text=text,
+            files=files,
+        )
+        receipt = await steer_active_turn(controller, backend, request)
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        if backend == "codex":
+            assert transport.calls == [("turn/steer", {
+                "threadId": "codex-thread",
+                "expectedTurnId": identity[1],
+                "input": [
+                    {"type": "text", "text": f"{text}\n\n[User Attachments]\n- File: {document} (text/plain)"},
+                    {"type": "localImage", "path": str(image)},
+                ],
+            })]
+        else:
+            prompt = (
+                f"{text}\n[User Attachments]\n"
+                f"- Image: {image} (image/png)\n- File: {document} (text/plain)"
+            )
+            if not text:
+                prompt = prompt.lstrip()
+            if backend == "claude":
+                assert client.queries[-1] == (prompt, "runtime-key")
+                assert agent._pending_requests["runtime-key"] == [primary]
+                assert agent.receiver_tasks["runtime-key"] is receiver_task
+                client._transport.end_input.assert_not_awaited()
+            else:
+                assert server.prompt_calls[0]["text"] == prompt
+                assert agent._steering_states[primary.base_session_id].awaiting_user_text == prompt
+                assert server.abort_calls == []
+        assert request.text == text
+        assert primary.message == "primary" and primary.files is None
+        assert not gate_task.done() and not receiver_task.done()
+    finally:
+        await _cancel_tasks(gate_task, receiver_task)
+
+
+@pytest.mark.anyio
 async def test_codex_steers_expected_active_turn_without_starting_another_turn(native_input) -> None:
     metadata, prefix = native_input
     primary = _primary_request(backend="codex")
@@ -320,6 +398,258 @@ async def test_codex_steers_expected_active_turn_without_starting_another_turn(n
         assert not gate_task.done()
     finally:
         await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_codex_steer_reconciliation_uses_persisted_client_message_id() -> None:
+    primary = _primary_request(backend="codex")
+    gate_task = await _held_task()
+    attempt_id = ATTEMPT_ID
+
+    class _ReconcileTransport(_CodexTransport):
+        async def send_request(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            if method == "thread/read":
+                return {
+                    "thread": {
+                        "turns": [{
+                            "id": "codex-turn",
+                            "status": "inProgress",
+                            "items": [{
+                                "type": "userMessage",
+                                "id": "user-message-1",
+                                "clientId": attempt_id,
+                                "content": [{"type": "text", "text": STEER_TEXT}],
+                            }],
+                        }],
+                    },
+                }
+            return {"turnId": "codex-turn"}
+
+    transport = _ReconcileTransport()
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+    agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "codex-thread",
+        primary.working_path,
+    )
+    agent._transports = {primary.working_path: transport}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    target = ActiveSteerTarget(
+        runtime_key="runtime-key",
+        logical_turn_id="logical-turn",
+        context=primary.context,
+        agent_request=primary,
+        agent=agent,
+    )
+    try:
+        receipt = await steer_active_turn(
+            controller,
+            "codex",
+            SteerRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id="logical-turn",
+                expected_native_turn_id="codex-turn",
+                text=STEER_TEXT,
+                attempt_id=attempt_id,
+            ),
+        )
+        assert receipt.outcome is SteerOutcome.ACCEPTED
+        assert transport.calls[0] == (
+            "turn/steer",
+            {
+                "threadId": "codex-thread",
+                "expectedTurnId": "codex-turn",
+                "input": [{"type": "text", "text": STEER_TEXT}],
+                "clientUserMessageId": attempt_id,
+            },
+        )
+
+        reconciled = await agent.reconcile_steer_attempt(
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id="logical-turn",
+                expected_native_turn_id="codex-turn",
+                attempt_id=attempt_id,
+            ),
+            target,
+        )
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.reason == "native_attempt_client_id_found"
+        assert [method for method, _params in transport.calls] == [
+            "turn/steer",
+            "thread/read",
+        ]
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_codex_steer_reconciliation_survives_completed_native_turn() -> None:
+    primary = _primary_request(backend="codex")
+    gate_task = await _held_task()
+    attempt_id = ATTEMPT_ID
+
+    class _CompletedTurnTransport(_CodexTransport):
+        async def send_request(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            if method == "turn/steer":
+                self.is_initialized = False
+                raise TimeoutError("steer response lost after native write")
+            return {
+                "thread": {
+                    "turns": [{
+                        "id": "codex-turn",
+                        "status": "completed",
+                        "items": [{
+                            "type": "userMessage",
+                            "clientId": attempt_id,
+                        }],
+                    }],
+                },
+            }
+
+    transport = _CompletedTurnTransport()
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+    agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "codex-thread",
+        primary.working_path,
+    )
+    agent._transports = {primary.working_path: transport}
+    agent._transport_last_activity = {}
+    controller = _controller_with_active_gate(agent, primary, gate_task)
+    request = SteerRequest(
+        target_session_id="avibe-session",
+        expected_logical_turn_id="logical-turn",
+        expected_native_turn_id="codex-turn",
+        text=STEER_TEXT,
+        attempt_id=attempt_id,
+    )
+    try:
+        receipt = await steer_active_turn(controller, "codex", request)
+        assert receipt.outcome is SteerOutcome.UNKNOWN
+
+        agent._turn_registry.active_turns.clear()
+        controller.agent_service._turn_gates.clear()
+        reconciled = await reconcile_steer_attempt(
+            controller,
+            "codex",
+            SteerReconcileRequest(
+                target_session_id="avibe-session",
+                expected_logical_turn_id="logical-turn",
+                expected_native_turn_id="codex-turn",
+                attempt_id=attempt_id,
+            ),
+        )
+
+        assert reconciled.outcome is SteerOutcome.ACCEPTED
+        assert reconciled.reason == "native_attempt_client_id_found"
+        assert [method for method, _params in transport.calls] == [
+            "turn/steer",
+            "thread/read",
+        ]
+        assert not agent._steer_reconciliation_targets
+    finally:
+        await _cancel_tasks(gate_task)
+
+
+@pytest.mark.anyio
+async def test_codex_steer_reconciliation_uses_durable_binding_after_restart(monkeypatch) -> None:
+    primary = _primary_request(backend="codex")
+    attempt_id = ATTEMPT_ID
+
+    class _CompletedTransport(_CodexTransport):
+        async def send_request(self, method: str, params: dict) -> dict:
+            self.calls.append((method, params))
+            return {
+                "thread": {
+                    "turns": [{
+                        "id": "codex-turn",
+                        "status": "completed",
+                        "items": [{"type": "userMessage", "clientId": attempt_id}],
+                    }],
+                },
+            }
+
+    monkeypatch.setattr(
+        "core.scheduled_tasks.resolve_session_id_target",
+        lambda _session_id: SimpleNamespace(
+            agent_backend="codex",
+            native_session_id="codex-thread",
+            workdir=primary.working_path,
+        ),
+    )
+    transport = _CompletedTransport()
+    agent = object.__new__(CodexAgent)
+    agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "different-turn")
+    agent._session_mgr = _CodexSessionManager(
+        primary.base_session_id,
+        "stale-thread",
+        primary.working_path,
+    )
+    agent._transports = {primary.working_path: transport}
+    agent._steer_reconciliation_targets = {}
+
+    request = SteerReconcileRequest(
+        target_session_id=primary.base_session_id,
+        expected_logical_turn_id="logical-turn",
+        expected_native_turn_id="codex-turn",
+        attempt_id=attempt_id,
+    )
+    target = agent.reconciliation_steer_target(request)
+    assert target is not None
+    assert target.agent_request is None
+
+    reconciled = await agent.reconcile_steer_attempt(request, target)
+
+    assert reconciled.outcome is SteerOutcome.ACCEPTED
+    assert reconciled.reason == "native_attempt_client_id_found"
+    assert transport.calls == [("thread/read", {"threadId": "codex-thread", "includeTurns": True})]
+
+
+@pytest.mark.anyio
+async def test_codex_steer_reconciliation_cache_keeps_only_unknown_receipts() -> None:
+    primary = _primary_request(backend="codex")
+
+    async def run(error: Exception | None, response: dict | None) -> dict:
+        gate_task = await _held_task()
+        transport = _CodexTransport(error=error, response=response)
+        agent = object.__new__(CodexAgent)
+        agent._turn_registry = _CodexTurnRegistry(primary.base_session_id, "codex-turn")
+        agent._session_mgr = _CodexSessionManager(
+            primary.base_session_id,
+            "codex-thread",
+            primary.working_path,
+        )
+        agent._transports = {primary.working_path: transport}
+        agent._transport_last_activity = {}
+        controller = _controller_with_active_gate(agent, primary, gate_task)
+        try:
+            await steer_active_turn(
+                controller,
+                "codex",
+                SteerRequest(
+                    target_session_id=primary.base_session_id,
+                    expected_logical_turn_id="logical-turn",
+                    expected_native_turn_id="codex-turn",
+                    text=STEER_TEXT,
+                    attempt_id=ATTEMPT_ID,
+                ),
+            )
+            return dict(agent._steer_reconciliation_targets)
+        finally:
+            await _cancel_tasks(gate_task)
+
+    accepted = await run(None, {"turnId": "codex-turn"})
+    refused = await run(RuntimeError("activeTurnNotSteerable"), None)
+    unknown = await run(TimeoutError("turn/steer timed out"), None)
+
+    assert accepted == {}
+    assert refused == {}
+    assert set(unknown) == {ATTEMPT_ID}
 
 
 @pytest.mark.anyio

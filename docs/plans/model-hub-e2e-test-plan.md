@@ -93,6 +93,7 @@ Out of scope (documented, not dropped silently):
 | F1 | seed hermetic HOME with native claude/codex/opencode configs; scan | complete Claude API-key custody is importable; access-only Codex OAuth and unsupported OpenCode credentials remain visible blockers; no credential material is returned | assert |
 | F2 | apply the selected complete backend group | Claude API-key custody is committed and its direct native auth is cleaned; blocked Codex/OpenCode material and unrelated Claude settings remain unchanged | assert |
 | F3 | first open `/settings/models` after upgrade with importable items | banner visible (B2 — currently only in wizard: expected-fail until mounted) | fix-first |
+| F4 | already-Hub agents with populated runtime auth; import saved CLI/shell files, then repair damaged private custody | runtime values neither supply nor block import; dynamic writers refuse without cleanup; static Bearer survives migration and replacement through actual CPA even when the old private file is missing/corrupt; recorded/unknown OAuth history survives later batches and refuses speculative reprovision; public/wrong-key proof preserves files and unrelated bytes/modes | assert |
 
 ### G. Guards and contract hygiene (C51–C53, B3,B7,B13,B16)
 | ID | Steps | Expect | Status |
@@ -227,6 +228,18 @@ lane-to-lane.
   every seeded native file and the empty Source list. This is a fixture-only
   contract: production authentication evidence and other suites' defaults
   are unchanged.
+  `required_auth_scheme: "protocol"|"bearer"` defaults to `"protocol"` and
+  leaves that behavior unchanged. Opting into `"bearer"` models a custom
+  Anthropic relay accepting only the exact Authorization bearer value, not
+  the same value sent as `x-api-key`. F2 uses a saved `ANTHROPIC_AUTH_TOKEN`
+  and this gate, keeping its positive and six-file-preserving negative
+  controls consistent with the pinned engine's custom-endpoint transport.
+  The persisted-migration suite uses this
+  to check that a saved `ANTHROPIC_AUTH_TOKEN` keeps its authentication
+  semantics through proof and actual CPA requests; missing/wrong credentials
+  still return 401, and authenticated schema probes still return 400.
+  Custom API-key-header settings/shell controls must instead show the explicit
+  transport blocker before any upstream request, preserving files and Sources.
 - The Playwright lane consumes this ONLY over HTTP via env
   `VIBE_E2E_MOCK_UPSTREAM_URL`; it never imports the Python module. Mock-
   dependent specs skip with a clear message when the env is absent.
