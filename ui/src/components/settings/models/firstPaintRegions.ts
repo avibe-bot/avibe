@@ -1,4 +1,4 @@
-import { readRegion, regionFailed, type RegionRead } from './regionRead';
+import { readRegion, type RegionRead } from './regionRead';
 import type { AgentSupply, RuntimeDependency, Source } from './types';
 
 /**
@@ -36,15 +36,3 @@ export const readFirstPaintRegions = async (
   }));
   return Object.fromEntries(entries) as SurfaceLanding;
 };
-
-/**
- * Whether this read left the first-paint surface showing something older than
- * the server — the only failure a page-wide alarm may speak for.
- *
- * Projections outside the barrier answer for themselves: a route chain that
- * could not be read is marked stale where it is drawn and carries its own
- * Retry, so folding it in here would turn a local read into a global sentence.
- */
-export const firstPaintFailed = (landing: SurfaceLanding): boolean =>
-  (Object.keys(FIRST_PAINT_REGION_WHITELIST) as (keyof SurfaceLanding)[])
-    .some((region) => regionFailed(landing[region]));

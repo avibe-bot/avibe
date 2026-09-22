@@ -7,17 +7,19 @@ import { describe, expect, it, vi } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { FIRST_PAINT_REGION_WHITELIST } from './firstPaintRegions';
-import { modelChainKey, type ModelChainRequest } from './modelRows';
+import { modelChainKey, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import type { SourceCreated } from './modelsApi';
 import {
   createContinuationSettlement,
   createSourceCreatedDelivery,
   readSurfaceLanding,
+  sourceMutationReadFailed,
   sourceMutationReadScope,
   SOURCE_MUTATION_OUTCOMES,
   SOURCE_MUTATION_TOAST,
+  type SourceMutationLandingReads,
 } from './mutationSettlement';
-import { readyRegion } from './regionRead';
+import { readyRegion, unreadRegion } from './regionRead';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
 const translated = (bundle: unknown, key: string): unknown =>
@@ -110,10 +112,11 @@ describe('mutation settlement fences', () => {
     );
 
     expect(refresh).toMatch(/Promise<SourceMutationLanding>/);
-    // The page-wide refresh toast answers for the first-paint surface only. A
-    // route chain it could not read is stale where it is drawn, with its own
-    // Retry, and must not raise an alarm about the whole page.
-    expect(refresh).toContain('firstPaintFailed(landing)');
+    // The page-wide refresh line answers for every region this read installs,
+    // route chains included. What it must never answer for is supersession —
+    // `refreshAffectedChains` reports no keys there rather than unread ones, so
+    // a newer read winning cannot arrive here as a page that could not refresh.
+    expect(refresh).toContain('sourceMutationReadFailed(landing)');
     expect(refresh).toContain("t('settings.models.toast.refreshFailed')");
     expect(settlement).toMatch(/Promise<SourceMutationLanding>/);
     expect(settlement).toContain('return refresh(affectedChains)');
@@ -149,5 +152,44 @@ describe('committed mutation outcomes', () => {
     // One fact, one sentence: the toast reuses the detail surface's own copy
     // rather than adding a second wording for the same state.
     expect(SOURCE_MUTATION_TOAST.gone.key).toBe('settings.models.sourceDetail.gone');
+  });
+});
+
+/**
+ * The page's refresh line answers one question — is anything on screen older
+ * than the server — and the bug that opened this lane was it answering a
+ * different one, saying a save that had landed could not be confirmed.
+ */
+describe('post-mutation read failure', () => {
+  const landing = (chains: ModelChainIndex): SourceMutationLandingReads => ({
+    sources: readyRegion([] as Source[]),
+    supply: readyRegion([] as AgentSupply[]),
+    runtime: readyRegion({} as RuntimeDependency),
+    chains: readyRegion(chains),
+  });
+  const chainKey = modelChainKey('claude', 'claude-opus-4-6');
+
+  it('stays silent when every projection came back', () => {
+    expect(sourceMutationReadFailed(landing({ [chainKey]: readyRegion({} as AgentChain) }))).toBe(false);
+  });
+
+  it('counts a route request that failed inside a readable index', () => {
+    // The index itself resolves — `refreshAffectedChains` catches per request —
+    // so a check that stopped at the index would call an unreadable route a
+    // clean refresh.
+    expect(sourceMutationReadFailed(landing({ [chainKey]: unreadRegion<AgentChain>() }))).toBe(true);
+  });
+
+  it('never counts a read a newer read took over', () => {
+    // Supersession reports no keys rather than unread ones. This is the case the
+    // user hit: the save had landed, and the page said it could not refresh.
+    expect(sourceMutationReadFailed(landing({}))).toBe(false);
+  });
+
+  it('counts a first-paint region that could not be read', () => {
+    expect(sourceMutationReadFailed({
+      ...landing({}),
+      supply: unreadRegion<AgentSupply[]>(),
+    })).toBe(true);
   });
 });

@@ -40,6 +40,7 @@ import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import {
   readSurfaceLanding,
+  sourceMutationReadFailed,
   SOURCE_MUTATION_TOAST,
   type PresentSourceMutationCommit,
   type SourceMutationLanding,
@@ -47,7 +48,6 @@ import {
   type SourceMutationSettlement,
   type TrackSourceMutation,
 } from './mutationSettlement';
-import { firstPaintFailed } from './firstPaintRegions';
 import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
   beginRegionRead,
@@ -677,9 +677,11 @@ export const SettingsModelsPage: React.FC = () => {
     });
     if (!aliveRef.current || result === 'stale') return null;
     const landing = outcome.landing;
-    // The toast names this read's OWN surface — the regions this refresh installs
-    // — and nothing wider; `firstPaintFailed` owns that boundary.
-    if (landing !== null && firstPaintFailed(landing)) {
+    // Every region this read installs is in scope, route chains included: a
+    // chain card's own Retry is not always rendered, so dropping the page line
+    // would leave a real read failure with nothing that says so. What is out of
+    // scope is supersession, which no longer reaches here as a failure.
+    if (landing !== null && sourceMutationReadFailed(landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
     return landing;

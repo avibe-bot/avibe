@@ -2,7 +2,7 @@ import type { TranslationKey } from '@/i18n/types';
 import type { SourceCreated } from './modelsApi';
 import { readFirstPaintRegions } from './firstPaintRegions';
 import { modelChainKey, type ModelChainIndex, type ModelChainRequest } from './modelRows';
-import { readRegion, type RegionRead } from './regionRead';
+import { foldRegionRead, readRegion, regionFailed, type RegionRead } from './regionRead';
 import type {
   AgentSupply,
   RouteHopRef,
@@ -96,6 +96,31 @@ export const readSurfaceLanding = async (
  * the surface that owns it says about a read it could not complete.
  */
 export type SourceMutationLanding = SourceMutationLandingReads | null;
+
+/**
+ * Whether this read left any projection it installs showing something older
+ * than the server — the question the page's refresh line answers.
+ *
+ * The chain index has to be opened rather than trusted: a route request that
+ * failed lands as an unread entry INSIDE a perfectly readable index, so a check
+ * that stopped at the index would call a route nobody could re-read a clean
+ * refresh.
+ *
+ * What is deliberately not a failure is a key that is simply absent. A read the
+ * newer read took over reports no keys at all rather than unread ones, so «a
+ * newer read won» can never arrive here as «the page could not refresh» — the
+ * confusion that made a successful save look unconfirmed.
+ */
+export const sourceMutationReadFailed = (landing: SourceMutationLandingReads): boolean => {
+  const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(landing.chains, {
+    loading: () => ({}),
+    ready: (index) => index,
+    unread: () => ({}),
+    degraded: (staleIndex) => staleIndex,
+  });
+  return Object.values(landing).some((read) => regionFailed(read))
+    || Object.values(chains).some((read) => regionFailed(read));
+};
 
 export type SourceMutationImpact = { hops: RouteHopRef[]; gaps: SupplyGap[] };
 
