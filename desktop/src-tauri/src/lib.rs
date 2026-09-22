@@ -935,28 +935,58 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                     TrayRuntimeState::Unreachable
                 },
             );
-            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation) {
-                notifications::stop(&app);
-                if return_to_bootstrap(&app) {
-                    spawn_owned_bootstrap(app);
-                    break;
-                }
-                // A transient native navigation failure must not silently
-                // abandon recovery. Keep the monitor ownership and try again.
-                if activity
-                    .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-                {
-                    break;
-                }
+            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation)
+                && recover_after_readiness_loss(
+                    || restore_bootstrap_view(&app),
+                    || notifications::stop(&app),
+                    || spawn_owned_bootstrap(app.clone()),
+                    || {
+                        activity
+                            .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    },
+                )
+            {
+                break;
             }
         }
     });
 }
 
+/// Readiness loss has one decision: the notification connection is given up
+/// only on the branch where the hand-off back to bootstrap actually happened. A
+/// native navigation failure keeps the connection, so the monitor that retains
+/// ownership still has one to recover with instead of running mute for the rest
+/// of the session. Answers whether the monitor should stop.
+fn recover_after_readiness_loss(
+    hand_off: impl FnOnce() -> bool,
+    stop_notifications: impl FnOnce(),
+    spawn_bootstrap: impl FnOnce(),
+    retain_ownership: impl FnOnce() -> bool,
+) -> bool {
+    if hand_off() {
+        stop_notifications();
+        spawn_bootstrap();
+        return true;
+    }
+    // A transient native navigation failure must not silently abandon
+    // recovery. Keep the monitor ownership and try again.
+    !retain_ownership()
+}
+
+/// Hands the shell back to bootstrap and, only once that succeeded, gives up
+/// the notification connection the abandoned origin owned.
+fn return_to_bootstrap(app: &AppHandle) -> bool {
+    if !restore_bootstrap_view(app) {
+        return false;
+    }
+    notifications::stop(app);
+    true
+}
+
 /// Restores the exact bootstrap URL captured before the first navigation. It is
 /// a bundled Tauri page in production and the fixed Vite dev URL in development.
-fn return_to_bootstrap(app: &AppHandle) -> bool {
+fn restore_bootstrap_view(app: &AppHandle) -> bool {
     let (bootstrap_url, latest) = {
         let shell = app.state::<Shell>();
         (shell.bootstrap_url.clone(), shell.latest.clone())
@@ -973,7 +1003,6 @@ fn return_to_bootstrap(app: &AppHandle) -> bool {
     if window.navigate(bootstrap_url).is_err() {
         return false;
     }
-    notifications::stop(app);
     let _ = set_active_origin(app, None);
     true
 }
@@ -1215,23 +1244,35 @@ fn report_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>, cata
 /// cleared before the private Runtime is deleted, so the OS never keeps
 /// launching an application the user just removed. Failing to inspect or to
 /// clear that registration is an uninstall failure — the Runtime stays and the
-/// caller reports it — rather than a silently stale entry.
+/// caller reports it — rather than a silently stale entry. Clearing it is also
+/// undone when the removal it authorized does not happen: the application is
+/// still installed, so it must keep launching the way the user configured it.
 #[cfg(feature = "bundled-runtime")]
-fn remove_runtime_after_login_cleanup(
+async fn remove_runtime_after_login_cleanup<Removal>(
     login_enabled: Result<bool, String>,
     disable_login: impl FnOnce() -> Result<(), String>,
-    remove_runtime: impl FnOnce(),
+    remove_runtime: impl FnOnce() -> Removal,
+    restore_login: impl FnOnce(),
     report_failure: impl FnOnce(),
-) {
+) where
+    Removal: std::future::Future<Output = bool>,
+{
     let cleared = match login_enabled {
-        Ok(true) => disable_login(),
-        Ok(false) => Ok(()),
+        Ok(true) => disable_login().map(|()| true),
+        Ok(false) => Ok(false),
         Err(error) => Err(error),
     };
-    match cleared {
-        Ok(()) => remove_runtime(),
-        Err(_) => report_failure(),
+    let Ok(cleared) = cleared else {
+        report_failure();
+        return;
+    };
+    if remove_runtime().await {
+        return;
     }
+    if cleared {
+        restore_login();
+    }
+    report_failure();
 }
 
 #[cfg(feature = "bundled-runtime")]
@@ -1275,34 +1316,37 @@ fn request_private_runtime_removal(app: AppHandle) {
                 return;
             }
 
-            let manager = confirmation_app.autolaunch();
-            let removal_activity = activity.clone();
             let removal_catalog = catalog.clone();
-            remove_runtime_after_login_cleanup(
-                manager.is_enabled().map_err(|error| error.to_string()),
-                || manager.disable().map_err(|error| error.to_string()),
-                || {
-                    notifications::stop(&confirmation_app);
-                    let removal_app = confirmation_app.clone();
-                    tauri::async_runtime::spawn(async move {
+            let login_app = confirmation_app.clone();
+            let restore_app = confirmation_app.clone();
+            let failure_app = confirmation_app.clone();
+            tauri::async_runtime::spawn(async move {
+                remove_runtime_after_login_cleanup(
+                    login_app.autolaunch().is_enabled().map_err(|error| error.to_string()),
+                    || login_app.autolaunch().disable().map_err(|error| error.to_string()),
+                    || async move {
+                        notifications::stop(&confirmation_app);
                         match host.remove_private_runtime(active_origin.as_ref()).await {
                             Ok(true) => {
-                                let exit_app = removal_app.clone();
-                                removal_app
+                                let exit_app = confirmation_app.clone();
+                                confirmation_app
                                     .dialog()
                                     .message(removal_catalog.success_message.clone())
                                     .title(removal_catalog.success_title.clone())
                                     .kind(MessageDialogKind::Info)
                                     .show(move |_| exit_shell(&exit_app));
+                                true
                             }
-                            Ok(false) | Err(_) => {
-                                report_runtime_removal_failure(&removal_app, removal_activity, &removal_catalog)
-                            }
+                            Ok(false) | Err(_) => false,
                         }
-                    });
-                },
-                || report_runtime_removal_failure(&confirmation_app, activity, &catalog),
-            );
+                    },
+                    || {
+                        let _ = restore_app.autolaunch().enable();
+                    },
+                    || report_runtime_removal_failure(&failure_app, activity, &catalog),
+                )
+                .await;
+            });
         });
 }
 
@@ -1760,6 +1804,7 @@ mod tests {
     enum UninstallEffect {
         DisableLogin,
         RemoveRuntime,
+        RestoreLogin,
         ReportFailure,
     }
 
@@ -1767,17 +1812,25 @@ mod tests {
     fn uninstall_effects(
         login_enabled: Result<bool, String>,
         disable_login: Result<(), String>,
+        removed: bool,
     ) -> Vec<UninstallEffect> {
         let effects = std::cell::RefCell::new(Vec::new());
-        remove_runtime_after_login_cleanup(
-            login_enabled,
-            || {
-                effects.borrow_mut().push(UninstallEffect::DisableLogin);
-                disable_login
-            },
-            || effects.borrow_mut().push(UninstallEffect::RemoveRuntime),
-            || effects.borrow_mut().push(UninstallEffect::ReportFailure),
-        );
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(remove_runtime_after_login_cleanup(
+                login_enabled,
+                || {
+                    effects.borrow_mut().push(UninstallEffect::DisableLogin);
+                    disable_login
+                },
+                || async {
+                    effects.borrow_mut().push(UninstallEffect::RemoveRuntime);
+                    removed
+                },
+                || effects.borrow_mut().push(UninstallEffect::RestoreLogin),
+                || effects.borrow_mut().push(UninstallEffect::ReportFailure),
+            ));
         effects.into_inner()
     }
 
@@ -1785,7 +1838,7 @@ mod tests {
     #[test]
     fn uninstall_clears_an_enabled_login_item_before_removing_the_private_runtime() {
         assert_eq!(
-            uninstall_effects(Ok(true), Ok(())),
+            uninstall_effects(Ok(true), Ok(()), true),
             vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
         );
     }
@@ -1794,8 +1847,30 @@ mod tests {
     #[test]
     fn uninstall_leaves_an_already_disabled_login_item_alone() {
         assert_eq!(
-            uninstall_effects(Ok(false), Ok(())),
+            uninstall_effects(Ok(false), Ok(()), true),
             vec![UninstallEffect::RemoveRuntime]
+        );
+        // The removal failed, but this uninstall never disabled anything, so
+        // there is no registration of its own to put back.
+        assert_eq!(
+            uninstall_effects(Ok(false), Ok(()), false),
+            vec![UninstallEffect::RemoveRuntime, UninstallEffect::ReportFailure],
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_restores_the_login_item_it_cleared_when_the_removal_does_not_happen() {
+        // The application is still installed, so the login registration this
+        // uninstall cleared has to come back before the failure is reported.
+        assert_eq!(
+            uninstall_effects(Ok(true), Ok(()), false),
+            vec![
+                UninstallEffect::DisableLogin,
+                UninstallEffect::RemoveRuntime,
+                UninstallEffect::RestoreLogin,
+                UninstallEffect::ReportFailure,
+            ],
         );
     }
 
@@ -1803,17 +1878,73 @@ mod tests {
     #[test]
     fn uninstall_fails_closed_when_the_login_item_cannot_be_cleared() {
         // Clearing failed, so the Runtime is never touched: no success dialog,
-        // no exit, and the user is told the uninstall failed.
+        // no exit, and the user is told the uninstall failed. Nothing was
+        // disabled, so nothing is restored either.
         assert_eq!(
-            uninstall_effects(Ok(true), Err("disable failed".to_owned())),
+            uninstall_effects(Ok(true), Err("disable failed".to_owned()), true),
             vec![UninstallEffect::DisableLogin, UninstallEffect::ReportFailure],
         );
         // The registration could not even be inspected — same answer, and
         // nothing is disabled on a state the shell could not read.
         assert_eq!(
-            uninstall_effects(Err("state unavailable".to_owned()), Ok(())),
+            uninstall_effects(Err("state unavailable".to_owned()), Ok(()), true),
             vec![UninstallEffect::ReportFailure],
         );
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum RecoveryEffect {
+        HandOff,
+        StopNotifications,
+        SpawnBootstrap,
+        RetainOwnership,
+    }
+
+    fn readiness_recovery_effects(handed_off: bool, retained: bool) -> (bool, Vec<RecoveryEffect>) {
+        let effects = std::cell::RefCell::new(Vec::new());
+        let stop = recover_after_readiness_loss(
+            || {
+                effects.borrow_mut().push(RecoveryEffect::HandOff);
+                handed_off
+            },
+            || effects.borrow_mut().push(RecoveryEffect::StopNotifications),
+            || effects.borrow_mut().push(RecoveryEffect::SpawnBootstrap),
+            || {
+                effects.borrow_mut().push(RecoveryEffect::RetainOwnership);
+                retained
+            },
+        );
+        (stop, effects.into_inner())
+    }
+
+    #[test]
+    fn readiness_recovery_gives_up_notifications_only_after_the_hand_off_succeeds() {
+        assert_eq!(
+            readiness_recovery_effects(true, false),
+            (
+                true,
+                vec![
+                    RecoveryEffect::HandOff,
+                    RecoveryEffect::StopNotifications,
+                    RecoveryEffect::SpawnBootstrap,
+                ]
+            ),
+        );
+    }
+
+    #[test]
+    fn a_failed_hand_off_keeps_the_notification_connection_and_the_monitor() {
+        // Navigation failed, so the shell is still on the abandoned origin. The
+        // monitor takes its ownership back and keeps watching with a live
+        // connection instead of running mute for the rest of the session.
+        let (stop, effects) = readiness_recovery_effects(false, true);
+        assert!(!stop);
+        assert_eq!(effects, vec![RecoveryEffect::HandOff, RecoveryEffect::RetainOwnership]);
+        // Ownership that cannot be retaken belongs to another run, so this
+        // monitor exits — still without tearing down that run's connection.
+        let (stop, effects) = readiness_recovery_effects(false, false);
+        assert!(stop);
+        assert_eq!(effects, vec![RecoveryEffect::HandOff, RecoveryEffect::RetainOwnership]);
     }
 
     #[cfg(feature = "bundled-runtime")]

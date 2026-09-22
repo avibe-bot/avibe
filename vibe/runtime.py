@@ -2226,7 +2226,17 @@ def start_ui(
                     existing_pid,
                     ", ".join(_ui_health_urls(host, port)),
                 )
-                stop_pid(existing_pid)
+                if not stop_pid(existing_pid):
+                    # The stale process still owns the configured listener, so a
+                    # replacement would only die on bind while that process kept
+                    # serving. Preserve the pid record naming the process that has
+                    # to be stopped: unlinking it here would leave the incompatible
+                    # UI running with nothing pointing at it.
+                    logger.error(
+                        "Failed to stop stale UI process pid=%s; preserving pid state and not starting a replacement",
+                        existing_pid,
+                    )
+                    return None
             else:
                 logger.warning(
                     "Ignoring stale UI pid file pid=%s because it does not match the Vibe UI server",

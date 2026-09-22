@@ -297,3 +297,68 @@ complete.
 - **Release state.** Tag `gh-v3.1.1rc5` stays as it is and is never reused; the
   orchestrator cuts a new rc after this fix passes review and CI. Push is held
   pending explicit candidate clearance.
+
+## H7 — the failure-path review round
+
+The exact-head Codex review of `b85261e41` returned five P2 findings. Four of
+them are one root-cause class: a multi-step operation commits an irreversible or
+externally visible step before the step it depends on is known to have
+succeeded, and the failure path neither aborts nor undoes it. That class had
+already appeared at the H5 head, so the review-loop circuit breaker was tripped
+and the inventory went to the orchestrator, which issued the scope ruling this
+round implements. Each fix is expressed as one decision function that owns every
+outcome and emits explicit effects, so the failure path is a branch of the same
+unit and a test can assert the effect sequence.
+
+- **Stale UI replacement now honours the stop result.** `start_ui` discarded
+  `stop_pid`'s answer, unlinked the pid file and spawned a replacement anyway. If
+  the stop failed, the old process still owned the listener, the replacement
+  could only die on bind, and the pid record had stopped naming the process that
+  actually had to be killed. It now fails through the module's existing idiom —
+  an error log and a falsy return — before the unlink, so the record keeps
+  naming the live process. H5 is what made this branch busier: reclassifying
+  `runtime_identity_invalid` as incompatible routes more restarts through it.
+- **Uninstall restores the login item it cleared when the removal does not
+  happen.** Clearing **Start at Login** still comes first, so the OS never keeps
+  launching an application the user just removed. But a removal that reports
+  `Ok(false)` or errors leaves the application installed, and the user's login
+  preference was silently gone. The decision function is now async and owns the
+  removal outcome, so the restore is a branch of the same unit rather than a
+  guard bolted onto the caller.
+- **Readiness recovery stops notifications only after the hand-off succeeds.**
+  The monitor tore the connection down before `return_to_bootstrap` was known to
+  have navigated. A failed navigation plus a recovered Runtime left native
+  notifications dead for the rest of the session with nothing to restart them.
+  The navigation is now `restore_bootstrap_view` and the recovery decision owns
+  the ordering; `return_to_bootstrap` keeps its previous behaviour for its five
+  other callers.
+- **Release tooling runs from the released source.** Both the
+  `resolve-desktop-release` and `release` checkouts passed only `fetch-depth`,
+  so a `workflow_dispatch` resolved and published a tag using whatever branch
+  the dispatch selected. Both are pinned now. The release job needs a fallback
+  because `resolve-desktop-release` is gated on `gh-v` and is skipped on the
+  official `v*` path, where its output would be the empty string. `Checkout
+  release verification` keeps `github.sha` deliberately: it is workflow-owned
+  verification applied to the tagged build, and pinning it to the resolved
+  source would defeat that.
+- **Deferred.** Uninstall deletes the private Runtime root without fencing an
+  in-flight backend install. The install lock is Python-only, so the Rust
+  launcher has none to take; the fix is a cross-language ownership change
+  outside this PR. Tracked in issue 2131 and in the PR's Known-by-design ledger.
+
+- **Local validation.** The new checkout-pinning guard is mutation-checked
+  against both an unpinned checkout and a pin that loses its official-path
+  fallback. The `start_ui` consumer fails with its own message when the fix is
+  reverted, and the two Rust effect-sequence tests fail when the stop is moved
+  back before the hand-off or the restore is dropped. Full Rust workspace: 204
+  tests including all 27 `shell_boundaries.rs` guards, `cargo fmt --all --check`,
+  and `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  clean. 303 Python release and desktop-runtime tests, Ruff clean on the changed
+  files, and actionlint on both release workflows with only the three
+  pre-existing newer-runner-label notices.
+- **Release state.** The freeze lifted for `.github/workflows/release_ai.yml`
+  only; its delta against `13082a8501ce5d1e771f56395a72fc062859cf8b` is the two
+  pins and their rationale. The other six release implementation files are still
+  byte-identical, which is why the guard test lives in its own file rather than
+  in `tests/test_desktop_release.py`. Tag `gh-v3.1.1rc5` stays spent. Push is
+  held pending explicit candidate clearance.

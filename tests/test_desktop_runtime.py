@@ -835,6 +835,57 @@ def test_start_ui_restarts_old_default_or_wildcard_ui_without_ready_identity(tmp
     assert stopped == [12345]
 
 
+def test_start_ui_refuses_to_replace_a_stale_ui_that_will_not_stop(tmp_path, monkeypatch):
+    # The stale process still owns the configured listener when the stop fails, so a
+    # replacement could only die on bind. Starting one anyway would also repoint the
+    # pid record at that dead replacement and leave nothing naming the process that
+    # actually has to be stopped.
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
+    runtime.ensure_dirs()
+    pid_path = paths.get_runtime_ui_pid_path()
+    pid_path.write_text("12345", encoding="utf-8")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise OSError("old UI lacks ready contract")
+        return Response()
+
+    stop_attempts = []
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5123)"
+        if pid == 12345
+        else None,
+    )
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid: stop_attempts.append(pid) or False)
+    monkeypatch.setattr(
+        runtime,
+        "spawn_background",
+        lambda *_args, **_kwargs: pytest.fail("a UI that would not stop must not be replaced"),
+    )
+
+    assert runtime.start_ui("127.0.0.1", 5123) is None
+    assert stop_attempts == [12345]
+    assert pid_path.read_text(encoding="utf-8") == "12345"
+
+
 def test_desktop_endpoint_cli_emits_only_schema_v1_json(monkeypatch, capsys):
     config = SimpleNamespace(ui=SimpleNamespace(setup_port=6123))
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)

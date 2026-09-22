@@ -37,6 +37,11 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          # Resolve the requested tag with the tooling that tag carries. An
+          # unpinned checkout would run a dispatched branch's resolver against a
+          # tag it never belonged to. fetch-depth keeps the tag history the
+          # resolver walks.
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0
       - name: Resolve exact TEST source and versions
         id: resolve
@@ -388,6 +393,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
+          # Publish with the release tooling and installation guidance the
+          # released source carries. resolve-desktop-release is skipped on the
+          # official v* path, so its output is empty there and the requested tag
+          # is the pin. fetch-depth keeps the tag and commit history that notes
+          # generation and the tag/source equality check walk.
+          ref: ${{ needs.resolve-desktop-release.outputs.source_sha || github.event.inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Resolve tag
