@@ -215,6 +215,43 @@ def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch
     }
 
 
+@pytest.mark.parametrize("memory_version", [[], ["--rollback-memory-version", "3.0.14"]])
+def test_entry_point_ignores_retired_scheduler_argv(monkeypatch, tmp_path, memory_version, capsys):
+    """Retain the IPC shape accepted by released v3.1.0, not its old behavior."""
+    from vibe import cli
+
+    ran = {}
+    old_python = tmp_path / "old-python"
+    old_main = tmp_path / "old-main.py"
+    old_python.write_bytes(b"must not execute or modify")
+    old_main.write_bytes(b"must not execute or modify")
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: None)
+    monkeypatch.setattr(restart_supervisor, "_run_restart_job", lambda **kwargs: ran.update(kwargs) or 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "vibe", "__restart-supervisor", "--job-id", "legacy-upgrade",
+            "--trigger", "upgrade", "--rollback-to", "3.0.14",
+            "--rollback-package", "avibe-os", "--rollback-memory-package",
+            *memory_version, "--rollback-python", str(old_python),
+            "--rollback-main", str(old_main),
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 0
+    assert ran == {
+        "job_id": "legacy-upgrade", "delay_seconds": 0.0, "vibe_path": None,
+        "trigger": "upgrade", "scope": "all", "prepare_show_runtime": False,
+    }
+    assert old_python.read_bytes() == old_main.read_bytes() == b"must not execute or modify"
+    with pytest.raises(SystemExit) as help_exit:
+        restart_supervisor.main(["--help"])
+    assert help_exit.value.code == 0
+    assert "rollback" not in capsys.readouterr().out
+
+
 def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_path):
     # The "scheduled" status is seeded before spawning; if the spawn fails, no
     # child will overwrite it, so schedule_restart must mark it failed (otherwise

@@ -152,6 +152,16 @@ const bottomOf = async (locator: import('@playwright/test').Locator) => {
 };
 
 test.describe('workbench home geometry', () => {
+  for (const path of ['/admin/settings/memory', '/settings/memory']) {
+    test(`retired bookmark ${path} reaches General without feature requests`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await open(page, path);
+      await expect(page).toHaveURL(/\/settings\/general$/);
+      await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+      await expect(page.locator(`${SETTINGS_CONTENT} h1`)).toHaveText('General');
+      expect(denied).toEqual([]);
+    });
+  }
   test('keeps the sidebar at 248 and lets everything beside it grow', async ({ page }) => {
     const denied = await serveProduct(page);
 

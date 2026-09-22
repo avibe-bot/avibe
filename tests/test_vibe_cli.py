@@ -2689,8 +2689,8 @@ def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monke
 @pytest.mark.parametrize(
     ("language", "consumer_scope", "failure_contract"),
     [
-        ("en", "Show, Git, Memory, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Memory、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
+        ("en", "Show, Git, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
     ],
 )
 def test_runtime_clean_help_names_consumers_and_failure_exit(
@@ -2712,6 +2712,7 @@ def test_runtime_clean_help_names_consumers_and_failure_exit(
     output = capsys.readouterr().out
     assert cli.i18n_t("runtime.clean.commandHelp", language) in output
     assert consumer_scope in output
+    assert "Memory" not in output
     assert failure_contract in output
 
 

@@ -2369,7 +2369,7 @@ class SessionTurnManager:
             not isinstance(snapshot, dict) or "message_kind" not in snapshot
         )
         author_id = payload.get("author_id")
-        if legacy_workbench:
+        if legacy_workbench and not author_id:
             author_id = delivery_store.legacy_admitted_user_id(metadata)
         if author_id:
             context.user_id = str(author_id)

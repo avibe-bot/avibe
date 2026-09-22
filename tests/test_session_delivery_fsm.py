@@ -8003,3 +8003,59 @@ def test_legacy_delivery_kind_requires_positive_original_evidence(managers, mark
     original = {**snapshot, "message_kind": "original", "metadata_json": "{}"}
     if expected == "unknown":
         assert delivery_store.message_merge_identity(snapshot) != delivery_store.message_merge_identity(original)
+
+
+@pytest.mark.parametrize("legacy_users,authors,resources,expected_size,expected_user", [
+    (("alice", "bob"), (None, None), (None, None), 1, "alice"),
+    (("alice", " alice "), (None, None), (None, None), 2, "alice"),
+    (("old-a", "old-b"), ("current", "current"), (None, None), 2, "current"),
+    (("old", "old"), ("alice", "bob"), (None, None), 1, "alice"),
+    (("old", "old"), ("current", "current"), ({"sub": "a"}, {"sub": "b"}), 1, "current"),
+])
+def test_legacy_effective_author_survives_queue_collect_merge_hydrate(
+    managers, legacy_users, authors, resources, expected_size, expected_user,
+):
+    manager, _other, engine, _engine_b, _starts = managers
+    ids = []
+    with engine.begin() as conn:
+        for index, (legacy_user, author, resource) in enumerate(zip(legacy_users, authors, resources)):
+            snapshot = delivery_store.message_snapshot(
+                scope_id=None, session_id="ses_fsm", platform="avibe", author="user",
+                source="user", author_id=author, text=f"原始 input {index}",
+            )
+            snapshot.pop("message_kind")
+            snapshot["metadata_json"] = json.dumps({
+                "_memory_user_id": legacy_user, "_memory_ordinary_text": True,
+                **({"resource_user_context": resource} if resource else {}),
+            })
+            delivery_id = delivery_store.new_delivery_id()
+            ids.append(delivery_id)
+            delivery_store.insert_delivery(
+                conn, delivery_id=delivery_id, session_id="ses_fsm", priority="p3",
+                state="queued", snapshot=snapshot, dispatch_text=f"原始 input {index}",
+                now=f"2026-09-22T00:00:0{index}+00:00",
+            )
+        projected = delivery_store.list_queued(conn, "ses_fsm")
+    raw = [_row(engine, delivery_id) for delivery_id in ids]
+    before = [row["snapshot_json"] for row in raw]
+    segment = _collect_delivery_segment(projected)
+    assert len(segment) == expected_size
+    merged = delivery_store._merged_initial_snapshot(raw[:expected_size])
+    if expected_size == 1:
+        with pytest.raises(RuntimeError, match="incompatible Message identities"):
+            delivery_store._merged_initial_snapshot(raw)
+    assert merged["content_text"] == "\n".join(f"原始 input {i}" for i in range(expected_size))
+    context = _context()
+    manager._hydrate_delivery_context(context, {**raw[0], "snapshot_json": json.dumps(merged)})
+    assert context.user_id == expected_user
+    assert context.platform_specific["author_id"] == expected_user
+    if expected_size == 1:
+        second = _context()
+        manager._hydrate_delivery_context(second, raw[1])
+        assert second.user_id == (authors[1] or legacy_users[1].strip())
+    assert [row["snapshot_json"] for row in raw] == before
+    assert [_row(engine, delivery_id)["snapshot_json"] for delivery_id in ids] == before
+    for row in projected:
+        public = delivery_store.public_delivery_payload(row)
+        assert "_memory_user_id" not in public["metadata"]
+        assert "resource_user_context" not in public["metadata"]

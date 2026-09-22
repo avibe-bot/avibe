@@ -625,6 +625,13 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
+        # Queue projections normalize message_kind before collection, so do not
+        # use that field's presence to detect a released pre-author_id row here.
+        # Preserve its effective author before merging discards later metadata.
+        # An explicit modern author wins; resource authority remains a separate
+        # discriminator below. No private compatibility field is projected out.
+        legacy_admitted_user_id(metadata)
+        if value.get("platform") == "avibe" and not value.get("author_id") else None,
         _delegated_authority_merge_identity(metadata),
     )
 

@@ -963,7 +963,7 @@
       "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}"
     },
     "clean": {
-      "commandHelp": "清理过期的 Show、Git、Memory、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
+      "commandHelp": "清理过期的 Show、Git、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
       "dryRunHelp": "仅报告可清理的归档与缓存条目，不删除任何内容。",
       "wouldRemoveItems": "将清理 {count} 项 Show Runtime 缓存。",
       "wouldRemoveArchives": "将清理 {count} 个已下载的 Show Runtime 归档（{size}）。",

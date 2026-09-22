@@ -117,6 +117,69 @@ collection alone. The existing orchestrator watch remains authoritative.
 - Remaining delivery gate: pushed-head Codex review and CI. No manual review
   trigger, merge, release, deployment, local reinstall or service restart.
 
+## Legacy GENERAL boundary completion (review 5280069619)
+
+Before edits, orchestrator `sesk8rfbcfr46` authorized a coherent continuation:
+the repeated class is incomplete legacy GENERAL persisted/IPC compatibility.
+Identity must remain distinct through queue collection and merge, before
+hydration. Old scheduler argv must remain consumable by the new parser without
+restoring retired behavior. Audit the complete consumers, not only the failing
+line; preserve modern author/resource authority and public privacy projection.
+
+Inventory at exact reviewed head `29c6de3339e10be08c652df2817b0e96033faeca`
+(19 threads, six unresolved; CI run 35743858636 succeeded):
+
+1. `PRRT_kwDOPbFPYs6kypQQ`: legacy effective-author queue merge identity.
+2. `PRRT_kwDOPbFPYs6kypQa`: suppressed, ignored legacy rollback argv.
+3. `PRRT_kwDOPbFPYs6kypQm`: runtime-clean localized help matches retained cleaners.
+4. `PRRT_kwDOPbFPYs6kypQx`: retired settings bookmarks redirect to General;
+   retired API paths still return 404, with no feature page or PWA state restored.
+5. `PRRT_kwDOPbFPYs6kypQL`: investigate released updater companion preflight
+   and supported transition options. Read-only evidence first; implementation
+   needs an explicit orchestrator/owner decision.
+6. `PRRT_kwDOPbFPYs6kypQq`: investigate historical published manifest assets,
+   backups and remaining availability guards. Read-only evidence first; no
+   Memory-only workflow/verifier restoration without a scope decision.
+
+The two release findings remain explicit and unresolved pending that decision.
+No tombstone/bridge publication, old-release mutation, data traversal, sidecar
+logic, local service operation, merge or premature PR closure is authorized.
+The sole active Watch is `d18dce76dd9f`, owned by `sesk8rfbcfr46`; do not reseed.
+
+Read-only release evidence: published `v3.1.0` and `gh-v3.1.1rc1` through
+`gh-v3.1.1rc4` build and preflight a same-tag `avibe_memory` wheel when the
+companion is installed/enabled. A future companionless release blocks that
+automatic upgrade route. The existing documented core-wheel-only manual
+install is an alternative, not an automatic bridge. No release is authorized
+for this local-test-only PR. The deleted guard exclusively protected historical
+Memory Runtime manifests/assets; Git Runtime and Model Hub guards do not cover
+them. Nonexpired backup artifacts exist (for example `10677598133`, expiring
+2026-12-21), but are not a permanent availability guarantee. Both decisions
+were escalated to the orchestrator; neither thread is resolved by these facts.
+
+Supported repair evidence:
+
+- The shared merge key now preserves legacy effective authors both in normalized
+  queue segments and raw snapshot merges. Explicit modern authors and delegated
+  resource authority retain precedence/separation. Regression cases exercise
+  distinct/same authors, non-ASCII text, hydration of both separated deliveries,
+  public privacy projection, and byte-identical persisted snapshots.
+- Restored the suppressed, ignored flag/value pair accepted by released
+  `v3.1.0`; neither reaches the restart job. A read-only execution of the
+  historical `d87a39415` scheduler's argv-building AST against the new parser
+  also passed with a job sink. A published emitter for that historical commit
+  was not established; this is not claimed as a released-client runtime test.
+- Focused delivery/CLI/removed-feature tests: **446 passed**; restart suite:
+  **28 passed**. After strengthening the second-author assertion, delivery plus
+  restart suites: **249 passed**. Changed-Python Ruff and diff whitespace passed.
+- Localized cleanup help matches the real retained cleaners. Route unit tests:
+  **9 passed**; both old bookmarks also passed real browser navigation with
+  strict unexpected-request rejection. UI build, lint and test typechecks passed.
+  The full workbench-general browser suite passed **74 tests**.
+- Prior-head CI was independently read back: all sixteen reported checks
+  succeeded at `29c6de3339e10be08c652df2817b0e96033faeca`. This does not certify
+  the next pushed head; its review and CI remain mandatory.
+
 ## Scope safety
 
 ### Owner close-out decision (2026-09-22 22:41 Asia/Shanghai)

@@ -608,6 +608,8 @@ def main(argv: list[str] | None = None) -> int:
     # not carry any of these values into job state or behavior.
     parser.add_argument("--rollback-to", help=argparse.SUPPRESS)
     parser.add_argument("--rollback-package", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-package", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--rollback-memory-version", help=argparse.SUPPRESS)
     parser.add_argument("--rollback-python", help=argparse.SUPPRESS)
     parser.add_argument("--rollback-main", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
