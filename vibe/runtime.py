@@ -1033,8 +1033,7 @@ def independent_process_env(
     from core.caller_context import environment_without_caller_context
 
     child_env = environment_without_caller_context(env)
-    if memory_ui_secret is None:
-        return child_env
+    return child_env
     from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
 
     child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
@@ -1896,11 +1895,7 @@ def _resolve_service_pid(
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
-        spawn_kwargs = (
-            {"memory_ui_secret": memory_ui_secret}
-            if memory_ui_secret is not None
-            else {}
-        )
+        spawn_kwargs = {}
         process = spawn_service_background_process(
             [*scope_prefix, launcher.python, launcher.main],
             "service_stdout.log",
@@ -2093,11 +2088,7 @@ def start_ui(
     # sent source text across the generation boundary would run the replacement's
     # idea of startup inside the replaced install.
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
-    spawn_kwargs = (
-        {"memory_ui_secret": memory_ui_secret}
-        if memory_ui_secret is not None
-        else {}
-    )
+    spawn_kwargs = {}
     pid = spawn_background(
         [(launcher or current_service_launcher()).python, "-c", command],
         pid_path,
