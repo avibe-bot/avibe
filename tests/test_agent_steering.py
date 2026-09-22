@@ -33,6 +33,9 @@ from modules.agents.opencode.server import OpenCodePromptRejectedError
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
+    _create_definition,
+    delegated_owner_transport,  # noqa: F401 -- fixture with real internal accessor
+)
 from tests.test_session_delivery_fsm import (
     _context, _seed_session,
     _fsm_schema_template, managers,  # noqa: F401 -- hermetic durable delivery fixtures
@@ -1291,6 +1294,249 @@ async def test_opencode_replacement_waits_for_in_flight_steering_write() -> None
     finally:
         await _cancel_tasks(gate_task)
 
+
+@pytest.mark.anyio
+async def test_opencode_coordinator_error_aborts_through_steering_owner(
+    monkeypatch, native_input, managers, delegated_owner_transport, tmp_path,
+) -> None:
+    """MEMORY-SEARCH-028: failed initial bind retries before delegated definitions."""
+    from core.session_turns import DeliveryRequest
+
+    manager, _fresh, engine, _other, _starts = managers
+    _seed_session(engine, "avibe-session")
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    durable = await manager.deliver(
+        DeliveryRequest(session_id="avibe-session", priority="p3", content="delegate", author_id="local"),
+        context=_context("avibe-session"),
+    )
+    attempts = 0
+    retry_succeeded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr("modules.agents.opencode.agent._CALLER_CONTEXT_BINDING_RETRY_SECONDS", 0)
+    metadata, prefix = native_input
+    primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["turn_token"] = durable.turn_id
+    primary.input_metadata = metadata
+    poll_started = asyncio.Event()
+    fail_poll = asyncio.Event()
+    steer_started = asyncio.Event()
+    release_steer = asyncio.Event()
+    events: list[str] = []
+
+    class _Server:
+        prompt_count = 0
+
+        def caller_context_binding_path(self):
+            return "/old-avibe-home/runtime/opencode_caller_context.json"
+
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return [{"info": {"id": "primary-user", "role": "user"}, "parts": []}]
+
+        async def get_session_status(self, session_id, directory):
+            return {"type": "busy"}
+
+        async def prompt_async(self, **kwargs):
+            self.prompt_count += 1
+            if self.prompt_count == 1:
+                assert kwargs["text"] == prefix + primary.message
+                events.append("primary")
+                return
+            steer_started.set()
+            await release_steer.wait()
+            events.append("steer")
+
+        async def abort_session(self, session_id, directory):
+            events.append("abort")
+            return True
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, agent):
+            return None
+
+    class _SessionManager:
+        request_session = None
+
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "opencode-session"
+
+        def set_request_session(self, base_session_id, session_id, directory, session_key):
+            self.request_session = (session_id, directory, session_key)
+
+        def set_agent_session_id(self, base_session_id, agent_session_id):
+            return None
+
+        def get_request_session(self, base_session_id):
+            return self.request_session
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            snapshot = kwargs["processing_indicator"]["opencode_caller_context_env"]
+            assert "AVIBE_SESSION_ID" in snapshot
+            assert "AVIBE_CALLER_SESSION_PROOF" not in snapshot
+            return None
+
+        def remove_active_poll(self, session_id):
+            return None
+
+    class _PollLoop:
+        async def run_prompt_poll(self, *args, **kwargs):
+            poll_started.set()
+            await fail_poll.wait()
+            raise RuntimeError("poll coordinator failed")
+
+    server = _Server()
+    controller = SimpleNamespace(
+        config=SimpleNamespace(
+            platform="avibe",
+            reply_enhancements=False,
+            remote_access=None,
+            language="en",
+            opencode=SimpleNamespace(
+                default_model=None,
+                default_provider=None,
+                default_reasoning_effort=None,
+            ),
+        ),
+        model_hub_runtime=None,
+        processing_indicator=SimpleNamespace(snapshot_request=lambda request: {}),
+        get_opencode_overrides=lambda context: (None, None, None),
+    )
+    agent = object.__new__(OpenCodeAgent)
+    agent.controller = controller
+    agent.config = controller.config
+    agent.sessions = _Sessions()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = _PollLoop()
+    agent._steering_states = {}
+    agent._active_requests = {}
+    agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._get_server = AsyncMock(return_value=server)
+    agent._delete_ack = AsyncMock()
+    agent._remove_ack_reaction = AsyncMock()
+    agent._prepare_message_with_files = lambda request: request.message
+    agent.mark_runtime_turn_started = lambda context, **kwargs: None
+    agent.record_model_hub_native_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        lambda **kwargs: "system prompt",
+    )
+    binding_tokens: list[str] = []
+    binding_paths: list[str] = []
+
+    def bind_caller_context(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("initial binding write failed")
+        from core.caller_context import verify_caller_session_proof
+
+        env = kwargs["extra_env"]
+        assert verify_caller_session_proof(env["AVIBE_SESSION_ID"], env["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "local"})
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        for kind in ("scheduled", "watch"):
+            definition = _create_definition(kind, tmp_path / f"retry-{kind}.json", session_id="avibe-session")
+            assert definition.metadata["delegated_memory_owner"]["user_id"] == "local"
+        loop.call_soon_threadsafe(retry_succeeded.set)
+        binding_tokens.append(kwargs["binding_token"])
+        binding_paths.append(kwargs["path"])
+        return True
+
+    unbound: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.bind_caller_context_session",
+        bind_caller_context,
+    )
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.unbind_caller_context_session",
+        lambda session_id, *, binding_token, path: unbound.append(
+            (session_id, binding_token, path)
+        ),
+    )
+    backend_failure = AsyncMock()
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.emit_backend_failure",
+        backend_failure,
+    )
+
+    process_task = asyncio.create_task(agent._process_message(primary))
+    agent._active_requests[primary.base_session_id] = process_task
+    await poll_started.wait()
+    await asyncio.wait_for(retry_succeeded.wait(), timeout=5)
+    state = agent._steering_states[primary.base_session_id]
+    assert state.awaiting_user_text == prefix + primary.message
+    assert state.awaiting_prompt_accepted is True
+    assert state.awaiting_prompt_activity_deadline is not None
+    assert state.awaiting_prompt_activity_deadline > time.monotonic()
+    assert state.awaiting_active_status_observed is False
+    target = ActiveSteerTarget(
+        runtime_key=primary.base_session_id,
+        logical_turn_id=durable.turn_id,
+        context=primary.context,
+        agent_request=primary,
+        agent=agent,
+    )
+    request = _steer_request(state.native_turn_id)
+    steer_task = asyncio.create_task(agent.steer_active_turn(request, target))
+    await steer_started.wait()
+    fail_poll.set()
+    await asyncio.sleep(0)
+    assert events == ["primary"]
+
+    release_steer.set()
+    receipt = await steer_task
+    await process_task
+
+    assert receipt.outcome is SteerOutcome.ACCEPTED
+    assert events == ["primary", "steer", "abort"]
+    assert attempts == 2
+    assert len(binding_tokens) == 1
+    assert binding_paths == ["/old-avibe-home/runtime/opencode_caller_context.json"]
+    assert unbound == [
+        (
+            "opencode-session",
+            binding_tokens[0],
+            "/old-avibe-home/runtime/opencode_caller_context.json",
+        )
+    ]
+    backend_failure.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", [400, 409])
+@pytest.mark.parametrize("reconciliation_fails", [False, True])
+async def test_opencode_definitive_start_rejection_reconciles_before_poll_cleanup(
+    monkeypatch,
+    status: int,
+    reconciliation_fails: bool,
+) -> None:
+    primary = _primary_request(backend="opencode")
+    primary.context.platform_specific["delivery_start_attempt_id"] = ATTEMPT_ID
+    events: list[str] = []
+
+    class _Server:
+        async def ensure_running(self):
+            return None
 
         async def list_messages(self, session_id, directory):
             return []
