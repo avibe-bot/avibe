@@ -12821,7 +12821,6 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
-    live_ui_pid = _live_ui_server_pid()
     language = _configured_cli_language()
     try:
         new_pid = runtime.start_service()
@@ -12834,19 +12833,6 @@ def _start_service_after_repair(
             stopped_pids=stopped_pids,
         )
     ui_pid = runtime.read_status().get("ui_pid")
-    if live_ui_pid is not None:
-        # Remote access keeps running across the UI restart, matching cmd_start.
-        try:
-            runtime.stop_ui(stop_remote_access=False)
-            config = _ensure_config()
-            ui_pid = runtime.start_ui(
-                runtime.effective_ui_bind_host(config),
-                config.ui.setup_port,
-            )
-        except Exception:
-            # The service repair itself succeeded; report it rather than failing
-            # the whole repair because the UI could not be realigned.
-            logger.exception("Repaired the service but could not restart the Web UI pid=%s", live_ui_pid)
     runtime.write_status("running", f"pid={new_pid}", new_pid, ui_pid)
     return _doctor_repair_result(
         target,
@@ -13343,17 +13329,6 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     return answer.strip().lower() == "yes"
 
 
-def _live_ui_server_pid() -> int | None:
-    """Return the recorded UI pid while it is still a live Avibe UI server."""
-
-    if not runtime.ui_pid_file_points_to_running_ui():
-        return None
-    try:
-        return int(paths.get_runtime_ui_pid_path().read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        return None
-
-
 def cmd_start():
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
@@ -13371,22 +13346,14 @@ def cmd_start():
         _write_status("starting")
 
     live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
-    live_ui_pid = _live_ui_server_pid()
     service_pid = runtime.start_service(
         wait_for_ready=False,
     )
     service_reused = live_service_pid is not None and service_pid == live_service_pid
-    if not service_reused and live_ui_pid is not None:
-            # A surviving UI signs with the previous secret, which the service
-            # started just now cannot verify. Restart it so the pair shares one
-            # secret; remote access keeps running across the UI restart.
-        runtime.stop_ui(stop_remote_access=False)
-        live_ui_pid = None
     bind_host = runtime.effective_ui_bind_host(config)
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
-
     )
     # The WAIT below is asked unconditionally. The predicate that used to guard
     # it is the lock, which is taken before the database is migrated -- so it is

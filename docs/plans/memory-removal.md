@@ -182,6 +182,44 @@ Supported repair evidence:
 
 ## Scope safety
 
+### Independent UI lifecycle audit at b7f8c58da
+
+Before edits, the orchestrator authorized the circuit-breaker repair for
+`PRRT_kwDOPbFPYs6k0mEs`: retained CLI service replacement and repair still stopped
+the UI solely to align the removed per-process Memory proof secret. Compare
+complete original/current functions, not just their comments. Healthy UI,
+remote access and SSE must survive service-only replacement/repair.
+
+Caller inventory: `cmd_start` ensures both services and delegates healthy reuse
+or missing/stale UI recovery to `runtime.start_ui`; its explicit UI stop is
+obsolete. `_start_service_after_repair` repairs only the service; its entire UI
+realignment block is obsolete (an absent UI already remained absent).
+`cmd_stop` legitimately stops the full stack and remote access. Supervisor
+`scope=all` explicitly stops/restarts UI plus service while preserving the
+tunnel; `scope=service` never owns UI. Explicit CLI restart and upgrade schedule
+the full-stack scope to activate new UI code, so those calls remain. Runtime UI
+startup stops only a matching unhealthy process, never a healthy/unrelated PID.
+The private live-UI helper has only the two obsolete coupling consumers and can
+be removed with their probes. Preserve readiness waits, repair error mapping,
+status PID reporting and missing/stale UI startup behavior. Validate with real
+idempotent UI startup code and stubbed process/network edges in test-owned homes.
+Release-policy threads remain unresolved pending owner decision.
+
+The isolated Incus supervisor's remaining UI calls are also retained: initial
+stack startup, recovery of a dead UI, failed-stack teardown and explicit stop.
+They own the isolated stack and are not secret synchronization.
+
+Behavioral evidence: CLI/restart-supervisor/upgrade suites **406 passed**, including a
+six-case real `runtime.start_ui` matrix (new/reused service × healthy/missing/
+stale UI), service-repair success/failure with healthy or absent UI, PID/status
+preservation and forbidden UI/remote process operations. Existing explicit
+full-stack restart, service-only restart, stale/unrelated PID handling, slow
+startup/error mapping and upgrade activation coverage remains. The retired
+helper's identity-probe test now targets the retained runtime probe; no generic
+coverage was discarded. All process/network edges are stubs and paths are
+test-owned; no real UI/SSE/tunnel or service was restarted.
+Changed-Python Ruff and diff-check passed; no UI source changed.
+
 ### Shared lifecycle audit at 970facd01 (2026-09-23)
 
 The orchestrator authorized a bounded whole-contract repair before another push.
