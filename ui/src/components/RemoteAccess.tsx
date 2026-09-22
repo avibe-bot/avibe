@@ -65,6 +65,7 @@ export const RemoteAccess: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [pairing, setPairing] = useState(false);
   const [status, setStatus] = useState<RemoteAccessStatus | null>(null);
+  const [pairingStatusKnown, setPairingStatusKnown] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
   const [pairingKey, setPairingKey] = useState('');
   const [reconfiguring, setReconfiguring] = useState(false);
@@ -91,6 +92,7 @@ export const RemoteAccess: React.FC = () => {
     try {
       const remoteStatus = await api.remoteAccessStatus();
       setStatus(remoteStatus);
+      setPairingStatusKnown(true);
       if (remoteStatus.paired) {
         try {
           const result = await api.getRemoteAccessNetworkInterfaces();
@@ -101,6 +103,9 @@ export const RemoteAccess: React.FC = () => {
       } else {
         setNetworkInterfaces([]);
       }
+    } catch (error) {
+      setPairingStatusKnown(false);
+      throw error;
     } finally {
       if (!silent) setLoading(false);
     }
@@ -131,18 +136,23 @@ export const RemoteAccess: React.FC = () => {
     }
   }, [settingsDirty, status?.settings]);
 
-  const pair = async () => {
-    if (!canPair) return;
+  const pair = async (resume = false) => {
+    if (!canPair || pairing || !pairingStatusKnown) return;
+    const key = resume ? '' : pairingKey.trim();
+    if (!resume && !key) return;
     setPairing(true);
     setActionMessage(null);
+    // A failed response does not mean the one-time key was not consumed.
+    setPairingKey('');
+    setReconfiguring(false);
+    setPairingStatusKnown(false);
     try {
       const result = await api.pairVibeCloudRemoteAccess({
         backend_url: VIBE_CLOUD_URL,
-        pairing_key: pairingKey.trim(),
+        pairing_key: key,
         device_name: 'avibe',
       });
       setStatus(result);
-      setPairingKey('');
       if (result?.start?.ok === false) {
         const message = describeError(result.start);
         setActionMessage({ type: 'error', text: message });
@@ -153,11 +163,12 @@ export const RemoteAccess: React.FC = () => {
         setActionMessage({ type: 'success', text: message });
         showToast(message, 'success');
       }
-      await refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });
     } finally {
+      // Recover from the durable owner, including HTTP failures and page reloads.
+      await refresh(true).catch(() => undefined);
       setPairing(false);
     }
   };
@@ -279,7 +290,8 @@ export const RemoteAccess: React.FC = () => {
   const publicUrl = status?.public_url;
   const paired = Boolean(status?.paired);
   const running = Boolean(status?.running);
-  const showPairingForm = !paired || (canPair && reconfiguring);
+  const pendingPairing = canPair ? status?.pending_pairing : null;
+  const showPairingForm = ((!paired || pendingPairing) && !pendingPairing?.can_resume) || (canPair && reconfiguring);
   const connectorState = status?.pid_state === 'unknown'
     ? t('remoteAccess.stateNeedsAttention')
     : running
@@ -440,7 +452,7 @@ export const RemoteAccess: React.FC = () => {
           variant="secondary"
           size="xs"
           className="shrink-0"
-          onClick={() => refresh()}
+          onClick={() => refresh().catch(() => undefined)}
           type="button"
         >
           <RefreshCcw className="size-3.5" />
@@ -735,8 +747,47 @@ export const RemoteAccess: React.FC = () => {
         </details>
       )}
 
+      {canPair && !loading && !pairingStatusKnown && (
+        <p className="px-5 py-3 text-[12px] text-gold-ink">{t('remoteAccess.pairingStatusUnavailable')}</p>
+      )}
+      {pendingPairing && (
+        <div className="space-y-2 border-b border-border px-5 py-4">
+          <p className="text-[12px] text-muted">
+            {pendingPairing.can_resume
+              ? t(pendingPairing.phase === 'retirement_pending' ? 'remoteAccess.pendingCleanup' : 'remoteAccess.pendingRecovery')
+              : t('remoteAccess.pendingIndeterminate')}
+          </p>
+          {pendingPairing.can_resume && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="default"
+                size="xs"
+                disabled={pairing || !pairingStatusKnown}
+                onClick={() => pair(true)}
+              >
+                {t(pendingPairing.phase === 'retirement_pending' ? 'remoteAccess.clearFailedPairing' : 'remoteAccess.resumePairing')}
+              </Button>
+              {!reconfiguring && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="xs"
+                  disabled={pairing || !pairingStatusKnown}
+                  onClick={() => setReconfiguring(true)}
+                >
+                  {t('remoteAccess.replacePairing')}
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {showPairingForm ? (
         <div className="space-y-1.5 px-5 py-4">
+          {pendingPairing?.can_resume && (
+            <p className="text-[12px] text-gold-ink">{t('remoteAccess.replacePairingWarning')}</p>
+          )}
           <label htmlFor="remote-access-pairing-key" className="block text-[12px] font-medium text-foreground">
             {t('remoteAccess.pairingKey')}
           </label>
@@ -747,7 +798,7 @@ export const RemoteAccess: React.FC = () => {
               value={pairingKey}
               onChange={(event) => setPairingKey(event.target.value)}
               placeholder="vrp_xxxxxxxxxxxxxxxxx"
-              disabled={!canPair}
+              disabled={!canPair || pairing || !pairingStatusKnown}
             />
             <div className="flex shrink-0 flex-wrap gap-2">
               <Button
@@ -755,13 +806,13 @@ export const RemoteAccess: React.FC = () => {
                 variant="default"
                 size="xs"
                 className="font-semibold"
-                disabled={!canPair || pairing || !pairingKey.trim()}
-                onClick={pair}
+                disabled={!canPair || pairing || !pairingStatusKnown || !pairingKey.trim()}
+                onClick={() => pair()}
               >
                 <Link2 className="size-3.5" />
                 {pairing ? t('remoteAccess.pairing') : t('remoteAccess.pair')}
               </Button>
-              {paired && (
+              {(paired || pendingPairing?.can_resume) && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -778,7 +829,7 @@ export const RemoteAccess: React.FC = () => {
           </div>
           <span className="block text-[10px] text-muted">{canPair ? t('remoteAccess.pairingKeyHelp') : t('remoteAccess.ownerPairingRequired')}</span>
         </div>
-      ) : (
+      ) : paired ? (
         <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[13px] font-medium text-mint-ink">
@@ -842,7 +893,7 @@ export const RemoteAccess: React.FC = () => {
             </Button>
           </div>
         </div>
-      )}
+      ) : null}
 
       {actionMessage && (
         <div className={`border-t border-border px-4 py-3 text-[12px] ${

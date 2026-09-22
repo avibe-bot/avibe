@@ -328,7 +328,7 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cloud_pairing_origin_reaches_effective_ui_listener
   - id: AUTH-SETUP-908
-    name: Cloud pairing recovery crosses a local save failure and CLI retry into durable identity
+    name: Cloud pairing recovery crosses an HTTP local save failure and fresh CLI or Web retry into durable identity
     status: covered
     kind: recovery
     layer: scenario

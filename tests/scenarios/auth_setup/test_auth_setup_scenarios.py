@@ -592,8 +592,9 @@ async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, s
     assert payload["ui_healthy"] is False
 
 
-def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys):
-    """Scenario: AUTH-SETUP-908 — redeem, local failure, CLI retry, durable identity."""
+@pytest.mark.parametrize("consumer", ["cli", "web"])
+def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys, consumer):
+    """Scenario: AUTH-SETUP-908 — HTTP failure, fresh CLI/Web retry, durable identity."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = V2Config(
         mode="self_host",
@@ -635,10 +636,11 @@ def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         remote_access,
         "status",
-        lambda next_config=None: {"ok": True, "paired": True, "running": True},
+        lambda next_config=None, **kwargs: {"ok": True, "paired": True, "running": True},
     )
     monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_service, "request_model_service_refresh", lambda: None)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: None)
 
     import config.v2_config as config_module
 
@@ -656,19 +658,40 @@ def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys):
     runner = ScenarioRunner(harness)
 
     def redeem(current):
-        current.first = remote_access.pair("scenario-key", "https://backend.test")
+        client = app.test_client()
+        response = client.post(
+            "/api/remote-access/vibe-cloud/pair",
+            json={"pairing_key": "scenario-key", "backend_url": "https://backend.test"},
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400
+        current.first = response.get_json()
         assert current.first["error"] == "pairing_save_failed_after_redeem"
+        assert not V2Config.load().remote_access.vibe_cloud.instance_id
+        current.journal = json.loads(remote_access._pending_pairing_path().read_text())
         assert len(calls) == 1
 
-    def retry_from_cli(current):
-        exit_code = cli.cmd_remote_pair(SimpleNamespace(
-            pairing_key=None,
-            backend_url="https://avibe.bot",
-            device_name="scenario",
-            json=True,
-        ))
-        assert exit_code == 0
-        current.second = json.loads(capsys.readouterr().out)
+    def retry_from_consumer(current):
+        if consumer == "cli":
+            exit_code = cli.cmd_remote_pair(SimpleNamespace(
+                pairing_key=None,
+                backend_url="https://avibe.bot",
+                device_name="scenario",
+                json=True,
+            ))
+            assert exit_code == 0
+            current.second = json.loads(capsys.readouterr().out)
+        else:
+            client = app.test_client()
+            pending = client.get("/api/remote-access/status").get_json()["pending_pairing"]
+            assert pending == {"phase": "redeemed", "can_resume": True}
+            response = client.post(
+                "/api/remote-access/vibe-cloud/pair",
+                json={"pairing_key": ""},
+                headers=csrf_headers(client),
+            )
+            assert response.status_code == 200
+            current.second = response.get_json()
         assert current.second["ok"] is True
         assert len(calls) == 1
 
@@ -677,19 +700,19 @@ def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys):
         binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
         assert saved.instance_id == binding["instance_id"] == "scenario-inst"
         assert saved.instance_secret == "scenario-secret"
-        assert saved.session_secret
+        assert saved.session_secret == current.journal["pairing"]["session_secret"]
         assert not remote_access.pending_pairing_record_exists()
 
     asyncio.run(runner.run(
         ScenarioStep("redeem_and_record_local_failure", redeem),
-        ScenarioStep("retry_from_fresh_cli_consumer", retry_from_cli),
+        ScenarioStep(f"retry_from_fresh_{consumer}_consumer", retry_from_consumer),
         ScenarioStep("verify_durable_identity_and_binding", verify_durable_identity),
     ))
     ScenarioExpect.step_history(
         runner,
         [
             "redeem_and_record_local_failure",
-            "retry_from_fresh_cli_consumer",
+            f"retry_from_fresh_{consumer}_consumer",
             "verify_durable_identity_and_binding",
         ],
     )

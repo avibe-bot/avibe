@@ -152,7 +152,8 @@ def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
     assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
 
 
-def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monkeypatch, tmp_path):
+@pytest.mark.parametrize("role", ["owner", "member"])
+def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monkeypatch, tmp_path, role):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.save()
@@ -189,7 +190,7 @@ def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monk
     client = ui_server.app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _session_cookie(config),
+        _session_cookie(config, role=role),
         domain="alex.avibe.bot",
     )
     remote_response = client.get(
@@ -203,7 +204,10 @@ def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monk
 
     assert remote_response.status_code == 200
     remote_body = remote_response.get_json()
-    assert set(remote_body) == set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS)
+    owner_fields = {"pending_pairing"} if role == "owner" else set()
+    assert set(remote_body) == set(ui_server._REMOTE_ACCESS_STATUS_PUBLIC_FIELDS) | owner_fields
+    if role == "owner":
+        assert remote_body["pending_pairing"] is None
     for sensitive in ("pid", "binary_found", "binary_path", "binary_version"):
         assert sensitive not in remote_body
     assert remote_body["network_path"] == full_payload["network_path"]
@@ -211,7 +215,7 @@ def test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals(monk
     assert remote_body["pid_state"] == "cloudflared"
 
     assert local_response.status_code == 200
-    assert local_response.get_json() == full_payload
+    assert local_response.get_json() == {**full_payload, "pending_pairing": None}
 
 
 def test_session_cookie_roundtrip() -> None:
@@ -2135,7 +2139,8 @@ def test_pair_returns_structured_error_when_backend_request_fails(monkeypatch) -
     result = remote_access.pair("vrp_test", "https://backend.test")
 
     assert result["ok"] is False
-    assert result["error"] == "pairing_request_failed"
+    assert result["error"] == "pairing_redeem_indeterminate"
+    assert result["pairing"]["cause"] == "pairing_request_failed"
     assert "offline" in result["detail"]
 
 

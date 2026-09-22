@@ -479,6 +479,10 @@ export type RemoteAccessStatus = {
   network_path?: TunnelNetworkPath;
   error?: string;
   optimization_started?: boolean;
+  pending_pairing?: {
+    phase: 'prepared' | 'redeemed' | 'applied' | 'revoked' | 'retirement_pending' | 'invalid';
+    can_resume: boolean;
+  } | null;
 };
 
 export type RemoteAccessSettings = {

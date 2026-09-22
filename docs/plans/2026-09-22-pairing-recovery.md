@@ -48,6 +48,17 @@ durable and never promises recovery across an unrecorded crash.
 - A verified revoked fence can be retired on repeated clear or an
   already-unpaired settings save. Unreadable journals block a real revocation,
   but do not block unrelated writes on an already-unpaired configuration.
+- Web owners receive only a credential-free phase/action projection through
+  status. The projection is advisory; the existing pairing owner revalidates
+  every recovery under its lock. Members cannot inspect or replay the record.
+- Web submission clears the one-time key even on failure. A durable recoverable
+  record offers local recovery after failure or page reload, including when
+  config is already paired. Replacing it requires a separate new-key action.
+  A failed status refresh disables pairing until status can be checked again.
+- Transport and server failures retain an uncertain prepared claim and report
+  an indeterminate result. CLI instructions show explicit new-key replacement
+  with the intended backend; they never promise that keyless retry can recover
+  an unrecorded response.
 
 ## Recovery boundaries
 
@@ -64,4 +75,6 @@ parent permissions, clear/revocation ABA, retirement failure and retry,
 lock-entry failures, cross-process/event-barrier concurrent claim/application,
 stale late responses, and ordinary settings controls. The auth/setup catalog
 and scenario harness cover the redeem → local failure → fresh consumer retry
-→ durable config/binding loop.
+→ durable config/binding loop through both HTTP and CLI. Rendered Web controls
+cover failed submission, reload, local resume, explicit replacement, status
+refresh failure, paired cleanup and owner authorization.

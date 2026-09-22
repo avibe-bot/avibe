@@ -1857,7 +1857,8 @@ def _remote_pair_examples_text() -> str:
         Guidance:
           This is the direct pairing command for users who already have a pairing key.
           For the guided setup flow, run `vibe remote`.
-          If you omit the pairing key, the CLI prompts for it without echoing it to the terminal.
+          Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.
+          To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.
           Pairing saves the remote-access config and then starts the managed tunnel automatically.
           The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.
 
@@ -14111,18 +14112,18 @@ def _print_remote_pair_failure(result: dict) -> None:
         print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
         print("  vibe remote pair", file=sys.stderr)
         return
-    if error_code == "pairing_recovery_not_ready":
-        print(i18n_t("remote_access.cli.recoveryNotReady", language), file=sys.stderr)
+    if error_code in {
+        "pairing_recovery_not_ready", "pairing_superseded_after_redeem", "pairing_redeem_indeterminate",
+    }:
+        message_key = "recoveryNotReady" if error_code == "pairing_recovery_not_ready" else "recoveryIndeterminate"
+        print(i18n_t(f"remote_access.cli.{message_key}", language), file=sys.stderr)
+        print(i18n_t("remote_access.cli.replacePendingPairing", language), file=sys.stderr)
+        print("  vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_recovery_revoked":
         print(i18n_t("remote_access.cli.recoveryRevoked", language), file=sys.stderr)
-        if result.get("detail"):
-            print(f"Detail: {result['detail']}", file=sys.stderr)
-        return
-    if error_code in {"pairing_superseded_after_redeem", "pairing_redeem_indeterminate"}:
-        print(i18n_t("remote_access.cli.recoveryIndeterminate", language), file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return

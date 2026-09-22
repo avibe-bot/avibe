@@ -4875,6 +4875,26 @@ def pending_pairing_record_exists() -> bool:
     return _pending_pairing_path().exists()
 
 
+def pending_pairing_status() -> dict[str, Any] | None:
+    """Project advisory local actions, never journal credentials or provenance.
+
+    Atomic publication permits a read-only snapshot here. ``pair`` must still
+    re-read and validate ownership under the configuration lock before acting.
+    Only the authorized owner-facing status route exposes this projection.
+    """
+
+    record, error = _read_pending_pairing_record()
+    if error:
+        return {"phase": "invalid", "can_resume": False}
+    if record is None:
+        return None
+    phase = record["phase"]
+    return {
+        "phase": phase,
+        "can_resume": phase in {"redeemed", "applied", "retirement_pending"},
+    }
+
+
 def _new_pairing_claim(config: V2Config, backend_url: str, device_name: str) -> dict[str, Any]:
     source_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
     return {
@@ -5062,9 +5082,18 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         failure = {"ok": False, **exc.payload, "status": exc.status}
         if exc.status < 500:
             return _pairing_failure_after_claim(claim["operation_id"], failure)
-        return failure
+        return {
+            **failure,
+            "error": "pairing_redeem_indeterminate",
+            "pairing": {"ok": False, "recoverable": False, "cause": failure.get("error")},
+        }
     except Exception as exc:
-        return {"ok": False, "error": "pairing_request_failed", "detail": str(exc)}
+        return {
+            "ok": False,
+            "error": "pairing_redeem_indeterminate",
+            "detail": str(exc),
+            "pairing": {"ok": False, "recoverable": False, "cause": "pairing_request_failed"},
+        }
     normalized_result, response_error = _validate_pairing_response(result)
     if response_error:
         return _pairing_failure_after_claim(claim["operation_id"], {

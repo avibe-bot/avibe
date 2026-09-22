@@ -18,7 +18,8 @@ from config import paths
 from config.v2_config import RemoteAccessConfig, V2Config
 from storage import remote_access_authorization_service
 from tests.test_remote_access_vibe_cloud import _config
-from vibe import api, cli, model_service, remote_access
+from tests.ui_server_test_helpers import csrf_headers
+from vibe import api, cli, model_service, remote_access, ui_server
 
 
 def _response(instance_id="inst_A"):
@@ -57,7 +58,7 @@ def pairing_host(monkeypatch, tmp_path):
     monkeypatch.setattr(remote_access, "start", lambda config: {"ok": True, "running": True})
     monkeypatch.setattr(
         remote_access, "status",
-        lambda config=None: {"ok": True, "paired": True, "running": True},
+        lambda config=None, **kwargs: {"ok": True, "paired": True, "running": True},
     )
     monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
     monkeypatch.setattr(model_service, "request_model_service_refresh", lambda: None)
@@ -165,6 +166,101 @@ def test_recovery_really_saves_credentials_and_binding(pairing_host, monkeypatch
     assert saved.session_secret
     assert not journal.exists()
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure_point", ["save", "retire"])
+def test_http_failure_reload_and_keyless_recovery_keep_redeemed_credentials(
+    pairing_host, monkeypatch, failure_point,
+):
+    root, calls = pairing_host
+    journal = root / "state/pending-pairing.json"
+    if failure_point == "save":
+        _fail_config_publication_once(monkeypatch)
+    else:
+        unlink = Path.unlink
+        fail_once = [True]
+
+        def fail_retirement_once(path, *args, **kwargs):
+            if path == journal and fail_once[0]:
+                fail_once[0] = False
+                raise OSError("fixture journal unlink failure")
+            return unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", fail_retirement_once)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: None)
+    client = ui_server.app.test_client()
+    first = client.post(
+        "/api/remote-access/vibe-cloud/pair",
+        json={"pairing_key": "key_A", "backend_url": "https://backend.test"},
+        headers=csrf_headers(client),
+    )
+    assert first.status_code == 400
+    assert first.get_json()["error"] == (
+        "pairing_save_failed_after_redeem" if failure_point == "save" else "pairing_retirement_failed"
+    )
+    original = json.loads(journal.read_text())
+    if failure_point == "retire":
+        saved = V2Config.load().remote_access.vibe_cloud
+        binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+        assert saved.instance_id == binding["instance_id"] == "inst_A"
+    # A fresh HTTP consumer discovers recovery from durable state, not a response
+    # object kept by the first caller. No key or credential is exposed by status.
+    fresh = ui_server.app.test_client()
+    projection = fresh.get("/api/remote-access/status").get_json()["pending_pairing"]
+    assert projection == {
+        "phase": "redeemed" if failure_point == "save" else "applied", "can_resume": True,
+    }
+    second = fresh.post(
+        "/api/remote-access/vibe-cloud/pair",
+        json={"pairing_key": ""},
+        headers=csrf_headers(fresh),
+    )
+    assert second.status_code == 200
+    saved = V2Config.load().remote_access.vibe_cloud
+    binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert saved.instance_id == binding["instance_id"] == "inst_A"
+    assert saved.session_secret == original["pairing"]["session_secret"]
+    assert saved.instance_secret == original["pairing"]["instance_secret"]
+    assert len(calls) == 1
+    assert not journal.exists()
+    assert fresh.get("/api/remote-access/status").get_json()["pending_pairing"] is None
+
+
+@pytest.mark.parametrize("role", ["member", "viewer"])
+def test_pending_http_projection_and_replay_require_owner(pairing_host, monkeypatch, role):
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_server import g
+
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    remote_access.pair("key_A", "https://backend.test")
+    journal = root / "state/pending-pairing.json"
+    before = journal.read_bytes()
+    with ui_server.app.test_request_context("/api/remote-access/status"):
+        g.authorization_context = AuthorizationContext(instance_role=role, is_remote=True)
+        assert "pending_pairing" not in json.loads(ui_server.remote_access_status().body)
+    with ui_server.app.test_request_context(
+        "/api/remote-access/vibe-cloud/pair", method="POST", json={"pairing_key": ""},
+    ):
+        g.authorization_context = AuthorizationContext(instance_role=role, is_remote=True)
+        _, status_code = ui_server.remote_access_vibe_cloud_pair()
+        assert status_code == 403
+    assert journal.read_bytes() == before
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("phase", ["prepared", "revoked", "retirement_pending"])
+def test_pending_status_projects_only_phase_and_action(pairing_host, phase):
+    claim = remote_access._new_pairing_claim(V2Config.load(), "https://backend.test", "fixture")
+    claim["phase"] = phase
+    if phase == "retirement_pending":
+        claim["retirement"] = {"kind": "definitive_redeem_failure", "error": "invalid_pairing_key"}
+    remote_access._write_pending_pairing_record(claim)
+    assert remote_access.pending_pairing_status() == {
+        "phase": phase, "can_resume": phase == "retirement_pending",
+    }
+    remote_access._pending_pairing_path().write_text("{invalid")
+    assert remote_access.pending_pairing_status() == {"phase": "invalid", "can_resume": False}
 
 
 def test_cli_does_not_prompt_for_unrecoverable_pending_record(pairing_host, monkeypatch, capsys):
@@ -391,10 +487,47 @@ def test_uncertain_redeem_failure_retains_prepared_claim(pairing_host, monkeypat
     )
     result = remote_access.pair("key_unknown", "https://backend.test")
     assert result["ok"] is False
+    assert result["error"] == "pairing_redeem_indeterminate"
+    assert result["pairing"]["recoverable"] is False
     assert json.loads(
         (root / "state/pending-pairing.json").read_text(encoding="utf-8")
     )["phase"] == "prepared"
     assert remote_access.pair("", "")["error"] == "pairing_recovery_not_ready"
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_cli_uncertain_failure_instructions_reach_explicit_replacement(
+    pairing_host, monkeypatch, capsys, language,
+):
+    _, calls = pairing_host
+    redeem = remote_access._json_request
+
+    def fail_then_redeem(url, payload, **kwargs):
+        if payload["pairing_key"] == "uncertain-key":
+            raise remote_access.BackendRequestError(503, {"error": "backend_http_error"})
+        return redeem(url, payload, **kwargs)
+
+    monkeypatch.setattr(remote_access, "_json_request", fail_then_redeem)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda *args: pytest.fail("pending operation must not prompt"))
+    args = SimpleNamespace(
+        pairing_key="uncertain-key", backend_url="https://backend.test", device_name="fixture", json=False,
+    )
+    assert cli.cmd_remote_pair(args) == 1
+    first = capsys.readouterr().err
+    command = "vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL"
+    assert command in first
+    assert ("uncertain" if language == "en" else "不确定") in first
+    args.pairing_key = None
+    assert cli.cmd_remote_pair(args) == 1
+    assert command in capsys.readouterr().err
+    args.pairing_key = "key_B"
+    assert cli.cmd_remote_pair(args) == 0
+    assert calls == [("https://backend.test/api/v1/pairing/redeem", "key_B")]
+    saved = V2Config.load().remote_access.vibe_cloud
+    binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert saved.instance_id == binding["instance_id"] == "inst_B"
+    assert not remote_access.pending_pairing_record_exists()
 
 
 @pytest.mark.parametrize(
