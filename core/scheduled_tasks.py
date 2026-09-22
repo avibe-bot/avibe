@@ -1619,11 +1619,7 @@ class ScheduledTaskStore:
 
         ensure_harness_definition_write(user_context)
         ensure_agent_name_access(agent_name, user_context=user_context)
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
-        metadata = metadata_with_delegated_memory_owner(
-            metadata_with_resource_user_context(metadata, user_context), session_id=session_id
-        )
+        metadata = metadata_with_resource_user_context(metadata, user_context)
         task = ScheduledTask(
             id=uuid4().hex[:12],
             name=name,
@@ -1780,8 +1776,6 @@ class ScheduledTaskStore:
             metadata if metadata is not None else task.metadata,
             user_context,
         )
-        from storage.message_deliveries import metadata_with_delegated_memory_owner
-
         task.metadata = metadata_with_delegated_memory_owner(
             task.metadata, session_id=session_id
         )
