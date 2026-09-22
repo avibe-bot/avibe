@@ -5290,8 +5290,8 @@
       "wechat": "微信"
     },
     "setup": {
-      "title": "连接 AI，开始工作",
-      "subtitle": "安装助手，连接模型，即可开始工作",
+      "title": "选择你的 AI 助手",
+      "subtitle": "启用助手，确认默认模型，即可开始工作",
       "install": "安装",
       "installed": "已安装",
       "notInstalled": "未安装",
@@ -5308,7 +5308,22 @@
       "installFirstNamed": "先安装 {{name}}",
       "subscriptionConnectedHint": "订阅已保存，进入工作台即可使用",
       "api_keyConnectedHint": "API Key 已保存，进入工作台即可使用",
-      "forNamed": "用于 {{name}}"
+      "forNamed": "用于 {{name}}",
+      "configureRoute": "配置模型路由",
+      "defaultModel": "默认模型",
+      "defaultModelNamed": "{{name}} 的模型路由，查看并调整顺序",
+      "noteEnabled": "已启用，模型路由就绪后即可使用"
+    },
+    "route": {
+      "title": "默认模型路由",
+      "description": "为下列助手调整共享模型顺序。各助手按自己的模型列表依次尝试；其他路由保持不变。",
+      "preferred": "首选",
+      "backup": "备用 {{index}}",
+      "singleNote": "此路由只有一个模型。可添加来源，再选择备用模型。",
+      "addSource": "添加模型来源",
+      "done": "完成",
+      "moveUpNamed": "上移 {{name}}",
+      "moveDownNamed": "下移 {{name}}"
     },
     "connection": {
       "method": "连接方式",
@@ -5387,12 +5402,6 @@
       "providerConfigured": "已连接",
       "providerCredentialHint": "此凭据只用于 OpenCode 中的 {{name}} 服务商",
       "providerDescription": "服务商 · 用于 OpenCode",
-      "modelTitle": "为此连接选择模型",
-      "modelHint": "{{agent}} 当前使用 {{model}}。请选择已连接提供商的模型以完成设置。",
-      "modelSelect": "已连接提供商的模型",
-      "modelApply": "应用模型并进入",
-      "modelEmpty": "暂无兼容模型。请检查上方连接，再重试获取模型列表。",
-      "modelChanged": "连接或 Agent 已发生变化。请刷新模型列表后重试。",
       "modelUnavailable": "没有可用 Agent 的模型路由。请检查连接后重试。",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
@@ -5493,7 +5502,8 @@
     "flow": {
       "backToIntro": "返回介绍",
       "backToProviders": "返回模型",
-      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。",
+      "completionUnconfirmed": "无法确认设置已完成，请重试"
     }
   }
 }

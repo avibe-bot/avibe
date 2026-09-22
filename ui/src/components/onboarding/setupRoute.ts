@@ -1,0 +1,389 @@
+import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
+import type { AssistantId } from './collaborationTimeline';
+import { ASSISTANT_ORDER } from './collaborationTimeline';
+import { readSetupTargets } from './setupTargets';
+import { routeChainMatchesAttempt, sameManualOverride, sameRouteDraft } from '../settings/models/routeChainDraft';
+import type { AgentBackend, AgentChain, AgentSupply, RouteHop } from '../settings/models/types';
+
+export const hopIdentity = (hop: RouteHop): string => `${hop.source_id}\0${hop.model_id}`;
+
+export const targetKey = (backend: AgentBackend, modelId: string): string =>
+  `${backend}\0${modelId}`;
+
+export type SetupRouteTargetSnapshot = {
+  backend: AgentBackend;
+  modelId: string;
+  agentNames: string[];
+  chain: AgentChain;
+  membership: RouteHop[];
+};
+
+export type SetupRouteHydration = {
+  defaultAgentName: string | null;
+  targets: SetupRouteTargetSnapshot[];
+  union: RouteHop[];
+};
+
+/** The assistant card that opened the route editor. */
+export type SetupRouteFocus = {
+  backend: AgentBackend;
+  agentName?: string;
+};
+
+/**
+ * Pick the snapshot the focused card may edit.
+ *
+ * A hosted card always supplies identity and never inherits another backend's
+ * target. Standalone tests that omit focus keep the first hydrated snapshot.
+ */
+export const selectSetupRouteTarget = (
+  targets: readonly SetupRouteTargetSnapshot[],
+  focus?: SetupRouteFocus | null,
+): SetupRouteTargetSnapshot | null => {
+  if (!targets.length) return null;
+  if (!focus) return targets[0] ?? null;
+  if (focus.agentName) {
+    const named = targets.find((target) => (
+      target.backend === focus.backend && target.agentNames.includes(focus.agentName!)
+    ));
+    if (named) return named;
+  }
+  return targets.find((target) => target.backend === focus.backend) ?? null;
+};
+
+export type SetupRouteReadApi = {
+  listVibeAgents: (params?: { cache?: boolean }) => Promise<{
+    ok: boolean;
+    agents: VibeAgentBrief[];
+    default_agent_name: string | null;
+  }>;
+  getVibeAgent: (
+    name: string,
+    params?: { cache?: boolean },
+  ) => Promise<{ ok: boolean; agent?: VibeAgentFull | null }>;
+  getAgentChain: (backend: AgentBackend, model: string) => Promise<AgentChain>;
+};
+
+export type SetupRouteWriteApi = {
+  getVibeAgent: SetupRouteReadApi['getVibeAgent'];
+  listAgents: () => Promise<AgentSupply[]>;
+  getAgentChain: SetupRouteReadApi['getAgentChain'];
+  previewAgentChain: (
+    backend: AgentBackend,
+    model: string,
+    body: { manual_override: { hops: RouteHop[] } | null },
+  ) => Promise<AgentChain>;
+  putAgentChain: (
+    backend: AgentBackend,
+    model: string,
+    body: { hops: RouteHop[] },
+  ) => Promise<{ chain: AgentChain }>;
+};
+
+export type TargetSaveResult =
+  | { key: string; kind: 'skipped' }
+  | { key: string; kind: 'confirmed'; chain: AgentChain }
+  | { key: string; kind: 'failed'; error: string }
+  | { key: string; kind: 'reconcile'; chain: AgentChain };
+
+/** Manual hops win when present; otherwise the automatic chain order. */
+export const chainMembership = (chain: AgentChain): RouteHop[] => {
+  if (chain.manual_override?.hops.length) {
+    return chain.manual_override.hops.map((hop) => ({ source_id: hop.source_id, model_id: hop.model_id }));
+  }
+  return chain.chain.map((link) => ({ source_id: link.source_id, model_id: link.model_id }));
+};
+
+export const projectTargetHops = (shared: RouteHop[], membership: RouteHop[]): RouteHop[] => {
+  const allowed = new Set(membership.map(hopIdentity));
+  return shared.filter((hop) => allowed.has(hopIdentity(hop)));
+};
+
+export const targetChanged = (shared: RouteHop[], target: SetupRouteTargetSnapshot): boolean =>
+  !sameRouteDraft(projectTargetHops(shared, target.membership), target.membership);
+
+export const withMembershipHop = (membership: RouteHop[], hop: RouteHop): RouteHop[] => {
+  if (membership.some((row) => hopIdentity(row) === hopIdentity(hop))) return membership;
+  return [...membership, hop];
+};
+
+export const appendSharedHop = (order: RouteHop[], hop: RouteHop): RouteHop[] => {
+  if (order.some((row) => hopIdentity(row) === hopIdentity(hop))) return order;
+  return [...order, hop];
+};
+
+export const moveRouteHop = (order: RouteHop[], index: number, direction: -1 | 1): RouteHop[] => {
+  const next = index + direction;
+  if (index < 0 || next < 0 || next >= order.length) return order;
+  const copy = [...order];
+  const current = copy[index];
+  const swap = copy[next];
+  if (!current || !swap) return order;
+  copy[index] = swap;
+  copy[next] = current;
+  return copy;
+};
+
+const backendRank = (backend: AgentBackend): number => {
+  const index = ASSISTANT_ORDER.indexOf(backend as AssistantId);
+  return index === -1 ? ASSISTANT_ORDER.length : index;
+};
+
+const byName = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+
+export const orderSetupTargets = (
+  targets: readonly SetupRouteTargetSnapshot[],
+  defaultAgentName?: string | null,
+): SetupRouteTargetSnapshot[] => {
+  const inDefault = defaultAgentName
+    ? targets.filter((target) => target.agentNames.includes(defaultAgentName))
+    : [];
+  const rest = defaultAgentName
+    ? targets.filter((target) => !target.agentNames.includes(defaultAgentName))
+    : [...targets];
+  const byStable = (left: SetupRouteTargetSnapshot, right: SetupRouteTargetSnapshot) =>
+    backendRank(left.backend) - backendRank(right.backend)
+    || byName(left.agentNames[0] ?? '', right.agentNames[0] ?? '')
+    || byName(left.modelId, right.modelId);
+  return [...inDefault].sort(byStable).concat([...rest].sort(byStable));
+};
+
+export const unionRouteOrder = (
+  targets: readonly SetupRouteTargetSnapshot[],
+  defaultAgentName?: string | null,
+): RouteHop[] => {
+  const seen = new Set<string>();
+  const union: RouteHop[] = [];
+  for (const target of orderSetupTargets(targets, defaultAgentName)) {
+    for (const hop of target.membership) {
+      const key = hopIdentity(hop);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      union.push(hop);
+    }
+  }
+  return union;
+};
+
+/** The Agent's exact saved model. Never selected_model_id or the first catalog row. */
+export const menuModelFor = (agent: Pick<VibeAgentFull, 'model'>, _supply?: AgentSupply): string | null => {
+  const saved = agent.model?.trim();
+  return saved ? saved : null;
+};
+
+const discloseNames = (
+  backend: AgentBackend,
+  modelId: string,
+  designated: string[],
+  supplies: readonly AgentSupply[],
+): string[] => {
+  const names = new Set(designated);
+  for (const supply of supplies) {
+    if (supply.backend !== backend) continue;
+    for (const named of supply.named_agents ?? []) {
+      if (named.effective_model_id === modelId) names.add(named.name);
+    }
+  }
+  return [...names].sort(byName);
+};
+
+export async function hydrateSetupRoutes(
+  reads: SetupRouteReadApi,
+  supplies: readonly AgentSupply[],
+): Promise<SetupRouteHydration> {
+  const listing = await reads.listVibeAgents({ cache: false });
+  const briefs = listing.ok ? listing.agents : [];
+  const designated = await readSetupTargets(briefs, reads);
+  const supplyByBackend = new Map(supplies.map((row) => [row.backend, row]));
+  const grouped = new Map<string, { backend: AgentBackend; modelId: string; names: string[] }>();
+
+  for (const agent of designated) {
+    const backend = agent.backend as AgentBackend;
+    const modelId = menuModelFor(agent, supplyByBackend.get(backend));
+    if (!modelId) continue;
+    const key = targetKey(backend, modelId);
+    const existing = grouped.get(key);
+    if (existing) existing.names.push(agent.name);
+    else grouped.set(key, { backend, modelId, names: [agent.name] });
+  }
+
+  const targets: SetupRouteTargetSnapshot[] = [];
+  for (const group of grouped.values()) {
+    try {
+      const chain = await reads.getAgentChain(group.backend, group.modelId);
+      targets.push({
+        backend: group.backend,
+        modelId: group.modelId,
+        agentNames: discloseNames(group.backend, group.modelId, group.names, supplies),
+        chain,
+        membership: chainMembership(chain),
+      });
+    } catch {
+      // Keep configure reachable; a failed chain is not a save target.
+    }
+  }
+
+  const ordered = orderSetupTargets(targets, listing.default_agent_name);
+  return {
+    defaultAgentName: listing.default_agent_name,
+    targets: ordered,
+    union: unionRouteOrder(ordered, listing.default_agent_name),
+  };
+}
+
+export const classifyRetry = (
+  target: SetupRouteTargetSnapshot,
+  current: AgentChain,
+  desired: RouteHop[],
+): 'skip' | 'retry' | 'reconcile' => {
+  if (routeChainMatchesAttempt(current, {
+    backend: target.backend,
+    modelId: target.modelId,
+    submitted: desired,
+    manual_override: { hops: desired },
+  })) return 'skip';
+  const original = chainMembership(target.chain);
+  const sameMembership = sameRouteDraft(chainMembership(current), original);
+  const sameOverride = sameManualOverride(current.manual_override, target.chain.manual_override);
+  return sameMembership && sameOverride ? 'retry' : 'reconcile';
+};
+
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const precheckTarget = async (
+  target: SetupRouteTargetSnapshot,
+  api: SetupRouteWriteApi,
+): Promise<'ok' | 'reconcile' | { kind: 'failed'; error: string }> => {
+  try {
+    const supplies = await api.listAgents();
+    const supply = supplies.find((row) => row.backend === target.backend);
+    if (supply?.mode !== 'hub') return 'reconcile';
+    for (const name of target.agentNames) {
+      const result = await api.getVibeAgent(name, { cache: false });
+      if (result.ok && result.agent && result.agent.backend === target.backend && result.agent.model === target.modelId) {
+        return 'ok';
+      }
+    }
+    return 'reconcile';
+  } catch (error) {
+    return { kind: 'failed', error: errorMessage(error) };
+  }
+};
+
+const writeTarget = async (
+  target: SetupRouteTargetSnapshot,
+  desired: RouteHop[],
+  api: SetupRouteWriteApi,
+): Promise<TargetSaveResult> => {
+  const key = targetKey(target.backend, target.modelId);
+  try {
+    await api.previewAgentChain(target.backend, target.modelId, { manual_override: { hops: desired } });
+    const pre = await api.getAgentChain(target.backend, target.modelId);
+    if (routeChainMatchesAttempt(pre, {
+      backend: target.backend,
+      modelId: target.modelId,
+      submitted: desired,
+      manual_override: { hops: desired },
+    })) {
+      return { key, kind: 'confirmed', chain: pre };
+    }
+    const check = classifyRetry(target, pre, desired);
+    if (check === 'reconcile') return { key, kind: 'reconcile', chain: pre };
+    await api.putAgentChain(target.backend, target.modelId, { hops: desired });
+    const readback = await api.getAgentChain(target.backend, target.modelId);
+    if (routeChainMatchesAttempt(readback, {
+      backend: target.backend,
+      modelId: target.modelId,
+      submitted: desired,
+      manual_override: { hops: desired },
+    })) {
+      return { key, kind: 'confirmed', chain: readback };
+    }
+    return { key, kind: 'reconcile', chain: readback };
+  } catch (error) {
+    return { key, kind: 'failed', error: errorMessage(error) };
+  }
+};
+
+export async function saveSetupRoutes(
+  shared: RouteHop[],
+  targets: readonly SetupRouteTargetSnapshot[],
+  api: SetupRouteWriteApi,
+  options: { dirty: boolean } = { dirty: true },
+): Promise<TargetSaveResult[]> {
+  if (!options.dirty) {
+    return targets.map((target) => ({ key: targetKey(target.backend, target.modelId), kind: 'skipped' as const }));
+  }
+  const results: TargetSaveResult[] = [];
+  for (const target of targets) {
+    const key = targetKey(target.backend, target.modelId);
+    const desired = projectTargetHops(shared, target.membership);
+    const baselineHops = chainMembership(target.chain);
+    if (
+      desired.length === 0
+      || (sameRouteDraft(desired, baselineHops) && sameRouteDraft(target.membership, baselineHops))
+    ) {
+      results.push({ key, kind: 'skipped' });
+      continue;
+    }
+    const precheck = await precheckTarget(target, api);
+    if (precheck === 'reconcile') {
+      const chain = await api.getAgentChain(target.backend, target.modelId).catch(() => target.chain);
+      results.push({ key, kind: 'reconcile', chain });
+      continue;
+    }
+    if (typeof precheck === 'object') {
+      results.push({ key, kind: 'failed', error: precheck.error });
+      continue;
+    }
+    results.push(await writeTarget(target, desired, api));
+  }
+  return results;
+}
+
+export async function retrySetupRoutes(
+  shared: RouteHop[],
+  targets: readonly SetupRouteTargetSnapshot[],
+  previous: readonly TargetSaveResult[],
+  api: SetupRouteWriteApi,
+): Promise<TargetSaveResult[]> {
+  const results: TargetSaveResult[] = [];
+  for (const target of targets) {
+    const key = targetKey(target.backend, target.modelId);
+    const prior = previous.find((row) => row.key === key);
+    if (!prior || prior.kind === 'skipped') {
+      results.push(prior ?? { key, kind: 'skipped' });
+      continue;
+    }
+    const desired = projectTargetHops(shared, target.membership);
+    if (desired.length === 0) {
+      results.push({ key, kind: 'skipped' });
+      continue;
+    }
+    let current: AgentChain;
+    try {
+      current = await api.getAgentChain(target.backend, target.modelId);
+    } catch (error) {
+      results.push({ key, kind: 'failed', error: errorMessage(error) });
+      continue;
+    }
+    const classification = classifyRetry(target, current, desired);
+    if (classification === 'skip') {
+      results.push({ key, kind: 'confirmed', chain: current });
+      continue;
+    }
+    if (classification === 'reconcile') {
+      results.push({ key, kind: 'reconcile', chain: current });
+      continue;
+    }
+    results.push(await writeTarget(target, desired, api));
+  }
+  return results;
+}
+
+export const saveNeedsRetry = (results: readonly TargetSaveResult[]): boolean =>
+  results.some((row) => row.kind === 'failed' || row.kind === 'reconcile');
+
+export const hopsFor = (targets: readonly SetupRouteTargetSnapshot[], hop: RouteHop): string[] =>
+  targets.filter((target) => target.membership.some((row) => hopIdentity(row) === hopIdentity(hop)))
+    .flatMap((target) => target.agentNames);

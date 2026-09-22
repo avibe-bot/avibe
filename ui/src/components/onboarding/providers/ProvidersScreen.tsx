@@ -21,16 +21,18 @@ import { Button } from '@/components/ui/button';
 import {
   createAgentCollectionReadAuthority,
   createSourceCollectionReadAuthority,
+  type CollectionReadAuthority,
 } from '@/components/settings/models/collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
+import { foldRegionRead } from '@/components/settings/models/regionRead';
 import {
   installAndStartStep,
   resumeInstallAndStartRuntime,
 } from '@/components/settings/models/runtimeLifecycle';
-import type { AgentBackend, RuntimeDependency, Source } from '@/components/settings/models/types';
+import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from '@/components/settings/models/types';
 
 import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
@@ -133,7 +135,17 @@ const formatNames = (names: readonly string[], locale: string): string => {
   }
 };
 
-export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenProps>(
+/**
+ * C4 names one owner for every setup supply read, so the shell may hand this screen
+ * the authority it shares with the completion gate. Optional because a screen mounted
+ * on its own is still a screen: it then owns one for its own life, which is what the
+ * shipped behaviour already was.
+ */
+export type ProvidersScreenProps = SetupScreenProps & {
+  agentReads?: CollectionReadAuthority<AgentSupply[]>;
+};
+
+export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScreenProps>(
   function ProvidersScreen({
     active,
     capability,
@@ -144,6 +156,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     setFlowState,
     onActionChange,
     onNavigate,
+    agentReads: sharedAgentReads,
   }, ref) {
     const { t, i18n } = useTranslation();
     const motion = useOnboardingMotion();
@@ -160,7 +173,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // One owner per collection, for the whole life of the screen: the add dialog
     // settles an unknown write against the same generation this screen reads.
     const [sourceReads] = React.useState(createSourceCollectionReadAuthority);
-    const [agentReads] = React.useState(createAgentCollectionReadAuthority);
+    const [ownAgentReads] = React.useState(createAgentCollectionReadAuthority);
+    const agentReads = sharedAgentReads ?? ownAgentReads;
 
     const [sources, setSources] = React.useState<Source[]>([]);
     // Whether the list above is an answer. It starts as neither empty nor absent but
@@ -204,6 +218,28 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // also true for the rescan that follows an import, whose consent has just been
     // spent on purpose and must not come back ticked.
     const seededSelectionRef = React.useRef(false);
+    /**
+     * The runtime observation this screen's supply read is taken against.
+     *
+     * A supply read is answered by the controller, and D11 is what makes the controller
+     * answerable. On a machine whose controller was merely stopped, the read taken on
+     * arrival can fail for that reason alone — and nothing would ever come back for it,
+     * because the sequence that fixes it publishes into the shell's runtime region, not
+     * into this screen. The observation is therefore part of what the read is taken
+     * against: one current read per observation. It adds no owner, no timer and no
+     * second bootstrap, and a read that fails AFTER establishment is still the explicit
+     * Retry it always was, because nothing new has been observed since.
+     *
+     * A refresh keeps the value it is refreshing, so the identity only changes when a
+     * genuinely new observation lands — which is also how coming back to this screen
+     * brings current server facts rather than the ones it left behind.
+     */
+    const observed = foldRegionRead(runtimeRead, {
+      loading: () => null,
+      ready: (runtime) => runtime,
+      unread: () => null,
+      degraded: (stale) => stale,
+    });
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
@@ -252,7 +288,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
         seededSelectionRef.current = true;
       })();
       return () => { cancelled = true; };
-    }, [active, ready, supplyToken, setFlowState, sourceReads]);
+    }, [active, ready, observed, supplyToken, setFlowState, sourceReads]);
 
     // ── Gateway ─────────────────────────────────────────────────────────────
 
