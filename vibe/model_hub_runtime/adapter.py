@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -85,6 +86,40 @@ _OAUTH_ENDPOINTS = {
     "kimi": ("/kimi-auth-url", "kimi", "kimi"),
     "xai": ("/xai-auth-url", "xai", "xai"),
 }
+
+# OIDC `prompt=login` asks the provider to re-authenticate the user *before* it
+# will show the authorization screen. The engine hardcodes it on the Codex
+# authorize URL (`internal/auth/codex/openai_auth.go` at the pinned commit),
+# which is why a user already signed in to ChatGPT lands on OpenAI's sign-in
+# page instead of the consent screen they clicked "add subscription" to reach —
+# the provider's own CLI sends no `prompt` at all. Avibe hands this URL to a
+# browser tab, so the landing page is Avibe's user-visible behavior even though
+# the engine composed the URL.
+#
+# Only the re-authentication value is dropped: `prompt=consent` (Google) asks
+# for the authorization screen rather than past it, and is what makes a refresh
+# token come back, so every other value is left exactly as the engine sent it.
+# Any vendor added later inherits this by construction.
+_REAUTHENTICATION_PROMPT = "login"
+
+
+def _authorization_landing_url(raw: str) -> str | None:
+    """Return the URL a provider tab should open, or None when there is none."""
+
+    url = raw.strip()
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.query:
+        return url
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    kept = [(key, value) for key, value in query if not (key == "prompt" and value == _REAUTHENTICATION_PROMPT)]
+    if len(kept) == len(query):
+        return url
+    return urlunsplit(parts._replace(query=urlencode(kept)))
 
 # The local surface the pinned engine serves a hub-held subscription on.
 #
@@ -2501,7 +2536,7 @@ class CLIProxyEngineAdapter:
                 callback_provider=callback_provider,
                 auth_provider=auth_provider,
                 expects=expects,
-                auth_url=str(payload.get("url") or payload.get("verification_uri") or "").strip() or None,
+                auth_url=_authorization_landing_url(str(payload.get("url") or payload.get("verification_uri") or "")),
                 device_code=device_code,
                 expires_at_iso=(datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat(),
                 before_auth_fingerprints={identity: record.fingerprint for identity, record in before.items()},

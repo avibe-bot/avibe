@@ -278,22 +278,6 @@ export const OAuthConnectDialog: React.FC<{
    */
   const resolvedAfterAttempt = React.useCallback(() => rowsBehindAreStale(), [rowsBehindAreStale]);
 
-  const copy = (text: string | null | undefined) => (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!text) return;
-    // navigator.clipboard is undefined in non-secure contexts / older browsers;
-    // touching .writeText there throws synchronously, not as a rejected promise.
-    if (!navigator.clipboard?.writeText) {
-      showToast(t('common.copyFailed') as string, 'error');
-      return;
-    }
-    navigator.clipboard
-      .writeText(text)
-      .then(() => showToast(t('common.copied') as string, 'success'))
-      .catch(() => showToast(t('common.copyFailed') as string, 'error'));
-  };
-
   // Drive the flow only after the user confirms one channel.
   React.useEffect(() => {
     if (!open || phase !== 'flow') return;
@@ -1003,11 +987,7 @@ export const OAuthConnectDialog: React.FC<{
                   }
                 >
                   {presentation?.auth_url ? (
-                    <OAuthLinkRow
-                      url={presentation.auth_url}
-                      onCopy={copy(presentation.auth_url)}
-                      copyLabel={t('common.copy') as string}
-                    />
+                    <OAuthLinkRow url={presentation.auth_url} />
                   ) : (
                     <p className="text-[12px] text-muted">{t('settings.models.oauth.starting')}</p>
                   )}
@@ -1015,11 +995,7 @@ export const OAuthConnectDialog: React.FC<{
 
                 <Step n={2} label={step2Label}>
                   {isDevice ? (
-                    <OAuthDeviceCodeRow
-                      code={presentation?.device_code ?? ''}
-                      onCopy={copy(presentation?.device_code)}
-                      copyLabel={t('common.copy') as string}
-                    />
+                    <OAuthDeviceCodeRow code={presentation?.device_code ?? ''} />
                   ) : (
                     <OAuthSubmitRow
                       value={code}

@@ -903,7 +903,7 @@
           "summary_one": "{{count}} 个 Agent 需关注",
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
-          "routeMissing": "此模型未配置路由",
+          "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
           "degraded": "模型供应已降级",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"

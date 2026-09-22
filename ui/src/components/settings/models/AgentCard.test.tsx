@@ -345,9 +345,28 @@ describe('AgentCard', () => {
     expect(details.hidden).toBe(false);
     expect(within(details).getByText('opencode')).toBeTruthy();
     expect(within(details).getByText('grok/grok-4.6')).toBeTruthy();
-    expect(within(details).getByText(instance.t('settings.models.gateway.agentIssues.routeMissing'))).toBeTruthy();
+    expect(within(details).getByText(instance.t('settings.models.gateway.agentIssues.routeMissing', { model: 'grok/grok-4.6' }))).toBeTruthy();
     await userEvent.click(toggle);
     expect(details.hidden).toBe(true);
+  });
+
+  it('names the unresolved model in the reason and opens the Agent that has to change', async () => {
+    const instance = localeInstance('zh');
+    const onOpenAgent = vi.fn();
+    const agent = {
+      ...openCodeAgent,
+      menu: { view: 'featured' as const, checked: ['listed-model'] },
+      model_supply: [{ model_id: 'listed-model', route_origin: 'automatic' as const, chain_length: 1, has_runnable_hop: true }],
+      named_agents: [{ name: 'opencode', effective_model_id: 'grok/grok-4.6', supply_status: 'interrupted' as const, route_reason: 'route_unconfigured' as const }],
+    };
+    render(<I18nextProvider i18n={instance}><AgentCard agents={[agent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} onOpenAgent={onOpenAgent} /></I18nextProvider>);
+    await userEvent.click(screen.getByRole('button', { name: instance.t('settings.models.gateway.agentIssues.summary', { count: 1 }) }));
+
+    const reason = screen.getByText(/grok\/grok-4\.6 模型名不存在/);
+    expect(reason.textContent).toContain('添加 grok/grok-4.6 模型的路由');
+    await userEvent.click(reason);
+
+    expect(onOpenAgent).toHaveBeenCalledWith('opencode');
   });
 
   it.each([

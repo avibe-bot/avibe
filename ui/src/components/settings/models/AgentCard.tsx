@@ -116,7 +116,12 @@ const ModelRow: React.FC<{
   );
 };
 
-const AgentSupplyIssues: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
+const AgentSupplyIssues: React.FC<{
+  agent: AgentSupply;
+  // Optional so a caller with no route to the Agents page renders the same list,
+  // just not as links.
+  onOpenAgent?: (name: string) => void;
+}> = ({ agent, onOpenAgent }) => {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const detailsId = React.useId();
@@ -144,11 +149,29 @@ const AgentSupplyIssues: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
             : named.route_reason === 'route_unconfigured' ? 'routeMissing'
               : named.supply_status;
           if (reason === null || reason === 'ok') return null;
-          return (
-            <li key={named.name} className="min-w-0 text-[11px] leading-4" data-agent-supply-issue>
+          // The reason reads the model back to the user, so a name that resolves
+          // to nothing is named rather than described as "this model".
+          const detail = (
+            <>
               <p className="min-w-0 font-semibold text-foreground [overflow-wrap:anywhere]">{named.name}</p>
               {named.effective_model_id !== null && <p className="min-w-0 font-mono text-muted [overflow-wrap:anywhere]">{named.effective_model_id}</p>}
-              <p className="model-hub-ink-gold mt-1 [overflow-wrap:anywhere]">{t(`settings.models.gateway.agentIssues.${reason}`)}</p>
+              <p className="model-hub-ink-gold mt-1 [overflow-wrap:anywhere]">
+                {t(`settings.models.gateway.agentIssues.${reason}`, { model: named.effective_model_id ?? '' })}
+              </p>
+            </>
+          );
+          return (
+            <li key={named.name} className="min-w-0 text-[11px] leading-4" data-agent-supply-issue>
+              {onOpenAgent ? (
+                <button
+                  type="button"
+                  className="-mx-1.5 flex w-full min-w-0 items-start gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-muted/10"
+                  onClick={() => onOpenAgent(named.name)}
+                >
+                  <span className="min-w-0 flex-1">{detail}</span>
+                  <ChevronRight className="model-hub-overview-chevron mt-0.5 size-[15px] shrink-0" aria-hidden="true" />
+                </button>
+              ) : detail}
             </li>
           );
         })}
@@ -173,7 +196,8 @@ const AgentModelCard: React.FC<{
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled }) => {
+  onOpenAgent?: (name: string) => void;
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
   const { t } = useTranslation();
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
@@ -303,7 +327,7 @@ const AgentModelCard: React.FC<{
         </div>
       </div>
       {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><ManageModelsButton disabled={pending} onClick={() => onOpenModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
-      {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} />}
+      {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
     </section>
   );
 };
@@ -321,6 +345,7 @@ export const AgentCard: React.FC<{
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
+  onOpenAgent?: (name: string) => void;
   connectingBackend: string | null;
 }> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => {
   const [activeOriginHelp, setActiveOriginHelp] = React.useState<string | null>(null);

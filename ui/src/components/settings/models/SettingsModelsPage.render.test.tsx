@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -14,9 +15,19 @@ import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
-import { SettingsModelsPage } from './SettingsModelsPage';
+import { SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
+
+// The page navigates to Agents when the user clicks an Agent that needs
+// attention, so it needs a router in scope. Every render site wants the same
+// throwaway one — these tests assert on the page, not on where it routes — so
+// the harness supplies it once instead of asking 23 call sites to remember.
+const SettingsModelsPage = () => (
+  <MemoryRouter>
+    <SettingsModelsRoute />
+  </MemoryRouter>
+);
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
