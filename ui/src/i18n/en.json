@@ -4255,6 +4255,7 @@
       "attachmentFailed": "The file could not be uploaded. Try again.",
       "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
+      "previewAttachment": "Preview {{name}}",
       "dropOverlay": "Drop files to attach"
     },
     "media": {

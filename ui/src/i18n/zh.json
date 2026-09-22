@@ -4255,6 +4255,7 @@
       "attachmentFailed": "文件上传失败，请重试。",
       "retryAttachment": "重试上传",
       "removeAttachment": "移除",
+      "previewAttachment": "预览 {{name}}",
       "dropOverlay": "拖放文件以添加"
     },
     "media": {
