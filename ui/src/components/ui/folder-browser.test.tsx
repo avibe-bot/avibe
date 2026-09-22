@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { StrictMode } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
@@ -240,6 +240,30 @@ it('does not override explicit navigation when initial path resolution finishes 
 
   resolvePath('/resolved/workspace');
   await waitFor(() => expect(listDir).not.toHaveBeenCalledWith('/resolved/workspace', false));
+});
+
+it('ignores an initial path resolution error after explicit navigation', async () => {
+  let rejectPath!: (cause: Error) => void;
+  resolveDirectoryPath.mockReturnValueOnce(
+    new Promise((_resolve, reject) => {
+      rejectPath = reject;
+    }),
+  );
+  const onSelect = vi.fn();
+  render(<FolderBrowser initialPath="./workspace" onSelect={onSelect} onClose={() => {}} />);
+
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
+  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
+
+  await act(async () => {
+    rejectPath(new Error('stale initial path'));
+    await Promise.resolve();
+  });
+
+  expect(screen.queryByText('apps.fileBrowser.errors.listFailed')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.select' }));
+  expect(onSelect).toHaveBeenCalledWith('/workspace');
 });
 
 it('refreshes a pending destination when hidden files change', async () => {

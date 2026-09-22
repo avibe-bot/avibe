@@ -205,7 +205,9 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     }).then((resolved) => {
       if (mounted.current && !initialPathHandled.current && resolved) navigate(resolved);
     }).catch((cause: unknown) => {
-      if (mounted.current) setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+      if (mounted.current && !initialPathHandled.current) {
+        setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+      }
     }).finally(() => {
       if (initialPathResolving.current === start) initialPathResolving.current = null;
     });
