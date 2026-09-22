@@ -9,9 +9,10 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   const denied=await serveProduct(page);
   let completed=false;
   let defaultName='claude';
-  const writes: Array<{path:string,body:any}>=[];
-  const errors:string[]=[]; page.on('pageerror', e=>errors.push(e.message));
   const hops=[{source_id:'src_fixture',model_id:'gpt-5'},{source_id:'src_fixture',model_id:'gpt-4.1'}];
+  type Write={setup_completed?:boolean,name?:string,hops?:typeof hops,manual_override?:{hops:typeof hops}};
+  const writes: Array<{path:string,body:Write|null}>=[];
+  const errors:string[]=[]; page.on('pageerror', e=>errors.push(e.message));
   const saved:Record<string,typeof hops>={claude:[],codex:[]};
   const agent=(backend:string)=>({id:`fixture-${backend}`,name:backend,backend,model:backend==='claude'?'opus-5':'gpt-5',enabled:true,archived:false,metadata:{builtin_default:true},source:'builtin',display_name:backend,description:'',system_prompt:null,reasoning_effort:null});
   const config=()=>({version:'v2',mode:'self_host',setup_completed:completed,setup_state:{needs_setup:!completed},capabilities:{model_hub:{enabled:true}},platforms:{primary:'slack',enabled:[]},runtime:{},agents:Object.fromEntries(['claude','codex','opencode'].map(b=>[b,{enabled:b!=='opencode',cli_path:b}])),agent:{default_cwd:'/fixture/work'},model_hub:{enabled:true,runtime_default_applied:true}});
@@ -22,7 +23,7 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   await page.route(`${ORIGIN}/api/**`,async route=>{
    const req=route.request(),path=new URL(req.url()).pathname;
    const answer=(json:unknown)=>route.fulfill({json});
-   const body=req.method()==='GET'?null:req.postDataJSON();
+   const body:Write|null=req.method()==='GET'?null:req.postDataJSON() as Write;
    if(req.method()!=='GET') writes.push({path,body});
    if(path==='/api/config'){if(body?.setup_completed===true)completed=true;return answer(config());}
    if(path==='/api/session')return answer({remote:false,instance_kind:'personal'});
@@ -38,8 +39,8 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
    if(path==='/api/models/agents')return answer({ok:true,agents:[supply('claude'),supply('codex')]});
    if(/\/api\/models\/agents\/(claude|codex)\/chain/.test(path)){
     const b=path.split('/')[4];
-    if(req.method()==='PUT'){saved[b]=body.hops;return answer({ok:true,chain:chain(b)});}
-    if(path.endsWith('/preview'))return answer({ok:true,chain:chain(b,body.manual_override.hops)});
+    if(req.method()==='PUT'){saved[b]=body?.hops??[];return answer({ok:true,chain:chain(b)});}
+    if(path.endsWith('/preview'))return answer({ok:true,chain:chain(b,body?.manual_override?.hops??[])});
     return answer({ok:true,chain:chain(b)});
    }
    if(/\/api\/backend\/[^/]+\/connection$/.test(path)){
@@ -77,7 +78,7 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
   await page.reload();await expect(page).toHaveURL(`${ORIGIN}/`);
   await expect(page.locator('.onboarding-shell')).toHaveCount(0);
   expect(errors).toEqual([]);
-  expect(writes.filter(w=>w.path==='/api/config').at(-1)?.body.setup_completed).toBe(true);
+  expect(writes.filter(w=>w.path==='/api/config').at(-1)?.body?.setup_completed).toBe(true);
   expect(denied.filter(r=>/PUT|POST.*(?:auth|runtime)/.test(r))).toEqual([]);
  });
 }

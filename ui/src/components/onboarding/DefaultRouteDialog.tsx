@@ -71,7 +71,10 @@ export function DefaultRouteDialog({
   const addButtonRef = React.useRef<HTMLButtonElement>(null);
   const loadToken = React.useRef(0);
   const dirtyRef = React.useRef(flowState.routeOrderDirty);
-  dirtyRef.current = flowState.routeOrderDirty;
+
+  React.useLayoutEffect(() => {
+    dirtyRef.current = flowState.routeOrderDirty;
+  }, [flowState.routeOrderDirty]);
 
   const writes = React.useMemo(() => ({
     getVibeAgent: (name: string, params?: { cache?: boolean }) => api.getVibeAgent(name, params),
@@ -261,7 +264,7 @@ export function DefaultRouteDialog({
               <p className="setup-add-note">{t('onboarding.route.singleNote')}</p>
             )}
             {rows.map((hop, index) => {
-              const names = hopsFor(targets.length ? targets : baselines.current, hop);
+              const names = hopsFor(targets, hop);
               return (
                 <div key={`${hop.source_id}:${hop.model_id}:${index}`} className="setup-add-row">
                   <div className="setup-add-row-copy">
