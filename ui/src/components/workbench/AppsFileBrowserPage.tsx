@@ -4,29 +4,22 @@ import { useTranslation } from 'react-i18next';
 import {
   Braces,
   ChevronDown,
-  ChevronRight,
   ChevronUp,
   ClipboardPaste,
   Copy,
   Download,
   Eye,
   FileCode2,
-  FileSearch,
   FileText,
   File as FileIcon,
   Folder,
   FolderInput,
   FolderPlus,
   FilePlus,
-  HardDrive,
   Hash,
-  Home,
   Image as ImageIcon,
   Loader2,
-  Monitor,
   Pencil,
-  RefreshCw,
-  Search,
   SquareTerminal,
   Trash2,
   Undo2,
@@ -78,9 +71,9 @@ import { Checkbox } from '../ui/checkbox';
 import { ConfirmDialog } from '../ui/confirm-dialog';
 import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
+import { FileBrowser } from '../ui/file-browser';
 import { FilePreview } from '../ui/file-preview';
 import { InlineNameInput } from '../ui/inline-name-input';
-import { MobileAppHeader } from '../apps/MobileAppHeader';
 import { FilePicker } from './FilePicker';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
@@ -104,16 +97,6 @@ function entryIcon(e: FsEntry): { Icon: LucideIcon; color: string } {
   if (e.kind === 'dir') return { Icon: Folder, color: 'var(--cyan)' };
   return EXT_ICON[e.ext?.toLowerCase()] ?? { Icon: FileIcon, color: 'var(--muted)' };
 }
-
-// A favorite's key → a distinct icon (mirrors the Finder rail in design nknn2:
-// Home / Desktop / Downloads / Documents / drive). Unknown keys fall back to a folder.
-const FAV_ICON: Record<string, LucideIcon> = {
-  home: Home,
-  desktop: Monitor,
-  downloads: Download,
-  documents: FileText,
-  root: HardDrive,
-};
 
 // One row in the listing OR the recursive-search results. `full` is the absolute path; `dir` is its
 // parent (where rename/delete/move resolve); `rel` (search hits only) is the path relative to the
@@ -1322,87 +1305,34 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     : 0;
 
   return (
-    <div className={fullBleed ? 'relative flex h-full w-full flex-col bg-surface pb-[env(safe-area-inset-bottom)]' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
-      {mobileRoute && <MobileAppHeader title={t('apps.fileBrowser.label')} icon={Folder} />}
-      {!fullBleed && (
-        <div>
-          <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
-          <p className="text-[12px] text-muted">{t('apps.fileBrowser.tagline')}</p>
-        </div>
-      )}
-
-      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-border')}>
-        {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
-        <div className={clsx(
-          'flex items-center gap-2 border-b border-border bg-surface-2/60',
-          mobileRoute ? 'flex-wrap px-2 py-2' : 'px-3 py-2',
-        )}>
-          <div className={clsx(
-            'flex min-w-0 items-center gap-0.5 overflow-x-auto',
-            mobileRoute ? 'order-1 w-full' : 'flex-1',
-          )}>
-            <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('apps.fileBrowser.refresh')} onClick={() => cwd && refreshAll()}>
-              <RefreshCw className={clsx('size-3.5', (loading || searchBusy) && 'animate-spin')} />
-            </Button>
-            {crumbs.map((c, i) => (
-              <span key={c.path} className="flex shrink-0 items-center">
-                {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQuery('');
-                    navigate(c.path);
-                  }}
-                  {...dropProps(c.path)}
-                  className={clsx(
-                    'max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground',
-                    dropTarget === c.path && 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan',
-                  )}
-                >
-                  {c.label}
-                </button>
-              </span>
-            ))}
-          </div>
-          <label className={clsx(
-            'flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1',
-            mobileRoute ? 'order-2 w-full' : 'shrink-0',
-          )}>
-            {searchBusy ? <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" /> : <Search className="size-3.5 shrink-0 text-muted" />}
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t(searchMode === 'content' ? 'apps.fileBrowser.searchContentPlaceholder' : 'apps.fileBrowser.searchPlaceholder')}
-              className={clsx(
-                'min-w-0 flex-1 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none',
-                !mobileRoute && 'w-28 flex-none',
-              )}
-            />
-            {/* Mode toggle: file/folder NAME search (default) ⇄ file CONTENT search; pressed = content. */}
-            <button
-              type="button"
-              aria-pressed={searchMode === 'content'}
-              aria-label={t('apps.fileBrowser.searchContents')}
-              title={t('apps.fileBrowser.searchContents')}
-              onClick={() => setSearchMode((m) => (m === 'content' ? 'name' : 'content'))}
-              className={clsx(
-                'grid size-5 shrink-0 place-items-center rounded transition',
-                searchMode === 'content' ? 'bg-cyan-soft text-cyan-ink' : 'text-muted hover:bg-foreground/10 hover:text-foreground',
-              )}
-            >
-              <FileSearch className="size-3.5" />
-            </button>
-            {query && (
-              <button type="button" onClick={() => setQuery('')} className="shrink-0 text-muted transition hover:text-foreground" aria-label={t('common.close')}>
-                <X className="size-3" strokeWidth={2.5} />
-              </button>
-            )}
-          </label>
-          <input ref={uploadInputRef} type="file" multiple className="hidden" onChange={onUploadPick} />
-          <div className={clsx(
-            'flex shrink-0 items-center gap-1 overflow-x-auto',
-            mobileRoute ? 'order-3 w-full justify-end' : 'ml-auto',
-          )}>
+    <>
+      <FileBrowser
+        fullBleed={fullBleed}
+        mobileRoute={mobileRoute}
+        mobileTitle={t('apps.fileBrowser.label')}
+        title={t('apps.fileBrowser.label')}
+        tagline={t('apps.fileBrowser.tagline')}
+        cwd={cwd}
+        crumbs={crumbs}
+        sysFavs={sysFavs}
+        projectFavs={projectFavs}
+        loading={loading}
+        searchBusy={searchBusy}
+        query={query}
+        onQueryChange={setQuery}
+        searchMode={searchMode}
+        onSearchModeChange={setSearchMode}
+        onRefresh={() => cwd && refreshAll()}
+        onNavigate={navigate}
+        onClearQuery={() => setQuery('')}
+        showHidden={showHidden}
+        onShowHiddenChange={setShowHidden}
+        error={error}
+        dropTarget={dropTarget}
+        getDropProps={dropProps}
+        toolbarActions={
+          <>
+            <input ref={uploadInputRef} type="file" multiple className="hidden" onChange={onUploadPick} />
             {selectedItems.length > 1 || touchSelectionMode ? (
               <>
                 <Button type="button" size="sm" variant="ghost" title={t('apps.fileBrowser.copy')} className="h-7 gap-1.5 px-2 text-[12px]" onClick={() => copyRowsToClipboard(selectedItems)} disabled={selectedItems.length === 0}>
@@ -1452,110 +1382,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 </Button>
               </>
             )}
-          </div>
-        </div>
+          </>
+        }
 
-        {/* Mobile favorites/projects strip: the rail (below) is hidden under md, so surface the same
-            destinations — system favorites then project folders — as a horizontal chip row pinned
-            under the toolbar. Tap navigates; the current folder's chip is highlighted. */}
-        {(sysFavs.length > 0 || projectFavs.length > 0) && (
-          <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-border bg-surface-2/60 px-3 py-2 md:hidden">
-            {sysFavs.map((f) => {
-              const Icon = FAV_ICON[f.key] ?? Folder;
-              const active = cwd === f.path;
-              return (
-                <button
-                  key={f.path}
-                  type="button"
-                  aria-current={active ? 'true' : undefined}
-                  onClick={() => {
-                    setQuery('');
-                    navigate(f.path);
-                  }}
-                  className={clsx(
-                    'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
-                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
-                  )}
-                >
-                  <Icon className="size-3.5 shrink-0" />
-                  <span className="max-w-[140px] truncate">{f.path.split('/').filter(Boolean).pop() || f.path}</span>
-                </button>
-              );
-            })}
-            {projectFavs.map((f) => {
-              const active = cwd === f.path;
-              return (
-                <button
-                  key={f.path}
-                  type="button"
-                  aria-current={active ? 'true' : undefined}
-                  onClick={() => {
-                    setQuery('');
-                    navigate(f.path);
-                  }}
-                  className={clsx(
-                    'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
-                    active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
-                  )}
-                >
-                  <Folder className={clsx('size-3.5 shrink-0', active ? 'text-cyan-ink' : 'text-cyan-ink/70')} />
-                  <span className="max-w-[140px] truncate">{f.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive-ink">{error}</div>}
-
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Rail: Favorites THEN Projects (design nknn2 order). Folders here are drop targets too. */}
-          <aside className="hidden w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-surface-2/40 p-2 md:flex">
-            {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
-            {sysFavs.map((f) => {
-              const Icon = FAV_ICON[f.key] ?? Folder;
-              return (
-                <RailRow
-                  key={f.path}
-                  icon={<Icon className="size-3.5 text-muted" />}
-                  label={f.path.split('/').filter(Boolean).pop() || f.path}
-                  active={cwd === f.path}
-                  dropActive={dropTarget === f.path}
-                  dropProps={dropProps(f.path)}
-                  onClick={() => {
-                    setQuery('');
-                    navigate(f.path);
-                  }}
-                />
-              );
-            })}
-            {projectFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.projects')}</RailTitle>}
-            {projectFavs.map((f) => (
-              <RailRow
-                key={f.path}
-                icon={<Folder className="size-3.5 text-cyan-ink" />}
-                label={f.label}
-                active={cwd === f.path}
-                dropActive={dropTarget === f.path}
-                dropProps={dropProps(f.path)}
-                onClick={() => {
-                  setQuery('');
-                  navigate(f.path);
-                }}
-              />
-            ))}
-          </aside>
-
-          {/* Listing: Name / Size / Modified. An OS file drag drops here to upload into the current
-              folder; the internal row-move drag (dragRef) is filtered out by isExternalFileDrag. */}
-          <div
-            className="relative flex min-w-0 flex-1 flex-col"
-            onDragOver={onListingDragOver}
-            onDragLeave={onListingDragLeave}
-            onDrop={onListingDrop}
-          >
-            <div className="flex items-center border-b border-border px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
-              {touchSelectionMode && <span className="mr-2 size-[18px] shrink-0" aria-hidden />}
+        listHeader={
+          <div className="flex items-center border-b border-border px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+            {touchSelectionMode && <span className="mr-2 size-[18px] shrink-0" aria-hidden />}
               <button type="button" onClick={() => cycleSort('name')} className={clsx('flex min-w-0 flex-1 items-center gap-1 text-left transition hover:text-foreground', sort?.col === 'name' && 'text-foreground')}>
                 <span className="truncate">{t('apps.fileBrowser.colName')}</span>
                 {sort?.col === 'name' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
@@ -1568,9 +1400,16 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 {t('apps.fileBrowser.colModified')}
                 {sort?.col === 'modified' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
               </button>
-            </div>
-            {/* Right-clicking blank space offers New File / New Folder in the current folder. */}
-            <div className="min-h-0 flex-1 overflow-y-auto py-1" onContextMenu={(e) => openMenu(e, null)}>
+          </div>
+        }
+        listProps={{
+          onContextMenu: (event) => openMenu(event, null),
+          onDragOver: onListingDragOver,
+          onDragLeave: onListingDragLeave,
+          onDrop: onListingDrop,
+        }}
+        listContent={
+          <>
               {showInitialSpinner && (
                 <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
               )}
@@ -1709,20 +1548,17 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   </button>
                 );
               })}
-            </div>
-            {fileDragOver && (
-              <div className="pointer-events-none absolute inset-1.5 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-cyan bg-cyan-soft/70">
-                <span className="rounded-md bg-surface px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-sm">
-                  {t('apps.fileBrowser.dropHint')}
-                </span>
-              </div>
-            )}
+          </>
+        }
+        dropOverlay={fileDragOver && (
+          <div className="pointer-events-none absolute inset-1.5 z-20 flex items-center justify-center rounded-lg border-2 border-dashed border-cyan bg-cyan-soft/70">
+            <span className="rounded-md bg-surface px-3 py-1.5 text-[12.5px] font-medium text-foreground shadow-sm">
+              {t('apps.fileBrowser.dropHint')}
+            </span>
           </div>
-        </div>
+        )}
 
-        {/* Undo bar: one recent revertible action (delete via backend token / move via reverse
-            move). Auto-dismisses; doesn't steal focus from the listing. */}
-        {undoEntry && (
+        footerContent={undoEntry && (
           <div className="flex items-center gap-2 border-t border-border bg-surface-2/80 px-3 py-1.5 text-[12px]">
             <span className="min-w-0 flex-1 truncate text-muted">
               {undoEntry.count > 1
@@ -1750,39 +1586,35 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             </button>
           </div>
         )}
-
-        {/* Status bar: item count + selection, with the hidden-files toggle. */}
-        <div className="flex items-center gap-3 border-t border-border bg-surface-2/60 px-3 py-1.5 text-[11px] text-muted">
-          <label className="flex items-center gap-1.5">
-            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="size-3" />
-            {t('apps.fileBrowser.showHidden')}
-          </label>
-          {uploadProgress && (
-            <span className="flex items-center gap-1.5 text-cyan-ink">
-              <Loader2 className="size-3 animate-spin" />
-              {t('apps.fileBrowser.uploading', { done: uploadProgress.done, total: uploadProgress.total })}
-            </span>
-          )}
-          <span className="ml-auto flex min-w-0 items-center gap-2 font-mono">
-            {selectedItems.length > 1 && (
-              <span className="truncate text-foreground/80">
-                {t('apps.fileBrowser.selectedStatus', { count: selectedItems.length, size: formatSize(selectedSize) })}
+        statusContent={
+          <>
+            {uploadProgress && (
+              <span className="flex items-center gap-1.5 text-cyan-ink">
+                <Loader2 className="size-3 animate-spin" />
+                {t('apps.fileBrowser.uploading', { done: uploadProgress.done, total: uploadProgress.total })}
               </span>
             )}
-            {selectedEntry && (
-              <span className="truncate text-foreground/80">
-                {selectedEntry.name}
-                {selectedEntry.kind !== 'dir' && selectedEntry.size != null ? ` · ${formatSize(selectedEntry.size)}` : ''}
+            <span className="ml-auto flex min-w-0 items-center gap-2 font-mono">
+              {selectedItems.length > 1 && (
+                <span className="truncate text-foreground/80">
+                  {t('apps.fileBrowser.selectedStatus', { count: selectedItems.length, size: formatSize(selectedSize) })}
+                </span>
+              )}
+              {selectedEntry && (
+                <span className="truncate text-foreground/80">
+                  {selectedEntry.name}
+                  {selectedEntry.kind !== 'dir' && selectedEntry.size != null ? ` · ${formatSize(selectedEntry.size)}` : ''}
+                </span>
+              )}
+              <span className="shrink-0">
+                {inSearch ? t('apps.fileBrowser.searchCount', { count: rows.length }) : t('apps.fileBrowser.itemCount', { count: rows.length })}
               </span>
-            )}
-            <span className="shrink-0">
-              {inSearch ? t('apps.fileBrowser.searchCount', { count: rows.length }) : t('apps.fileBrowser.itemCount', { count: rows.length })}
+              {!inSearch && listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? rows.length })}</span>}
+              {inSearch && searchTruncated && <span className="shrink-0">· {t('apps.fileBrowser.searchTruncated')}</span>}
             </span>
-            {!inSearch && listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? rows.length })}</span>}
-            {inSearch && searchTruncated && <span className="shrink-0">· {t('apps.fileBrowser.searchTruncated')}</span>}
-          </span>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* MOBILE-ONLY quick-look overlay: on mobile there's no window layer, so a previewable file
           opens here in-page instead of the standalone Preview window (desktop uses the window). */}
@@ -2042,40 +1874,6 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           )}
         </ContextMenu>
       )}
-    </div>
+    </>
   );
 };
-
-const RailTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="px-1 pb-0.5 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted">{children}</div>
-);
-
-const RailRow: React.FC<{
-  icon: React.ReactNode;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-  dropActive?: boolean;
-  dropProps?: {
-    onDragOver: (e: React.DragEvent) => void;
-    onDragLeave: () => void;
-    onDrop: (e: React.DragEvent) => void;
-  };
-}> = ({ icon, label, active, onClick, dropActive, dropProps }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    {...dropProps}
-    className={clsx(
-      'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition',
-      dropActive
-        ? 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan'
-        : active
-          ? 'bg-cyan-soft text-foreground'
-          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
-    )}
-  >
-    <span className="shrink-0">{icon}</span>
-    <span className="truncate">{label}</span>
-  </button>
-);
