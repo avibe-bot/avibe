@@ -165,7 +165,44 @@ describe("route projection reconciliation", () => {
     expect(readAgents).toHaveBeenCalledTimes(1);
   });
 
-  it("queues a later commit until the earlier report settles", async () => {
+  it.each([false, true])("publishes Agents recovery while Sources is pending (older Sources failure: %s)", async (sourceFailed) => {
+    const sources = deferred<{ value: Source[]; install: () => void }>();
+    const agentInstall = vi.fn();
+    const readAgents = vi.fn().mockResolvedValue({ value: [agent], install: agentInstall });
+    const readSources = vi.fn().mockReturnValue(sources.promise);
+    const statuses = vi.fn();
+    const reconciler = createRouteProjectionReconciler({
+      readAgents, readSources, onFailure: vi.fn(), onStatus: statuses,
+    });
+    if (sourceFailed) {
+      readSources.mockRejectedValueOnce(new Error("older Sources failure"));
+      reconciler.start({ ...report });
+      await vi.waitFor(() => expect(statuses.mock.lastCall?.[0].failed).toEqual(new Set(["sources"])));
+    }
+    readAgents.mockRejectedValueOnce(new Error("Agents failure"));
+    reconciler.start(report);
+    await vi.waitFor(() => expect(statuses.mock.lastCall?.[0]).toMatchObject({
+      pending: false,
+      failed: new Set(sourceFailed ? ["agents", "sources"] : ["agents"]),
+    }));
+    const heldReports = statuses.mock.lastCall![0].reports;
+    reconciler.retry();
+    await vi.waitFor(() => expect(readSources).toHaveBeenCalledTimes(sourceFailed ? 2 : 1));
+    expect(agentInstall).toHaveBeenCalledTimes(sourceFailed ? 2 : 1);
+    expect(statuses).toHaveBeenLastCalledWith({
+      report, reports: heldReports, pending: true,
+      failed: new Set(sourceFailed ? ["sources"] : []),
+    });
+    // An intermediate success is not batch completion or admission to Retry.
+    reconciler.retry();
+    expect(readAgents).toHaveBeenCalledTimes(sourceFailed ? 3 : 2);
+    sources.resolve({ value: [source], install: vi.fn() });
+    await vi.waitFor(() => expect(statuses).toHaveBeenLastCalledWith({
+      report, reports: heldReports, pending: false, failed: new Set(),
+    }));
+  });
+
+  it("queues later reads but immediately publishes the newest commit for focus", async () => {
     const firstAgents = deferred<{ value: AgentSupply[]; install: () => void }>();
     const firstSources = deferred<{ value: Source[]; install: () => void }>();
     const secondAgents = deferred<{ value: AgentSupply[]; install: () => void }>();
@@ -190,7 +227,7 @@ describe("route projection reconciliation", () => {
     reconciler.start(secondReport);
     expect(readAgents).toHaveBeenCalledTimes(1);
     expect(statuses).toHaveBeenLastCalledWith({
-      report: firstReport,
+      report: secondReport,
       reports: [firstReport],
       pending: true,
       failed: new Set(),
@@ -199,7 +236,7 @@ describe("route projection reconciliation", () => {
     firstAgents.resolve({ value: [agent], install: vi.fn() });
     await vi.waitFor(() => expect(readSources).toHaveBeenCalledTimes(1));
     expect(statuses).toHaveBeenLastCalledWith({
-      report: firstReport,
+      report: secondReport,
       reports: [firstReport],
       pending: true,
       failed: new Set(),
@@ -225,11 +262,14 @@ describe("route projection reconciliation", () => {
     }));
     expect(statuses.mock.calls.map(([status]) => status.report)).toEqual([
       firstReport,
-      firstReport,
-      firstReport,
+      secondReport,
+      secondReport,
       secondReport,
       secondReport,
     ]);
+    const firstSettlement = statuses.mock.calls.find(([status]) => !status.pending)![0];
+    expect(firstSettlement.report).toBe(secondReport);
+    expect(firstSettlement.reports).toEqual([firstReport]);
   });
 
   it.each(["agents", "sources"] as const)(

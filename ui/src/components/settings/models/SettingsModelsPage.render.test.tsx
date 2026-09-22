@@ -1552,8 +1552,8 @@ describe('SettingsModelsPage surface branches', () => {
     expect(document.activeElement?.closest('[data-agent-backend="codex"]')).toBeNull();
   });
 
-  const saveRouteForFocusTest = async () => {
-    const sources = [
+  const saveRouteForFocusTest = async (emptySources = false) => {
+    const sources = emptySources ? [] : [
       { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
       { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
     ];
@@ -1615,6 +1615,208 @@ describe('SettingsModelsPage surface branches', () => {
     expect(opener.isConnected).toBe(false);
     expect(document.activeElement).toBe(document.querySelector('.model-hub-shell-info'));
   });
+
+  it('MH-ROUTING-007 shows recovered Direct authority before the pending Sources read settles', async () => {
+    await saveRouteForFocusTest(true);
+    const sources = deferred<Source[]>();
+    vi.mocked(modelsApi.listAgents)
+      .mockRejectedValueOnce(new Error('Agents offline'))
+      .mockResolvedValue([directAgent('codex')]);
+    vi.mocked(modelsApi.listSources).mockReturnValueOnce(sources.promise);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await userEvent.click(await screen.findByRole('button', { name: /^Retry$/i }));
+    expect(await screen.findByText(/^Currently: direct$/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Retry$/i })).toBeNull();
+    expect(modelsApi.listSources).toHaveBeenCalledTimes(2);
+    await flushRouteFocus();
+    expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
+    await act(async () => { sources.resolve([]); });
+    await flushRouteFocus();
+    expect(screen.getByText(/^Currently: direct$/i)).toBeTruthy();
+    expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])(
+    'MH-ROUTING-007 uses the newest queued route fallback (user moved focus: %s)',
+    async (moveFocus) => {
+      const sources = [
+        { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+        { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+      ];
+      const claudeChain = { ...takeoverChain, backend: 'claude' as const };
+      const claudeAgent = { ...takeoverAgent, backend: 'claude' as const };
+      vi.spyOn(modelsApi, 'getAgentChains').mockImplementation((backend) =>
+        Promise.resolve([backend === 'claude' ? claudeChain : takeoverChain]));
+      vi.spyOn(modelsApi, 'getAgentChain').mockImplementation((backend) =>
+        Promise.resolve(backend === 'claude' ? claudeChain : takeoverChain));
+      vi.spyOn(modelsApi, 'putAgentChain').mockImplementation(async (backend) => ({
+        chain: {
+          ...(backend === 'claude' ? claudeChain : takeoverChain),
+          manual_override: { hops: [takeoverChain.chain[0]] },
+          chain: [takeoverChain.chain[0]],
+          current: takeoverChain.chain[0],
+        },
+        removed_hops: [],
+        interrupted: [],
+      }));
+      renderPage(sources, [takeoverAgent, claudeAgent]);
+      const firstAgents = deferred<AgentSupply[]>();
+      const firstSources = deferred<Source[]>();
+      const secondAgents = deferred<AgentSupply[]>();
+      const secondSources = deferred<Source[]>();
+      await screen.findAllByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+      vi.mocked(modelsApi.listAgents)
+        .mockReturnValueOnce(firstAgents.promise)
+        .mockReturnValueOnce(secondAgents.promise);
+      vi.mocked(modelsApi.listSources)
+        .mockReturnValueOnce(firstSources.promise)
+        .mockReturnValueOnce(secondSources.promise);
+      let latestOpener: HTMLElement | null = null;
+      for (const backend of ['codex', 'claude']) {
+        const group = document.querySelector(`[data-agent-backend="${backend}"]`) as HTMLElement;
+        latestOpener = within(group).getByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+        await userEvent.click(latestOpener);
+        await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+        await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+        await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+        await flushRouteFocus();
+        expect(document.activeElement).toBe(latestOpener);
+      }
+      expect(modelsApi.listAgents).toHaveBeenCalledTimes(2);
+      const destination = screen.getByRole('button', { name: /Add API key/i });
+      if (moveFocus) destination.focus();
+
+      // A's read may remove B's opener, but only B's later read can settle B.
+      const withoutLatestRoute = [takeoverAgent, directAgent('claude')];
+      await act(async () => { firstAgents.resolve(withoutLatestRoute); });
+      await flushRouteFocus();
+      expect(latestOpener?.isConnected).toBe(false);
+      const expectedFocus = moveFocus ? destination : document.querySelector('[data-agent-group-head="claude"]');
+      expect(expectedFocus).not.toBeNull();
+      expect(document.activeElement).toBe(expectedFocus);
+      await act(async () => { firstSources.resolve(sources); });
+      await waitFor(() => expect(modelsApi.listAgents).toHaveBeenCalledTimes(3));
+      await act(async () => { secondAgents.resolve(withoutLatestRoute); });
+      await flushRouteFocus();
+      expect(document.activeElement).toBe(expectedFocus);
+      await act(async () => { secondSources.resolve(sources); });
+      await flushRouteFocus();
+      expect(document.activeElement).toBe(expectedFocus);
+      expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([false, true])(
+    'MH-ROUTING-007 resolves the newest inferred commit at frame execution (user moved: %s)',
+    async (moveFocus) => {
+      const sources = [
+        { ...retainedSource, id: 'src_head', display_name: 'Paused source' },
+        { ...retainedSource, id: 'src_relay', display_name: 'Replacement source' },
+      ];
+      const claudeChain = { ...takeoverChain, backend: 'claude' as const };
+      const claudeAgent = { ...takeoverAgent, backend: 'claude' as const };
+      const codexWithoutModels = {
+        ...takeoverAgent, selected_model_id: null, selected_model_explicit: false,
+        builtin_models: [], model_supply: [], routes: {}, named_agents: [],
+      };
+      const inferred = deferred<AgentChain>();
+      const agentsA = deferred<AgentSupply[]>();
+      const sourcesA = deferred<Source[]>();
+      const agentsB = deferred<AgentSupply[]>();
+      const sourcesB = deferred<Source[]>();
+      vi.spyOn(modelsApi, 'getAgentChains').mockImplementation((backend) =>
+        Promise.resolve([backend === 'claude' ? claudeChain : takeoverChain]));
+      const exactRead = vi.spyOn(modelsApi, 'getAgentChain')
+        .mockResolvedValueOnce(takeoverChain)
+        .mockImplementation((backend) =>
+          backend === 'claude' ? Promise.resolve(claudeChain) : inferred.promise);
+      vi.spyOn(modelsApi, 'putAgentChain')
+        .mockRejectedValueOnce(new ApiCallError('direct_mode'))
+        .mockResolvedValueOnce({
+          chain: {
+            ...claudeChain, manual_override: { hops: [claudeChain.chain[0]] },
+            chain: [claudeChain.chain[0]], current: claudeChain.chain[0],
+          },
+          removed_hops: [], interrupted: [],
+        });
+      renderPage(sources, [takeoverAgent, claudeAgent]);
+      await screen.findAllByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+      const codexGroup = document.querySelector('[data-agent-backend="codex"]') as HTMLElement;
+      const codexOpener = within(codexGroup).getByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+      // Leave Codex suspended with its exact-chain evidence still pending.
+      await userEvent.click(codexOpener);
+      await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+      await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await waitFor(() => expect(exactRead).toHaveBeenCalledTimes(2));
+      await flushRouteFocus();
+
+      const claudeGroup = document.querySelector('[data-agent-backend="claude"]') as HTMLElement;
+      const claudeOpener = within(claudeGroup).getByRole('button', { name: /Open gpt-5\.6-sol route chain/i });
+      await userEvent.click(claudeOpener);
+      await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$/i }))[1]);
+      vi.mocked(modelsApi.listAgents)
+        .mockReturnValueOnce(agentsA.promise).mockReturnValueOnce(agentsB.promise);
+      vi.mocked(modelsApi.listSources)
+        .mockReturnValueOnce(sourcesA.promise).mockReturnValueOnce(sourcesB.promise);
+      await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      await flushRouteFocus();
+      codexOpener.focus();
+      expect(document.activeElement).toBe(codexOpener);
+
+      // Hold frames only after both editors finish their normal close/focus.
+      const frames: FrameRequestCallback[] = [];
+      const frameSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+        frames.push(callback);
+        return frames.length;
+      });
+      const drainFrames = async () => {
+        await act(async () => {
+          for (const callback of frames.splice(0)) callback(0);
+        });
+      };
+      try {
+        // A removes the focused row and schedules its fallback.
+        await act(async () => { agentsA.resolve([codexWithoutModels, claudeAgent]); });
+        expect(codexOpener.isConnected).toBe(false);
+        expect(document.activeElement).toBe(document.body);
+        expect(frames.length).toBeGreaterThan(0);
+        // B is inferred in the same frame, before that callback executes.
+        await act(async () => {
+          inferred.resolve({
+            ...takeoverChain, manual_override: { hops: [takeoverChain.chain[0]] },
+            chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0],
+          });
+        });
+        expect(screen.getByRole('status').textContent).toContain('×2');
+        const destination = screen.getByRole('button', { name: /Add API key/i });
+        if (moveFocus) destination.focus();
+        const expectedFocus = moveFocus ? destination : document.querySelector('[data-agent-group-head="codex"]');
+        expect(expectedFocus).not.toBeNull();
+        await drainFrames();
+        const firstFocus = document.activeElement;
+
+        // Finish both batches: an incorrect but valid A target would persist.
+        const readsBeforeNextBatch = vi.mocked(modelsApi.listAgents).mock.calls.length;
+        await act(async () => { sourcesA.resolve(sources); });
+        expect(modelsApi.listAgents).toHaveBeenCalledTimes(readsBeforeNextBatch + 1);
+        await act(async () => { agentsB.resolve([codexWithoutModels, claudeAgent]); });
+        await drainFrames();
+        await act(async () => { sourcesB.resolve(sources); });
+        await drainFrames();
+        expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(2);
+        expect({
+          atFrame: firstFocus === expectedFocus,
+          afterSettlement: document.activeElement === expectedFocus,
+          wronglyFocusedClaude: document.activeElement === claudeOpener,
+        }).toEqual({ atFrame: true, afterSettlement: true, wronglyFocusedClaude: false });
+      } finally {
+        frameSpy.mockRestore();
+      }
+    },
+  );
 
   for (const member of ['agents', 'sources'] as const) {
     it(`MH-ROUTING-007 retains the route fallback through failed ${member} retries`, async () => {

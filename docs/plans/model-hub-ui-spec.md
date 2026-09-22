@@ -775,7 +775,12 @@ from starting, and a successful newer collection must not resurrect an older
 failure banner. Retry is read-only and inert while M6 is pending, with focus
 handed off before disabling it. Suspended D-36 attempts retain their own original
 opener; inferred commits use their exact backend/model identity and never borrow
-the currently open editor's target.
+the currently open editor's target. The newest outstanding committed route owns
+the fallback even while its reads are queued behind an older batch; the active
+batch's settlement releases only its own reports, not that queued commit.
+An animation-frame fallback selects that identity at execution, not scheduling;
+if the same report has settled in between, its captured opener remains an
+eligible fallback. A newer identity never borrows an older report's opener.
 
 **M6 failure visibility across unrelated reads** `[derived]`. A ready region from
 another refresh or a Source entity echo does not itself settle M6's retained
@@ -786,6 +791,10 @@ Page-form selection uses that same composed view so a direct/empty landing
 cannot remove the only Retry. M6's read-only Retry settles its acquired failed
 subset, then clears this presentation and releases its retained report and
 chain-probe exclusion.
+Each successful member clears its own retained failure in the published view
+immediately after installation. In particular, Agents recovery dispatches the
+exact mode/page authority before awaiting Sources, while the batch remains
+pending and preserves any still-failed Source obligation.
 
 **Repair-reconciliation totality** `[contract]` `[derived]`. This is the one machine for
 create OAuth, reauth and credential replacement. A Source snapshot and a mutation result

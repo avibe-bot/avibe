@@ -4,7 +4,9 @@ import type { AgentSupply, Source } from "./types";
 export type RouteProjectionMember = "agents" | "sources";
 
 export type RouteProjectionStatus = {
+  /** Latest outstanding commit for focus, including a save queued mid-read. */
   report: RouteReport;
+  /** Only the active batch's reports; queued commits need a later read frontier. */
   reports: readonly RouteReport[];
   failed: ReadonlySet<RouteProjectionMember>;
   pending: boolean;
@@ -32,7 +34,7 @@ export const createRouteProjectionReconciler = ({
   const queuedReports: RouteReport[] = [];
 
   const publish = () => {
-    const report = reports[reports.length - 1];
+    const report = queuedReports[queuedReports.length - 1] ?? reports[reports.length - 1];
     if (report) onStatus({ report, reports: [...reports], pending, failed: new Set(failed) });
   };
 
@@ -46,7 +48,8 @@ export const createRouteProjectionReconciler = ({
           const observation = await readAgents();
           if (token !== generation) return;
           observation.install();
-          failed.delete("agents");
+          // Successful mode authority applies now, not after Sources settles.
+          if (failed.delete("agents")) publish();
         } catch {
           if (token !== generation) return;
           failed.add("agents");

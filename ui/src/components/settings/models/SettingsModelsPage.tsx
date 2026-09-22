@@ -1056,11 +1056,17 @@ export const SettingsModelsPage: React.FC = () => {
     if (!report || !pendingRouteOpenersRef.current.has(report)) return;
     const opener = pendingRouteOpenersRef.current.get(report) ?? null;
     requestAnimationFrame(() => {
+      // Another commit can be inferred between installation and this frame.
+      // Its focus identity wins, even while its collection reads are queued.
+      const latestReport = routeCommitStatusRef.current?.report ?? report;
+      const latestOpener = pendingRouteOpenersRef.current.has(latestReport)
+        ? pendingRouteOpenersRef.current.get(latestReport) ?? null
+        : latestReport === report ? opener : null;
       focusModelHubProjection({
         root: pageRef.current,
-        activeTarget: opener,
-        backend: report.chain.backend,
-        modelId: report.chain.model_id,
+        activeTarget: latestOpener,
+        backend: latestReport.chain.backend,
+        modelId: latestReport.chain.model_id,
         preserveCurrentFocus: true,
       });
     });
