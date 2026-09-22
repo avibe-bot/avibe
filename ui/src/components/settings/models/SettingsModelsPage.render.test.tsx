@@ -1410,7 +1410,8 @@ describe('SettingsModelsPage surface branches', () => {
     const removeButtons = await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i });
     await userEvent.click(removeButtons[1]);
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
-    await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
+    expect(await screen.findByText(/^Saved$|^已保存$/i)).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(await screen.findByTitle(headMappingTitle)).toBeTruthy();
 
     await act(async () => {
@@ -1454,7 +1455,6 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() =>
       expect(document.querySelector('[data-agent-backend="codex"]')).toBeNull(),
     );
-    await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     const firstRegisteredDestination = document.querySelector(
       '.model-hub-shell-info',

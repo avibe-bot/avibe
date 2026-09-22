@@ -1071,7 +1071,8 @@ export const SettingsModelsPage: React.FC = () => {
     suspendedChainBaselinesRef.current.delete(result.chain.backend);
     setRouteCommitBackend(result.chain.backend);
     routeProjectionReconciler.start(result.chain.backend);
-  }, [chainReadAuthority, routeObserved, routeProjectionReconciler]);
+    showToast(t('common.saved'), 'success');
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler, showToast, t]);
   React.useEffect(() => {
     if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
       setRouteCommitBackend(null);
