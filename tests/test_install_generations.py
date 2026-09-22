@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import psutil
+import pytest
+
+from vibe import install_generations as retention
+from vibe import upgrade
+
+REAL_RUNNING_PATHS = retention._running_paths
+
+
+@pytest.fixture
+def installation(tmp_path, monkeypatch):
+    root = tmp_path / "home with 空格" / "runtime" / "install-generations"
+    launcher = tmp_path / "stable" / "vibe"
+    launcher.parent.mkdir()
+    monkeypatch.setattr(upgrade, "atomic_uv_install_root", lambda: root)
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _: upgrade.IntegrityResult(True, 1))
+    monkeypatch.setattr(retention, "_running_paths", lambda: set())
+    return root, launcher
+
+
+def _candidate(root, name):
+    path = root / name / "bin" / "vibe"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"#!/bin/sh\n# {path}\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def _activate(root, launcher, name):
+    candidate = _candidate(root, name)
+    source = upgrade._launcher_generation(launcher, root)
+    upgrade.activate_installer_candidate(upgrade.AtomicActivation(launcher, candidate, source))
+    return candidate
+
+
+def _owned(root):
+    return {path.name for path in root.iterdir() if (path / retention.RECEIPT).exists()}
+
+
+@pytest.mark.parametrize("link", ["symlink", "hardlink", "copy"])
+def test_repeated_activation_keeps_current_and_previous_for_all_launcher_shapes(installation, monkeypatch, link):
+    root, launcher = installation
+    if link != "symlink":
+        def replace(path, target):
+            if link == "hardlink":
+                os.link(target, path)
+            else:
+                shutil.copy2(target, path)
+        monkeypatch.setattr(upgrade, "_prepare_launcher_replacement", replace)
+    for index in range(8):
+        name = f"1725900000-1234-{index}" if index % 2 else f"{index:032x}"
+        prior = upgrade._launcher_generation(launcher, root)
+        candidate = _activate(root, launcher, name)
+        assert len(_owned(root)) == min(index + 1, 2)
+        assert upgrade._launcher_generation(launcher, root) == candidate.parent.parent
+        if prior:
+            assert prior.is_dir()
+
+
+def test_unowned_history_and_unpublished_candidates_are_never_collected(installation):
+    root, launcher = installation
+    historical = [_candidate(root, name) for name in ("1693000000-123-456", "a" * 32)]
+    staging = root / "incomplete-staging"
+    staging.mkdir()
+    for index in range(4):
+        _activate(root, launcher, f"owned-{index}")
+    assert len(_owned(root)) == 2
+    assert all(path.exists() for path in historical)
+    assert staging.exists()
+    assert not any((path.parent.parent / retention.RECEIPT).exists() for path in historical)
+
+
+def test_every_recorded_stable_launcher_protects_its_target(installation, tmp_path):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    alias = tmp_path / "alternative" / "vibe"
+    upgrade.activate_launcher_target(alias, first)
+    for index in range(4):
+        _activate(root, launcher, f"next-{index}")
+    assert alias.resolve() == first
+    assert first.exists()
+    assert _owned(root) == {"first", "next-2", "next-3"}
+    alias.unlink()
+    _activate(root, launcher, "last")
+    assert not first.exists()
+
+
+@pytest.mark.parametrize("marker", ["missing", "stale"])
+def test_copied_launcher_is_retained_even_when_generation_marker_is_wrong(installation, tmp_path, marker):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    alias = tmp_path / "other" / "vibe"
+    upgrade.activate_launcher_target(alias, first)
+    alias.unlink()
+    shutil.copy2(first, alias)
+    marker_path = alias.parent / ".vibe.avibe-generation"
+    if marker == "missing":
+        marker_path.unlink()
+    else:
+        marker_path.write_text(str(root / "absent"))
+    for index in range(4):
+        _activate(root, launcher, f"next-{index}")
+    assert first.exists()
+    assert _owned(root) == {"first", "next-2", "next-3"}
+
+
+@pytest.mark.parametrize("reference", ["service", "ui", "source-handoff"])
+def test_running_logical_interpreter_and_source_handoff_survive(installation, monkeypatch, reference):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    logical_python = first.parent.parent / "uv" / "tools" / "avibe-os" / "bin" / "python"
+    logical_python.parent.mkdir(parents=True)
+    logical_python.symlink_to(sys.executable)
+    kept_path = logical_python if reference != "source-handoff" else first.parent.parent
+    monkeypatch.setattr(retention, "_running_paths", lambda: {kept_path})
+    for index in range(4):
+        _activate(root, launcher, f"next-{index}")
+    assert _owned(root) == {"first", "next-2", "next-3"}
+    monkeypatch.setattr(retention, "_running_paths", lambda: set())
+    _activate(root, launcher, "last")
+    assert not first.exists()
+
+
+def test_process_scan_reads_real_logical_argv_and_handoff_arguments(tmp_path, monkeypatch):
+    python = tmp_path / "logical-env" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    source = tmp_path / "source"
+    process = subprocess.Popen(
+        [str(python), "-c", "import sys; print('ready', flush=True); sys.stdin.read()", "--source-generation", str(source)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([psutil.Process(process.pid)]))
+        paths = retention._running_paths()
+        assert python in paths
+        assert source in paths
+    finally:
+        process.communicate(timeout=10)
+
+
+def test_real_process_keeps_old_environment_until_it_exits(installation, monkeypatch):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    python = first.parent.parent / "uv" / "tools" / "avibe-os" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    process = subprocess.Popen(
+        [str(python), "-c", "import sys; print('ready', flush=True); sys.stdin.read()"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    monkeypatch.setattr(retention, "_running_paths", REAL_RUNNING_PATHS)
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        child = psutil.Process(process.pid)
+        monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([child]))
+        for index in range(4):
+            _activate(root, launcher, f"next-{index}")
+        assert first.exists()
+        assert len(_owned(root)) == 3
+    finally:
+        process.communicate(timeout=10)
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([]))
+    _activate(root, launcher, "last")
+    assert not first.exists()
+    assert len(_owned(root)) == 2
+
+
+def test_process_scan_uses_existing_command_fallback_for_macos_denial(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from vibe import runtime
+
+    python = tmp_path / "generation" / "bin" / "python"
+    def denied():
+        raise psutil.AccessDenied(123)
+    fake = SimpleNamespace(
+        pid=123, username=lambda: psutil.Process().username(),
+        status=lambda: psutil.STATUS_RUNNING, cmdline=denied, exe=denied,
+    )
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter([fake]))
+    monkeypatch.setattr(runtime, "get_process_command", lambda _: f'"{python}" -c pass')
+    assert python in retention._running_paths()
+    monkeypatch.setattr(runtime, "get_process_command", lambda _: None)
+    with pytest.raises(psutil.AccessDenied):
+        retention._running_paths()
+
+
+def test_recorded_service_and_ui_are_checked_even_for_a_different_user(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from config import paths
+
+    live_python = tmp_path / "generation" / "bin" / "python"
+    records = (paths.get_runtime_pid_path(), paths.get_runtime_ui_pid_path())
+    for index, record in enumerate(records):
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(str(123 + index))
+    processes = [
+        SimpleNamespace(
+            pid=pid, username=lambda: "another-user", status=lambda: psutil.STATUS_RUNNING,
+            cmdline=lambda: [str(live_python), "-c", "pass"], exe=lambda: sys.executable,
+        )
+        for pid in (123, 124)
+    ]
+    monkeypatch.setattr(retention.psutil, "process_iter", lambda: iter(processes))
+    assert live_python in retention._running_paths()
+
+
+@pytest.mark.parametrize("payload", [{"state": "scheduled"}, {"state": "running"}, [], "malformed"])
+def test_pending_or_unreadable_restart_defers_collection(installation, payload):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    _activate(root, launcher, "second")
+    status = upgrade.runtime_mod.get_restart_status_path()
+    status.parent.mkdir(parents=True, exist_ok=True)
+    status.write_text(json.dumps(payload) if payload != "malformed" else "{", encoding="utf-8")
+    candidate = _candidate(root, "third")
+    activation = upgrade.AtomicActivation(launcher, candidate, root / "second")
+    with upgrade.atomic_upgrade_lock():
+        assert retention.collect_before_activation(activation) == []
+    assert first.exists()
+    status.write_text(json.dumps({"state": "succeeded"}))
+    upgrade.activate_installer_candidate(activation)
+    assert not first.exists()
+
+
+def test_concurrent_installer_protects_staging_and_older_source_until_it_finishes(installation):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    staging = _candidate(root, "concurrent")
+    marker = staging.parent.parent / retention.INSTALLER_PID
+    marker.write_text(str(os.getpid()))
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+    assert first.exists()
+    assert staging.exists()
+    marker.unlink()
+    _activate(root, launcher, "last")
+    assert not first.exists()
+    assert staging.exists()  # unpublished candidate still belongs to its caller
+    assert len(_owned(root)) == 2
+
+
+def test_own_installer_marker_does_not_disable_collection(installation):
+    root, launcher = installation
+    _activate(root, launcher, "first")
+    _activate(root, launcher, "second")
+    candidate = _candidate(root, "third")
+    (candidate.parent.parent / retention.INSTALLER_PID).write_text(str(os.getpid()))
+    upgrade.activate_installer_candidate(upgrade.AtomicActivation(launcher, candidate, root / "second"))
+    assert _owned(root) == {"second", "third"}
+
+
+def test_stale_installer_pid_does_not_pin_owned_history(installation, monkeypatch):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    staging = _candidate(root, "abandoned")
+    (staging.parent.parent / retention.INSTALLER_PID).write_text("123")
+    def absent(_):
+        raise psutil.NoSuchProcess(123)
+    monkeypatch.setattr(retention.psutil, "Process", absent)
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+    assert not first.exists()
+    assert staging.exists()  # a crashed, unreceipted candidate is not owned
+
+
+def test_reused_installer_pid_does_not_own_the_marker(installation, monkeypatch):
+    from types import SimpleNamespace
+
+    root, _ = installation
+    candidate = _candidate(root, "abandoned")
+    marker = candidate.parent.parent / retention.INSTALLER_PID
+    marker.write_text("123")
+    monkeypatch.setattr(retention.psutil, "Process", lambda _: SimpleNamespace(
+        status=lambda: psutil.STATUS_RUNNING,
+        create_time=lambda: marker.stat().st_mtime + 10,
+    ))
+    assert not retention._installer_is_live(candidate.parent.parent)
+
+
+def test_failed_candidate_is_discarded_without_touching_selected_generations(installation, monkeypatch):
+    from vibe import cli
+
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    candidate = _candidate(root, "failed")
+    monkeypatch.setattr(upgrade, "verify_upgrade_candidate", lambda _: upgrade.IntegrityResult(False))
+    assert cli._dispatch_installer_activation([
+        "--launcher", str(launcher), "--candidate", str(candidate),
+        "--source-generation", str(first.parent.parent),
+    ]) == 1
+    assert first.exists()
+    assert not candidate.parent.parent.exists()
+    assert launcher.resolve() == first
+
+
+def test_collection_does_not_follow_generation_symlinks_or_touch_other_state(installation, tmp_path):
+    root, launcher = installation
+    _activate(root, launcher, "first")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / retention.RECEIPT).write_text(json.dumps({"version": 1, "launchers": [str(launcher)]}))
+    sentinel = outside / "state"
+    sentinel.write_text("keep")
+    (root / "alias").symlink_to(outside, target_is_directory=True)
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+    assert sentinel.read_text() == "keep"
+    assert (root / "alias").is_symlink()
+
+
+def test_malformed_receipt_defers_collection_but_allows_activation(installation):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    (first.parent.parent / retention.RECEIPT).write_text('{"version": 9}')
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+    assert first.exists()
+    assert launcher.resolve() == root / "next-2" / "bin" / "vibe"
+
+
+def test_canonical_uv_install_does_not_protect_unreferenced_owned_generations(installation, tmp_path, monkeypatch):
+    root, launcher = installation
+    _activate(root, launcher, "first")
+    canonical = tmp_path / ".local" / "share" / "uv" / "tools" / "avibe-os" / "bin" / "vibe"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("#!/canonical/python\n")
+    canonical.chmod(0o755)
+    upgrade.activate_launcher_target(launcher, canonical)
+    monkeypatch.setattr(retention, "_running_paths", lambda: {canonical.with_name("python")})
+    for index in range(3):
+        _activate(root, launcher, f"next-{index}")
+    assert _owned(root) == {"next-1", "next-2"}
+    assert canonical.exists()
+
+
+@pytest.mark.parametrize("failure", ["enumerate", "processes", "remove", "receipt"])
+def test_cleanup_failure_never_invalidates_successful_activation(installation, monkeypatch, failure):
+    root, launcher = installation
+    first = _activate(root, launcher, "first")
+    _activate(root, launcher, "second")
+    def fail(*args, **kwargs):
+        raise PermissionError("test-owned denial")
+    if failure == "enumerate":
+        original = Path.iterdir
+        monkeypatch.setattr(Path, "iterdir", lambda path: fail() if path == root else original(path))
+    elif failure == "processes":
+        monkeypatch.setattr(retention, "_running_paths", fail)
+    elif failure == "remove":
+        monkeypatch.setattr(retention.shutil, "rmtree", fail)
+    else:
+        monkeypatch.setattr(retention, "write_atomic", fail)
+    candidate = _activate(root, launcher, "third")
+    assert launcher.resolve() == candidate
+    assert candidate.exists()
+    if failure != "receipt":
+        assert first.exists()
+
+
+@pytest.mark.parametrize("surface", ["manual", "automatic"])
+def test_repeated_real_upgrade_callers_are_bounded(installation, monkeypatch, surface):
+    from vibe import api, cli
+
+    root, launcher = installation
+    caller = cli if surface == "manual" else api
+    monkeypatch.setattr(caller, "configured_memory_enabled", lambda: False)
+    monkeypatch.setattr(caller, "_runtime_process_was_running", lambda: surface == "automatic")
+    monkeypatch.setattr(caller, "schedule_restart", lambda **kwargs: {"job_id": "test"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "99"})
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_: None)
+    for index in range(5):
+        candidate = _candidate(root, f"{index:032x}")
+        activation = upgrade.AtomicActivation(launcher, candidate, upgrade._launcher_generation(launcher, root))
+        plan = upgrade.UpgradePlan(command=["test-uv"], env={}, method="uv", activation=activation)
+        monkeypatch.setattr(caller, "build_upgrade_plan", lambda **kwargs: plan)
+        monkeypatch.setattr(caller.subprocess, "run", lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, "", ""))
+        result = cli.cmd_upgrade() if surface == "manual" else api.do_upgrade(auto_restart=True)
+        assert result == 0 if surface == "manual" else result["ok"]
+        assert len(_owned(root)) == min(index + 1, 2)
+        assert candidate.exists()

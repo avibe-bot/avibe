@@ -607,9 +607,19 @@ def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
 def activate_upgrade_candidate(activation: AtomicActivation) -> None:
     """Atomically switch the stable launcher to a validated candidate."""
 
+    # Runtime callers already own this lock; the lock is re-entrant so direct
+    # activation and installer callers share the same collection boundary too.
+    with atomic_upgrade_lock():
+        _activate_upgrade_candidate_locked(activation)
+
+
+def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
+    from vibe.install_generations import collect_before_activation, record_activation
+
     result = verify_upgrade_candidate(activation)
     if not result.ok:
         raise RuntimeError(f"staged Avibe install failed integrity checks: {result.detail}")
+    collect_before_activation(activation)
     launcher = activation.launcher
     launcher.parent.mkdir(parents=True, exist_ok=True)
     replacement = launcher.parent / f".{launcher.name}.avibe-{uuid4().hex}.new"
@@ -622,6 +632,7 @@ def activate_upgrade_candidate(activation: AtomicActivation) -> None:
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher, activation.candidate_launcher, root)
+    record_activation(launcher, activation.candidate_launcher)
 
 
 def activate_installer_candidate(activation: AtomicActivation) -> None:
@@ -639,6 +650,13 @@ def activate_installer_candidate(activation: AtomicActivation) -> None:
 def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
     """Atomically point a stable launcher at an installed target."""
 
+    with atomic_upgrade_lock():
+        _activate_launcher_target_locked(launcher, target)
+
+
+def _activate_launcher_target_locked(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    from vibe.install_generations import record_activation
+
     launcher_path = Path(launcher).expanduser()
     target_path = Path(target).expanduser()
     if not target_path.is_file() or not os.access(target_path, os.X_OK):
@@ -653,6 +671,7 @@ def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.
             replacement.unlink()
         raise
     _update_launcher_generation_marker(launcher_path, target_path, atomic_uv_install_root().expanduser().resolve())
+    record_activation(launcher_path, target_path)
 
 
 def resolve_command_path(command: str | None, search_path: str | None = None) -> str | None:

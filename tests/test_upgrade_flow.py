@@ -198,7 +198,7 @@ def test_activate_upgrade_candidate_replaces_windows_hardlink_launcher(monkeypat
     assert launcher.resolve() == candidate.resolve()
 
 
-def test_activation_leaves_every_other_generation_untouched(monkeypatch, tmp_path):
+def test_activation_leaves_unowned_legacy_generations_untouched(monkeypatch, tmp_path):
     from vibe import upgrade
 
     root = tmp_path / "generations"
@@ -2218,6 +2218,9 @@ def test_cmd_upgrade_metadata_failure_uses_exact_memory_artifact(monkeypatch, tm
         return subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr="")
 
     monkeypatch.setattr(cli, "execute_upgrade_plan", execute)
+    # The install is a double, so its post-install probe must not inspect the
+    # pytest interpreter (which need not contain an installed Avibe wheel).
+    monkeypatch.setattr(cli, "verify_python_environment", lambda *_: vibe_upgrade.IntegrityResult(True))
 
     assert cli.cmd_upgrade() == 0
     assert "Attempting upgrade anyway..." in capsys.readouterr().out
@@ -2265,6 +2268,7 @@ def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, caps
         return subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr="")
 
     monkeypatch.setattr(cli, "execute_upgrade_plan", execute)
+    monkeypatch.setattr(cli, "verify_python_environment", lambda *_: vibe_upgrade.IntegrityResult(True))
 
     assert cli.cmd_upgrade() == 0
     assert "Attempting upgrade anyway..." in capsys.readouterr().out

@@ -81,7 +81,14 @@ def test_install_command_starts_vibe_for_new_user_without_local_bin_on_path():
             "! command -v vibe; "
             "/home/installer/.local/bin/vibe version; "
             "sleep 2; "
-            "/home/installer/.local/bin/vibe status"
+            "/home/installer/.local/bin/vibe status; "
+            # This runtime belongs to the disposable container. Stop it before
+            # checking the two-generation bound without live interpreter pins.
+            "/home/installer/.local/bin/vibe stop; "
+            "for attempt in 1 2 3; do "
+            "bash /work/install.sh; "
+            'test "$(find /home/installer/.avibe/runtime/install-generations -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 2; '
+            "done"
         )
         command = (
             "apt-get update >/dev/null && "

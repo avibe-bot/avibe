@@ -416,6 +416,7 @@ jobs:
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/*.whl)"
           pytest \
             tests/test_upgrade_flow.py \
+            tests/test_install_generations.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             tests/e2e/test_upgrade_command.py \
@@ -460,6 +461,15 @@ jobs:
 
           if (-not (Select-String -Path install-output.log -Pattern 'avibe-os installed successfully \(from custom package spec\)' -Quiet)) {
             throw "Installer output missing custom package success message"
+          }
+
+          # Exercise the real hardlink/copy launcher and process inspection on
+          # Windows, not just mocked link fallbacks in the Python unit suite.
+          1..3 | ForEach-Object {
+            & .\install.ps1
+            if ($LASTEXITCODE -ne 0) { throw "Repeated installer failed" }
+            $generations = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations" -Directory)
+            if ($generations.Count -ne 2) { throw "Expected two managed generations, found $($generations.Count)" }
           }
 
       - name: Verify vibe in fresh PowerShell session

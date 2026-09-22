@@ -418,11 +418,15 @@ function Invoke-UvToolInstallAttempt {
     $generationBin = Join-Path $generationRoot "bin"
     $stableBin = Get-StableBinDirectory
     $stableLauncher = Join-Path $stableBin "vibe.exe"
+    New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
+    # Protect the source snapshot throughout staging outside the Python lock.
+    # The collector ignores this marker only for its own candidate.
+    $installerMarker = Join-Path $generationRoot ".avibe-installing"
+    Set-Content -LiteralPath $installerMarker -Value $PID -Encoding UTF8
     # The candidate's shared Python activation owner resolves this snapshot to
     # a generation. PowerShell must not duplicate junction/symlink identity.
     $launcherState = Get-LauncherState -Launcher $stableLauncher -RuntimeHome $runtimeHome
     $previousSourcePath = $launcherState.SourcePath
-    New-Item -ItemType Directory -Force -Path $generationTools, $generationBin, $stableBin | Out-Null
 
     $previousToolDir = $env:UV_TOOL_DIR
     $previousToolBinDir = $env:UV_TOOL_BIN_DIR
@@ -509,6 +513,7 @@ function Invoke-UvToolInstallAttempt {
         }
         return $result
     } finally {
+        Remove-Item -LiteralPath $installerMarker -Force -ErrorAction SilentlyContinue
         if ($null -eq $previousToolDir) { Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_DIR = $previousToolDir }
         if ($null -eq $previousToolBinDir) { Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue } else { $env:UV_TOOL_BIN_DIR = $previousToolBinDir }
     }

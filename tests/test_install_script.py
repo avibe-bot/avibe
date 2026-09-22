@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -58,6 +59,13 @@ def _run(command: str, *, cwd: Path, env: dict[str, str], timeout: int = 30) -> 
 
 
 def _write_fake_uv(path: Path, uv_log: Path) -> None:
+    activation_driver = (
+        f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
+        "from vibe import cli, upgrade, install_generations; "
+        "upgrade.verify_upgrade_candidate = lambda activation: upgrade.IntegrityResult(True, 1); "
+        "install_generations._running_paths = lambda: set(); "
+        "sys.exit(cli._dispatch_installer_activation(sys.argv[1:]))"
+    )
     _write_executable(
         path,
         f"""\
@@ -81,6 +89,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         cat > "$bin_dir/vibe-test-driver" <<'EOF'
         #!/usr/bin/env bash
         set -euo pipefail
+        if [ "${{VIBE_TEST_SHARED_ACTIVATION:-}}" = "1" ] && [ "${{1:-}}" = "__activate-install" ]; then
+            exec "{sys.executable}" -c {shlex.quote(activation_driver)} "${{@:2}}"
+        fi
         if [ "${{VIBE_TEST_REQUIRE_CANONICAL_HOME:-}}" = "1" ] && \
             [ "${{AVIBE_HOME:-}}" != "${{VIBE_TEST_EXPECTED_AVIBE_HOME:-}}" ]; then
             echo "AVIBE_HOME was not canonicalized" >&2
@@ -195,6 +206,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         from vibe.cli import main
         sys.exit(main())
         EOF
+        # Real uv console scripts contain their generation-specific interpreter.
+        # Preserve that distinction in this fake using the test interpreter.
+        printf '\\n# generation: %s\\n' "$bin_dir" >> "$bin_dir/vibe"
         chmod +x "$bin_dir/vibe"
         if [ "${{VIBE_TEST_LEGACY_ACTIVATION:-}}" = "1" ]; then
             touch "$bin_dir/.legacy-activation"
@@ -408,17 +422,22 @@ def test_repeated_installer_runs_prune_old_generations(tmp_path):
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_SHARED_ACTIVATION"] = "1"
 
-    first = _install(env)
-    first_generations = sorted((home_dir / ".avibe" / "runtime" / "install-generations").iterdir())
-    second = _install(env)
-    generations = sorted((home_dir / ".avibe" / "runtime" / "install-generations").iterdir())
-
-    assert first.returncode == 0, first.stdout + first.stderr
-    assert second.returncode == 0, second.stdout + second.stderr
-    assert len(first_generations) == 1
-    assert len(generations) == 2
-    assert all(path.is_dir() for path in generations)
+    root = home_dir / ".avibe" / "runtime" / "install-generations"
+    previous = None
+    for index in range(5):
+        result = _install(env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        generations = list(root.iterdir())
+        assert len(generations) == min(index + 1, 2)
+        assert all((path / ".avibe-install.json").is_file() for path in generations)
+        assert not any((path / ".avibe-installing").exists() for path in generations)
+        current = (path_dir / "vibe").resolve()
+        assert current.is_file()
+        if previous:
+            assert previous.is_file()
+        previous = current
 
 
 def test_install_script_activates_a_wheel_without_the_shared_protocol(tmp_path):

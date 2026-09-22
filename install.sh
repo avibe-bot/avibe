@@ -458,6 +458,13 @@ uv_tool_install() {
         return 1
     fi
     mkdir -p "$generation_tools" "$generation_bin" "$stable_bin_dir"
+    # Publish before the source snapshot. Collection in another activation
+    # retains this installer's entire handoff while the shell is still alive.
+    # Unreceipted candidates themselves are never eligible for collection.
+    if ! printf '%s\n' "$$" > "$generation_root/.avibe-installing"; then
+        warn "Could not protect the installer handoff"
+        return 1
+    fi
     if [ -e "$stable_bin_dir/vibe" ] || [ -L "$stable_bin_dir/vibe" ]; then
         previous_target="$(resolve_binary_path "$stable_bin_dir/vibe" || true)"
         local current_protocol=""
@@ -548,6 +555,7 @@ uv_tool_install() {
         fi
         VIBE_TOOL_BIN_DIR="$stable_bin_dir"
         VIBE_BIN_PATH="$stable_bin_dir/vibe"
+        rm -f -- "$generation_root/.avibe-installing" || warn "Could not remove the completed installer marker"
         return 0
     fi
     rm -rf -- "$generation_root"

@@ -320,6 +320,18 @@ npm install -g @openai/codex
 
 ---
 
+## Upgrade storage
+
+Automatic updates, `vibe upgrade`, and installer reruns reclaim superseded
+installation environments on later successful activations. Normally, the current
+and previous managed generations remain; running processes, other managed
+launchers, pending restarts, and concurrent installers keep the environments they
+still need. Cleanup failures defer reclamation without failing the upgrade.
+
+Generations created before activation receipts were introduced are retained:
+their ownership cannot be established safely. They require separate verified
+operator cleanup; do not delete environments used by a launcher or live process.
+
 ## Uninstall
 
 ```bash
