@@ -7375,13 +7375,8 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
-        from vibe.memory_ui_access import process_ui_read_secret
-
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
-        memory_ui_secret = process_ui_read_secret()
-        spawn_kwargs = (
-            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
-        )
+        spawn_kwargs = {}
         pid = runtime.spawn_background(
             [sys.executable, "-c", command],
             config_paths.get_runtime_ui_pid_path(),
@@ -16581,19 +16576,10 @@ async def _reconcile_startup_dependencies_task() -> None:
                 if isinstance(result.get("model_hub_engine"), dict)
                 else {}
             )
-            memory_package = (
-                result.get("memory_package")
-                if isinstance(result.get("memory_package"), dict)
-                else {}
-            )
             logger.warning(
                 "Startup dependency reconcile completed with issues in %sms: "
-                "memory_package=%s askill=%s model_hub_engine=%s show_runtime=%s",
+                "askill=%s model_hub_engine=%s show_runtime=%s",
                 duration_ms,
-                memory_package.get("message")
-                or memory_package.get("reason")
-                or memory_package.get("status")
-                or memory_package.get("ok"),
                 askill.get("message") or askill.get("status") or askill.get("ok"),
                 model_hub_engine.get("message")
                 or model_hub_engine.get("reason")
