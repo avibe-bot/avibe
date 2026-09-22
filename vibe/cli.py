@@ -14074,6 +14074,29 @@ def _print_remote_pair_failure(result: dict) -> None:
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
+    if error_code == "pairing_local_write_unavailable":
+        print("Remote access setup stopped before contacting Avibe Cloud.", file=sys.stderr)
+        print("The local config cannot durably accept a pairing, so no pairing key was consumed.", file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        print("Fix the local config problem, then run:", file=sys.stderr)
+        print("  vibe remote", file=sys.stderr)
+        return
+    if error_code == "pairing_save_failed_after_redeem":
+        orphan = result.get("orphaned_binding") or {}
+        print("The pairing was redeemed cloud-side but could not be saved locally.", file=sys.stderr)
+        if orphan.get("instance_id"):
+            print(
+                f"Orphaned binding: instance {orphan['instance_id']} "
+                f"(device {orphan.get('device_name') or 'unknown'}).",
+                file=sys.stderr,
+            )
+        print("The redeemed credentials are kept on this host, so no new pairing key is needed.", file=sys.stderr)
+        print("Fix the local config problem, then run:", file=sys.stderr)
+        print("  vibe remote pair", file=sys.stderr)
+        if result.get("detail"):
+            print(f"Detail: {result['detail']}", file=sys.stderr)
+        return
     if error_code == "invalid_pairing_response":
         print("Avibe Cloud returned incomplete pairing data.", file=sys.stderr)
         print("Create a fresh pairing key and run:", file=sys.stderr)
