@@ -813,8 +813,9 @@ describe("RouteChainDialog", () => {
     );
   });
 
-  it("renders the complete removed-hop impact after a successful save", async () => {
+  it("closes through the owner after a successful save with impact", async () => {
     const user = userEvent.setup();
+    const onClose = vi.fn();
     const removed = {
       backend: "claude" as const,
       menu_model: "opus-5",
@@ -825,85 +826,13 @@ describe("RouteChainDialog", () => {
     vi.spyOn(modelsApi, "putAgentChain").mockResolvedValue(
       mutation(chain, { removed_hops: [removed] }),
     );
-    renderDialog();
+    renderDialog(vi.fn(), onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByText("Claude Code · opus-5")).toBeTruthy();
-    expect(screen.getByText("claude-opus-5 · Order #1")).toBeTruthy();
-  });
-
-  it("keeps Done available while page-owned M6 is pending and failed", async () => {
-    const user = userEvent.setup();
-    const removed = {
-      backend: "claude" as const,
-      menu_model: "opus-5",
-      source_id: "src_a",
-      model_id: "claude-opus-5",
-      position: 1,
-    };
-    const put = vi
-      .spyOn(modelsApi, "putAgentChain")
-      .mockResolvedValue(mutation(chain, { removed_hops: [removed] }));
-    const onCommitted = vi.fn();
-    const retry = vi.fn();
-    vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
-    const page = render(
-      <I18nextProvider i18n={i18n}>
-        <RouteChainDialog
-          selection={{ agent, modelId: "opus-5", read: readyRegion(chain) }}
-          sources={sources}
-          onClose={vi.fn()}
-          onCommitted={onCommitted}
-          commitReconciliation={{ pending: true, failed: false, retry }}
-          readAgents={vi.fn().mockResolvedValue(observation([agent]))}
-          readSources={vi.fn().mockResolvedValue(observation(sources))}
-        />
-      </I18nextProvider>,
-    );
-    await screen.findAllByRole("button", { name: "Remove hop" });
-    await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
-    await user.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
-    expect(
-      await screen.findByText(
-        "Route chain saved. Refreshing the model surface…",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "These are the items this save actually removed or interrupted.",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByText("Done").closest("button")).toBeTruthy();
-    page.rerender(
-      <I18nextProvider i18n={i18n}>
-        <RouteChainDialog
-          selection={{ agent, modelId: "opus-5", read: readyRegion(chain) }}
-          sources={sources}
-          onClose={vi.fn()}
-          onCommitted={onCommitted}
-          commitReconciliation={{ pending: false, failed: true, retry }}
-          readAgents={vi.fn().mockResolvedValue(observation([agent]))}
-          readSources={vi.fn().mockResolvedValue(observation(sources))}
-        />
-      </I18nextProvider>,
-    );
-    expect(
-      await screen.findByText(
-        "The route chain was saved, but the model surface could not be refreshed.",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(
-        "These are the items this save actually removed or interrupted.",
-      ),
-    ).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(retry).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("echoes the exact refusal plan on a forced confirmation", async () => {
@@ -983,7 +912,8 @@ describe("RouteChainDialog", () => {
     const put = vi
       .spyOn(modelsApi, "putAgentChain")
       .mockRejectedValueOnce(new TypeError("response lost"));
-    renderDialog();
+    const onClose = vi.fn();
+    renderDialog(vi.fn(), onClose);
     await screen.findAllByRole("button", { name: "Remove hop" });
 
     await user.click(screen.getAllByRole("button", { name: "Remove hop" })[0]);
@@ -992,7 +922,7 @@ describe("RouteChainDialog", () => {
 
     await waitFor(() => expect(read).toHaveBeenCalledWith("claude", "opus-5"));
     expect(put).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("Done").closest("button")).toBeTruthy();
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("installs a nonmatching D-36 observation without treating it as a retryable write", async () => {

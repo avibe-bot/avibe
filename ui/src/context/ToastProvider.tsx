@@ -80,6 +80,9 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         {toasts.map((toast) => (
           <div
             key={toast.id}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
             className={`flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border animate-slide-in ${
               toast.type === 'success'
                 ? 'bg-mint/10 border-mint/30 text-mint-ink'

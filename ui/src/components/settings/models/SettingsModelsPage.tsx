@@ -74,6 +74,11 @@ import type { UsageWindowOption } from './usageProjection';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
+type RouteTarget = {
+  agent: AgentSupply;
+  modelId: string;
+  opener: HTMLElement | null;
+};
 // Frame 13's rows, derived from the one subscription-vendor vocabulary rather
 // than restated here. `subscriptionOptions.ts` owns which vendors are offered and
 // what custody each has, so this menu cannot drift out of the same order the
@@ -393,7 +398,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
-  const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
+  const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
+  const pendingRouteFocusRef = React.useRef<RouteTarget | null>(null);
   const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
   const [routeCommitBackend, setRouteCommitBackend] = React.useState<AgentBackend | null>(null);
   const [suspendedRouteAttempts, setSuspendedRouteAttempts] = React.useState(
@@ -1013,7 +1019,7 @@ export const SettingsModelsPage: React.FC = () => {
     read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
     available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
   } : null;
-  const focusRouteDestination = React.useCallback((target: NonNullable<typeof routeTarget>) => {
+  const focusRouteDestination = React.useCallback((target: RouteTarget) => {
     requestAnimationFrame(() => {
       focusModelHubProjection({
         root: pageRef.current,
@@ -1023,6 +1029,10 @@ export const SettingsModelsPage: React.FC = () => {
       });
     });
   }, []);
+  const refocusPendingRouteDestination = React.useCallback(() => {
+    const target = pendingRouteFocusRef.current;
+    if (target) focusRouteDestination(target);
+  }, [focusRouteDestination]);
   const routeObserved = React.useCallback((next: RouteReport['chain']) => {
     setChainsRead((previous) => readyRegion({
       ...foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
@@ -1039,18 +1049,24 @@ export const SettingsModelsPage: React.FC = () => {
     if (result.kind === 'stale') throw new Error('route_agents_read_superseded');
     return {
       value: result.value,
-      install: () => setSupplyRead(readyRegion(result.value)),
+      install: () => {
+        setSupplyRead(readyRegion(result.value));
+        refocusPendingRouteDestination();
+      },
     };
-  }, [agentCollectionReads]);
+  }, [agentCollectionReads, refocusPendingRouteDestination]);
   const readRouteSources = React.useCallback(async (): Promise<RouteCollectionObservation<Source[]>> => {
     const snapshot = sourceEntityAuthority.beginSnapshot();
     const result = await sourceCollectionReads.read();
     if (result.kind === 'stale') throw new Error('route_sources_read_superseded');
     return {
       value: result.value,
-      install: () => sourceEntityAuthority.settleSnapshot(snapshot, result.value),
+      install: () => {
+        sourceEntityAuthority.settleSnapshot(snapshot, result.value);
+        refocusPendingRouteDestination();
+      },
     };
-  }, [sourceCollectionReads, sourceEntityAuthority]);
+  }, [refocusPendingRouteDestination, sourceCollectionReads, sourceEntityAuthority]);
   const routeProjectionReconciler = React.useMemo(() => createRouteProjectionReconciler({
     readAgents: readRouteAgents,
     readSources: readRouteSources,
@@ -1061,6 +1077,7 @@ export const SettingsModelsPage: React.FC = () => {
     onStatus: setRouteCommitStatus,
   }), [readRouteAgents, readRouteSources]);
   const routeCommitted = React.useCallback((result: RouteReport) => {
+    if (routeTarget) pendingRouteFocusRef.current = routeTarget;
     chainReadAuthority.invalidate(result.chain.backend);
     routeObserved(result.chain);
     setSuspendedRouteAttempts((attempts) =>
@@ -1072,12 +1089,18 @@ export const SettingsModelsPage: React.FC = () => {
     setRouteCommitBackend(result.chain.backend);
     routeProjectionReconciler.start(result.chain.backend);
     showToast(t('common.saved'), 'success');
-  }, [chainReadAuthority, routeObserved, routeProjectionReconciler, showToast, t]);
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler, routeTarget, showToast, t]);
   React.useEffect(() => {
     if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
       setRouteCommitBackend(null);
     }
   }, [routeCommitStatus]);
+  React.useEffect(() => {
+    if (!routeCommitStatus || routeCommitStatus.pending || !pendingRouteFocusRef.current) return;
+    const target = pendingRouteFocusRef.current;
+    pendingRouteFocusRef.current = null;
+    focusRouteDestination(target);
+  }, [focusRouteDestination, routeCommitStatus]);
   const retryRouteCommit = React.useCallback(() => {
     if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
     routeProjectionReconciler.retry();
@@ -1419,7 +1442,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => { pendingRouteFocusRef.current = null; setRouteTarget({ agent, modelId, opener }); }} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
