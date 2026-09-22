@@ -5448,6 +5448,7 @@
       "actionAdd": "Add subscription or API Key",
       "actionConnecting": "Connecting…",
       "actionChecking": "Checking connection…",
+      "continueHint": "You can connect a provider later.",
       "addTitle": "Add subscription or API Key",
       "addTitleMore": "Add more model providers",
       "addDescription": "Add one source to get started. Model Hub handles routing.",

@@ -5448,6 +5448,7 @@
       "actionAdd": "添加订阅或 API Key",
       "actionConnecting": "正在连接…",
       "actionChecking": "正在检查连接…",
+      "continueHint": "也可以稍后再连接提供商。",
       "addTitle": "添加订阅或 API Key",
       "addTitleMore": "添加更多模型提供商",
       "addDescription": "添加一个来源即可开始，由模型网关统一路由。",

@@ -123,6 +123,12 @@ for (const width of [1200, 390]) {
 
     await page.goto('/setup');
     await page.getByRole('button', { name: 'Get started', exact: true }).click();
+    // Nothing is connected yet, so the journey opens on Providers with only the
+    // take-over it found on offer. Saying so there is what leaves a way through to
+    // the screen that owns the Hub — and the take-over is still only on offer when
+    // it does: the credential this run imports is taken over from the Hub itself.
+    await expect(page.locator('[data-setup-screen="providers"]')).toBeVisible();
+    await page.getByRole('button', { name: 'Continue to assistants', exact: true }).click();
     const enter = page.getByRole('button', { name: 'Enter workspace', exact: true });
     await expect(enter).toBeDisabled();
     await expect.poll(() => observedReady.length).toBeGreaterThan(0);
