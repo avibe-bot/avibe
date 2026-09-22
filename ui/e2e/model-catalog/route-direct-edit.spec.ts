@@ -277,3 +277,36 @@ for (const lang of ['en', 'zh'] as const) {
       .toBe(frame + bands + await drawn('.model-hub-route-selector-list'));
   });
 }
+
+// The row action is the one trigger narrower than the panel it opens, and it
+// sits at the right edge of the row. Aligned to its end under a popover with
+// collision handling off, the panel's left edge is placed a panel-width to the
+// left of that — off screen on a phone, where the first column and the search
+// field were simply cut away. Vertically the same panel is bounded by what the
+// engine reports is on screen; this is that reading on the other axis, so the
+// assertion is the one the screenshot would have failed: both edges inside the
+// viewport, at every width a phone actually is.
+for (const [label, width] of [['small', 390], ['large', 430]] as const) {
+  test(`MH-ROUTING-007: the edit picker stays on screen on a ${label} phone`, async ({ page }) => {
+    const copy = (key: string) => hub(key, {}, 'zh');
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
+    await page.getByRole('button', { name: 'Open route', exact: true }).click();
+    const dialog = page.locator('.model-hub-route-dialog');
+    await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+    const selector = page.locator('.model-hub-route-selector');
+    await expect(selector).toBeVisible();
+    await settled(selector);
+
+    const panel = (await selector.boundingBox())!;
+    expect(panel.x).toBeGreaterThanOrEqual(0);
+    expect(panel.x + panel.width).toBeLessThanOrEqual(width);
+    // Contained by shrinking, not by collapsing: a panel bounded to nothing
+    // would satisfy the edges above and still be unusable.
+    expect(panel.width).toBeGreaterThanOrEqual(240);
+    // And the column that was being cut is the one that has to survive: its
+    // left edge is what leaves the viewport first.
+    const head = (await selector.locator('.model-hub-route-selector-list').boundingBox())!;
+    expect(head.x).toBeGreaterThanOrEqual(0);
+  });
+}
