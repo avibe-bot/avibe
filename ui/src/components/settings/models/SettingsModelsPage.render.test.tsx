@@ -1310,7 +1310,44 @@ describe('SettingsModelsPage surface branches', () => {
       expect(deleteWrite).toHaveBeenLastCalledWith(removed.id, undefined);
       // Not merely closed: the placeholder never became something to read past.
       expect(screen.queryByText(/no longer available|已经不在了/i)).toBeNull();
+      // The row that opened this dialog left with the removal, so the recorded
+      // return target is disconnected. Focus has to land back inside the Hub
+      // rather than on `document.body`, where the next Tab would restart at the
+      // top of the document instead of near the list being worked in. The shell
+      // rather than the overview is what both rounds share: the second removal
+      // empties the Hub, which unmounts the overview along with the last row.
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
+      if (survivors.length) {
+        expect(document.activeElement?.closest('.model-hub-overview-grid')).toBeTruthy();
+      }
     }
+  });
+
+  it('reports an edit whose Source turned out to be gone as gone, not as updated', async () => {
+    // The commit envelope carries the OUTCOME, not the flow: this is still the
+    // edit flow, but nothing was updated, and announcing 「已更新」 over a panel
+    // saying the provider is no longer there tells the user two things at once.
+    renderPage([retainedSource]);
+    const patch = vi.spyOn(modelsApi, 'patchSource').mockRejectedValueOnce(new ApiCallError('source_not_found'));
+
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+
+    await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
+    const name = screen.getByLabelText(/^Display name$|^显示名称$/i);
+    await userEvent.clear(name);
+    await userEvent.type(name, 'Renamed source');
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    await waitFor(() => expect(patch).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/^The source was updated$|^供应商已更新$/)).toBeNull();
+    // The Save press gets an answer OUTSIDE the dialog — the toast — saying the
+    // same thing the panel under it now says, rather than one each.
+    await waitFor(() => expect(screen.getAllByText(/no longer available|已经不在了/i)
+      .some((node) => node.closest('[role="dialog"]') === null)).toBe(true));
   });
 
   it('states in the dialog that a source disappeared with no removal of ours', async () => {

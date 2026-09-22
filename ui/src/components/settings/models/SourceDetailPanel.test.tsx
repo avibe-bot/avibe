@@ -119,11 +119,15 @@ const deferred = <T,>() => {
 
 let sourceSnapshot = 0;
 const beginSourceSnapshot = () => ++sourceSnapshot;
-const mutationLanding = (
-  verdict: SourceMutationLanding['verdict'] = 'landed',
-): SourceMutationLanding => verdict === 'landed'
-  ? { verdict, reads: {} as SourceMutationLandingReads, affectedChains: [] }
-  : { verdict, reads: null, affectedChains: [] };
+/**
+ * Whether this mutation's own read published the surface, or a newer read took
+ * the surface over before it could land. There is no third answer: a region the
+ * read could not complete rides inside the published surface as its own failed
+ * `RegionRead`, which the page draws as stale with its own Retry.
+ */
+type LandingOutcome = 'landed' | 'superseded';
+const mutationLanding = (outcome: LandingOutcome = 'landed'): SourceMutationLanding =>
+  outcome === 'landed' ? {} as SourceMutationLandingReads : null;
 const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMutationSettlement => ({
   source: vi.fn().mockResolvedValue(mutationLanding()),
   gone: vi.fn().mockResolvedValue(mutationLanding()),
@@ -166,7 +170,7 @@ const renderProtocol = (protocol: SourceProtocol, models: Source['models'] = sou
 );
 
 const EchoPanel: React.FC<{
-  reconcile?: () => Promise<SourceMutationLanding['verdict'] | void> | SourceMutationLanding['verdict'] | void;
+  reconcile?: () => Promise<LandingOutcome | void> | LandingOutcome | void;
   scheduler?: MutationScheduler;
 }> = ({ reconcile = vi.fn(), scheduler = async (work) => work() }) => {
   const [current, setCurrent] = React.useState<Source | null>(source);
@@ -407,7 +411,7 @@ describe('SourceDetailPanel', () => {
     expect(await screen.findByRole('heading', { name: updated.display_name })).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(commits).toHaveLength(1);
-    expect(commits[0].action).toBe('edit');
+    expect(commits[0].outcome).toBe('updated');
     expect(commits[0].impact).toEqual({ hops, gaps });
   });
 
@@ -697,9 +701,9 @@ describe('SourceDetailPanel', () => {
   });
 
   it.each(['edit', 'delete'] as const)(
-    'settles a committed $action once and leaves a degraded read to the surface that owns it',
+    'settles a committed $action once and leaves a superseded read to the surface that owns it',
     async (action) => {
-      const reconcile = vi.fn().mockResolvedValue('degraded');
+      const reconcile = vi.fn().mockResolvedValue('superseded');
       const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
       const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
       if (action === 'edit') {
@@ -726,20 +730,21 @@ describe('SourceDetailPanel', () => {
 
       await submitManagementWrite(action, false);
 
-      // The write reports itself once. A degraded reconcile is a read verdict the
-      // surface already renders as stale with its own Retry, so nothing here holds
-      // the user to a second decision and nothing re-runs the settlement.
+      // The write reports itself once. A reconcile that never published is the
+      // surface's business — it already renders stale regions with their own
+      // Retry — so nothing here holds the user to a second decision and nothing
+      // re-runs the settlement.
       await waitFor(() => expect(reconcile).toHaveBeenCalledOnce());
       expect(commits).toHaveLength(1);
-      expect(commits[0].action).toBe(action);
+      expect(commits[0].outcome).toBe(action === 'edit' ? 'updated' : 'removed');
       expect(commits[0].impact).toEqual({ hops, gaps });
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(reconcile).toHaveBeenCalledOnce();
     },
   );
 
-  it('releases tracked work as soon as a degraded settlement returns', async () => {
-    const landing = deferred<SourceMutationLanding['verdict']>();
+  it('releases tracked work as soon as a superseded settlement returns', async () => {
+    const landing = deferred<LandingOutcome>();
     const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 1, source_id: source.id, model_id: 'model-a' }];
     vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({
       source: { ...source, display_name: 'Dismissible impact' },
@@ -767,11 +772,11 @@ describe('SourceDetailPanel', () => {
 
     await submitManagementWrite('edit', false);
     // Tracked work spans the settlement read, not a dialog the user must close:
-    // it stays held while the read is in flight and is released by its verdict,
-    // degraded included.
+    // it stays held while the read is in flight and is released when that read
+    // returns, including when a newer read superseded it.
     await waitFor(() => expect(commits).toHaveLength(1));
     expect(trackedSettled).toBe(false);
-    landing.resolve('degraded');
+    landing.resolve('superseded');
     expect(tracked).toBeDefined();
     await act(async () => { await tracked; });
     expect(trackedSettled).toBe(true);
@@ -783,7 +788,7 @@ describe('SourceDetailPanel', () => {
       removed_hops: heldHops,
       interrupted: heldGaps,
     });
-    const landing = deferred<SourceMutationLanding['verdict']>();
+    const landing = deferred<LandingOutcome>();
     renderEchoPanel(() => landing.promise);
 
     await submitManagementWrite('delete', false);

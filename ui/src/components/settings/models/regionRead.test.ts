@@ -78,10 +78,12 @@ describe('RegionRead', () => {
     expect(called).toEqual(keys);
     expect(Object.keys(landing)).toEqual(keys);
     const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
-    const barrier = settlement.slice(
-      settlement.indexOf('export const readSurfaceLanding'),
-      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
-    );
+    const barrierStart = settlement.indexOf('export const readSurfaceLanding');
+    // Ends on the reader's own closing brace rather than on whatever declaration
+    // follows it, so a neighbour gaining a doc comment cannot silently widen the
+    // slice into code this assertion was never about.
+    const barrier = settlement.slice(barrierStart, settlement.indexOf('\n};', barrierStart));
+    expect(barrierStart).toBeGreaterThanOrEqual(0);
     expect(barrier).not.toMatch(/listEvents|events/);
   });
 
@@ -108,13 +110,14 @@ describe('RegionRead', () => {
       page.indexOf('\n\n  const refreshAllAgentChains'),
     );
     const settlement = readFileSync(join(__dirname, 'mutationSettlement.ts'), 'utf8');
-    const landing = settlement.slice(
-      settlement.indexOf('export const readSurfaceLanding'),
-      settlement.indexOf('\n\nexport type SourceMutationLanding ='),
-    );
+    const landingStart = settlement.indexOf('export const readSurfaceLanding');
+    const landingEnd = settlement.indexOf('\n};', landingStart);
+    const landing = settlement.slice(landingStart, landingEnd);
 
     expect(definitionStart).toBeGreaterThanOrEqual(0);
     expect(definitionEnd).toBeGreaterThan(definitionStart);
+    expect(landingStart).toBeGreaterThanOrEqual(0);
+    expect(landingEnd).toBeGreaterThan(landingStart);
     expect(withoutDefinition).not.toMatch(/modelsApi\.getAgentChain/);
     expect(definitions).toMatch(/modelsApi\.getAgentChains\(agent\.backend\)/);
     expect(definitions).toMatch(/modelsApi\.getAgentChain\(backend, modelId\)/);

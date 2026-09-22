@@ -60,14 +60,15 @@ export const SourceTestDialog: React.FC<{
           return;
         }
         // Reconciliation, not an old dialog snapshot, owns the current identity.
-        // Its failure must neither publish a verdict nor retry the same read.
+        // A read this dialog cannot complete leaves the probe unconfirmed rather
+        // than retrying the same read here.
         const landing = await settlement.unread();
-        const current = landing.verdict === 'landed' ? foldRegionRead<Source[], Source | undefined>(landing.reads.sources, {
+        const current = landing === null ? undefined : foldRegionRead<Source[], Source | undefined>(landing.sources, {
           loading: () => undefined,
           ready: (sources) => sources.find((item) => item.id === latest.id),
           unread: () => undefined,
           degraded: () => undefined,
-        }) : undefined;
+        });
         const matches = current && current.credential_ref === latest.credential_ref
           && current.base_url === latest.base_url && current.protocol === latest.protocol
           && (!current.verification_pending || current.verification_pending === latest.verification_pending)

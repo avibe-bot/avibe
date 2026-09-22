@@ -1,7 +1,8 @@
+import type { TranslationKey } from '@/i18n/types';
 import type { SourceCreated } from './modelsApi';
 import { readFirstPaintRegions } from './firstPaintRegions';
 import { modelChainKey, type ModelChainIndex, type ModelChainRequest } from './modelRows';
-import { foldRegionRead, readRegion, regionFailed, type RegionRead } from './regionRead';
+import { readRegion, type RegionRead } from './regionRead';
 import type {
   AgentSupply,
   RouteHopRef,
@@ -58,14 +59,6 @@ type SourceMutationProjectionValues = {
   chains: ModelChainIndex;
 };
 
-/** Every projection named by the committed Source report must be read before it lands. */
-export const SOURCE_MUTATION_REPORT_PROJECTIONS = {
-  sources: 'the Source inventory after the mutation',
-  supply: 'the backend supply projection after the mutation',
-  runtime: 'the runtime projection that qualifies live chain claims',
-  chains: 'every route chain named by the impact evidence',
-} as const satisfies Record<keyof SourceMutationProjectionValues, string>;
-
 export type SourceMutationLandingReads = {
   [K in keyof SourceMutationProjectionValues]: RegionRead<SourceMutationProjectionValues[K]>;
 };
@@ -92,17 +85,17 @@ export const readSurfaceLanding = async (
   return { ...surface, chains };
 };
 
-export type SourceMutationLanding =
-  | {
-      verdict: 'landed';
-      reads: SourceMutationLandingReads;
-      affectedChains: ModelChainRequest[];
-    }
-  | {
-      verdict: 'degraded';
-      reads: SourceMutationLandingReads | null;
-      affectedChains: ModelChainRequest[];
-    };
+/**
+ * What a mutation's own read of the model surface published, or `null` when a
+ * newer read took the surface over before this one could land.
+ *
+ * There is deliberately no pass/fail verdict over the whole surface. That
+ * verdict existed for the post-commit report, which asked the user to accept a
+ * write that had already landed; with the report gone, each region answers for
+ * itself through its own `RegionRead` — stale projection, Retry, and whatever
+ * the surface that owns it says about a read it could not complete.
+ */
+export type SourceMutationLanding = SourceMutationLandingReads | null;
 
 export type SourceMutationImpact = { hops: RouteHopRef[]; gaps: SupplyGap[] };
 
@@ -111,47 +104,45 @@ export type SourceMutationReadScope = { affectedChains: ModelChainRequest[] };
 export const SOURCE_MUTATION_ACTIONS = ['edit', 'delete'] as const;
 export type SourceMutationAction = (typeof SOURCE_MUTATION_ACTIONS)[number];
 
+/**
+ * What the write actually left behind, which is not always what was asked for:
+ * an edit whose Source turns out to be absent lands `gone`, not `updated`.
+ *
+ * This is deliberately NOT the action. The action is the flow the user is in and
+ * belongs to the panel's stage machine; the outcome is what the surface may tell
+ * them, and announcing 「已更新」 over a panel that says the provider is no longer
+ * there is exactly the mismatch a separate word prevents.
+ */
+export const SOURCE_MUTATION_OUTCOMES = ['updated', 'removed', 'gone'] as const;
+export type SourceMutationOutcome = (typeof SOURCE_MUTATION_OUTCOMES)[number];
+
+/**
+ * The line AND the tone for each outcome, decided together — same rule as
+ * `REPAIR_TOAST`: tone is a property of the outcome, not of the branch that
+ * happens to render it, and a Record over the full union makes the next outcome
+ * added answer for its own tone instead of inheriting green.
+ *
+ * `gone` reuses the copy the detail surface already shows for the same fact, so
+ * the toast and the panel under it say one thing rather than two.
+ */
+export const SOURCE_MUTATION_TOAST: Record<
+  SourceMutationOutcome,
+  { key: TranslationKey; tone: 'success' | 'warning' }
+> = {
+  updated: { key: 'settings.models.sourceDetail.edit.settlement.title', tone: 'success' },
+  removed: { key: 'settings.models.sourceDetail.remove.settlement.title', tone: 'success' },
+  gone: { key: 'settings.models.sourceDetail.gone', tone: 'warning' },
+};
+
 export type SourceMutationCommit = {
-  action: SourceMutationAction;
+  outcome: SourceMutationOutcome;
   impact: SourceMutationImpact | null;
   settle: () => Promise<SourceMutationLanding>;
 };
 
 export type PresentSourceMutationCommit = (commit: SourceMutationCommit) => Promise<void>;
 
-/** A landed verdict is proof that every report projection was current and readable. */
-export const sourceMutationLanding = (
-  reads: SourceMutationLandingReads | null,
-  affectedChains: ModelChainRequest[],
-  applied: boolean,
-): SourceMutationLanding => {
-  const reportProjectionFailed = reads
-    ? (
-        Object.keys(
-          SOURCE_MUTATION_REPORT_PROJECTIONS,
-        ) as (keyof SourceMutationLandingReads)[]
-      ).some((projection) => regionFailed(reads[projection]))
-    : true;
-
-  if (!reads || !applied || reportProjectionFailed) {
-    return { verdict: 'degraded', reads, affectedChains };
-  }
-  const chains = foldRegionRead<ModelChainIndex, ModelChainIndex | null>(reads.chains, {
-    loading: () => null,
-    ready: (data) => data,
-    unread: () => null,
-    degraded: () => null,
-  });
-  const chainReadsLanded = chains !== null && affectedChains.every(({ backend, modelId }) => {
-    const read = chains[modelChainKey(backend, modelId)];
-    return Boolean(read && !regionFailed(read));
-  });
-  return chainReadsLanded
-    ? { verdict: 'landed', reads, affectedChains }
-    : { verdict: 'degraded', reads, affectedChains };
-};
-
-/** The report evidence is the authority for which exact route projections must land. */
+/** The impact evidence is the authority for which exact route projections to read. */
 export const sourceMutationReadScope = (
   impact: SourceMutationImpact | null,
 ): SourceMutationReadScope => {

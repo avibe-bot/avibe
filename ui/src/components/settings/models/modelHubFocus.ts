@@ -59,3 +59,35 @@ export const focusModelHubProjection = ({
   target?.focus();
   return target;
 };
+
+/**
+ * Where keyboard focus goes when a dialog closes over the element that opened
+ * it. A removed Source takes its own row with it, so the recorded return target
+ * is disconnected by the time the dialog hands focus back; without a fallback
+ * the browser drops focus on `document.body` and the next Tab restarts at the
+ * top of the document instead of near the list the user was working in.
+ *
+ * `root` is the neighbourhood the caller nominates — the smallest surface still
+ * standing around where that element was — so its first focusable is the closest
+ * thing left to it.
+ */
+export const focusDialogReturn = ({
+  root,
+  returnTarget,
+}: {
+  root: HTMLElement | null;
+  returnTarget: HTMLElement | null;
+}): HTMLElement | null => {
+  const candidates = [
+    returnTarget,
+    // Declared rather than 「first focusable」: the read that follows a removal
+    // re-renders the list, so the first focusable at close time may itself be
+    // the row that is about to go, and focus would fall to the body one tick
+    // later. An anchor is chosen for outliving exactly that.
+    root?.querySelector<HTMLElement>('[data-model-hub-focus-anchor]') ?? null,
+    root?.querySelector<HTMLElement>(focusableSelector) ?? null,
+  ];
+  const target = candidates.find(focusValid) ?? null;
+  target?.focus();
+  return target;
+};

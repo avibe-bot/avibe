@@ -23,7 +23,7 @@ import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
-import { focusModelHubProjection } from './modelHubFocus';
+import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -40,13 +40,14 @@ import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import {
   readSurfaceLanding,
-  sourceMutationLanding,
+  SOURCE_MUTATION_TOAST,
   type PresentSourceMutationCommit,
   type SourceMutationLanding,
   type SourceMutationLandingReads,
   type SourceMutationSettlement,
   type TrackSourceMutation,
 } from './mutationSettlement';
+import { firstPaintFailed } from './firstPaintRegions';
 import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
   beginRegionRead,
@@ -529,12 +530,10 @@ export const SettingsModelsPage: React.FC = () => {
         incoming = await readChainRequests(backendRequests);
         return { scope: 'models' as const, chains: incoming };
       });
-      return result === 'landed'
-        ? incoming
-        : Object.fromEntries(backendRequests.map(({ backend: requestBackend, modelId }) => [
-            modelChainKey(requestBackend, modelId),
-            unreadRegion(),
-          ]));
+      // A superseded read is not an unreadable chain: the newer read for this
+      // backend owns those keys and is the one installing them. Reporting them
+      // as unread here would hand the caller a failure the surface never had.
+      return result === 'landed' ? incoming : {};
     }));
     return Object.assign({}, ...landings);
   }, [chainReadAuthority]);
@@ -676,12 +675,11 @@ export const SettingsModelsPage: React.FC = () => {
       }, affectedChains);
       return { landing: outcome.landing, sourceSnapshot };
     });
-    const landing = sourceMutationLanding(
-      outcome.landing,
-      affectedChains,
-      aliveRef.current && result === 'landed',
-    );
-    if (aliveRef.current && result === 'landed' && landing.verdict === 'degraded') {
+    if (!aliveRef.current || result === 'stale') return null;
+    const landing = outcome.landing;
+    // The toast names this read's OWN surface — the regions this refresh installs
+    // — and nothing wider; `firstPaintFailed` owns that boundary.
+    if (landing !== null && firstPaintFailed(landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
     return landing;
@@ -1001,15 +999,17 @@ export const SettingsModelsPage: React.FC = () => {
    * projection and Retry, which every region already carries.
    */
   const presentSourceMutation = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
-    if (commit.action === 'delete') selectSource(null);
-    showToast(t(commit.action === 'delete'
-      ? 'settings.models.sourceDetail.remove.settlement.title'
-      : 'settings.models.sourceDetail.edit.settlement.title') as string, 'success');
+    // Only a removal closes the dialog. An edit that found its Source absent
+    // leaves it open on `sourceDetail.gone`, which is the same fact the toast
+    // states — the page never announces an update that did not happen.
+    if (commit.outcome === 'removed') selectSource(null);
+    const toast = SOURCE_MUTATION_TOAST[commit.outcome];
+    showToast(t(toast.key) as string, toast.tone);
     try {
       await commit.settle();
     } catch {
-      // `refresh` already owns the read verdict: a failed projection keeps its
-      // own stale treatment and Retry, and raises the page's refresh toast.
+      // `refresh` already owns what a read can say: a failed projection keeps
+      // its own stale treatment and Retry, and raises the page's refresh toast.
     }
   }, [selectSource, showToast, t]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
@@ -1450,10 +1450,18 @@ export const SettingsModelsPage: React.FC = () => {
           onCloseAutoFocus={(event) => {
             const returnFocus = sourceDetailReturnFocusRef.current;
             sourceDetailReturnFocusRef.current = null;
-            const target = returnFocus?.();
-            if (!target?.isConnected) return;
-            event.preventDefault();
-            target.focus();
+            // A removal deletes the row that opened this dialog, so the return
+            // target is already disconnected. The overview is the nearest
+            // neighbourhood to fall back into — except when the removal took the
+            // last Source with it, which unmounts the overview too and leaves the
+            // shell as the smallest surface still standing. Either beats
+            // `document.body`, where the next Tab restarts at the top of the page.
+            if (focusDialogReturn({
+              root: overviewRef.current ?? pageRef.current,
+              returnTarget: returnFocus?.() ?? null,
+            })) {
+              event.preventDefault();
+            }
           }}
           onEscapeKeyDown={(event) => {
             // Radix observes Escape before React's row handlers; marked editors own it locally.
