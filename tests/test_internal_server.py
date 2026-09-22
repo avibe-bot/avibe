@@ -151,8 +151,6 @@ def _build_controller_double(handler=None):
     return controller
 
 
-
-
 def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "2026-05-31T00:00:00Z") -> None:
     from storage.models import scope_settings
 
@@ -364,22 +362,6 @@ def _bind_test_native_start(engine, context: MessageContext) -> str:
     return turn_id
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
     async def _exercise() -> None:
         context = MessageContext(
@@ -430,62 +412,6 @@ def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> Non
     assert oversized.status_code == 400
     assert oversized.json()["error"] == "invalid_run_candidates"
     assert captured == [["run-a", "run-b"]]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------
@@ -992,8 +918,6 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
-
-
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():

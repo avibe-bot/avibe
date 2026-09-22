@@ -158,3 +158,12 @@ async def test_http_serves_completed_dependency_while_another_probe_is_blocked(m
             release.set()
             slow_result = await asyncio.wait_for(pending, timeout=3)
         assert slow_result.status_code == 200
+
+
+def test_coupled_rows_share_one_offline_inspection_and_duplicate_ids_do_not_repeat_it(probes):
+    result = api.dependencies_status(
+        offline=True,
+        dependency_ids=["node", "show-runtime", "node"],
+    )
+    assert [row["id"] for row in result["deps"]] == ["show-runtime", "node"]
+    assert probes == [(GROUPS[2], {"offline": True})]

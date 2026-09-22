@@ -421,8 +421,6 @@ async def reconcile_agent_backends(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-
-
 async def test_backend_auth(
     backend: str,
     *,
@@ -449,62 +447,6 @@ async def test_backend_auth(
     except httpx.TimeoutException as exc:
         raise InternalServerTimeout(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 async def notify_vault_request_created(

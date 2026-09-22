@@ -4,31 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
-import hashlib
-import hmac
-import secrets
 import os
 from typing import Any, Mapping, Optional
-
-AVIBE_CALLER_SESSION_PROOF_ENV = "AVIBE_CALLER_SESSION_PROOF"
-_SESSION_PROOF_KEY = secrets.token_bytes(32)
-
-
-def _session_owner_proof(session_id: str, owner: Mapping[str, Any]) -> str:
-    identity = json.dumps([session_id, owner["platform"], owner["user_id"]], separators=(",", ":"))
-    return hmac.new(_SESSION_PROOF_KEY, identity.encode(), hashlib.sha256).hexdigest()
-
-
-def issue_caller_session_proof(session_id: str, *, turn_id: str | None = None) -> str | None:
-    """Return no legacy delivery proof; caller identity is carried directly."""
-    return None
-
-
-def verify_caller_session_proof(session_id: str, proof: str, owner: Mapping[str, Any] | None) -> bool:
-    return bool(session_id and proof and owner) and hmac.compare_digest(
-        _session_owner_proof(session_id, owner).encode(), proof.encode()
-    )
-
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
@@ -294,7 +271,7 @@ def environment_without_caller_context(env: Optional[Mapping[str, str]] = None) 
     source = os.environ if env is None else env
     return {
         key: value for key, value in source.items()
-        if key not in CALLER_CONTEXT_ENV_NAMES and key != AVIBE_CALLER_SESSION_PROOF_ENV
+        if key not in CALLER_CONTEXT_ENV_NAMES
     }
 
 
@@ -310,7 +287,7 @@ def background_command_env(
     A command is not the human turn that created its definition. Its current
     binding owns CLI defaults and callbacks; creator metadata is not a fallback.
     Only the definition's resource snapshot carries remote authority, rechecked
-    by runtime admission and the CLI, never a transient human/Memory proof.
+    by runtime admission and the CLI.
     """
 
     env = environment_without_caller_context()
@@ -563,8 +540,4 @@ def caller_env_for_platform_payload(
         return {}
     if session_stable_only:
         context = context.session_stable()
-    env = context.to_env()
-    proof = issue_caller_session_proof(context.session_id, turn_id=_clean((payload or {}).get("turn_token")) or None)
-    if proof:
-        env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
-    return env
+    return context.to_env()

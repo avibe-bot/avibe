@@ -76,8 +76,6 @@ class _Controller:
         self.command_handler = SimpleNamespace(handle_stop=AsyncMock(return_value=True))
         self.agent_service = SimpleNamespace(agents={}, _turn_gates={})
         self.config = SimpleNamespace(language="en")
-        self.memory_runtime = SimpleNamespace()
-        self._memory_implementation_error = None
         self.statuses: list[tuple[str, str]] = []
 
     @staticmethod
@@ -110,8 +108,6 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
             },
         },
     )
-
-
 
 
 def _complete_capture_admission(context: MessageContext) -> None:
@@ -229,8 +225,6 @@ def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template
         assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
-
-
 @pytest.mark.anyio
 async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
@@ -245,10 +239,6 @@ async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) 
         lifecycle_operation,
     ) == "reset"
     assert not manager.session_lifecycle_snapshot_matches("ses_fsm", snapshot)
-
-
-
-
 
 
 @pytest.mark.anyio
@@ -687,8 +677,6 @@ def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None
     assert bob["state"] == "queued"
 
 
-
-
 def test_core_message_kind_separates_original_and_quick_reply_segments() -> None:
     common = {
         "scope_id": "scope",
@@ -705,12 +693,6 @@ def test_core_message_kind_separates_original_and_quick_reply_segments() -> None
     quick_reply = {**common, "message_kind": "quick_reply"}
 
     assert _collect_delivery_segment([original, quick_reply]) == [original]
-
-
-
-
-
-
 
 
 def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
@@ -988,10 +970,6 @@ async def test_steering_preparation_failure_preserves_a_definitively_unwritten_b
     manager._steer.assert_awaited_once()
     assert manager._steer.await_args.args[1].text == "\n".join(row["dispatch_text"] for row in queued)
     assert all(_row(engine, row["id"])["state"] == "accepted" for row in queued)
-
-
-
-
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
@@ -1874,6 +1852,45 @@ def test_duplicate_im_p1_reuses_one_delivery_and_one_native_steer(managers) -> N
     assert rows[0]["state"] == "accepted"
 
 
+@pytest.mark.parametrize("user", ["local", "remote:old-user", "  old-user  "])
+def test_legacy_delivery_hydration_preserves_admitted_author(managers, user):
+    manager, _other, _engine, _engine_b, _starts = managers
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None, session_id="ses_fsm", platform="avibe", author="user",
+        source="user", message_type="user", text="queued before upgrade",
+    )
+    # Released rows predate the current ingress filter. Construct their stored
+    # shape directly instead of asking today's writer to mint obsolete identity.
+    snapshot["metadata_json"] = json.dumps({
+        "_memory_user_id": user, "_memory_ordinary_text": True,
+        "delegated_memory_owner": {"user_id": "must-not-delegate"},
+    })
+    snapshot.pop("message_kind", None)
+    delivery = {"id": "legacy-delivery", "session_id": "ses_fsm", "message_id": None,
+                "snapshot_json": json.dumps(snapshot)}
+    before = delivery["snapshot_json"]
+    context = _context()
+    manager._hydrate_delivery_context(context, delivery)
+    assert context.user_id == user.strip()
+    assert context.platform_specific["author_id"] == user.strip()
+    assert "delegated_memory_owner" not in context.platform_specific["message_metadata"]
+    assert delivery["snapshot_json"] == before
+
+
+def test_public_metadata_recursively_redacts_legacy_identity_without_mutating_rows():
+    private = {"delegated_memory_owner": {"user_id": "private"}, "_memory_user_id": "private",
+               "_memory_arbitrary": True, "_web_push_user_key": "private",
+               "resource_user_context": {"sub": "private"}, "visible": "keep"}
+    metadata = {**private, "scheduled_provenance": {"platform_specific": {
+        "message_metadata": private}}, "items": [{"nested": private}]}
+    before = json.dumps(metadata)
+    projected = delivery_store.public_message_metadata(metadata)
+    assert projected == {"visible": "keep", "scheduled_provenance": {"platform_specific": {
+        "message_metadata": {"visible": "keep"}}}, "items": [{"nested": {"visible": "keep"}}]}
+    assert json.dumps(metadata) == before
+    assert delivery_store.public_delivery_payload({"content": {}, "metadata": metadata})["metadata"] == projected
+
+
 def test_delivery_admission_context_restores_route_without_message_metadata(
     managers,
 ) -> None:
@@ -1910,20 +1927,6 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
             "routing_subagent": True,
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 @pytest.mark.parametrize(
@@ -4726,8 +4729,6 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
 
     assert [text for _turn_id, text in starts] == ["retry safely"]
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
-
-
 
 
 @pytest.mark.parametrize(
@@ -7832,3 +7833,173 @@ async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
         "result_text": "agent-initiated terminal body",
         "settles_run": True,
     }
+
+
+@pytest.mark.anyio
+async def test_failed_session_lifecycle_preserves_sampled_epoch(managers) -> None:
+    """A failed reset preserves an in-flight turn epoch."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    sampled_snapshot = manager.snapshot_session_lifecycle("ses_fsm")
+
+    async def lifecycle_operation() -> str:
+        raise RuntimeError("reset failed")
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.run_session_lifecycle("ses_fsm", lifecycle_operation)
+
+    admission = await manager.acquire_lifecycle_admission("ses_fsm")
+    try:
+        assert manager.session_lifecycle_snapshot_matches(
+            "ses_fsm",
+            sampled_snapshot,
+        )
+    finally:
+        admission.release()
+
+
+def test_hydrate_delivery_context_preserves_im_author_as_routing_identity(
+    managers,
+) -> None:
+    """Hydrating an IM delivery keeps the outbound recipient on author_id.
+
+    This is the guardrail that would have caught avibe-bot/avibe#1584: Memory
+    identity must not replace MessageContext.user_id.
+    """
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                author_name="Ada",
+                native_message_id="wc-msg-1",
+                metadata={"_memory_user_id": "local"},
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=author_id,
+        platform="wechat",
+    )
+
+    manager._hydrate_delivery_context(context, delivery)
+
+    assert context.user_id == author_id
+    assert context.platform_specific["message_metadata"] == {}
+
+
+def test_wechat_outbound_send_uses_hydrated_author_id(managers) -> None:
+    """Scenario: MESSAGE-DELIVERY-316.
+
+    WeChat reply addresses the real platform user, never a Memory principal.
+    """
+
+    from modules.im.wechat import WeChatBot, WeChatConfig
+
+    manager, _other, engine, _engine_b, _starts = managers
+    author_id = "wxid_real_user"
+    admitted = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="hello from wechat",
+                platform="wechat",
+                source="user",
+                author="user",
+                message_type="user",
+                author_id=author_id,
+                native_message_id="wc-msg-2",
+            ),
+            context=_context(),
+        )
+    )
+    delivery = _row(engine, str(admitted.delivery_id))
+    context = MessageContext(
+        user_id=None,
+        channel_id=author_id,
+        platform="wechat",
+        platform_specific={"context_token": "ctx-1"},
+    )
+    manager._hydrate_delivery_context(context, delivery)
+    bot = WeChatBot(
+        WeChatConfig(bot_token="token", base_url="https://ilinkai.weixin.qq.com")
+    )
+
+    with patch(
+        "modules.im.wechat.wechat_api.send_message",
+        new=AsyncMock(return_value={}),
+    ) as mock_send:
+        message_id = asyncio.run(bot.send_message(context, "reply"))
+
+    to_user_id = mock_send.await_args.args[2]
+    assert to_user_id == author_id
+    assert to_user_id
+    assert message_id
+
+
+def test_persisted_start_does_not_acquire_lifecycle_admission(
+    managers,
+    monkeypatch,
+) -> None:
+    """Dispatch does not wait on lifecycle admission."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    acquired = False
+    original_acquire = manager.acquire_lifecycle_admission
+
+    async def track_acquire(raw_session_id):
+        nonlocal acquired
+        acquired = True
+        return await original_acquire(raw_session_id)
+
+    monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not fence dispatch",
+            ),
+            context=_context(),
+        )
+    )
+
+    assert acquired is False
+    assert "ses_fsm" not in manager._session_lifecycle_states
+
+
+@pytest.mark.parametrize("marker,expected", [
+    (None, "unknown"), (False, "unknown"), ("true", "unknown"),
+    (1, "unknown"), ({}, "unknown"), (True, "original"),
+])
+def test_legacy_delivery_kind_requires_positive_original_evidence(managers, marker, expected):
+    manager, _other, _engine, _engine_b, _starts = managers
+    metadata = {} if marker is None else {"_memory_ordinary_text": marker}
+    snapshot = delivery_store.message_snapshot(
+        scope_id=None, session_id="ses_fsm", platform="avibe", author="user",
+        source="user", text="legacy input", author_id="local",
+    )
+    snapshot.pop("message_kind")
+    snapshot["metadata_json"] = json.dumps(metadata)
+    delivery = {"id": "legacy-kind", "session_id": "ses_fsm", "message_id": None,
+                "snapshot_json": json.dumps(snapshot)}
+    assert delivery_store.delivery_payload(delivery)["message_kind"] == expected
+    context = _context()
+    manager._hydrate_delivery_context(context, delivery)
+    assert context.is_original_human_text is (expected == "original")
+    original = {**snapshot, "message_kind": "original", "metadata_json": "{}"}
+    if expected == "unknown":
+        assert delivery_store.message_merge_identity(snapshot) != delivery_store.message_merge_identity(original)

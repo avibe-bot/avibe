@@ -173,17 +173,6 @@ class _StubAgentService:
         return self.stop_result
 
 
-class _RecordingMemoryAdapter:
-    def __init__(self) -> None:
-        self.events = []
-
-
-    def offer(self, event) -> None:
-        self.events.append(event)
-
-
-
-
 class _StubController:
     def __init__(self, *, platform: str, ack_mode: str, typing_result: bool):
         self.config = type(
@@ -286,8 +275,6 @@ class _StubController:
         return "en"
 
 
-
-
 class _StubSessionHandler:
     def __init__(self):
         self.alias_calls = []
@@ -312,6 +299,33 @@ class _StubSessionHandler:
 
 
 class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_durable_input_keeps_canonical_text_and_authenticated_sender(self):
+        """Scenario: MESSAGE-DELIVERY-317."""
+        for platform in ("avibe", "slack"):
+            with self.subTest(platform=platform):
+                controller = _StubController(platform=platform, ack_mode="reaction", typing_result=True)
+                controller.config.include_time_info = True
+                controller.config.include_user_info = True
+                handler = MessageHandler(controller)
+                handler.set_session_handler(_StubSessionHandler())
+                original = "original user text\n[Now: literal example]"
+                context = MessageContext(
+                    user_id="sender", channel_id="session", platform=platform,
+                    message_id="message", is_original_human_text=True,
+                    platform_specific={
+                        "delivery_ids": ["delivery"],
+                        "message_content": {"text": original},
+                        "author_id": "sender", "author_name": "Sender",
+                    },
+                )
+                await handler.handle_user_message(context, "[Recovery context]\n" + original)
+                _, request = controller.agent_service.requests[0]
+                self.assertEqual(request.user_message, original)
+                self.assertEqual(request.message, "[Recovery context]\n" + original)
+                self.assertEqual(request.input_metadata.user_name, "Sender")
+                self.assertEqual(context.platform_specific["message_content"]["text"], original)
+
 
     async def test_im_human_input_enters_delivery_owner_before_backend(self):
         controller = _StubController(

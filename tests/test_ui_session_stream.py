@@ -233,10 +233,6 @@ def _accepted_dispatch(session_id: str) -> AsyncMock:
     return AsyncMock(side_effect=dispatch)
 
 
-
-
-
-
 @pytest.mark.parametrize(
     "payload",
     [
@@ -271,7 +267,6 @@ def test_workbench_side_actions_have_fail_closed_core_message_kinds(
     assert response.get_json()["draft_advanced"] is (
         "quick_reply_for" not in payload.get("metadata", {})
     )
-
 
 
 def test_workbench_text_uses_authenticated_author_and_core_message_kind(
@@ -1701,8 +1696,6 @@ def test_chat_bootstrap_keeps_timeout_turn_state_unknown(isolated_state, tmp_pat
     assert response.get_json()["turn_state"]["in_flight"] is None
 
 
-
-
 def test_cancel_route_proxies_to_internal_socket(isolated_state, tmp_path):
     _, session_id = _make_session(tmp_path)
 
@@ -2662,3 +2655,56 @@ def test_patch_backend_switch_falls_back_to_row_guard_when_controller_down(isola
         )
     assert response.status_code == 200
     assert response.get_json()["agent_backend"] == "codex"
+
+def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
+    """The web Chat POST persists the user row AND fire-and-forgets the turn via
+    ``/internal/dispatch_async``. The reply arrives over the persistent
+    ``message.new`` stream, so the response returns 201 immediately with the row
+    (it does NOT hold the turn open).
+    """
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
+    with (
+        patch("vibe.internal_client.dispatch_async", dispatch_mock),
+        patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
+        patch(
+            "vibe.ui_server._workbench_author_id",
+            return_value="remote:user-a",
+        ),
+    ):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        saved_draft = client.put(
+            f"/api/sessions/{session_id}/draft",
+            json={"text": "draft before send", "expected_updated_at": None},
+            headers=headers,
+        ).get_json()["draft"]
+        response = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "no stream", "author_id": "remote:spoofed"},
+            headers=headers,
+        )
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["author"] == "user"
+    assert payload["author_id"] == "remote:user-a"
+    assert "_web_push_user_key" not in payload["metadata"]
+    assert not any(key.startswith("_memory_") for key in payload["metadata"])
+    assert payload["text"] == "no stream"
+    assert payload["draft_advanced"] is True
+    assert payload["draft"]["text"] == ""
+    assert payload["draft"]["updated_at"] not in (None, saved_draft["updated_at"])
+    # The turn was kicked off fire-and-forget with the session + text.
+    dispatch_mock.assert_awaited_once()
+    sent = dispatch_mock.await_args.args[0]
+    assert sent["session_id"] == session_id
+    assert sent["text"] == "no stream"
+    assert sent["author_id"] == "remote:user-a"
+    assert sent["message_kind"] == "original"
+    assert "user_id" not in sent
+    assert "memory_cli_admitted" not in sent
+    assert "is_ordinary_text" not in sent

@@ -28,19 +28,18 @@ def test_caller_context_from_env_requires_session_id() -> None:
     assert caller_context_from_env({}) is None
 
 
-def test_independent_environment_drops_proof_without_making_it_persistable() -> None:
+def test_independent_environment_drops_caller_without_mutating_source() -> None:
     from core.caller_context import (
-        AVIBE_CALLER_SESSION_PROOF_ENV,
         CALLER_CONTEXT_ENV_NAMES,
         environment_without_caller_context,
         validated_caller_env_snapshot,
     )
 
     env = {key: "old" for key in CALLER_CONTEXT_ENV_NAMES}
-    env.update({AVIBE_CALLER_SESSION_PROOF_ENV: "transient", "KEEP": "ordinary"})
+    env["KEEP"] = "ordinary"
     assert environment_without_caller_context(env) == {"KEEP": "ordinary"}
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(env)
-    assert env[AVIBE_CALLER_SESSION_PROOF_ENV] == "transient"
+    assert "KEEP" not in validated_caller_env_snapshot(env)
+    assert all(env[key] == "old" for key in CALLER_CONTEXT_ENV_NAMES)
 
 
 def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
@@ -461,14 +460,6 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
         session_stable_only=True,
     )
     assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
-    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV, validated_caller_env_snapshot
-
-    # No durable execution owner in this pure caller-shape fixture.
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in full
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in scoped
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(full)
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in caller_context_from_env(full).to_metadata()
-
 
 
 def test_remote_workbench_caller_context_survives_env_and_claude_stable_form() -> None:

@@ -72,7 +72,61 @@ No merge, release, installed-service restart, or production-data operation is
 authorized. Acceptance requires behavioral and artifact evidence, not grep or
 collection alone. The existing orchestrator watch remains authoritative.
 
+### Repair evidence (2026-09-22)
+
+- Integrated master `4b964fef2` in merge `3d4aa9763`. Conflict inventory: one
+  add/add file, `tests/test_conftest_async_plugin_guard.py`; preserved upstream
+  generic guards and changed only the retired suite target. Thirteen guard
+  tests passed. A final fetch confirmed master had not moved.
+- Read all three review bodies and all thirteen threads, including the f6 head
+  review. Restored generic tests for CI resource metrics, remote authorization
+  cache races, OpenCode restored polling/prompt/steering, dependency UI refresh,
+  upgrade failure/atomicity, and config/delivery/runtime consumers. Retained
+  SCT-038, AUTH-SETUP-907, MESSAGE-DELIVERY-316 and MESSAGE-DELIVERY-317 coverage.
+- Concentrated behavioral run: **2,259 passed, 14 subtests passed** across 31
+  suites. Includes the real released HTTP method/path pairs, generic unknown
+  API 404, existing API 405, SPA navigation, Editor legacy filtering, opaque
+  byte/inode/symlink sentinels, legacy author/message-kind hydration, recursive
+  privacy projection, and both release upload scripts with mocked GitHub.
+  Extracted workflow shell passes `bash -n`; sparse-checkout path/ref behavior
+  is replayed using a test-owned Git repository.
+- Built a wheel from the actual sdist with `uv build` in isolated HOME/XDG/uv
+  cache. `tests/test_distribution_artifacts.py`: **2 passed**. Inspected both
+  archives and metadata; retained Show manifest/router/UI contracts; installed
+  the wheel and dependencies in a fresh venv and imported with `-I` outside
+  the source tree while the Memory package was unavailable. This is import
+  evidence, not running-service evidence.
+- Separate Linux packaged user flow: **1 passed** in disposable Debian Docker,
+  installing that wheel as a new user without `.local/bin` on PATH; service
+  reached `running` with internal server ready. Startup's root cause was orphan
+  decorators left on `_init_modules` and `_run_im_runtime`, not a short timeout.
+  Bound-method regression tests now exercise both. Diagnostic EXIT handling
+  also avoids Debian login-shell logout masking a successful probe. Node/Show
+  preparation is explicitly skipped by this existing installer smoke; it does
+  not claim live IM or Show-runtime end-to-end coverage.
+- Artifact directory (ignored, retained locally): `.runtime/removal-dist-reviewed`.
+  Wheel SHA256: `3fb24491e04f81db1a3c4586e2f5c56c5ee22f828ad1e0d1e9646ab443be7acc`.
+  Sdist SHA256: `1d8daca30826ccabd016fc8870a42c38c2921f4521af11b8ff3476bf60d28fec`.
+- Node 24.12: UI build, lint-baseline and test typechecks passed; restored
+  dependency UI tests **15 passed**; affected sidebar/geometry Playwright
+  suites **27 passed** with test-owned Chromium/HOME. Unknown-request denial
+  stays strict; inbox/version/events fallbacks are restored.
+- Ruff passed on all existing changed Python files against master and new
+  Python suites; `git diff --check` passed. Collection was also successful
+  (23,029 nodes before the final seven regression cases), but is not acceptance.
+- Remaining delivery gate: pushed-head Codex review and CI. No manual review
+  trigger, merge, release, deployment, local reinstall or service restart.
+
 ## Scope safety
+
+### Owner close-out decision (2026-09-22 22:41 Asia/Shanghai)
+
+Continue the repair, push, review-response, and exact-head review/CI loop to
+completion. Do not merge or close prematurely. After the gates are satisfied,
+hand the evidence to orchestrator `sesk8rfbcfr46`, who will close PR #2120
+without merging and retire the existing watch. Preserve the `remove-memory`
+branch, every commit, and this worktree for the owner's local testing. No
+release, deployment, installed-service restart, or branch/worktree deletion.
 
 Do not use `git clean`, remove untracked user artifacts, touch `$HOME`, restart
 the local `vibe` service, or modify files outside this repository. The checkout

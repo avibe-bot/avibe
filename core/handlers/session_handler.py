@@ -1759,10 +1759,6 @@ class SessionHandler(BaseHandler):
             session_anchor=session_anchor,
         )
 
-        # Resolve admission once: it associates or clears this turn's Memory CLI
-        # session scope as a side effect, so a second call per turn would repeat
-        # that write.
-
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",

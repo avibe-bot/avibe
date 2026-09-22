@@ -14,7 +14,6 @@ from vibe import restart_supervisor
 from vibe import runtime
 
 
-
 def _fake_start_runtime(calls, service_pid: int = 222, ui_pid: int = 333):
     calls.append("start_runtime")
     runtime.write_status("running", f"pid={service_pid}", service_pid, ui_pid)
@@ -31,7 +30,6 @@ def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=T
         service_stopped,
         0.03,
     )
-
 
 
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
@@ -145,7 +143,6 @@ def test_candidate_supervisor_drops_source_pythonpath(monkeypatch, tmp_path):
     assert "PYTHONHOME" not in calls["kwargs"]["env"]
 
 
-
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -169,7 +166,6 @@ def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tm
     restart_supervisor.schedule_restart(delay_seconds=2, vibe_path="/bin/vibe", trigger="upgrade", prepare_show_runtime=True)
 
     assert "--prepare-show-runtime" in calls["command"]
-
 
 
 def test_the_argv_the_job_builds_is_the_argv_the_entry_point_accepts(monkeypatch, tmp_path):

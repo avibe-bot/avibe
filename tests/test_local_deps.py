@@ -974,8 +974,6 @@ def test_a_second_prepare_process_reuses_the_persisted_askill_latest(monkeypatch
     assert len(probes) == 1
 
 
-
-
 def test_refresh_askill_if_stale_ignores_the_auto_update_gate(monkeypatch):
     # ``VIBE_ASKILL_AUTO_UPDATE`` disables the update-checker cadence, not the
     # lifecycle refresh that ``vibe runtime prepare`` performs; keeping the gate
@@ -1206,8 +1204,6 @@ def test_refresh_askill_if_stale_needs_an_orderable_latest_to_claim_currency(mon
     out = api.refresh_askill_if_stale()
 
     assert out["reason"] == "latest_unavailable"
-
-
 
 
 @pytest.mark.parametrize(
@@ -1721,16 +1717,6 @@ def test_model_hub_engine_ensure_treats_controller_unsupported_as_nonfatal(
     }
 
 
-
-
-
-
-
-
-
-
-
-
 def test_show_runtime_status_does_not_hide_programming_defects(monkeypatch, tmp_path):
     from core.show_runtime import ShowRuntimeManager
 
@@ -1773,30 +1759,6 @@ def test_settings_and_doctor_consume_the_same_verified_repair_owner(monkeypatch,
     assert verification_calls == [["/bin/echo"], ["/bin/echo"]]
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     # Node present but below the runtime minimum (node_supported False) -> not ready.
     monkeypatch.setattr(
@@ -1824,16 +1786,6 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
     monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
     by = {d["id"]: d for d in api.dependencies_status()["deps"]}
     assert by["node"]["installed"] is False and by["node"]["status"] == "missing"
-
-
-
-
-
-
-
-
-
-
 
 
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
@@ -1941,8 +1893,6 @@ def test_startup_show_page_prewarm_limit_env(monkeypatch):
     assert api.startup_show_page_prewarm_limit() == 10
 
 
-
-
 #: One running version, published two ways. `publish.yml` accepts official
 #: `vX.Y.ZrcN` tags and publishes them to PyPI, while a `gh-v*` build of the
 #: identical version is on no index at all — so the version string cannot pick
@@ -1954,22 +1904,6 @@ INSTALL_ORIGIN_SOURCES = {
     "index install": (None, None, None),
     "release asset install": (RELEASE_CORE_URL, RELEASE_CORE_URL),
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_start_dependency_install_job_rejects_unknown():
@@ -2116,3 +2050,345 @@ def test_start_dependency_install_job_runs_model_hub_engine(monkeypatch):
     assert calls == [True]
     assert cur["status"] == "succeeded"
     assert cur["version"] == "v7.2.149"
+
+
+def test_installing_askill_keeps_the_persisted_latest_for_the_next_process(monkeypatch):
+    """An install is the one moment prepare runs most, and must not cost a probe.
+
+    Installing 0.1.14 does not change the fact that 0.1.14 is what askill
+    publishes, so the entry that justified the install is exactly what the next
+    process needs: it compares a freshly measured local version against it and
+    concludes ``up_to_date``. Retiring it here — the reflex the in-memory cache
+    this replaced had — would send every post-update ``runtime prepare`` back to
+    GitHub for a string already on disk.
+    """
+
+    installed = {"version": "0.1.13"}
+    monkeypatch.setattr(
+        api,
+        "askill_status",
+        lambda: {"id": "askill", "installed": True, "version": installed["version"], "status": "ready"},
+    )
+
+    def _install(force=False):
+        installed["version"] = "0.1.14"
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", _install)
+    probes = []
+    monkeypatch.setattr(
+        api,
+        "_fetch_latest_askill_version",
+        lambda: probes.append(1) or "0.1.14",
+    )
+
+    assert api.refresh_askill_if_stale()["action"] == "update"
+    latest_version_cache._MEMORY.clear()  # noqa: SLF001 - stand in for a new process
+
+    assert api.refresh_askill_if_stale()["reason"] == "up_to_date"
+    assert len(probes) == 1
+
+
+def test_dependencies_status_shape(monkeypatch):
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {
+            "id": "askill",
+            "installed": True,
+            "version": "0.1.13",
+            "latest_version": None,
+            "has_update": False,
+            "status": "ready",
+            "path": "/x",
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"id": "avault", "installed": True, "version": "0.0.1", "status": "ready", "path": "/x/avault"},
+    )
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def status(self):
+            return {
+                "install": {"state": "installed", "runtime_version": "1.4.0", "matches_manifest": True},
+                "manifest": {"runtime_version": "1.4.0"},
+                "node_available": True,
+                "node_version": "20.11",
+            }
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+    monkeypatch.setattr(
+        api,
+        "_model_hub_engine_dependency_status",
+        lambda: {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": True,
+            "version": "v7.2.149",
+            "latest_version": "v7.2.149",
+            "has_update": False,
+            "status": "ready",
+            "action_class": "none",
+            "reason": None,
+            "download_error": None,
+        },
+    )
+    out = api.dependencies_status()
+    assert out["ok"]
+    by = {d["id"]: d for d in out["deps"]}
+    assert list(by) == [
+        "askill",
+        "avault",
+        "show-runtime",
+        "model-hub-engine",
+        "tmux",
+        "node",
+    ]
+    assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
+    assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
+    assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
+    assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
+    assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
+    assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
+    assert by["show-runtime"]["latest_version"] == "1.4.0"
+    assert by["show-runtime"]["has_update"] is False
+    assert by["model-hub-engine"]["version"] == "v7.2.149"
+    assert by["model-hub-engine"]["latest_version"] == "v7.2.149"
+    assert by["model-hub-engine"]["status"] == "ready"
+    assert by["node"]["installed"] and by["node"]["version"] == "20.11"
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected"),
+    (
+        pytest.param(
+            {
+                "provider": "manifest-cache",
+                "install": {"state": "installed", "runtime_version": "runtime-installed", "matches_manifest": False},
+                "manifest": {"runtime_version": "runtime-selected"},
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": "runtime-installed", "latest_version": "runtime-selected", "has_update": True},
+            id="stale-manifest-install",
+        ),
+        pytest.param(
+            {
+                "provider": "npm",
+                "install": {"state": "installed", "runtime_version": None, "matches_manifest": None},
+                "manifest": None,
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            },
+            {"version": None, "latest_version": None, "has_update": False},
+            id="npm-not-comparable",
+        ),
+    ),
+)
+def test_dependencies_status_projects_show_runtime_identity_without_pairing(monkeypatch, runtime_status, expected):
+    monkeypatch.setattr(
+        api,
+        "askill_update_status",
+        lambda **_: {"installed": True, "version": "0.1.14", "latest_version": None, "has_update": False, "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"installed": True, "version": "0.0.1", "status": "ready"},
+    )
+    monkeypatch.setattr(
+        api.V2Config,
+        "load",
+        classmethod(lambda _cls: SimpleNamespace()),
+    )
+
+    import core.show_runtime as show_runtime
+    import core.tmux_runtime as tmux_runtime
+
+    manager = Mock()
+    manager.status.return_value = runtime_status
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    monkeypatch.setattr(tmux_runtime, "tmux_status", lambda: {"installed": False, "version": None, "status": "missing"})
+
+    entry = next(item for item in api.dependencies_status()["deps"] if item["id"] == "show-runtime")
+
+    assert entry["installed"] is True
+    assert entry["status"] == "ready"
+    assert {key: entry[key] for key in expected} == expected
+
+
+def test_dependencies_status_preserves_show_runtime_inspection_failure(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    runtime_dir = tmp_path / "runtime"
+    pointer = runtime_dir / "prebuilt" / "current.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps(
+            {
+                "provider": "archive",
+                "runtime_id": "show-runtime",
+                "install_dir": str(runtime_dir / "prebuilt" / "versions" / "missing"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=runtime_dir,
+        runtime_source="archive",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+    pointer_before = pointer.read_bytes()
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is None
+    assert entry["status"] == "error"
+    assert entry["action_class"] == "operator_only"
+    assert entry["reason"] == "runtime_install_inspection_failed"
+    assert entry["inspection_error"]["kind"] == "OSError"
+    repair = manager.repair()
+    assert repair["reason"] == "runtime_install_inspection_failed"
+    assert repair["repair_attempted"] is False
+    assert pointer.read_bytes() == pointer_before
+
+
+def test_dependencies_status_keeps_true_show_runtime_absence_installable(monkeypatch, tmp_path):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    manager = show_runtime.ShowRuntimeManager(
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+        runtime_source="archive",
+        archive_path=tmp_path / "runtime.tgz",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    entry = next(
+        item
+        for item in api.dependencies_status()["deps"]
+        if item["id"] == "show-runtime"
+    )
+
+    assert entry["installed"] is False
+    assert entry["status"] == "missing"
+    assert entry["action_class"] == "repairable"
+    assert entry["reason"] is None
+
+
+def test_dependencies_status_keeps_node_ready_for_explicit_runtime_config_failure(
+    monkeypatch,
+    tmp_path,
+):
+    import core.show_runtime as show_runtime
+
+    _stub_dependency_status_neighbors(monkeypatch)
+    monkeypatch.setattr(
+        show_runtime,
+        "_resolve_command",
+        lambda command: ["node"] if command == "node" else None,
+    )
+    manager = show_runtime.ShowRuntimeManager(
+        command=str(tmp_path / "missing-runtime"),
+        workspace_root=tmp_path / "show",
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: manager)
+
+    by_id = {item["id"]: item for item in api.dependencies_status()["deps"]}
+
+    assert by_id["show-runtime"]["installed"] is None
+    assert by_id["show-runtime"]["status"] == "error"
+    assert by_id["show-runtime"]["reason"] == "runtime_command_missing"
+    assert by_id["show-runtime"]["action_class"] == "operator_only"
+    assert by_id["node"]["installed"] is True
+    assert by_id["node"]["status"] == "ready"
+
+
+def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
+    """MH-RUNTIME-008: startup converges CPA without changing run intent."""
+
+    askill_calls = []
+    avault_calls = []
+    model_hub_calls = []
+
+    def fake_ensure(force=False):
+        askill_calls.append(force)
+        return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
+
+    monkeypatch.setattr(api, "ensure_askill_installed", fake_ensure)
+
+    def fake_ensure_avault(force=False):
+        avault_calls.append(force)
+        return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
+
+    monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
+    monkeypatch.setattr(
+        api,
+        "ensure_model_hub_engine_installed",
+        lambda *, force=False: model_hub_calls.append(force)
+        or {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"},
+    )
+
+    import core.show_runtime as srt_mod
+
+    class _Mgr:
+        def __init__(self):
+            self.prepared = []
+
+        def status(self, *, offline=False):
+            assert offline is True
+            return {
+                "node_available": True,
+                "node_supported": True,
+                "node_version": "22.12.0",
+            }
+
+        def prepare(self, *, force=False, automatic=False):
+            self.prepared.append((force, automatic))
+            return {
+                "policy": {"state": "allowed", "reason": None},
+                "install": {"state": "installed", "reason": None},
+                "runtime": {"state": "unchecked", "reason": None},
+                "status": {
+                    "node_available": True,
+                    "node_supported": True,
+                    "node_version": "22.12.0",
+                },
+            }
+
+    manager = _Mgr()
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: manager)
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["ok"] is True
+    assert askill_calls == [False]
+    assert avault_calls == [False]
+    assert model_hub_calls == [False]
+    assert out["model_hub_engine"]["version"] == "v7.2.149"
+    assert manager.prepared == [(False, True)]
+    assert out["node"]["status"] == "ready"
+    assert out["show_runtime"]["ok"] is True
+    assert out["show_runtime"]["status"] == "pending_prewarm"
+    assert out["show_runtime"]["policy"]["state"] == "allowed"
+    assert out["show_runtime"]["install"]["state"] == "installed"
+    assert out["show_runtime"]["runtime"]["state"] == "unchecked"

@@ -867,18 +867,6 @@ def test_invalid_manifest_keeps_disk_resolution_but_blocks_repair(
     assert str(repair["reason"]).endswith("manifest_invalid")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize("runtime_kind", ["git", "model-hub"])
 def test_existing_subclass_adopts_released_manifest_digest_layout_without_write_or_download(
     tmp_path: Path,

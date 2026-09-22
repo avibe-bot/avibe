@@ -6127,7 +6127,6 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(agent._is_recoverable_transport_error(err))
 
 
-
 class CodexPromptSnapshotRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def _setup(self, strategy=None, *, legacy=False):
         self.marker = {}

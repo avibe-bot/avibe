@@ -744,3 +744,63 @@ def test_cleanup_sync_settles_the_internal_server_task(tmp_path, monkeypatch) ->
     assert task.cancelled()
     assert controller._internal_server_task is None
     assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
+
+
+def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
+    """Shutdown settles consumers before their shared supervisor."""
+
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+    stopped: dict[str, bool] = {
+        "watch": False,
+        "tasks": False,
+        "supervisor": False,
+        "runtime": False,
+    }
+    stop_order: list[str] = []
+
+    class _Stopper:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        async def stop(self) -> None:
+            stopped[self.key] = True
+            stop_order.append(self.key)
+
+    class _Supervisor(_Stopper):
+        def quiesce(self) -> None:
+            stop_order.append("quiesce")
+
+        async def run_sync(self, operation):  # noqa: ANN001, ANN202
+            assert not stopped["supervisor"]
+            return operation()
+
+    class _WatchStopper(_Stopper):
+        async def stop(self) -> None:
+            await controller.runtime_work_supervisor.run_sync(lambda: None)
+            await super().stop()
+
+    controller.scheduled_task_service = _Stopper("tasks")
+    controller.runtime_work_supervisor = _Supervisor("supervisor")
+    controller.watch_service = _WatchStopper("watch")
+    controller.runtime_command_watcher = _Stopper("runtime")
+
+    loop.run_until_complete(asyncio.sleep(0))
+    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
+    controller.receiver_tasks = {}
+    controller.im_client = None
+    controller._im_thread = None
+
+    try:
+        controller.cleanup_sync()
+    finally:
+        loop.close()
+
+    assert stopped["tasks"] is True
+    assert stopped["watch"] is True
+    assert stopped["supervisor"] is True
+    assert stopped["runtime"] is True
+    assert stop_order[0] == "quiesce"
+    assert set(stop_order[1:3]) == {"tasks", "watch"}
+    assert stop_order[3] == "supervisor"

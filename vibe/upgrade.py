@@ -50,9 +50,6 @@ logger = logging.getLogger(__name__)
 PACKAGE_NAME = CORE_PACKAGE_NAME
 LEGACY_PACKAGE_NAME = LEGACY_CORE_PACKAGE_NAME
 PIP_DOWNLOAD_DEST_PLACEHOLDER = "{avibe-pip-download-destination}"
-# Core is on PyPI; Memory is a same-version GitHub Release companion. A recorded
-# GitHub core origin preserves its exact release tag, including gh-v previews.
-RELEASE_DOWNLOAD_BASE_URL = "https://github.com/avibe-bot/avibe/releases/download"
 DEFAULT_UPDATE_METADATA_URL = f"https://pypi.org/pypi/{PACKAGE_NAME}/json"
 CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
@@ -90,7 +87,6 @@ _PRE_ORDER = {
     "pre": 2,
     "preview": 2,
 }
-
 
 
 class RestartState(str, Enum):
@@ -1042,10 +1038,6 @@ def is_legacy_uv_tool_install(python_executable: str | None = None) -> bool:
     return f"/uv/tools/{LEGACY_PACKAGE_NAME}/" in executable
 
 
-
-
-
-
 def _distributions_providing_this_package() -> list[str]:
     """Every installed distribution that provides the package this module is in."""
 
@@ -1178,8 +1170,6 @@ def _published_version(value: str | None) -> str | None:
     return version if _names_a_published_release(version) else None
 
 
-
-
 def _wheel_distribution(package_name: str) -> str:
     """Spell one distribution name the way a wheel filename does."""
 
@@ -1218,10 +1208,6 @@ def pinned_package_spec(version: str | None, *, package_name: str) -> str:
     return f"{package_name}=={version}"
 
 
-def release_asset_specs(version: str) -> None:
-    return None
-
-
 def build_upgrade_plan(
     *,
     python_executable: str | None = None,
@@ -1237,11 +1223,7 @@ def build_upgrade_plan(
     """How to install avibe: the newest release, or `version` exactly."""
 
     executable = python_executable or sys.executable
-    # A caller targeting another interpreter (for example a test-owned venv)
-    # can provide an explicit package-shape measurement.  Only infer from this
-    # process when the caller did not provide one; otherwise ambient metadata
-    # would leak into the target plan and turn an intentional core-only install
-    # into a Memory install.
+    # Explicit target specs belong to the selected interpreter, not the caller.
     package_spec = (
         (
             core_spec
@@ -1283,39 +1265,16 @@ def build_upgrade_plan(
     command = [executable, "-m", "pip", "install"]
     if not version:
         command.append("--upgrade")
-    # pip decides whether to act from metadata. Exact installs always force so a
-    # matching optional package is applied even when core is already satisfied;
-    # forward installs force only when published provider metadata disagrees with
-    # the running files.
+    # Exact repairs reinstall even when metadata already matches. Forward
+    # installs force only when metadata disagrees with the running files.
     if version or not installed_metadata_describes_running_code():
         command.append("--force-reinstall")
     command.append(package_spec)
     preflight_command = None
-    # Preflight only when the optional package shape is part of the operation.
-    # Core-only forward installs retain the origin/dev synchronous behavior: the
-    # service is still running while pip resolves, so a second resolver pass is
-    # unnecessary general-updater machinery.
+    # A forward core-only install needs a single resolver pass. Exact repairs
+    # retain their availability check before changing the installed version.
     preflight_fallback_command = None
-    if not version:
-        preflight_command = [
-            executable,
-            "-m",
-            "pip",
-            "install",
-            "--dry-run",
-            "--upgrade",
-            package_spec,
-        ]
-        preflight_fallback_command = [
-            executable,
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            PIP_DOWNLOAD_DEST_PLACEHOLDER,
-            package_spec,
-        ]
-    else:
+    if version:
         preflight_command = [
             executable,
             "-m",

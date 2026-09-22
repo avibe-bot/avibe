@@ -8,7 +8,6 @@ import json
 import logging
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -62,10 +61,6 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS = 10.0
 _MODEL_HUB_SNAPSHOT_RECONCILE_INTERVAL_SECONDS = 5 * 60
-
-
-
-
 
 
 class RemovedPlatformIMClient(BaseIMClient):
@@ -340,8 +335,6 @@ class Controller:
         self.session_turns.reset_legacy_ownerless_status()
 
 
-
-
     @staticmethod
     def _derive_primary_platform(config) -> str:
         enabled = list(getattr(config, "enabled_platforms", lambda: [getattr(config, "platform", "slack")])())
@@ -520,58 +513,6 @@ class Controller:
             "backends": requested,
             "states": states,
         }
-
-
-
-
-    @asynccontextmanager
-
-
-
-
-    @asynccontextmanager
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    @asynccontextmanager
-
-
-
-    @staticmethod
-
-
-
 
 
     def _init_modules(self):
@@ -1029,11 +970,6 @@ class Controller:
             logger.error("Not publishing service readiness: the IM runtime failed during startup")
             return
         mark_service_instance_started()
-
-    @staticmethod
-
-
-
 
     def _run_im_runtime(self) -> None:
         try:

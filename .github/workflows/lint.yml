@@ -314,7 +314,7 @@ jobs:
         if: matrix.suite == 'installer'
         with:
           name: vibe-package-contracts-linux
-          path: .
+          path: dist
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
@@ -346,7 +346,8 @@ jobs:
           set -o pipefail
           output="$RUNNER_TEMP/distribution-contracts.log"
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
-            pytest tests/test_release_verification.py -v -ra | tee "$output"
+          AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
+            pytest tests/test_distribution_artifacts.py -v -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
             echo "Distribution contracts must not skip."
             exit 1

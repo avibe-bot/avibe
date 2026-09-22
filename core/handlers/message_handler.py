@@ -269,7 +269,6 @@ class MessageHandler(BaseHandler):
                     mirror_harness_inbound(context, message)
 
             base_session_id, working_path, composite_key = self.session_handler.get_session_info(context, source=source)
-            lifecycle_snapshot = None
             payload = dict(context.platform_specific or {})
             payload["turn_source"] = source
             payload["turn_base_session_id"] = base_session_id
@@ -277,12 +276,6 @@ class MessageHandler(BaseHandler):
                 context, source=source
             )
             context.platform_specific = payload
-
-            # Text-only turns keep the original early capture path. Attachment
-            # turns defer only until the shared materializer has produced a
-            # descriptor-backed lease.
-            if is_human and not context.files:
-                capture_lifecycle_snapshot = None
 
             reply_anchor_base_session_id = payload.get("reply_anchor_base_session_id")
             if reply_anchor_base_session_id and reply_anchor_base_session_id != base_session_id:
@@ -679,9 +672,6 @@ class MessageHandler(BaseHandler):
                         "Processed %s file attachments for message",
                         len(processed_files),
                     )
-
-            if is_human and context.files:
-                capture_lifecycle_snapshot = None
 
             if durable_ingress_enabled and not durable_delivery_owned:
                 admitted = await self._admit_human_delivery(

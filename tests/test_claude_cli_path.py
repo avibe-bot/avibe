@@ -387,8 +387,6 @@ def test_session_handler_recreates_cached_claude_client_when_catalog_limits_chan
     assert second_client.options.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "256000"
 
 
-
-
 def test_session_handler_injects_vendored_git_into_gitless_child_env(
     monkeypatch,
     tmp_path: Path,
@@ -1581,8 +1579,6 @@ def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env
     assert len(captured["clients"]) == 1
     assert first_client.options.env["AVIBE_SESSION_ID"] == "ses-subagent"
     assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
-
-
 
 
 def test_session_handler_recreates_terminated_cached_subagent_before_dispatch(

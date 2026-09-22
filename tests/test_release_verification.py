@@ -9,6 +9,7 @@ import subprocess
 import sys
 import shutil
 import threading
+import re
 
 import pytest
 import yaml
@@ -133,10 +134,6 @@ def _notes_git_fixture(tmp_path, *, annotation, existing_body):
     return remote, workspace, env, tag, source, command
 
 
-
-
-
-
 @pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
 @pytest.mark.parametrize("tag", ["v3.2.0-rc1", "v03.02.00"])
 def test_noncanonical_official_tags_fail_before_artifact_construction(
@@ -159,6 +156,106 @@ def test_noncanonical_official_tags_fail_before_artifact_construction(
     assert "canonical spelling" in result.stderr
     assert not (tmp_path / "artifact-construction-reached").exists()
     assert not (tmp_path / "github-env").exists()
+
+
+@pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
+def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workflow_name, job_name, checkout_name, workflow_ref):
+    job = _job(workflow_name, job_name)
+    checkout = _step(job, checkout_name)
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"]["ref"] == workflow_ref
+    assert checkout["with"]["path"] == "release-automation"
+    assert checkout["with"]["sparse-checkout-cone-mode"] is False
+    files = checkout["with"]["sparse-checkout"].splitlines()
+    assert "tests/test_distribution_artifacts.py" in files
+    verification = _step(job, "Verify built distribution contracts")
+    assert "release-automation/tests/test_distribution_artifacts.py" in verification["run"]
+    assert "AVIBE_CORE_WHEEL=" in verification["run"] and "AVIBE_CORE_SDIST=" in verification["run"]
+    assert job["steps"].index(checkout) < job["steps"].index(verification)
+    # Replay the path/ref contract: release source lacks the automation, while
+    # the workflow commit supplies it via the declared sparse checkout.
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _fixture_git(remote, "init")
+    _fixture_git(remote, "commit", "--allow-empty", "-m", "release source")
+    release = _fixture_git(remote, "rev-parse", "HEAD")
+    for name in files:
+        target = remote / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("print('workflow-owned automation')\n")
+    _fixture_git(remote, "add", ".")
+    _fixture_git(remote, "commit", "-m", "workflow automation")
+    workflow = _fixture_git(remote, "rev-parse", "HEAD")
+    destination = tmp_path / checkout["with"]["path"]
+    _fixture_git(tmp_path, "clone", "--no-checkout", str(remote), str(destination))
+    _fixture_git(destination, "sparse-checkout", "set", "--no-cone", *files)
+    _fixture_git(destination, "checkout", workflow)
+    assert _fixture_git(destination, "rev-parse", "HEAD") != release
+    for name in files:
+        assert (destination / name).is_file()
+    if workflow_name == "publish.yml":
+        upload = _step(job, "Upload GitHub release assets")
+        script = "release-automation/scripts/github_release.py"
+        assert f"python {script} ensure-draft" in upload["run"]
+        result = subprocess.run([sys.executable, str(tmp_path / script), "ensure-draft"],
+                                cwd=tmp_path, capture_output=True, text=True)
+        assert result.returncode == 0 and "workflow-owned automation" in result.stdout
+
+
+@pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml"])
+def test_release_shell_steps_parse(workflow):
+    document = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if "run" not in step or step.get("shell", "bash") not in {"bash", "sh"}:
+                continue
+            command = re.sub(r"\$\{\{.*?\}\}", "fixture", step["run"])
+            result = subprocess.run(["bash", "-n"], input=command, capture_output=True, text=True)
+            assert result.returncode == 0, f"{step.get('name')}: {result.stderr}"
+
+
+@pytest.mark.parametrize("existing", ["none", "same", "different"])
+def test_preview_upload_validates_all_existing_bytes_before_runtime_then_packages(tmp_path, existing):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    names = ["vibe-show-runtime-node-linux-arm64.tgz", "show-runtime-manifest.json",
+             "avibe_os-1.0.0-py3-none-any.whl", "avibe_os-1.0.0.tar.gz"]
+    for name in names:
+        (dist / name).write_bytes(b"immutable asset")
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    log = tmp_path / "calls.jsonl"
+    fake = f'''#!{sys.executable}
+import json, pathlib, sys
+args = sys.argv[1:]
+with open({str(log)!r}, "a") as stream: stream.write(json.dumps([pathlib.Path(sys.argv[0]).name, *args]) + "\\n")
+if args[:2] == ["release", "view"]:
+    print({names[-1] if existing != 'none' else ''!r})
+elif args[:2] == ["release", "download"]:
+    target = pathlib.Path(args[args.index("--dir") + 1]) / args[args.index("--pattern") + 1]
+    target.write_bytes({b'immutable asset' if existing == 'same' else b'changed bytes'!r})
+'''
+    for name in ("gh", "python"):
+        path = binaries / name
+        path.write_text(fake)
+        path.chmod(0o755)
+    command = _step(_job("release_ai.yml", "release"), "Create GitHub-only Release")["run"]
+    command = command.replace("${{ steps.tag.outputs.tag }}", "gh-v1.0.0rc1").replace("${{ steps.release_type.outputs.prerelease }}", "true")
+    result = subprocess.run(["bash", "-c", command], cwd=tmp_path,
+                            env={**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}",
+                                 "GITHUB_REPOSITORY": "fixture/repo"}, capture_output=True, text=True)
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    uploads = [call for call in calls if call[1:3] == ["release", "upload"]]
+    if existing == "different":
+        assert result.returncode != 0 and "differs" in result.stderr
+        assert uploads == []
+        assert not any("finalize" in call for call in calls)
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert len(uploads) == 2
+        assert uploads[0][-2:] == [f"dist/{name}" for name in names[:2]]
+        assert uploads[1][6:] == [f"dist/{name}" for name in names[2:] if existing == "none" or name != names[-1]]
+        assert "finalize" in calls[-1]
 
 
 def _job(workflow_name: str, job_name: str) -> dict:
@@ -205,6 +302,140 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     assert not consumer.get("if") and not consumer.get("continue-on-error")
 
 
+@pytest.mark.parametrize("workflow_name", ["publish.yml", "release_ai.yml"])
+@pytest.mark.parametrize(
+    "state",
+    ["empty", "identical", "partial", "core-mismatch", "core-sdist-mismatch",
+     "runtime-mismatch", "missing-wheel", "empty-sdist", "read-failure"],
+)
+def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_name, state):
+    workspace = tmp_path / "release source 中文"
+    dist = workspace / "dist"
+    runtime = workspace / ("runtime-artifacts" if workflow_name == "publish.yml" else "dist")
+    binaries = tmp_path / "bin"
+    temporary = tmp_path / "temp"
+    for path in {workspace, dist, runtime, binaries, temporary}:
+        path.mkdir(parents=True, exist_ok=True)
+    packages = {
+        f"{package}-3.1.0{suffix}": f"{package}{suffix}".encode()
+        for package in ("avibe_os",)
+        for suffix in ("-py3-none-any.whl", ".tar.gz")
+    }
+    if workflow_name == "publish.yml":
+        # Preserve the optional legacy package upload path too.
+        packages["vibe_remote-3.0.14-py3-none-any.whl"] = b"legacy shim"
+    runtimes = {
+        **{f"vibe-show-runtime-node-{platform}.tgz": platform.encode()
+           for platform in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")},
+        "show-runtime-manifest.json": b"show manifest",
+    }
+    for directory, assets in ((dist, packages), (runtime, runtimes)):
+        for name, data in assets.items():
+            (directory / name).write_bytes(data)
+    all_assets = {**packages, **runtimes}
+    existing = dict(all_assets) if state == "identical" else {}
+    if state not in {"empty", "identical"}:
+        existing = {name: all_assets[name] for name in (
+            "avibe_os-3.1.0-py3-none-any.whl", "avibe_os-3.1.0.tar.gz", "show-runtime-manifest.json",
+        )}
+    mismatch = {
+        "core-mismatch": "avibe_os-3.1.0-py3-none-any.whl",
+        "core-sdist-mismatch": "avibe_os-3.1.0.tar.gz",
+        "runtime-mismatch": "show-runtime-manifest.json",
+    }.get(state)
+    if mismatch:
+        existing[mismatch] = b"already published different bytes"
+    if state == "missing-wheel":
+        (dist / "avibe_os-3.1.0-py3-none-any.whl").unlink()
+    if state == "empty-sdist":
+        (dist / "avibe_os-3.1.0.tar.gz").write_bytes(b"")
+
+    # Only gh and the metadata helper are simulated; run the complete upload
+    # shell, including real file comparisons, globs, temp cleanup and ordering.
+    gh = binaries / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        "import json, pathlib, sys\n"
+        "args = sys.argv[1:]\n"
+        f"existing = {existing!r}\n"
+        "with pathlib.Path('events.jsonl').open('a') as stream:\n"
+        "    stream.write(json.dumps(args) + '\\n')\n"
+        "if args[1] == 'view':\n"
+        f"    sys.exit(1) if {state == 'read-failure'!r} else None\n"
+        "    print('\\n'.join(existing))\n"
+        "elif args[1] == 'download':\n"
+        "    name = args[args.index('--pattern') + 1]\n"
+        "    (pathlib.Path(args[args.index('--dir') + 1]) / name).write_bytes(existing[name])\n"
+        "elif args[1] == 'upload':\n"
+        "    assert '--clobber' not in args\n"
+        "    for path in args[args.index('--repo') + 2:]:\n"
+        "        assert pathlib.Path(path).name not in existing\n"
+        "        assert pathlib.Path(path).is_file()\n"
+        "else: raise AssertionError(args)\n",
+        encoding="utf-8",
+    )
+    gh.chmod(0o755)
+    python = binaries / "python"
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    if workflow_name == "publish.yml":
+        command = _step(_job(workflow_name, "build"), "Upload GitHub release assets")["run"]
+        command = command.replace("${{ needs.resolve-tag.outputs.tag }}", "v3.1.0")
+    else:
+        command = _step(_job(workflow_name, "release"), "Create GitHub-only Release")["run"]
+        command = command.replace("${{ steps.tag.outputs.tag }}", "gh-v3.1.0")
+        command = command.replace("${{ steps.release_type.outputs.prerelease }}", "true")
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+        cwd=workspace, env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+        capture_output=True, text=True, timeout=20,
+    )
+    success = state in {"empty", "identical", "partial"}
+    assert (result.returncode == 0) is success, result.stdout + result.stderr
+    events = [json.loads(line) for line in (workspace / "events.jsonl").read_text().splitlines()]
+    uploads = [event for event in events if event[1] == "upload"]
+    if not success:
+        assert not uploads
+    else:
+        uploaded = [Path(path).name for event in uploads for path in event[event.index("--repo") + 2:]]
+        assert len(uploaded) == len(set(uploaded))
+        assert set(uploaded) == set(all_assets) - set(existing)
+        if uploads:
+            first_upload = events.index(uploads[0])
+            assert all(event[1] != "download" for event in events[first_upload:])
+        kinds = [name in packages for name in uploaded]
+        assert kinds == sorted(kinds), "Runtime uploads must complete before package uploads"
+    assert not list(temporary.iterdir())
 
 
-
+@pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
+@pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("cancelled", [False, True])
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
+def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(tag, build_result, cancelled, event):
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
+    jobs = workflow["jobs"]
+    preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
+    for name in ("resolve-show-runtime-ref",):
+        assert jobs[name]["if"] == preview_condition
+    assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
+    assert jobs["build-assets"]["needs"] == ["show-runtime-bundles"]
+    assert jobs["release"]["needs"] == "build-assets"
+    # Evaluate the actual bounded job expression for both event kinds. This
+    # catches skipped-needs propagation without replacing the condition itself.
+    expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
+    expression = expression.replace("needs.build-assets.result", "build_result")
+    expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
+    expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+    expression = " ".join(expression.split())
+    result = eval(expression, {"__builtins__": {}}, {
+        "build_result": build_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "ref": "master" if event == "workflow_dispatch" else tag,
+        "cancelled": lambda: cancelled,
+        "startsWith": lambda value, prefix: value.startswith(prefix),
+    })
+    expected = not cancelled and (
+        build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
+    )
+    assert result == expected

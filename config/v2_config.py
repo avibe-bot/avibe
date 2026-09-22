@@ -1075,12 +1075,6 @@ def _recover_switch_section_field(
     return False
 
 
-
-
-
-
-
-
 def _recover_runtime_field(payload: dict, field_name: Optional[str]) -> bool:
     """Repair one retention or collection field without discarding runtime."""
 
@@ -1632,23 +1626,9 @@ class AudioAsrConfig:
         _refuse_values_naming_nothing("audio_asr", self)
 
 
-
-
-
-
-
-
-
-
 def _looks_like_ui_mask(value: str) -> bool:
     stripped = value.strip()
     return bool(stripped) and all(character in {"*", "•", "x", "X"} for character in stripped)
-
-
-
-
-
-
 
 
 @dataclass

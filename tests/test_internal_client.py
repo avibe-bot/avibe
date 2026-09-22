@@ -360,34 +360,6 @@ def test_backend_auth_missing_socket_raises_unavailable(tmp_path):
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_notify_vault_request_created_round_trip(tmp_path, socket_path):
     app = FastAPI()
     captured: dict = {}
@@ -480,8 +452,6 @@ def test_turn_state_uses_short_timeout(tmp_path, socket_path):
 
     assert captured["timeout"].connect == 0.2
     assert captured["timeout"].read == 1.0
-
-
 
 
 def test_socket_verifier_accepts_umask_created_owner_only_mode(socket_path) -> None:

@@ -39,6 +39,14 @@ FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
+
+
+def legacy_admitted_user_id(metadata: object) -> str | None:
+    """Read the author identity of a released pre-author_id delivery row."""
+    value = metadata.get("_memory_user_id") if isinstance(metadata, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def message_kind_from_metadata(metadata: object) -> str:
     """Translate persisted metadata into the core message vocabulary."""
 
@@ -54,7 +62,9 @@ def message_kind_from_metadata(metadata: object) -> str:
         return "edited"
     if metadata.get("is_system") or metadata.get("system"):
         return "system"
-    return "original"
+    # Released GENERAL delivery rows need positive evidence of ordinary text;
+    # a missing or malformed legacy marker must not grant human-input status.
+    return "original" if metadata.get("_memory_ordinary_text") is True else "unknown"
 
 
 def utc_now_iso() -> str:
@@ -159,9 +169,14 @@ def message_snapshot(
         author = "harness"
         resolved_type = "harness"
     if source == "user":
-        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata = metadata_without_delegated_owner(metadata)
         metadata.pop("scheduled_provenance", None)
-    filtered_metadata = dict(metadata or {})
+    # New input cannot stamp retired private identity fields. Existing queued
+    # rows remain readable through legacy_admitted_user_id without migration.
+    filtered_metadata = {
+        key: value for key, value in (metadata or {}).items()
+        if not str(key).startswith("_memory_")
+    }
     return {
         "scope_id": scope_id,
         "session_id": session_id,
@@ -527,11 +542,13 @@ def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
     """Project the two known owner locations without changing stored metadata."""
     result = dict(metadata) if isinstance(metadata, dict) else {}
+    result.pop("delegated_memory_owner", None)
     provenance = result.get("scheduled_provenance")
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
     nested = spec.get("message_metadata") if isinstance(spec, dict) else None
     if isinstance(nested, dict):
         public_nested = dict(nested)
+        public_nested.pop("delegated_memory_owner", None)
         result["scheduled_provenance"] = {
             **provenance, "platform_specific": {**spec, "message_metadata": public_nested},
         }
@@ -540,23 +557,18 @@ def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
 
 def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Hide execution identity in both queued and accepted public messages."""
-    def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: item for key, item in value.items()
-            if key != "resource_user_context"
-            and not str(key).startswith("_web_push_")
-        }
+    def without_private_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_private_fields(item) for key, item in value.items()
+                if key not in {"resource_user_context", "delegated_memory_owner"}
+                and not str(key).startswith(("_web_push_", "_memory_"))
+            }
+        if isinstance(value, list):
+            return [without_private_fields(item) for item in value]
+        return value
 
-    result = without_private_fields(dict(metadata) if isinstance(metadata, dict) else {})
-    provenance = result.get("scheduled_provenance")
-    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
-    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
-    if isinstance(nested, dict):
-        result["scheduled_provenance"] = {
-            **provenance,
-            "platform_specific": {**spec, "message_metadata": without_private_fields(nested)},
-        }
-    return result
+    return without_private_fields(metadata if isinstance(metadata, dict) else {})
 
 
 def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:

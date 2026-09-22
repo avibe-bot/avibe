@@ -119,6 +119,16 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
+      - name: Checkout release verification
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ github.sha }}
+          path: release-automation
+          sparse-checkout: |
+            scripts/show_runtime_manifest_asset.py
+            tests/test_distribution_artifacts.py
+          sparse-checkout-cone-mode: false
+
       - name: Setup Node.js
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -184,6 +194,12 @@ jobs:
                       f"Expected exactly one release asset matching {pattern}, found {len(matches)}"
                   )
           PY
+
+      - name: Verify built distribution contracts
+        run: |
+          AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
+          AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
+            pytest release-automation/tests/test_distribution_artifacts.py -v
 
       - name: Add Show Runtime release assets
         shell: bash
@@ -594,6 +610,7 @@ jobs:
               fi
             else
               case "$name" in
+                vibe-show-runtime-node-*.tgz|show-runtime-manifest.json)
                   runtime_to_upload+=("$path") ;;
                 *) package_to_upload+=("$path") ;;
               esac

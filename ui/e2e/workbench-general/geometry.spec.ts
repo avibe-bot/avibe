@@ -211,6 +211,7 @@ test.describe('workbench home geometry', () => {
       const inheritedReads = new Set([
         '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
         '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
+        '/api/inbox', '/api/version', '/api/events',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();
@@ -483,7 +484,7 @@ test.describe('general settings geometry', () => {
       } else {
         await page.getByRole('button', { name: 'Apps', exact: true }).click();
         await page.getByRole('dialog', { name: 'Apps' }).getByRole('link', { name: 'Settings', exact: true }).click();
-        await page.getByRole('link', { name: 'All settings', exact: true }).click();
+        await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
       }
       await expect(page.locator('[data-settings-overlay="true"]')).toBeVisible();
       await page.getByRole('navigation', { name: 'Settings sections' })

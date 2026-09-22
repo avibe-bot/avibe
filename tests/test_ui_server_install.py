@@ -156,9 +156,6 @@ def test_dependency_install_route_allows_model_hub_engine(monkeypatch, tmp_path)
     assert response.get_json()["backend"] == "model-hub-engine"
 
 
-
-
-
 def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
     monkeypatch.setattr(api, "is_agent_backend", lambda name: name == "codex")
     monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == "codex")

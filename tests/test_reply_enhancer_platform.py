@@ -274,12 +274,6 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("slack/U1", prompt)
 
 
-
-
-
-
-
-
     def test_process_reply_strips_silent_blocks_before_enhancements(self):
         reply = process_reply(
             "Visible\n<silent>skip [secret](file:///tmp/secret.txt)\n---\n[Hidden]</silent>\nDone"

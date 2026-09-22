@@ -590,12 +590,9 @@ class CommandHandlers(BaseHandler):
                                 )
                 return False, reclaimed
 
-            async def _reset_and_offer() -> _NewSessionResult:
-                return await _reset_session()
-
             topic_started, reclaimed = await self._run_session_lifecycle_for_new(
                 session_anchor,
-                _reset_and_offer,
+                _reset_session,
             )
             if topic_started:
                 return

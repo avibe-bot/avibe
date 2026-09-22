@@ -552,20 +552,6 @@ def _configured_cli_language() -> str:
         return "en"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def cmd_skill(args) -> int:
     """List or load Skills through Avibe's live resolver."""
 
@@ -12760,8 +12746,6 @@ def _doctor_display_value(value: object, category: str, language: str) -> str:
     return i18n_t(key, language) if key else i18n_t("doctor.value.unknown", language)
 
 
-
-
 def _doctor_managed_reason_key(reason: str) -> str | None:
     projections = DOCTOR_DISPLAY_PROJECTIONS
     key = projections["repair_reason"].get(reason)
@@ -13174,8 +13158,6 @@ def _repair_tmux(*, dry_run: bool = False) -> dict:
     from core.tmux_runtime import ensure_tmux_installed
 
     return _repair_managed_dependency("tmux", ensure_tmux_installed, dry_run=dry_run)
-
-
 
 
 def _repair_git_runtime(*, dry_run: bool = False) -> dict:

@@ -36,7 +36,6 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     pinned_package_spec,
-    release_asset_specs,
     execute_upgrade_plan,
     restart_is_pending,
 )
@@ -103,6 +102,13 @@ def test_build_upgrade_plan_uses_pip_for_non_uv_install():
     assert plan.method == "pip"
     assert plan.command == ["/usr/bin/python3", "-m", "pip", "install", "--upgrade", "avibe-os"]
     assert plan.env == {"PATH": "/usr/bin"}
+    assert plan.preflight_command is None
+    assert plan.preflight_fallback_command is None
+    run = Mock(return_value=subprocess.CompletedProcess(plan.command, 17, "", "install failed"))
+    result = execute_upgrade_plan(plan, run=run)
+    assert result.returncode == 17
+    assert run.call_count == 1
+    assert run.call_args.args[0] == plan.command
 
 
 def test_build_upgrade_plan_stages_uv_install_for_a_stable_launcher(monkeypatch, tmp_path):
@@ -901,10 +907,437 @@ def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
 FORCES_THE_INSTALL = {"uv": "--force", "pip": "--force-reinstall"}
 
 
+def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(monkeypatch):
+    # Exact repairs must apply the requested version even when already installed.
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+        package_name="avibe-os",
+    )
+    assert uv_plan.method == "uv"
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        "avibe-os==3.0.10",
+        # Unconditional here: the version already installed is the newer one, so
+        # without it uv reports the tool as satisfied and installs nothing.
+        "--force",
+    ]
+    assert "--upgrade" not in uv_plan.command
+    assert uv_plan.env["UV_TOOL_DIR"] != "/tmp/.local/share/uv/tools"
+    assert uv_plan.activation is not None
+    assert uv_plan.activation.launcher == Path("/custom/bin/vibe")
+    assert Path(uv_plan.env["UV_TOOL_DIR"]).is_relative_to(vibe_upgrade.atomic_uv_install_root())
+
+    pip_plan = build_upgrade_plan(
+        python_executable="/usr/bin/python3",
+        uv_path=None,
+        base_env={"PATH": "/usr/bin"},
+        version="3.0.10",
+        package_name="avibe-os",
+    )
+    assert pip_plan.method == "pip"
+    assert pip_plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "avibe-os==3.0.10",
+    ]
+
+    for plan in (uv_plan, pip_plan):
+        assert "--upgrade" not in plan.command
+        assert FORCES_THE_INSTALL[plan.method] in plan.command
 
 
+def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env={"UV_TOOL_BIN_DIR": "/custom/bin"},
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
+    monkeypatch.setattr(
+        api,
+        "build_upgrade_plan",
+        lambda **kwargs: calls.setdefault("plan_kwargs", kwargs) and plan,
+    )
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            calls["run_cmd"] = cmd
+            calls["run_kwargs"] = kwargs
+        else:
+            raise AssertionError(f"unexpected subprocess command: {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is True
+    assert calls["run_cmd"] == plan.command
+    assert calls["run_kwargs"]["capture_output"] is True
+    assert calls["run_kwargs"]["text"] is True
+    assert calls["run_kwargs"]["timeout"] == 1800
+    assert calls["run_kwargs"]["env"] == plan.env
+    assert calls["plan_kwargs"]["target_version"] == "3.0.15"
+    safe_cwd = calls["run_kwargs"].get("cwd")
+    assert safe_cwd and os.path.isabs(safe_cwd), f"subprocess.run cwd must be an absolute path, got {safe_cwd!r}"
+    assert calls["restart_kwargs"] == {
+        "delay_seconds": 2.0,
+        "vibe_path": "/custom/bin/vibe",
+        "trigger": "upgrade",
+        "prepare_show_runtime": True,
+    }
 
 
+def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    events: list[str] = []
+
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: events.append("restart") or {"job_id": "restart"})
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            events.append("upgrade")
+        else:
+            raise AssertionError(f"unexpected subprocess command: {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert events == ["upgrade", "restart"]
+
+
+def test_do_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "1")
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: calls.setdefault("restart_kwargs", kwargs))
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="done", stderr=""),
+    )
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is True
+    assert calls["restart_kwargs"]["prepare_show_runtime"] is False
+
+
+def test_do_upgrade_reports_restart_scheduling_failure_as_partial_success(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+
+    def fail_restart(**kwargs):
+        raise RuntimeError("bad launcher")
+
+    monkeypatch.setattr(api, "schedule_restart", fail_restart)
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="done", stderr=""),
+    )
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is False
+    assert result["message"] == "Upgrade successful, but restart scheduling failed. Please restart vibe."
+    assert "Restart scheduling failed" in result["output"]
+    assert "bad launcher" in result["output"]
+
+
+def test_do_upgrade_without_auto_restart_prepares_runtime(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+
+    def fail_restart(**kwargs):
+        raise AssertionError("schedule_restart should not run when auto_restart is disabled")
+
+    monkeypatch.setattr(api, "schedule_restart", fail_restart)
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            calls["upgrade_cmd"] = cmd
+            calls["upgrade_kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+        if cmd == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]:
+            calls["runtime_prepare_cmd"] = cmd
+            calls["runtime_prepare_kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="runtime ready", stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd}")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is True
+    assert result["restarting"] is False
+    assert result["output"] == "done\n\nruntime ready"
+    assert calls["runtime_prepare_cmd"] == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]
+    assert calls["runtime_prepare_kwargs"]["capture_output"] is True
+    assert calls["runtime_prepare_kwargs"]["text"] is True
+    assert calls["runtime_prepare_kwargs"]["timeout"] == 600  # prepare now budgets for Show Runtime + askill
+    assert calls["runtime_prepare_kwargs"]["cwd"] == calls["upgrade_kwargs"]["cwd"]
+
+
+def test_do_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+
+    def fail_restart(**kwargs):
+        raise AssertionError("schedule_restart should not run when Avibe was not running")
+
+    monkeypatch.setattr(api, "schedule_restart", fail_restart)
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            calls["upgrade_cmd"] = cmd
+            calls["upgrade_kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+        if cmd == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]:
+            calls["runtime_prepare_cmd"] = cmd
+            calls["runtime_prepare_kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="runtime ready", stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd}")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert result["restarting"] is False
+    assert result["message"] == "Upgrade successful. Please restart vibe."
+    assert calls["runtime_prepare_cmd"] == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]
+
+
+def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env={"UV_TOOL_BIN_DIR": "/custom/bin"},
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(
+        cli,
+        "build_upgrade_plan",
+        lambda **kwargs: calls.setdefault("plan_kwargs", kwargs) and plan,
+    )
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+
+    def fake_schedule_restart(**kwargs):
+        calls["restart_kwargs"] = kwargs
+        return {"job_id": "restart"}
+
+    monkeypatch.setattr(cli, "schedule_restart", fake_schedule_restart)
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            calls["cmd"] = cmd
+            calls["kwargs"] = kwargs
+        else:
+            raise AssertionError(f"unexpected subprocess command: {cmd}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli.cmd_upgrade()
+
+    assert result == 0
+    assert calls["cmd"] == plan.command
+    assert calls["kwargs"]["capture_output"] is True
+    assert calls["kwargs"]["text"] is True
+    assert calls["kwargs"]["env"] == plan.env
+    assert calls["plan_kwargs"]["target_version"] == "2.2.0"
+    assert "cwd" in calls["kwargs"], "subprocess.run must specify cwd to avoid stale venv cwd"
+    assert os.path.isabs(calls["kwargs"]["cwd"]), f"cwd must be absolute, got {calls['kwargs']['cwd']!r}"
+    assert calls["restart_kwargs"] == {
+        "delay_seconds": 0.0,
+        "vibe_path": "/custom/bin/vibe",
+        "trigger": "upgrade",
+        "prepare_show_runtime": True,
+    }
+
+
+def test_cmd_upgrade_running_runtime_honors_show_runtime_skip_for_restart(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setenv("VIBE_INSTALL_SKIP_SHOW_RUNTIME", "true")
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+
+    def fake_schedule_restart(**kwargs):
+        calls["restart_kwargs"] = kwargs
+        return {"job_id": "restart"}
+
+    monkeypatch.setattr(cli, "schedule_restart", fake_schedule_restart)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="done", stderr=""),
+    )
+
+    assert cli.cmd_upgrade() == 0
+    assert calls["restart_kwargs"]["prepare_show_runtime"] is False
+
+
+def test_cmd_upgrade_reports_restart_scheduling_failure_as_partial_success(monkeypatch, capsys):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+
+    def fail_restart(**kwargs):
+        raise RuntimeError("bad launcher")
+
+    monkeypatch.setattr(cli, "schedule_restart", fail_restart)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="done", stderr=""),
+    )
+
+    assert cli.cmd_upgrade() == 2
+    output = capsys.readouterr().out
+    assert "Upgrade installed, but restart scheduling failed." in output
+    assert "Restart error: bad launcher" in output
+    assert "Run `vibe restart` to use the new version." in output
+    assert "Upgrade failed" not in output
+
+
+def test_cmd_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
+
+    def fail_restart(**kwargs):
+        raise AssertionError("schedule_restart should not run when Avibe was not running")
+
+    monkeypatch.setattr(cli, "schedule_restart", fail_restart)
+
+    def fake_run(cmd, **kwargs):
+        if cmd == plan.command:
+            calls["cmd"] = cmd
+            calls["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+        if cmd == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]:
+            calls["runtime_prepare_cmd"] = cmd
+            calls["runtime_prepare_kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="runtime ready", stderr="")
+        raise AssertionError(f"unexpected subprocess command: {cmd}")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.cmd_upgrade() == 0
+    assert calls["cmd"] == plan.command
+    assert calls["runtime_prepare_cmd"] == ["/custom/bin/vibe", "runtime", "prepare", "--strict"]
+
+
+def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, capsys):
+    calls: dict[str, Any] = {}
+
+    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": "metadata unavailable", "has_update": False, "latest": None},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: {"job_id": "restart"})
+    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
+
+    def execute(plan, **kwargs):
+        calls["plan"] = plan
+        return subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(cli, "execute_upgrade_plan", execute)
+
+    assert cli.cmd_upgrade() == 0
+    assert "Attempting upgrade anyway..." in capsys.readouterr().out
+    assert calls["plan"].command[-1] == "avibe-os"
 
 
 PREVIEW_VERSION = "3.0.16rc1"
@@ -917,50 +1350,6 @@ def _installed_from(monkeypatch, origin: str | None) -> None:
     """Record where the installer says this copy of core came from."""
 
     monkeypatch.setattr("vibe.upgrade._recorded_install_origin", lambda _package: origin)
-
-
-
-
-def test_an_official_prerelease_on_pypi_keeps_core_on_its_index(monkeypatch):
-    # `publish.yml` accepts official `vX.Y.ZrcN` tags and publishes them to
-    # PyPI. Such a build carries a version indistinguishable from a `gh-v*`
-    # one, so only its origin can say that `gh-v3.0.16rc1` was never created.
-    _installed_from(monkeypatch, None)
-
-    assert release_asset_specs(PREVIEW_VERSION) is None
-
-
-
-
-@pytest.mark.parametrize(
-    ("origin", "version"),
-    [
-        # An index install records no origin at all: it is repairable by name.
-        (None, PREVIEW_VERSION),
-        ("", PREVIEW_VERSION),
-        # Somewhere that is not a release asset of this repository.
-        ("https://example.com/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
-        ("https://github.com/other/repo/releases/download/gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
-        ("file:///tmp/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
-        ("https://github.com/avibe-bot/avibe/releases/download/avibe_os-3.0.16rc1-py3-none-any.whl", PREVIEW_VERSION),
-        (
-            "https://github.com/avibe-bot/avibe/releases/download/gh-v3.0.16rc1/nested/avibe_os-3.0.16rc1-py3-none-any.whl",
-            PREVIEW_VERSION,
-        ),
-        (
-            "https://github.com/avibe-bot/avibe/releases/download/../gh-v3.0.16rc1/avibe_os-3.0.16rc1-py3-none-any.whl",
-            PREVIEW_VERSION,
-        ),
-        (PREVIEW_CORE_URL, "3.0.16rc2"),
-        (PREVIEW_CORE_URL, "3.0.16"),
-        (PREVIEW_CORE_URL, ""),
-        (PREVIEW_CORE_URL, "not-a-version"),
-    ],
-)
-def test_an_origin_that_cannot_name_this_pair_cannot_redirect_repair(monkeypatch, origin, version):
-    _installed_from(monkeypatch, origin)
-
-    assert release_asset_specs(version) is None
 
 
 def test_a_missing_or_unreadable_origin_record_reads_as_an_index_install(monkeypatch):
@@ -995,10 +1384,6 @@ def test_a_recorded_origin_is_read_from_the_installers_own_pep_610_record(monkey
     monkeypatch.setattr("importlib.metadata.distribution", lambda _name: _Distribution())
 
     assert vibe_upgrade._recorded_install_origin("avibe-os") == PREVIEW_CORE_URL
-
-
-
-
 
 
 def _metadata_records(monkeypatch, distribution: str, version: str) -> None:
@@ -1119,7 +1504,6 @@ def test_an_unknown_install_shape_is_never_forced_on_a_guess(monkeypatch, case, 
 
 def test_exact_package_spec_uses_the_explicit_distribution() -> None:
     assert pinned_package_spec("3.0.10", package_name="avibe-os") == "avibe-os==3.0.10"
-
 
 
 def test_build_upgrade_plan_finds_uv_outside_current_path(monkeypatch):
@@ -1449,22 +1833,6 @@ def test_get_restart_environment_normalizes_relative_pythonpath_entries(monkeypa
     assert env["PYTHONPATH"] == f"{source_root}{os.pathsep}{tmp_path}{os.pathsep}{tmp_path / 'src'}"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_api_runtime_process_was_running_checks_service_and_ui_pid_files(monkeypatch, tmp_path):
     service_pid_path = tmp_path / "service.pid"
     ui_pid_path = tmp_path / "ui.pid"
@@ -1504,14 +1872,6 @@ def test_cli_runtime_process_was_running_uses_service_process_state(monkeypatch)
     assert cli._runtime_process_was_running() is True
 
 
-
-
-
-
-
-
-
-
 def test_cmd_upgrade_skips_install_when_already_latest(monkeypatch):
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": False, "latest": "2.2.0"})
 
@@ -1523,48 +1883,11 @@ def test_cmd_upgrade_skips_install_when_already_latest(monkeypatch):
     assert cli.cmd_upgrade() == 0
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
     monkeypatch.setattr(
         "config.v2_config.V2Config.load",
         lambda: (_ for _ in ()).throw(FileNotFoundError()),
     )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_get_safe_cwd_returns_absolute_existing_dir():
@@ -1579,3 +1902,152 @@ def test_get_safe_cwd_falls_back_when_home_invalid(monkeypatch):
     assert os.path.isabs(cwd)
     assert os.path.isdir(cwd)
     assert cwd != "/nonexistent_dir_for_test"
+
+
+@pytest.mark.parametrize("launcher", (None, "/tmp/uv/tools/avibe-os/bin/vibe"))
+def test_exact_uv_repair_without_a_stable_launcher_fails_before_mutation(monkeypatch, launcher):
+    monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv")
+    plan = build_upgrade_plan(
+        python_executable="/tmp/uv/tools/avibe-os/bin/python",
+        vibe_path=launcher, version="3.0.14",
+        base_env={"PATH": "/usr/bin"},
+    )
+    assert plan.activation is None
+    assert plan.preflight_error
+    run = Mock()
+    with pytest.raises(ValueError, match="stable vibe launcher"):
+        execute_upgrade_plan(plan, run=run)
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize("tag", [
+    "v3.1.0", "v3.2.0a1", "v3.2.0b1", "v3.2.0rc1", "v3.2.0.dev0",
+    "v3.2.0.dev1", "v3.2.0.post1",
+])
+@pytest.mark.parametrize("method", ["pip", "uv"])
+@pytest.mark.parametrize("selection", ["exact", "forward-pin", "forward-latest"])
+def test_official_index_release_reaches_every_install_command(
+    monkeypatch, tmp_path, tag, method, selection,
+):
+    from scripts.release_package_version import package_version_from_release_tag
+
+    version = package_version_from_release_tag(tag)
+    # No PEP610 record is the normal index-install shape, including dev.
+    _installed_from(monkeypatch, None)
+    monkeypatch.setattr(vibe_upgrade, "is_uv_tool_install", lambda _: method == "uv")
+    monkeypatch.setattr(vibe_upgrade, "is_legacy_uv_tool_install", lambda _: False)
+    monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv" if method == "uv" else None)
+    monkeypatch.setattr(vibe_upgrade, "atomic_uv_install_root", lambda: tmp_path / "generations")
+    core = "avibe-os" if selection == "forward-latest" else f"avibe-os=={version}"
+    source = {"version": version} if selection == "exact" else {
+        "package_spec": core, "target_version": version,
+    }
+    plan = build_upgrade_plan(
+        python_executable="/fixture/bin/python",
+        vibe_path=str(tmp_path / "bin" / "vibe"),
+        base_env={"PATH": "/usr/bin"},
+        **source,
+    )
+    assert plan.method == method
+    assert plan.preflight_error is None
+    assert (plan.activation is not None) is (method == "uv")
+    commands = [c for c in (plan.command, plan.preflight_command, plan.preflight_fallback_command) if c]
+    assert commands
+    for command in commands:
+        assert core in command
+        assert not any("avibe-memory" in item for item in command)
+
+
+@pytest.mark.parametrize("tag", [
+    "gh-v3.2.0.dev1", "gh-v3.2.0-dev1", "gh-v03.02.00dev01", "v3.2.0.dev1",
+])
+@pytest.mark.parametrize("method", ["pip", "uv"])
+@pytest.mark.parametrize("exact", [False, True], ids=["forward", "exact"])
+@pytest.mark.parametrize("named", [False, True], ids=["raw-url", "named-url"])
+def test_published_dev_origin_reaches_every_install_command(
+    monkeypatch, tmp_path, tag, method, exact, named,
+):
+    from scripts.release_package_version import package_version_from_release_tag
+
+    version = package_version_from_release_tag(tag)
+    release_base = "https://github.com/avibe-bot/avibe/releases/download"
+    directory = f"{release_base}/{tag}"
+    core = f"{directory}/avibe_os-{version}-py3-none-any.whl"
+    _installed_from(monkeypatch, core)
+
+    # A forward plan must use the selected target, not this older installed
+    # origin. This exercises the artifact-version gate as well as URL selection.
+    _installed_from(monkeypatch, PREVIEW_CORE_URL)
+    monkeypatch.setattr(vibe_upgrade, "is_uv_tool_install", lambda _: method == "uv")
+    monkeypatch.setattr(vibe_upgrade, "is_legacy_uv_tool_install", lambda _: False)
+    monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: "/usr/bin/uv" if method == "uv" else None)
+    monkeypatch.setattr(vibe_upgrade, "atomic_uv_install_root", lambda: tmp_path / "generations")
+    launcher = tmp_path / "bin" / "vibe"
+    spec = f"avibe-os @ {core}" if named else core
+    source = {"version": version, "core_spec": spec} if exact else {
+        "package_spec": spec, "target_version": "9.0.0",
+    }
+    plan = build_upgrade_plan(
+        python_executable="/fixture/bin/python",
+        vibe_path=str(launcher),
+        base_env={"PATH": "/usr/bin"},
+        **source,
+    )
+    assert plan.method == method
+    assert plan.preflight_error is None
+    assert (plan.activation is not None) is (method == "uv")
+    commands = [c for c in (plan.command, plan.preflight_command, plan.preflight_fallback_command) if c]
+    assert commands
+    for command in commands:
+        assert spec in command
+        assert not any("9.0.0" in item or "[memory]" in item for item in command)
+
+
+def test_an_exact_plan_installs_the_named_sources_instead_of_index_pins(monkeypatch):
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+
+    shared = {
+        "base_env": {"PATH": "/usr/bin"},
+        "version": PREVIEW_VERSION,
+        "package_name": "avibe-os",
+        "core_spec": PREVIEW_CORE_URL,
+    }
+    uv_plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path="/custom/bin/vibe",
+        **shared,
+    )
+    assert uv_plan.command == [
+        "/usr/local/bin/uv",
+        "tool",
+        "install",
+        PREVIEW_CORE_URL,
+        "--force",
+    ]
+    pip_plan = build_upgrade_plan(python_executable="/usr/bin/python3", uv_path=None, **shared)
+    assert pip_plan.command == [
+        "/usr/bin/python3",
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        PREVIEW_CORE_URL,
+    ]
+
+    # Every command an installer runs has to reach the release. A pin left in
+    # any one of them resolves against an index that never served this version,
+    # which is the failure the sources exist to remove.
+    for plan in (uv_plan, pip_plan):
+        commands = [
+            command
+            for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command)
+            if command
+        ]
+        assert commands
+        for command in commands:
+            assert PREVIEW_CORE_URL in command
+            assert f"avibe-os=={PREVIEW_VERSION}" not in command
+        assert "--upgrade" not in plan.command
+        assert FORCES_THE_INSTALL[plan.method] in plan.command

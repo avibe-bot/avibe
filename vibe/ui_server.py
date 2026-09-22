@@ -30,9 +30,11 @@ import psutil
 from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
+from fastapi.exception_handlers import http_exception_handler
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.routing import Match
 
 from vibe.ui_compat import (
     CompatApp,
@@ -96,6 +98,20 @@ class _ShowEventDispatchOutcome(str, Enum):
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def unknown_api_exception(request: FastAPIRequest, exc: StarletteHTTPException):
+    """The SPA catch-all must not turn an absent API into method-not-allowed."""
+    if exc.status_code == 405 and request.url.path.startswith("/api/"):
+        known_path = any(
+            getattr(route, "path", None) != "/{path:path}"
+            and route.matches(request.scope)[0] != Match.NONE
+            for route in app.routes
+        )
+        if not known_path:
+            return FastAPIResponse(content='{"error":"not_found"}', status_code=404, media_type="application/json")
+    return await http_exception_handler(request, exc)
 
 # Global server instance for graceful shutdown on reload
 _server = None
@@ -662,8 +678,6 @@ def _is_cli_session_activity_request() -> bool:
         _cli_local_event_token_ok()
         and re.fullmatch(r"/api/sessions/[^/]+/cli-activity", request.path or "") is not None
     )
-
-
 
 
 def _is_show_api_mutation() -> bool:
@@ -3238,7 +3252,6 @@ def status():
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
         payload = json.loads(runtime.render_status(detect_extra_processes=False))
     return jsonify(payload)
-
 
 
 @app.websocket("/ws/echo")
@@ -10199,8 +10212,6 @@ async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler
     return await app.dispatch_native_request(starlette_request, handler)
 
 
-
-
 @app.get("/api/files/list", include_in_schema=False)
 async def files_list(starlette_request: FastAPIRequest):
     async def handler():
@@ -16372,6 +16383,9 @@ def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_co
 @app.route("/<path:path>", methods=["GET", "HEAD"])
 def serve_static(path):
     """Serve static files from ui/dist, with SPA fallback to index.html."""
+    # Unknown API paths are not client-side navigation routes.
+    if path == "api" or path.startswith("api/"):
+        return jsonify({"error": "not_found"}), 404
     ui_dist = get_ui_dist_path()
 
     if path.startswith("assets/"):

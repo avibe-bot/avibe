@@ -73,7 +73,6 @@ from vibe.upgrade import (
     get_running_vibe_path,
     get_safe_cwd,
     launcher_is_current_process,
-    release_asset_specs,
     restart_is_pending,
     should_skip_show_runtime_prepare,
     UPGRADE_INSTALL_TIMEOUT_SECONDS,
@@ -1213,13 +1212,13 @@ def save_config(
     from vibe.authorization import require_instance_role
 
     context = require_instance_role(user_context, "editor")
+    payload = {key: value for key, value in payload.items() if key != "memory"}
     if not context.can_manage_instance:
         payload = editor_config_write_payload(payload)
 
     # This read-only projection is returned by GET /api/config so the browser
     # can explain a recovered load; it must never become persisted config data.
     payload = {key: value for key, value in payload.items() if key != "config_recovery"}
-    payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
     # bindings and credential lifecycle stay in sync with the persisted config.
     # Generic settings pages round-trip GET /api/config, so treat this section
@@ -1361,8 +1360,6 @@ def _require_preserved_config_access(current: V2Config, candidate: V2Config) -> 
 
     if policy(current) != policy(candidate):
         raise InstanceAuthorizationError("owner")
-
-
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
@@ -1678,6 +1675,7 @@ def editor_config_write_payload(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise ValueError("editor_config_write_invalid")
+    payload = {key: value for key, value in payload.items() if key != "memory"}
     unknown = set(payload) - _EDITOR_CONFIG_WRITE_FIELDS
     if unknown:
         raise ValueError("editor_config_write_forbidden")
@@ -8808,7 +8806,6 @@ _MODEL_HUB_ENGINE_PLATFORM_UNSUPPORTED_REASON = (
 )
 
 
-
 def _published_running_version() -> str | None:
     from packaging.version import InvalidVersion, Version
     from vibe import __version__
@@ -8822,18 +8819,6 @@ def _published_running_version() -> str | None:
     # Official index releases include dev versions. Source deployment is
     # rejected independently by readiness; a dev suffix is not provenance.
     return str(version)
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _model_hub_engine_dependency_status() -> dict:
@@ -9132,8 +9117,6 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
     return {"ok": True, "deps": [deps[dep] for dep in DEPENDENCY_IDS if dep in requested]}
 
 
-
-
 def _prepare_show_runtime_job() -> dict:
     try:
         from core.show_runtime import get_show_runtime_manager
@@ -9169,28 +9152,6 @@ def _prepare_show_runtime_job() -> dict:
         return result
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc), "output": None}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _prepare_tmux_job() -> dict:

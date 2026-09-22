@@ -705,7 +705,7 @@ class SessionTurnManager:
         raw_session_id: str,
         snapshot: object,
     ) -> bool:
-        """Revalidate a retained generation before Memory attribution."""
+        """Revalidate a retained session lifecycle generation."""
 
         if not isinstance(raw_session_id, str) or not raw_session_id:
             raise ValueError("session lifecycle requires a session id")

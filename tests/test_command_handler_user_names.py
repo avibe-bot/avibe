@@ -319,6 +319,51 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(controller.im_client.sent_messages), 1)
 
+    async def _run_new_with_lifecycle_error(
+        self,
+        error: Exception,
+        *,
+        language: str,
+    ) -> _StubController:
+        controller = _StubController({"display_name": "Alex"})
+        controller.config.language = language
+
+        class _TurnManager:
+            async def run_session_lifecycle(
+                self,
+                _raw_session_id,
+                _operation,
+                *,
+                deadline_seconds,
+            ):
+                self_outer.assertEqual(deadline_seconds, 0.0)
+                raise error
+
+        self_outer = self
+        controller.session_turns = _TurnManager()
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        await handler.handle_new(context)
+        return controller
+
+    async def test_new_preserves_generic_error_detail(self):
+        controller = await self._run_new_with_lifecycle_error(
+            RuntimeError("provider unavailable"),
+            language="zh",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "❌ 清除会话时出错：provider unavailable")],
+        )
+
+
     async def test_new_command_reports_paused_bound_definitions(self):
         """D2 — `/new` pauses definitions pinned to the session it clears, and says so.
 

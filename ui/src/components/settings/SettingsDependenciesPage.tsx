@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -55,6 +55,7 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const { checks, refresh: refreshDependencies, checking } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
   // A closed backend reason/message is often a snake_case token rather than human copy. Localize any
   // token-shaped string through the shared errors namespace so the user never
   // sees a raw identifier; fall back to a human message or the generic failure.

@@ -26,8 +26,6 @@ from core.caller_context import (
     AVIBE_SESSION_ID_ENV,
     caller_env_for_platform_payload,
     validated_caller_env_snapshot,
-    AVIBE_CALLER_SESSION_PROOF_ENV,
-    issue_caller_session_proof,
 )
 from core.message_output import stop_output_for, terminal_output_for
 from core.managed_skills import (
@@ -1507,9 +1505,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 or self.controller.config.platform
             )
 
-            # Resolve admission once: it associates or clears this turn's Memory
-            # CLI session scope as a side effect, so a second call per turn would
-            # repeat that write.
+            # Bind this turn's caller identity to the backend process.
             caller_context_env = caller_env_for_platform_payload(
                 request.context.platform_specific or {},
                 message=request.context,
@@ -2618,14 +2614,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_snapshot.get(_CALLER_CONTEXT_ENV_SNAPSHOT_KEY)
             )
             restored_context = restored_context_from_poll_info(poll_info)
-            restored_session_id = str(
-                (steering_snapshot.get("target_session_id") if isinstance(steering_snapshot, dict) else None)
-                or poll_info.base_session_id or ""
-            )
-            if logical_turn_id and restored_session_id and restored_caller_env.get(AVIBE_SESSION_ID_ENV) == restored_session_id:
-                proof = issue_caller_session_proof(restored_session_id, turn_id=logical_turn_id)
-                if proof:
-                    restored_caller_env[AVIBE_CALLER_SESSION_PROOF_ENV] = proof
             if (
                 poll_platform == "avibe"
                 and str(restored_context.user_id or "").startswith("remote:")
