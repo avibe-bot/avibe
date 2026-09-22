@@ -155,6 +155,9 @@ class ModelHubScenarioAdapter:
     async def credential_auth_scheme(self, credential_ref: str) -> str | None:
         return None
 
+    async def credential_address(self, credential_ref: str) -> str | None:
+        return None
+
     async def provision_transient_credential(
         self,
         vendor: str,

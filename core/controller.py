@@ -689,6 +689,19 @@ class Controller:
                 raise RuntimeError("Backend restart coordinator is unavailable")
             await coordinator.request_restart(backend)
 
+        async def repair_model_selections(addresses: frozenset[str]) -> int:
+            # A Vibe Agent's model, a channel's routing override, and a
+            # session's pin are each a copy of an id the Model Hub menu once
+            # offered. The hub proves which addresses are addresses; this
+            # process owns the rows that copied them.
+            from storage.model_selection_addresses import (
+                remove_credential_addresses_from_selections,
+            )
+
+            return await asyncio.to_thread(
+                remove_credential_addresses_from_selections, addresses
+            )
+
         self.model_hub_service = create_default_service(
             adapter=self.model_hub_engine_adapter,
             requested_model_override=default_vibe_agent_model,
@@ -697,6 +710,7 @@ class Controller:
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=backend_catalog_changed,
+            repair_model_selections=repair_model_selections,
         )
         set_remote_catalog_refresh_completed(
             self._model_hub_snapshot_refresh_completed
