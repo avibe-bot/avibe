@@ -1798,6 +1798,645 @@ class AudioAsrConfig:
         _refuse_values_naming_nothing("audio_asr", self)
 
 
+_MEMORY_MAX_URL_BYTES = 2048
+_MEMORY_MAX_MODEL_BYTES = 512
+_MEMORY_MAX_API_KEY_BYTES = 16 * 1024
+_MEMORY_CLOUD_MODEL_ALIAS = "avibe-cloud-chat"
+_MEMORY_CLOUD_MULTIMODAL_ALIAS = "avibe-cloud-multimodal"
+
+MemoryMode = Literal["platform", "custom"]
+MemoryCloudScope = Literal["organization", "platform"]
+MemoryCloudLlmSource = Literal["dedicated", "chat_fallback"]
+MemoryRerankProvider = Literal["deepinfra", "vllm", "dashscope"]
+MEMORY_RERANK_PROVIDERS = frozenset(get_args(MemoryRerankProvider))
+DEFAULT_MEMORY_RERANK_PROVIDER: MemoryRerankProvider = "deepinfra"
+DASHSCOPE_RERANK_MODEL = "gte-rerank-v2"
+
+
+@dataclass
+class MemoryEndpointConfig:
+    """One write-only processing endpoint used by the local memory sidecar."""
+
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = field(default=None, repr=False)
+    provider: Optional[str] = None
+
+    def validate(self, *, name: str) -> None:
+        self.base_url = _validate_memory_url(
+            self.base_url,
+            path=f"memory.processing.{name}.base_url",
+        )
+        self.model = _validate_memory_text(
+            self.model,
+            name=f"memory.processing.{name}.model",
+            maximum=_MEMORY_MAX_MODEL_BYTES,
+        )
+        self.api_key = _validate_memory_key(
+            self.api_key,
+            path=f"memory.processing.{name}.api_key",
+        )
+        if name != "rerank":
+            self.provider = None
+            return
+        if not any((self.base_url, self.model, self.api_key)):
+            self.provider = None
+            return
+        provider = (self.provider or "").strip() or _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
+        if provider not in MEMORY_RERANK_PROVIDERS:
+            raise ValueError(
+                "Memory rerank endpoint provider must be deepinfra, vllm, or dashscope"
+            )
+        if provider == "dashscope" and self.model != DASHSCOPE_RERANK_MODEL:
+            raise ValueError(
+                "Memory DashScope rerank endpoint model must be gte-rerank-v2"
+            )
+        self.provider = provider
+
+    def complete(self) -> bool:
+        return bool(self.base_url and self.model and self.api_key)
+
+    def rerank_provider(self) -> MemoryRerankProvider:
+        provider = (self.provider or "").strip()
+        if provider in MEMORY_RERANK_PROVIDERS:
+            return provider
+        return _inferred_memory_rerank_provider(
+            base_url=self.base_url,
+            model=self.model,
+        )
+
+
+@dataclass
+class MemoryProcessingConfig:
+    llm: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+    embedding: MemoryEndpointConfig = field(default_factory=MemoryEndpointConfig)
+    rerank: Optional[MemoryEndpointConfig] = None
+    multimodal: Optional[MemoryEndpointConfig] = None
+
+    def validate(self) -> None:
+        self.llm.validate(name="llm")
+        self.embedding.validate(name="embedding")
+        if self.rerank is not None:
+            self.rerank.validate(name="rerank")
+            if not any(
+                (
+                    self.rerank.base_url,
+                    self.rerank.model,
+                    self.rerank.api_key,
+                )
+            ):
+                self.rerank = None
+            elif not self.rerank.complete():
+                raise ValueError(
+                    "Memory rerank endpoint must include base_url, model, and api_key"
+                )
+        if self.multimodal is not None:
+            self.multimodal.validate(name="multimodal")
+            if not any(
+                (
+                    self.multimodal.base_url,
+                    self.multimodal.model,
+                    self.multimodal.api_key,
+                )
+            ):
+                self.multimodal = None
+            elif not self.multimodal.complete():
+                raise ValueError(
+                    "Memory multimodal endpoint must include base_url, model, and api_key"
+                )
+
+
+@dataclass
+class MemoryCloudCapabilities:
+    asr: bool = False
+    chat: bool = False
+    embedding: bool = False
+    multimodal: bool = False
+    # Older persisted cloud caches did not have the effective Memory LLM
+    # capability. ``None`` keeps that shape distinguishable while the helper
+    # methods treat it as Chat fallback until the next status sync.
+    memory_llm: bool | None = None
+
+    def validate(self) -> None:
+        if any(
+            not isinstance(value, bool)
+            for value in (
+                self.asr,
+                self.chat,
+                self.embedding,
+                self.multimodal,
+            )
+        ) or (self.memory_llm is not None and not isinstance(self.memory_llm, bool)):
+            raise ValueError("Config 'memory.cloud.capabilities' values must be booleans")
+
+    def memory_available(self) -> bool:
+        effective_memory_llm = self.chat if self.memory_llm is None else self.memory_llm
+        return effective_memory_llm and self.embedding
+
+
+@dataclass
+class MemoryCloudConfig:
+    """Cached Cloud Model Service resolution and write-only model key."""
+
+    scope: MemoryCloudScope | None = None
+    capabilities: MemoryCloudCapabilities = field(default_factory=MemoryCloudCapabilities)
+    memory_llm_source: MemoryCloudLlmSource | None = None
+    embedding_identity: str | None = None
+    revision: int | None = None
+    quota_enforced: bool = False
+    model_access_key: str | None = field(default=None, repr=False)
+    proxy_base_url: str | None = None
+    source_instance_id: str = ""
+    organization_attached: bool = False
+    transition_notice_pending: bool = False
+    applied_embedding_identity: str | None = None
+    runtime_apply_pending: bool = False
+
+    def validate(self) -> None:
+        if self.scope is not None and self.scope not in get_args(MemoryCloudScope):
+            raise ValueError("Config 'memory.cloud.scope' must be 'organization', 'platform', or null")
+        if self.memory_llm_source is not None and self.memory_llm_source not in get_args(
+            MemoryCloudLlmSource
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' must be 'dedicated', 'chat_fallback', or null"
+            )
+        self.capabilities.validate()
+        if self.memory_llm_source == "dedicated" and self.capabilities.memory_llm is False:
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' dedicated requires memory_llm"
+            )
+        if (
+            self.memory_llm_source == "chat_fallback"
+            and self.capabilities.memory_llm is not None
+            and self.capabilities.memory_llm != self.capabilities.chat
+        ):
+            raise ValueError(
+                "Config 'memory.cloud.memory_llm_source' chat_fallback requires chat"
+            )
+        if self.embedding_identity is not None:
+            self.embedding_identity = _validate_memory_text(
+                self.embedding_identity,
+                name="memory.cloud.embedding_identity",
+                maximum=_MEMORY_MAX_MODEL_BYTES,
+            )
+        if self.applied_embedding_identity is not None:
+            self.applied_embedding_identity = _validate_memory_text(
+                self.applied_embedding_identity,
+                name="memory.cloud.applied_embedding_identity",
+                maximum=_MEMORY_MAX_MODEL_BYTES,
+            )
+        if self.revision is not None and (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 0
+        ):
+            raise ValueError("Config 'memory.cloud.revision' must be a non-negative integer or null")
+        for name, value in (
+            ("quota_enforced", self.quota_enforced),
+            ("organization_attached", self.organization_attached),
+            ("transition_notice_pending", self.transition_notice_pending),
+            ("runtime_apply_pending", self.runtime_apply_pending),
+        ):
+            if not isinstance(value, bool):
+                raise ValueError(f"Config 'memory.cloud.{name}' must be a boolean")
+        if not isinstance(self.source_instance_id, str):
+            raise ValueError("Config 'memory.cloud.source_instance_id' must be a string")
+        self.source_instance_id = self.source_instance_id.strip()
+        if len(self.source_instance_id.encode("utf-8")) > _MEMORY_MAX_MODEL_BYTES:
+            raise ValueError("Config 'memory.cloud.source_instance_id' is invalid")
+        if self.proxy_base_url is not None:
+            self.proxy_base_url = _validate_memory_url(
+                self.proxy_base_url,
+                path="memory.cloud.proxy_base_url",
+            )
+        if self.model_access_key is not None:
+            self.model_access_key = _validate_memory_key(
+                self.model_access_key,
+                path="memory.cloud.model_access_key",
+            )
+            if not self.model_access_key.startswith("mak_"):
+                raise ValueError("Config 'memory.cloud.model_access_key' is invalid")
+
+    def memory_capability_available(self) -> bool:
+        return bool(
+            self.capabilities.memory_available()
+            and self.embedding_identity
+            and self.proxy_base_url
+        )
+
+    def runtime_ready(self) -> bool:
+        return self.memory_capability_available() and bool(self.model_access_key)
+
+
+@dataclass
+class MemoryConfig:
+    """Persisted local EverOS configuration; credentials are API-write-only."""
+
+    enabled: bool = False
+    profile_enabled: bool = True
+    mode: MemoryMode | None = None
+    processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
+    cloud: MemoryCloudConfig = field(default_factory=MemoryCloudConfig)
+    # Released recovery markers collapse into one durable repair fence. It is
+    # persisted internally until a successful destructive Repair clears it,
+    # but never exposed through public config projections.
+    legacy_needs_repair: bool = field(default=False, repr=False, compare=False)
+
+    def validate(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("Config 'memory.enabled' must be a boolean")
+        if not isinstance(self.profile_enabled, bool):
+            raise ValueError("Config 'memory.profile_enabled' must be a boolean")
+        if self.mode is not None and self.mode not in get_args(MemoryMode):
+            raise ValueError("Config 'memory.mode' must be 'platform', 'custom', or null")
+        if not isinstance(self.legacy_needs_repair, bool):
+            raise ValueError("Config 'memory' legacy repair state must be a boolean")
+        self.processing.validate()
+        self.cloud.validate()
+        if (
+            self.enabled
+            and not self.cloud_runtime_selected()
+            and not self.custom_processing_complete()
+        ):
+            raise ValueError("Both Memory processing endpoints must be complete before enabling Memory")
+
+    def custom_processing_complete(self) -> bool:
+        return self.processing.llm.complete() and self.processing.embedding.complete()
+
+    def cloud_runtime_selected(self) -> bool:
+        if self.cloud.scope == "organization":
+            # A pending enterprise transition is deliberately fenced on the
+            # last applied custom identity until the user accepts a data reset.
+            return self.cloud.organization_attached
+        # Mode owns the runtime source. A missing or recovered cloud cache must
+        # pause platform Memory, never expose saved custom endpoints as fallback.
+        return self.mode == "platform"
+
+    def runtime_source(self) -> Literal["cloud", "custom", "unavailable"]:
+        if self.cloud_runtime_selected():
+            return "cloud" if self.cloud.runtime_ready() else "unavailable"
+        if self.custom_processing_complete():
+            return "custom"
+        return "unavailable"
+
+    def settings_mode(self) -> Literal["organization", "platform", "custom"]:
+        if self.cloud.scope == "organization":
+            # An organization without the complete Memory pair cannot replace
+            # a released working custom setup. Fresh installs still get the
+            # read-only managed state instead of a misleading platform fallback.
+            if self.custom_processing_complete() and not (
+                self.cloud.memory_capability_available()
+                or self.cloud.organization_attached
+                or self.cloud.transition_notice_pending
+            ):
+                return "custom"
+            return "organization"
+        if self.mode == "platform":
+            return "platform"
+        return "custom"
+
+    def runtime_processing(self) -> MemoryProcessingConfig:
+        """Return the sidecar-facing endpoints without changing saved custom slots."""
+
+        if not self.cloud_runtime_selected():
+            return self.processing
+        if not self.cloud.runtime_ready():
+            return MemoryProcessingConfig()
+        base_url = self.cloud.proxy_base_url
+        key = self.cloud.model_access_key
+        # A changed managed embedding identity is not admitted until the user
+        # accepts local data loss. Keep the last applied identity as the
+        # sidecar-facing baseline while the control plane reports the change.
+        embedding_identity = (
+            self.cloud.applied_embedding_identity
+            or self.cloud.embedding_identity
+        )
+        multimodal = None
+        if self.cloud.capabilities.multimodal:
+            multimodal = MemoryEndpointConfig(
+                base_url=f"{base_url}/mm",
+                model=_MEMORY_CLOUD_MULTIMODAL_ALIAS,
+                api_key=key,
+            )
+        return MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url=base_url,
+                model=_MEMORY_CLOUD_MODEL_ALIAS,
+                api_key=key,
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url=base_url,
+                model=f"avibe-cloud-embedding-{embedding_identity}",
+                api_key=key,
+            ),
+            rerank=None,
+            multimodal=multimodal,
+        )
+
+    def runtime_embedding_identity(self) -> tuple[str, str | None, str | None]:
+        if self.cloud_runtime_selected():
+            # Capability removal clears the live status identity, but the last
+            # applied value remains the comparison baseline for a checked resume.
+            return (
+                "cloud",
+                self.cloud.applied_embedding_identity
+                or self.cloud.embedding_identity,
+                None,
+            )
+        return (
+            "custom",
+            self.processing.embedding.base_url,
+            self.processing.embedding.model,
+        )
+
+    def effective_multimodal_available(self) -> bool:
+        if self.cloud_runtime_selected():
+            # Cloud chat is the declared fallback when no dedicated mm slot exists;
+            # a dedicated multimodal slot remains valid without Chat.
+            return self.cloud.runtime_ready() and (
+                self.cloud.capabilities.multimodal or self.cloud.capabilities.chat
+            )
+        return bool(self.processing.multimodal and self.processing.multimodal.complete())
+
+
+def _inferred_memory_rerank_provider(
+    *,
+    base_url: Optional[str],
+    model: Optional[str] = None,
+) -> MemoryRerankProvider:
+    hostname = (urlsplit((base_url or "").strip()).hostname or "").lower()
+    # Legacy omitted-provider configs meant DeepInfra. Only an unambiguous
+    # Bailian workspace host may change that default on upgrade.
+    if hostname.endswith(".maas.aliyuncs.com"):
+        return "dashscope"
+    return DEFAULT_MEMORY_RERANK_PROVIDER
+
+
+def _validate_memory_url(value: object, *, path: str) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config '{path}' must be a string")
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate.encode("utf-8")) > _MEMORY_MAX_URL_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+    ):
+        raise ValueError(f"Config '{path}' is invalid")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"Config '{path}' is invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Config '{path}' is invalid") from exc
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError(f"Config '{path}' is invalid")
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ValueError(f"Config '{path}' requires HTTPS")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def _validate_memory_text(value: object, *, name: str, maximum: int) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config '{name}' must be a string")
+    candidate = value.strip()
+    if (
+        not candidate
+        or len(candidate.encode("utf-8")) > maximum
+        or any(ord(character) < 32 or ord(character) == 127 for character in candidate)
+        or _looks_like_ui_mask(candidate)
+    ):
+        raise ValueError(f"Config '{name}' is invalid")
+    return candidate
+
+
+def _validate_memory_key(value: object, *, path: str) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"Config '{path}' must be a string")
+    if (
+        len(value.encode("utf-8")) > _MEMORY_MAX_API_KEY_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or _looks_like_ui_mask(value)
+    ):
+        raise ValueError(f"Config '{path}' is invalid")
+    return value
+
+
+def _looks_like_ui_mask(value: str) -> bool:
+    stripped = value.strip()
+    return bool(stripped) and all(character in {"*", "•", "x", "X"} for character in stripped)
+
+
+def memory_config_to_payload(
+    memory: MemoryConfig,
+    *,
+    include_secrets: bool = False,
+    include_internal: bool = False,
+) -> dict:
+    """Project Memory config without ever returning a reusable API key."""
+
+    def endpoint_payload(
+        endpoint: MemoryEndpointConfig,
+        *,
+        include_provider: bool = False,
+    ) -> dict:
+        key = endpoint.api_key
+        payload = {
+            "base_url": endpoint.base_url,
+            "model": endpoint.model,
+            "api_key": key if include_secrets else None,
+            "has_api_key": bool(key),
+        }
+        if include_provider:
+            payload["provider"] = endpoint.rerank_provider()
+        return payload
+
+    processing = {
+        "llm": endpoint_payload(memory.processing.llm),
+        "embedding": endpoint_payload(memory.processing.embedding),
+    }
+    if memory.processing.rerank is not None:
+        processing["rerank"] = endpoint_payload(
+            memory.processing.rerank,
+            include_provider=True,
+        )
+    if memory.processing.multimodal is not None:
+        processing["multimodal"] = endpoint_payload(memory.processing.multimodal)
+    payload = {
+        "enabled": memory.enabled,
+        "profile_enabled": memory.profile_enabled,
+        "mode": memory.mode,
+        "processing": processing,
+        "cloud": {
+            "scope": memory.cloud.scope,
+            "capabilities": {
+                "asr": memory.cloud.capabilities.asr,
+                "chat": memory.cloud.capabilities.chat,
+                "embedding": memory.cloud.capabilities.embedding,
+                "multimodal": memory.cloud.capabilities.multimodal,
+                "memory_llm": memory.cloud.capabilities.memory_llm,
+            },
+            "memory_llm_source": memory.cloud.memory_llm_source,
+            "embedding_identity": memory.cloud.embedding_identity,
+            "revision": memory.cloud.revision,
+            "quota_enforced": memory.cloud.quota_enforced,
+            "model_access_key": (
+                memory.cloud.model_access_key if include_secrets else None
+            ),
+            "has_model_access_key": bool(memory.cloud.model_access_key),
+            "proxy_base_url": memory.cloud.proxy_base_url,
+            "source_instance_id": memory.cloud.source_instance_id,
+            "organization_attached": memory.cloud.organization_attached,
+            "transition_notice_pending": memory.cloud.transition_notice_pending,
+            "applied_embedding_identity": memory.cloud.applied_embedding_identity,
+            "runtime_apply_pending": memory.cloud.runtime_apply_pending,
+        },
+    }
+    if include_internal and memory.legacy_needs_repair:
+        payload["repair_required"] = True
+    return payload
+
+
+def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Config '{name}' must be an object")
+    return value
+
+
+def memory_config_from_payload(payload: object) -> MemoryConfig:
+    """Parse Memory config and collapse released recovery fields into one fence."""
+
+    payload = _optional_memory_object(payload, name="memory")
+    processing_payload = _optional_memory_object(
+        payload.get("processing", {}),
+        name="memory.processing",
+    )
+    llm_payload = _optional_memory_object(
+        processing_payload.get("llm", {}),
+        name="memory.processing.llm",
+    )
+    embedding_payload = _optional_memory_object(
+        processing_payload.get("embedding", {}),
+        name="memory.processing.embedding",
+    )
+    rerank_payload = None
+    if "rerank" in processing_payload:
+        rerank_payload = _optional_memory_object(
+            processing_payload["rerank"],
+            name="memory.processing.rerank",
+        )
+    multimodal_payload = None
+    if "multimodal" in processing_payload:
+        multimodal_payload = _optional_memory_object(
+            processing_payload["multimodal"],
+            name="memory.processing.multimodal",
+        )
+    cloud_payload = _optional_memory_object(
+        payload.get("cloud", {}),
+        name="memory.cloud",
+    )
+    cloud_capabilities_payload = _optional_memory_object(
+        cloud_payload.get("capabilities", {}),
+        name="memory.cloud.capabilities",
+    )
+
+    repair_required = payload.get("repair_required", False)
+    if not isinstance(repair_required, bool):
+        raise ValueError("Config 'memory.repair_required' must be a boolean")
+    legacy_pending = payload.get("embedding_change_pending", False)
+    if not isinstance(legacy_pending, bool):
+        raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
+    legacy_intent = payload.get("recovery_intent")
+    if legacy_intent is not None and (
+        not isinstance(legacy_intent, str)
+        or legacy_intent not in {"rebuild", "factory_reset"}
+    ):
+        raise ValueError(
+            "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
+        )
+    transition_rebuild_owned = cloud_payload.get("transition_rebuild_owned", False)
+    if not isinstance(transition_rebuild_owned, bool):
+        raise ValueError(
+            "Config 'memory.cloud.transition_rebuild_owned' must be a boolean"
+        )
+    legacy_needs_repair = bool(
+        repair_required
+        or legacy_pending
+        or legacy_intent is not None
+        or transition_rebuild_owned
+    )
+
+    memory = MemoryConfig(
+        enabled=payload.get("enabled", False),
+        profile_enabled=payload.get("profile_enabled", True),
+        mode=payload.get("mode"),
+        legacy_needs_repair=legacy_needs_repair,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                **_filter_dataclass_fields(MemoryEndpointConfig, llm_payload)
+            ),
+            embedding=MemoryEndpointConfig(
+                **_filter_dataclass_fields(MemoryEndpointConfig, embedding_payload)
+            ),
+            rerank=(
+                MemoryEndpointConfig(
+                    **_filter_dataclass_fields(MemoryEndpointConfig, rerank_payload)
+                )
+                if rerank_payload is not None
+                else None
+            ),
+            multimodal=(
+                MemoryEndpointConfig(
+                    **_filter_dataclass_fields(
+                        MemoryEndpointConfig,
+                        multimodal_payload,
+                    )
+                )
+                if multimodal_payload is not None
+                else None
+            ),
+        ),
+        cloud=MemoryCloudConfig(
+            **_filter_dataclass_fields(
+                MemoryCloudConfig,
+                {
+                    **cloud_payload,
+                    "capabilities": MemoryCloudCapabilities(
+                        **_filter_dataclass_fields(
+                            MemoryCloudCapabilities,
+                            cloud_capabilities_payload,
+                        )
+                    ),
+                },
+            )
+        ),
+    )
+    memory.validate()
+    return memory
+
+
 @dataclass
 class RuntimeConfig:
     default_cwd: str
@@ -3275,6 +3914,7 @@ class V2Config:
     slack: SlackConfig
     runtime: RuntimeConfig
     agents: AgentsConfig
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
     model_hub: ModelHubConfig = field(default_factory=ModelHubConfig)
     platform: str = "slack"
     platforms: PlatformsConfig = field(default_factory=PlatformsConfig)
@@ -3315,6 +3955,14 @@ class V2Config:
     load_warnings: ClassVar[tuple[str, ...]] = ()
     recovered_sections: ClassVar[tuple[str, ...]] = ()
     whole_config_recovery: ClassVar[bool] = False
+
+    @property
+    def memory_required(self) -> bool | None:
+        """Return the persisted Memory requirement, or None when unreadable."""
+
+        if self.whole_config_recovery:
+            return None
+        return bool(self.memory.enabled)
 
     @classmethod
     def default(cls) -> "V2Config":
@@ -3656,6 +4304,8 @@ class V2Config:
         # input: do not validate or activate it.
         # This deliberately accepts malformed values (including ``enabled``)
         # and leaves no memory data or runtime side effects.
+        memory = MemoryConfig()
+
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
             # Enable the gateway runtime on upgrade without changing the
@@ -3835,6 +4485,7 @@ class V2Config:
             platform_configs={key: value for key, value in platform_configs.items() if value is not None},
             runtime=runtime,
             agents=agents,
+            memory=memory,
             model_hub=model_hub,
             gateway=gateway,
             ui=ui,
@@ -3885,12 +4536,17 @@ class V2Config:
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with config_file_lock(path):
-            self._write_locked(path)
+            try:
+                memory = type(self).load(path).memory
+            except FileNotFoundError:
+                memory = self.memory
+            self._write_locked(path, memory=memory)
 
-    def _write_locked(self, path: Path) -> None:
+    def _write_locked(self, path: Path, *, memory: MemoryConfig) -> None:
         """Write an exact snapshot while the config transaction is held."""
 
         self.platforms.validate()
+        memory.validate()
         self.platform = self.platforms.primary
         platform_payload = {}
         for descriptor in platform_descriptors():
@@ -3978,3 +4634,27 @@ class V2Config:
             "configured_platforms": configured,
             "missing_credentials": missing,
         }
+
+
+class MemoryConfigStaleWrite(RuntimeError):
+    """The durable Memory unit no longer matches a writer's snapshot."""
+
+
+def atomic_update_memory(
+    mutator: Callable[[MemoryConfig], MemoryConfig],
+    *,
+    config_path: Optional[Path] = None,
+) -> V2Config:
+    """Atomically replace only Memory while preserving every other config field."""
+
+    paths.ensure_data_dirs()
+    path = config_path or paths.get_config_path()
+    with config_file_lock(path):
+        config = V2Config.load(path)
+        memory = mutator(deepcopy(config.memory))
+        if not isinstance(memory, MemoryConfig):
+            raise TypeError("Memory config mutator must return MemoryConfig")
+        memory.validate()
+        config.memory = memory
+        config._write_locked(path, memory=memory)
+        return config
