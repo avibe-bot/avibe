@@ -29,6 +29,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.events import redact_credential_material
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -47,6 +48,8 @@ from vibe.model_hub_runtime.state import SourceRecord
 
 
 _STREAM_CHUNK_BYTES = 64 * 1024
+# Upper bound on upstream error text shown to the user in a terminal message.
+_UPSTREAM_DETAIL_CHARS = 400
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -1507,6 +1510,10 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
+            upstream_detail=_upstream_error_detail(
+                observation.error_payload or b"",
+                observation.error_envelope_paths or (("error",),),
+            ),
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1582,6 +1589,7 @@ def _outcome(
     stream_started: bool = False,
     usage: ProtocolUsageReport | None = None,
     recovery_verified: bool = False,
+    upstream_detail: str | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1595,6 +1603,7 @@ def _outcome(
         error_candidates=error_candidates,
         usage=usage,
         recovery_verified=recovery_verified,
+        upstream_detail=upstream_detail,
     )
 
 
@@ -1613,6 +1622,38 @@ def _raw_error_fields(
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
     return _project_raw_error_fields(io.BytesIO(payload), envelope_paths)
+
+
+def _upstream_error_detail(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+) -> str | None:
+    """Project the first envelope's ``message`` as bounded, redacted display text."""
+
+    message_paths = tuple((*path, "message") for path in envelope_paths)
+    values: dict[JSONPath, str] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar" and isinstance(value, str):
+            values[path] = value
+
+    if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
+        return None
+    for path in message_paths:
+        text = " ".join(values.get(path, "").split())
+        if text:
+            text = redact_credential_material(text)
+            if len(text) > _UPSTREAM_DETAIL_CHARS:
+                text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
+            return text
+    return None
 
 
 def _safe_error_code(value: object) -> str | None:

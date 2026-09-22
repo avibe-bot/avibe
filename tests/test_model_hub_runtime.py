@@ -37,7 +37,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import ProtocolObservation, ProtocolUsageReport
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -6199,6 +6199,83 @@ def test_engine_error_fields_preserve_nested_candidates(
     else:
         assert decision.action == "fallback"
         assert decision.reason == "server_error"
+
+
+def _detail_source() -> SourceRecord:
+    return SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol="anthropic",
+        base_url="https://api.example.test",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+
+
+def test_engine_http_error_carries_redacted_upstream_detail_apart_from_classification() -> None:
+    message = (
+        "Claude Code 2.1.261 does not support this model;\n version 2.1.280 or newer "
+        "is required. key=sk-live_abcdefghijklmnop"
+    )
+    payload = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+                "details": {"error_code": "claude_code_version_too_old"},
+            },
+        }
+    ).encode()
+
+    outcome = client_module._reduce_protocol_observation(
+        ProtocolObservation(
+            outcome="failed_terminal",
+            error_payload=payload,
+            error_envelope_paths=(("error",),),
+            message="upstream returned HTTP 400",
+        ),
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=400,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.redacted_message == "upstream returned HTTP 400"
+    assert outcome.upstream_detail == (
+        "Claude Code 2.1.261 does not support this model; version 2.1.280 or newer "
+        "is required. key=[redacted]"
+    )
+    assert "sk-live" not in outcome.upstream_detail
+    assert classify_outcome(outcome).error_code == "upstream_request_invalid"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"not json",
+        json.dumps({"error": {"type": "invalid_request_error"}}).encode(),
+        json.dumps({"error": {"message": {"nested": "x"}}}).encode(),
+        json.dumps({"error": {"message": "   "}}).encode(),
+        json.dumps({"message": "outside the trusted envelope"}).encode(),
+    ],
+)
+def test_engine_upstream_detail_is_absent_without_an_envelope_message(payload: bytes) -> None:
+    assert client_module._upstream_error_detail(payload, (("error",),)) is None
+
+
+def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
+    payload = json.dumps({"error": {"message": "模型不可用" * 200}}, ensure_ascii=False).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail is not None
+    assert len(detail) == client_module._UPSTREAM_DETAIL_CHARS
+    assert detail.startswith("模型不可用") and detail.endswith("…")
 
 
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:

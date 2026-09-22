@@ -584,6 +584,8 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
             producer_kwargs["source_transition_persisted"] = True
     elif variant == "transition_unpersisted":
         producer_kwargs = {"source_transition_persisted": False}
+    elif variant == "upstream_detail":
+        producer_kwargs = {"upstream_detail": "Upstream rejected this request."}
     elif variant == "waiting_without_retry":
         source = _source("src_matrix_ready", "Recovered source")
         config = _config([source])
@@ -618,6 +620,32 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
     assert (copy.key if copy is not None else None) == expected_key
     rendered = render_turn_outcome_copy(projection, "en")
     assert (rendered is None) == (expected_key is None)
+
+
+def test_request_nonfallback_renders_upstream_detail_verbatim() -> None:
+    detail = "Claude Code 2.1.261 does not support this model; {model} needs 2.1.280."
+    projection = produce_turn_outcome(
+        "turn.request_nonfallback",
+        upstream_detail=detail,
+    )
+
+    assert projection.upstream_detail == detail
+    for language in ("en", "zh"):
+        rendered = render_turn_outcome_copy(projection, language)
+        assert rendered is not None and rendered.endswith(detail)
+    assert render_turn_outcome_copy(
+        produce_turn_outcome("turn.request_nonfallback", upstream_detail=""),
+        "en",
+    ) == i18n_t("modelHub.launch.request_incompatible", "en")
+
+
+def test_upstream_detail_is_ignored_outside_request_nonfallback() -> None:
+    projection = produce_turn_outcome(
+        "turn.engine_down",
+        upstream_detail="engine said something",
+    )
+
+    assert projection.upstream_detail is None
 
 
 def test_turn_outcome_producer_rejects_missing_streamed_fallback_facts() -> None:
