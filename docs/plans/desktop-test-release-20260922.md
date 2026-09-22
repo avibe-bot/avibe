@@ -457,4 +457,41 @@ byte is reported rather than raised.
 
 Only two subprocess calls in the file carry a timeout at all, and the other one
 — `taskkill` in `terminate_probe_processes` — never reads its streams, so it does
-not share this defect.
+not share this defect. It does carry a related one: it has no `TimeoutExpired`
+handler and runs inside an `except BaseException:` block, so a thirty-second hang
+there would replace the original exception and mask the failure the same way.
+Different root cause, same consequence. **Deferred by orchestrator decision, to
+be fixed in a later round** alongside the `desktop-package.yml` expression above.
+
+### One opener for the notification connection
+
+The notification connection's lifetime was not paired with the outcome of the
+navigation it belongs to. `open_workbench` opened it before attempting the
+navigation, and every failure exit from that loop — no window, no bootstrap
+navigation, `set_active_origin` refusing, `window.navigate` erroring — returned
+without closing it, leaving it consuming Runtime events and able to raise native
+notifications while the shell sat on bootstrap.
+
+The fix is an ownership statement expressed as a deletion rather than a guard.
+`Notifications::start` returns early when a connection for the same origin
+already exists, so the monitor's own start was a no-op after it and the early one
+was redundant on the success path and a leak everywhere else. Removing it leaves
+exactly one opener, `start_runtime_monitor`, which is reached only once a handoff
+has actually completed; the stop sites already give the connection up only where
+a hand-off away actually happened. Start and stop now both hang off a navigation
+that really occurred instead of one that was merely attempted, and the rule is
+written at the monitor's start site for the next reader.
+
+The shell's boundary test already owned this invariant and had recorded the old
+shape: it required `open_workbench` to contain the early start. Both starts
+arrived in the same commit, so what it captured was the code as first written
+rather than a decision that the connection must open early — and its own name
+says the lifecycle follows runtime ownership, which is exactly what the early
+start broke. It now requires the start inside `start_runtime_monitor`, requires
+`open_workbench` to touch the lifecycle not at all, and holds the opener count at
+one, so reintroducing a premature start anywhere fails it.
+
+The line predates this PR — it arrived with #1983 — and the other lifecycle sites
+(`exit_shell`, `stop_runtime`, the readiness-loss recovery, `return_to_bootstrap`
+and the removal flow) were audited against that one sentence and do not
+contradict it. None of them is changed here.

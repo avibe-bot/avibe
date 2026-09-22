@@ -835,7 +835,6 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
         let _ = activity.compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_IDLE, Ordering::SeqCst, Ordering::SeqCst);
         return;
     };
-    notifications::start(app, origin.clone());
     let window_generation = app.state::<Shell>().window_generation.clone();
     loop {
         let observed_generation = window_generation.load(Ordering::SeqCst);
@@ -902,6 +901,13 @@ fn workbench_navigation_failure_status(ready: &BootstrapStatus, origin: &Loopbac
 
 /// Watches the exact origin that bootstrap proved ready. The caller owns the
 /// shell's single monitor activity until this task exits or begins recovery.
+///
+/// This is also the notification connection's only opener, and it is the rule
+/// the whole lifetime hangs off: every caller arrives holding monitor ownership
+/// of a navigation that actually happened, and the stop sites give the
+/// connection up only where a hand-off away actually happened. Opening it
+/// anywhere earlier — before a navigation is known to have succeeded — leaves a
+/// live connection behind on every path that then fails.
 fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<AtomicU8>) {
     notifications::start(&app, origin.clone());
     let host = app.state::<Shell>().host.clone();

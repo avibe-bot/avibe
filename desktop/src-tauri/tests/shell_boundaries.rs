@@ -133,9 +133,9 @@ fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_ss
     let source = shipping_source("src/lib.rs");
     for (function, next_function, required) in [
         (
-            "fn open_workbench(",
-            "fn workbench_navigation_failure_status",
-            "notifications::start(app, origin.clone())",
+            "fn start_runtime_monitor(",
+            "fn recover_after_readiness_loss",
+            "notifications::start(&app, origin.clone())",
         ),
         (
             "fn start_runtime_monitor(",
@@ -167,6 +167,20 @@ fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_ss
             .unwrap();
         assert!(body.contains(required), "{function} must retain {required}");
     }
+    // The connection has exactly one opener, and it is the monitor a completed
+    // handoff created. `open_workbench` used to open it before attempting the
+    // navigation, which left it running on every failure exit from that loop —
+    // ownership the shell no longer had, which is the property this test is named
+    // for.
+    let workbench = source
+        .split("fn open_workbench(")
+        .nth(1)
+        .unwrap()
+        .split("fn workbench_navigation_failure_status")
+        .next()
+        .unwrap();
+    assert!(!workbench.contains("notifications::"));
+    assert_eq!(source.matches("notifications::start(").count(), 1);
     let close = source
         .split("event: WindowEvent::CloseRequested")
         .nth(1)
