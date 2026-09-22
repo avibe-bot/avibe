@@ -157,6 +157,12 @@ extend-ignore = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Without pytest-asyncio every ``async def`` test fails individually with
+# "async def functions are not natively supported", and ``asyncio_mode`` above
+# is reported only as an unknown-config warning. That names the tests instead of
+# the missing plugin, so a suite run in an environment that never installed the
+# dev group looks like a broad product regression. Fail once, up front, instead.
+required_plugins = ["pytest-asyncio"]
 markers = [
     "e2e_model_hub: opt-in hermetic Model Hub HTTP and gateway scenarios",
     "integration: tests excluded from the unit shards because they need external infrastructure (Docker + platform tokens) or minutes of real filesystem work",
