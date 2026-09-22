@@ -16,7 +16,6 @@ from avibe_memory.admission import (
 )
 from avibe_memory.im_attachments import select_memory_attachments
 from avibe_memory.types import CaptureAccepted, CaptureRequest, CaptureSkipped
-from core.attachment_telemetry import log_attachment_capture
 from core.blocking import run_blocking
 from core.memory_adapter import MemoryEvent, SessionArchived, SessionReset, TurnAccepted
 
