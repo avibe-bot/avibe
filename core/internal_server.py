@@ -1033,16 +1033,19 @@ def create_app(controller: "Controller") -> FastAPI:
     async def _archive_session(request: Request) -> Any:
         body = await _safe_json(request)
         session_id = body.get("session_id") if isinstance(body, dict) else None
-        if not isinstance(session_id, str) or not session_id.strip():
+        if (not isinstance(body, dict) or set(body) != {"session_id"} or
+                not isinstance(session_id, str) or not session_id or session_id != session_id.strip()):
             return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_session_id"})
         try:
-            session = await controller.archive_session(session_id.strip())
+            session = await controller.archive_session(session_id)
         except LookupError:
             return JSONResponse(status_code=404, content={"ok": False, "error": "session_not_found"})
         except PermissionError as exc:
             return JSONResponse(status_code=403, content={"ok": False, "error": getattr(exc, "code", "forbidden")})
         except Exception:
             logger.exception("internal session archive failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
+        if not isinstance(session, dict):
             return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
         return {"ok": True, "session": session}
 
