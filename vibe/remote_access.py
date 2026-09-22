@@ -4546,11 +4546,17 @@ _PAIRING_REQUIRED_FIELDS = (
 # must never become local path components: they are data inside this document.
 _PENDING_PAIRING_FILENAME = "pending-pairing.json"
 _PENDING_PAIRING_SCHEMA_VERSION = 1
-_PENDING_PAIRING_PHASES = frozenset({"prepared", "redeemed", "applied", "revoked"})
+_PENDING_PAIRING_PHASES = frozenset(
+    {"prepared", "redeemed", "applied", "revoked", "retirement_pending"}
+)
 
 
 class _PairingLockUnavailable(RuntimeError):
     """The pairing transaction could not enter the existing config lock."""
+
+
+class _PairingRevocationUnavailable(RuntimeError):
+    """The pending pairing revocation fence could not be persisted."""
 
 
 @contextmanager
@@ -4711,6 +4717,14 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
             _pairing_target_identity(normalized, pairing["session_secret"])
         ) != payload.get("target_fingerprint"):
             return None, "pending pairing record target identity is invalid"
+    if phase == "retirement_pending":
+        retirement = payload.get("retirement")
+        if not isinstance(retirement, dict):
+            return None, "pending pairing retirement marker is incomplete"
+        if retirement.get("kind") != "definitive_redeem_failure":
+            return None, "pending pairing retirement marker kind is invalid"
+        if not isinstance(retirement.get("error"), str) or not retirement["error"].strip():
+            return None, "pending pairing retirement marker error is invalid"
     return payload, None
 
 
@@ -4737,6 +4751,74 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
     except Exception:
         logger.warning("Discarding the sealed pairing response failed", exc_info=True)
         return False
+
+
+def _retire_prepared_pairing_claim(
+    *, operation_id: str, cause: str,
+) -> tuple[bool, bool]:
+    """Return (retired, terminal_marker_persisted) for this failed operation."""
+
+    try:
+        with _pairing_persist_lock():
+            record, error = _read_pending_pairing_record()
+            if error:
+                return False, False
+            if (
+                record is None
+                or record.get("operation_id") != operation_id
+                or record.get("phase") != "prepared"
+            ):
+                return True, False
+            # Record the definitive outcome before deletion. A crash or failed
+            # unlink must leave a terminal operation, not an ambiguous claim.
+            _write_pending_pairing_record(
+                {
+                    **record,
+                    "phase": "retirement_pending",
+                    "retirement": {
+                        "kind": "definitive_redeem_failure",
+                        "error": cause,
+                    },
+                }
+            )
+            return _retire_pending_pairing(operation_id=operation_id), True
+    except Exception:
+        logger.warning("Recording definitive pairing failure failed", exc_info=True)
+        return False, False
+
+
+def _pairing_failure_after_claim(
+    operation_id: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a definitive failure after retiring its prepared claim."""
+
+    retired, marker_persisted = _retire_prepared_pairing_claim(
+        operation_id=operation_id,
+        cause=str(result.get("error") or "pairing_failed"),
+    )
+    if retired:
+        return result
+    return {
+        **result,
+        "error": "pairing_retirement_failed",
+        "detail": (
+            f"{result.get('error') or 'pairing failure'} was definitive, but the "
+            "prepared pairing claim could not be retired"
+            + (
+                ""
+                if marker_persisted
+                else "; its retry marker could not be persisted"
+            )
+        ),
+        "pairing": {
+            "ok": False,
+            "applied": False,
+            "recoverable": False,
+            "retirement_pending": marker_persisted,
+            "cause": result.get("error"),
+        },
+    }
 
 
 def _probe_atomic_parent(directory: Path) -> None:
@@ -4804,6 +4886,7 @@ def _new_pairing_claim(config: V2Config, backend_url: str, device_name: str) -> 
         "source_backend_url": str(source_identity.get("backend_url") or ""),
         "backend_url": backend_url,
         "device_name": device_name,
+        "session_secret": secrets.token_urlsafe(32),
         "prepared_at": time.time(),
     }
 
@@ -4854,10 +4937,26 @@ def prepare_pairing_revocation(
 ) -> str | None:
     """Fence pending replay before api.save_config publishes a real unpair."""
 
-    if not _pairing_identity_revoked(base_config, candidate_config):
+    candidate_is_unpaired = not candidate_config.remote_access.vibe_cloud.is_runtime_paired()
+    identity_revoked = _pairing_identity_revoked(base_config, candidate_config)
+    if not identity_revoked and not candidate_is_unpaired:
         return None
     record, error = _read_pending_pairing_record()
-    if error or record is None or record.get("phase") not in {"prepared", "redeemed", "applied"}:
+    if error:
+        if not identity_revoked:
+            logger.warning(
+                "Ignoring an unreadable pending pairing record on an already-unpaired config: %s",
+                error,
+            )
+            return None
+        raise _PairingRevocationUnavailable(error)
+    if record is None:
+        return None
+    if record.get("phase") == "revoked" and candidate_is_unpaired:
+        return str(record["operation_id"])
+    if not identity_revoked:
+        return None
+    if record.get("phase") not in {"prepared", "redeemed", "applied"}:
         return None
     revoked = {
         **record,
@@ -4865,7 +4964,12 @@ def prepare_pairing_revocation(
         "revoked_at": time.time(),
         "revocation_reason": "config_identity_cleared",
     }
-    _write_pending_pairing_record(revoked)
+    try:
+        _write_pending_pairing_record(revoked)
+    except Exception as exc:
+        raise _PairingRevocationUnavailable(
+            f"pending pairing revocation could not be persisted: {exc}"
+        ) from exc
     return str(record["operation_id"])
 
 
@@ -4955,25 +5059,28 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             connection_target=backend,
         )
     except BackendRequestError as exc:
-        return {"ok": False, **exc.payload, "status": exc.status}
+        failure = {"ok": False, **exc.payload, "status": exc.status}
+        if exc.status < 500:
+            return _pairing_failure_after_claim(claim["operation_id"], failure)
+        return failure
     except Exception as exc:
         return {"ok": False, "error": "pairing_request_failed", "detail": str(exc)}
     normalized_result, response_error = _validate_pairing_response(result)
     if response_error:
-        return {
+        return _pairing_failure_after_claim(claim["operation_id"], {
             "ok": False,
             "error": "invalid_pairing_response",
             "detail": response_error,
-        }
+        })
     assert normalized_result is not None
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
-        return {
+        return _pairing_failure_after_claim(claim["operation_id"], {
             "ok": False,
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
-        }
+        })
     pairing_result: dict[str, Any] = {
         **normalized_result,
         "backend_url": backend.base_url,
@@ -5074,7 +5181,7 @@ def _persist_pairing_impl(
                     "detail": "the source pairing changed before the redeem response was published",
                     "pairing": {"ok": False, "recoverable": False},
                 }
-            session_secret = secrets.token_urlsafe(32)
+            session_secret = str(record.get("session_secret") or secrets.token_urlsafe(32))
             target_identity = _pairing_target_identity(result, session_secret)
             record = {
                 **record,
@@ -5095,6 +5202,22 @@ def _persist_pairing_impl(
                 }
 
         phase = record.get("phase")
+        if phase == "retirement_pending":
+            if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
+                return {
+                    "ok": False,
+                    "error": "pairing_retirement_failed",
+                    "detail": "pending pairing retirement marker could not be retired",
+                    "pairing": {
+                        "ok": False, "applied": False, "recoverable": False,
+                        "retirement_pending": True,
+                    },
+                }
+            return {
+                "ok": False,
+                "error": "pairing_failure_retired",
+                "pairing": {"ok": False, "recoverable": False},
+            }
         if phase == "prepared":
             return {
                 "ok": False,

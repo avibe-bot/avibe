@@ -14127,9 +14127,21 @@ def _print_remote_pair_failure(result: dict) -> None:
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_retirement_failed":
-        print(i18n_t("remote_access.cli.retirementFailed", language), file=sys.stderr)
+        pairing = result.get("pairing") or {}
+        if pairing.get("applied") is False:
+            key = "failedClaimCleanup" if pairing.get("retirement_pending") else "failedClaimUnrecorded"
+        else:
+            key = "retirementFailed"
+        print(i18n_t(f"remote_access.cli.{key}", language), file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
+        if pairing.get("applied") is not False or pairing.get("retirement_pending"):
+            print(i18n_t("remote_access.cli.retryPairCommand", language), file=sys.stderr)
+            print("  vibe remote pair", file=sys.stderr)
+        return
+    if error_code == "pairing_failure_retired":
+        print(i18n_t("remote_access.cli.failedClaimRetired", language), file=sys.stderr)
+        print("  vibe remote pair", file=sys.stderr)
         return
     if error_code == "invalid_pairing_response":
         print("Avibe Cloud returned incomplete pairing data.", file=sys.stderr)
@@ -14207,9 +14219,10 @@ def _print_remote_already_configured(result: dict) -> None:
 def _run_remote_pair(args, *, guided: bool) -> int:
     from vibe import remote_access
 
+    pending_operation_exists = remote_access.pending_pairing_record_exists()
     if guided:
         current = remote_access.status()
-        if current.get("paired"):
+        if current.get("paired") and not pending_operation_exists:
             _print_remote_already_configured(current)
             return 0
 
@@ -14232,7 +14245,7 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         )
         return 1
 
-    if guided:
+    if guided and not pending_operation_exists:
         _print_remote_setup_intro()
         if not _wait_for_pairing_key_ready():
             print("Remote access setup cancelled.")
@@ -14240,7 +14253,6 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         _print_remote_pair_start()
 
     provided_pairing_key = (getattr(args, "pairing_key", None) or "").strip()
-    pending_operation_exists = remote_access.pending_pairing_record_exists()
     if provided_pairing_key or not pending_operation_exists:
         pairing_key = _read_pairing_key_from_args(args)
     else:

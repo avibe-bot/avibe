@@ -39,6 +39,15 @@ durable and never promises recovery across an unrecorded crash.
   revoked, or otherwise not recoverable; `pair()` reports the state instead.
 - Applied recovery accepts only the exact durable target identity. The
   generated session secret is created once per operation and reused on retry.
+- Definitive rejection, malformed-response, and origin-update failures record
+  a terminal `retirement_pending` marker under the configuration lock before
+  retirement. A keyless retry only retires this marker; it neither redeems nor
+  applies credentials. Uncertain transport/server failures stay `prepared`.
+  If even terminal publication fails, report the unrecoverable local state
+  instead of promising a keyless recovery.
+- A verified revoked fence can be retired on repeated clear or an
+  already-unpaired settings save. Unreadable journals block a real revocation,
+  but do not block unrelated writes on an already-unpaired configuration.
 
 ## Recovery boundaries
 

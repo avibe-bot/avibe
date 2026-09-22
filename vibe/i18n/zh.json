@@ -1069,7 +1069,11 @@
       "recoveryNotReady": "配对操作已准备好，但还没有可恢复的兑换结果。",
       "recoveryRevoked": "已保存的配对恢复记录已被本地解绑操作作废。",
       "recoveryIndeterminate": "配对结果已无法安全自动应用；不要重复使用已消耗的密钥。",
-      "retirementFailed": "配对已应用，但恢复记录未能清理。请不要更换密钥并重试。"
+      "retirementFailed": "配对已应用，但恢复记录未能清理。请不要更换密钥并重试。",
+      "failedClaimCleanup": "本次配对失败，尚未应用。修复本地存储后，不提供密钥重试，以清理失败操作的记录。",
+      "failedClaimUnrecorded": "本次配对失败，尚未应用，且无法记录清理状态。修复本地存储后，请向 'vibe remote pair' 显式提供新的配对密钥；无密钥重试无法恢复此结果。",
+      "failedClaimRetired": "失败的配对记录已清理。获取新的配对密钥后，运行以下命令安全输入：",
+      "retryPairCommand": "使用以下命令重试本地配对恢复："
     }
   },
   "turn": {

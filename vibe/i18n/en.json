@@ -1069,7 +1069,11 @@
       "recoveryNotReady": "A pairing operation is prepared but has no recoverable redeemed response.",
       "recoveryRevoked": "The saved pairing recovery was invalidated by a local unpair operation.",
       "recoveryIndeterminate": "The pairing result is no longer safe to apply automatically; do not reuse the consumed key.",
-      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key."
+      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key.",
+      "failedClaimCleanup": "This pairing attempt failed and was not applied. Fix local storage, then retry without a key to clear its failed-operation record.",
+      "failedClaimUnrecorded": "This pairing attempt failed and was not applied. Its cleanup could not be recorded. After fixing local storage, supply a fresh pairing key explicitly to 'vibe remote pair'; a keyless retry cannot recover this result.",
+      "failedClaimRetired": "The failed pairing record was cleared. Get a fresh pairing key, then run the following command to enter it securely:",
+      "retryPairCommand": "Retry local pairing recovery with:"
     }
   },
   "turn": {
