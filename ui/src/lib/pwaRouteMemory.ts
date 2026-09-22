@@ -1,3 +1,5 @@
+import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
+
 const STORAGE_KEY = 'avibe.pwa.last-route.v1';
 
 type ReadableStorage = Pick<Storage, 'getItem'>;
@@ -36,25 +38,10 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings/diagnostics',
   '/settings/diagnostics/logs',
   '/settings/access',
-  // Accept stored pre-#1412 paths once so the router can translate them.
-  '/admin/dashboard',
-  '/admin/remote-access',
-  '/admin/groups',
-  '/admin/users',
-  '/admin/logs',
-  '/admin/settings/service',
-  '/admin/settings/platforms',
-  '/admin/settings/backends',
-  '/admin/settings/backends/opencode',
-  '/admin/settings/backends/claude',
-  '/admin/settings/backends/codex',
-  '/admin/settings/dependencies',
-  '/admin/settings/messaging',
-  '/admin/settings/diagnostics',
-  '/admin/settings/logs',
 ]);
 
 const RESTORABLE_DYNAMIC_PATHS = [/^\/chat\/[^/]+$/, /^\/apps\/show\/[^/]+$/];
+const LEGACY_DESTINATIONS = new Map(LEGACY_SETTINGS_REDIRECTS.map(({ from, to }) => [from, to]));
 
 export function normalizeRestorablePwaPath(value: unknown): string | null {
   if (typeof value !== 'string' || !value.startsWith('/')) return null;
@@ -64,7 +51,13 @@ export function normalizeRestorablePwaPath(value: unknown): string | null {
     const parsed = new URL(value, base);
     if (parsed.origin !== base.origin) return null;
 
-    const { pathname } = parsed;
+    // Use the router's compatibility declaration, then apply the same safety
+    // policy to its destination. Persist only canonical paths, never URL state.
+    const destination = LEGACY_DESTINATIONS.get(parsed.pathname);
+    if (destination !== undefined && !destination.startsWith('/')) return null;
+    const canonical = destination === undefined ? parsed : new URL(destination, base);
+    if (canonical.origin !== base.origin) return null;
+    const { pathname } = canonical;
     const restorable =
       RESTORABLE_EXACT_PATHS.has(pathname) ||
       RESTORABLE_DYNAMIC_PATHS.some((pattern) => pattern.test(pathname));

@@ -182,6 +182,34 @@ Supported repair evidence:
 
 ## Scope safety
 
+### PWA compatibility boundary completion (review 5280345842)
+
+Before edits, the orchestrator verified `PRRT_kwDOPbFPYs6kzQa_` at
+`074e02466d8481acae6538d3600dfe123b237d71` and authorized the circuit-breaker
+repair: browser aliases reached the router, but persisted PWA paths were rejected
+before routing. Replace the independently maintained legacy PWA allowlist with
+normalization derived from `LEGACY_SETTINGS_REDIRECTS`, accepting only safe
+restorable destinations. Audit storage read, normalization, launch selection,
+rendering and canonical persistence together. Preserve explicit deep links,
+query/hash stripping, dynamic routes and no mid-session bounce; reject unknown
+or external destinations. Cover declaration-driven invariants and actual app
+PWA launch in test-owned browser storage. No feature page/API/runtime is restored.
+The two release-policy threads remain unresolved pending owner decision; no
+exception to the review/CI/close-out gates has been granted.
+
+Implementation reuses `LEGACY_SETTINGS_REDIRECTS` directly and removes the old
+duplicated legacy allowlist. The destination still passes origin and canonical
+restorable-path checks; query/hash are omitted. No App lifecycle change was
+needed. Focused PWA/navigation/router units: **74 passed**. Actual App browser
+tests with test-owned localStorage and simulated iOS standalone detection:
+**7 passed**, covering both retired entries, canonical persistence, back to root
+without bounce, explicit Shortcuts deep link, unknown/external rejection and
+the two ordinary bookmarks. This is Chromium app-flow evidence, not physical
+iOS-device verification. Prior-head CI was read back fully green; new-head gates
+remain required.
+Node 24.12 UI build, lint-baseline, test typechecks and diff whitespace checks
+passed. No Python files changed. The latest fetched master remains `4b964fef2`.
+
 ### Owner close-out decision (2026-09-22 22:41 Asia/Shanghai)
 
 Continue the repair, push, review-response, and exact-head review/CI loop to
