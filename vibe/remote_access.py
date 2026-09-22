@@ -38,6 +38,7 @@ import requests
 from jwt import PyJWKClient
 
 from config import paths
+from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
@@ -4528,8 +4529,110 @@ def origin_service_for_pairing(config: V2Config | None = None) -> str:
     return f"http://{_origin_host_for_pairing(config)}:{_effective_ui_port(config)}"
 
 
+_PAIRING_REQUIRED_FIELDS = (
+    "instance_id",
+    "client_id",
+    "issuer",
+    "authorization_endpoint",
+    "token_endpoint",
+    "jwks_uri",
+    "public_url",
+    "redirect_uri",
+    "tunnel_token",
+    "instance_secret",
+)
+
+# Directory holding redeemed-but-unsaved pairing responses. The cloud consumes
+# a pairing key the moment it is redeemed, so the response is sealed to disk
+# before the local save is attempted; a save failure can then be retried
+# without minting a new key (#2080).
+_PENDING_PAIRING_DIRNAME = "pending-pairing"
+
+# Sealed alongside the required fields so a resumed pairing keeps the backend
+# URL and normalized instance kind the redeem negotiated.
+_PAIRING_SEAL_EXTRA_FIELDS = ("backend_url", "instance_kind")
+
+
+def _pending_pairing_dir() -> Path:
+    directory = paths.get_state_dir() / _PENDING_PAIRING_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _seal_pending_pairing(result: Mapping[str, Any]) -> Path:
+    """Durably store a redeemed pairing response before the local save attempt."""
+    payload = {field: result.get(field) for field in (*_PAIRING_REQUIRED_FIELDS, *_PAIRING_SEAL_EXTRA_FIELDS)}
+    payload["sealed_at"] = time.time()
+    path = _pending_pairing_dir() / f"{result['instance_id']}.json"
+    write_atomic(path, json.dumps(payload, indent=2))
+    return path
+
+
+def _load_pending_pairing() -> dict[str, Any] | None:
+    """Return the oldest sealed redeem response that still has every field."""
+    directory = paths.get_state_dir() / _PENDING_PAIRING_DIRNAME
+    if not directory.is_dir():
+        return None
+    candidates = sorted(directory.glob("*.json"), key=lambda path: (path.stat().st_mtime, path.name))
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(payload, dict) and all(payload.get(field) for field in _PAIRING_REQUIRED_FIELDS):
+            return payload
+    return None
+
+
+def _discard_pending_pairing(instance_id: str) -> None:
+    path = paths.get_state_dir() / _PENDING_PAIRING_DIRNAME / f"{instance_id}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logger.warning("Discarding the sealed pairing response failed", exc_info=True)
+
+
+def _pairing_local_write_preflight() -> str | None:
+    """Return a reason when the local config cannot durably accept a pairing.
+
+    Runs BEFORE the one-time redeem so a predictable local failure never
+    consumes the pairing key (#2080). ``V2Config.load()`` recovery warnings are
+    the same condition ``api.save_config`` refuses on, so they fail here too.
+    """
+    try:
+        loaded = V2Config.load()
+        if loaded.load_warnings:
+            return "config was loaded with recovery warnings; repair the backed-up config before pairing"
+    except FileNotFoundError:
+        pass  # fresh install: save_config seeds defaults
+    except Exception as exc:
+        return f"config load failed: {exc}"
+    config_path = paths.get_config_path()
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return f"config directory is not writable: {exc}"
+    target = config_path if config_path.exists() else config_path.parent
+    if not os.access(target, os.W_OK):
+        return f"config file is not writable: {target}"
+    try:
+        with config_file_lock():
+            pass  # the save itself takes this lock; prove it is acquirable now
+    except Exception as exc:
+        return f"config lock is unavailable: {exc}"
+    return None
+
+
 def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict[str, Any]:
     pairing_key = (pairing_key or "").strip()
+    # A previous attempt redeemed cloud-side but failed to save locally; the
+    # sealed response completes the pairing now, without a key of any kind
+    # (#2080). It outranks the missing-key check so the retry is one command.
+    sealed_pairing = _load_pending_pairing()
+    if sealed_pairing is not None:
+        return _persist_pairing(sealed_pairing, device_name=device_name)
     if not pairing_key:
         return {"ok": False, "error": "missing_pairing_key"}
     backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
@@ -4564,6 +4667,16 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "detail": str(exc),
             "pairing": {"ok": False},
         }
+    # Every locally-failable condition is checked BEFORE the one-time redeem so
+    # a predictable local failure cannot burn the pairing key (#2080).
+    preflight_error = _pairing_local_write_preflight()
+    if preflight_error:
+        return {
+            "ok": False,
+            "error": "pairing_local_write_unavailable",
+            "detail": preflight_error,
+            "pairing": {"ok": False},
+        }
     try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
@@ -4579,8 +4692,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         return {"ok": False, **exc.payload, "status": exc.status}
     except Exception as exc:
         return {"ok": False, "error": "pairing_request_failed", "detail": str(exc)}
-    required = ("instance_id", "client_id", "issuer", "authorization_endpoint", "token_endpoint", "jwks_uri", "public_url", "redirect_uri", "tunnel_token", "instance_secret")
-    missing = [field for field in required if not result.get(field)]
+    missing = [field for field in _PAIRING_REQUIRED_FIELDS if not result.get(field)]
     if missing:
         return {"ok": False, "error": "invalid_pairing_response", "missing": missing}
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
@@ -4591,41 +4703,74 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "error": str(origin_update.get("error") or "tunnel_origin_update_failed"),
             "pairing": {"ok": False, "origin_service": origin_service},
         }
+    pairing_result: dict[str, Any] = {
+        **result,
+        "backend_url": backend.base_url,
+        "instance_kind": instance_kind,
+    }
+    return _persist_pairing(pairing_result, device_name=device_name)
+
+
+def _persist_pairing(result: Mapping[str, Any], *, device_name: str) -> dict[str, Any]:
+    """Persist a redeemed pairing response and publish its instance binding.
+
+    The redeem response is sealed to disk inside the critical section before
+    ``save_config`` runs, so a save failure destroys nothing: ``pair()``
+    resumes the sealed response on its next call and completes the pairing
+    without a new key (#2080).
+    """
     # C2: the pairing save and its binding transition form ONE cross-process
     # critical section, so two concurrent pair() calls cannot interleave
     # save A / save B / transition B / transition A. SQLite initializes
     # before the config lock per the canonical lock order.
     from storage.importer import ensure_sqlite_state
 
+    instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     ensure_sqlite_state()
     with config_file_lock():
+        _seal_pending_pairing(result)
         try:
             previous_instance_id = str(V2Config.load().remote_access.vibe_cloud.instance_id or "")
         except Exception:
             previous_instance_id = ""
-        config = api.save_config(
-            {
-                "remote_access": {
-                    "provider": "vibe_cloud",
-                    "vibe_cloud": {
-                        "enabled": True,
-                        "backend_url": backend.base_url,
-                        "instance_id": result["instance_id"],
-                        "instance_kind": instance_kind or "",
-                        "client_id": result["client_id"],
-                        "issuer": result["issuer"],
-                        "authorization_endpoint": result["authorization_endpoint"],
-                        "token_endpoint": result["token_endpoint"],
-                        "jwks_uri": result["jwks_uri"],
-                        "public_url": result["public_url"],
-                        "redirect_uri": result["redirect_uri"],
-                        "tunnel_token": result["tunnel_token"],
-                        "instance_secret": result["instance_secret"],
-                        "session_secret": secrets.token_urlsafe(32),
-                    },
+        try:
+            config = api.save_config(
+                {
+                    "remote_access": {
+                        "provider": "vibe_cloud",
+                        "vibe_cloud": {
+                            "enabled": True,
+                            "backend_url": result.get("backend_url", ""),
+                            "instance_id": result["instance_id"],
+                            "instance_kind": instance_kind or "",
+                            "client_id": result["client_id"],
+                            "issuer": result["issuer"],
+                            "authorization_endpoint": result["authorization_endpoint"],
+                            "token_endpoint": result["token_endpoint"],
+                            "jwks_uri": result["jwks_uri"],
+                            "public_url": result["public_url"],
+                            "redirect_uri": result["redirect_uri"],
+                            "tunnel_token": result["tunnel_token"],
+                            "instance_secret": result["instance_secret"],
+                            "session_secret": secrets.token_urlsafe(32),
+                        },
+                    }
                 }
+            )
+        except Exception as exc:
+            # The key is already consumed cloud-side and the seal holds the
+            # credentials, so the operator retries without minting a new key.
+            logger.warning("pairing save failed after the redeem", exc_info=True)
+            return {
+                "ok": False,
+                "error": "pairing_save_failed_after_redeem",
+                "detail": str(exc),
+                "orphaned_binding": {
+                    "instance_id": str(result["instance_id"]),
+                    "device_name": device_name,
+                },
+                "pairing": {"ok": False},
             }
-        )
         if previous_instance_id and previous_instance_id != str(result["instance_id"]):
             try:
                 from storage import remote_access_authorization_service
@@ -4670,6 +4815,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "detail": transition.get("error"),
             "pairing": {"ok": False, "reconciling": True},
         }
+    _discard_pending_pairing(str(result["instance_id"]))
     start_result = start(config)
     _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     return {**status(config), "ok": True, "pairing": {"ok": True}, "start": start_result}

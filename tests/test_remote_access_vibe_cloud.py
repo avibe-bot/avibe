@@ -3533,3 +3533,137 @@ def test_overlapping_heartbeat_refuses_stale_personal_kind(monkeypatch, tmp_path
     )
     assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
     assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+
+
+_PAIRING_RESPONSE = {
+    "instance_id": "inst_123",
+    "client_id": "vr_client_123",
+    "issuer": "https://backend.test",
+    "authorization_endpoint": "https://backend.test/oauth/authorize",
+    "token_endpoint": "https://backend.test/oauth/token",
+    "jwks_uri": "https://backend.test/jwks.json",
+    "public_url": "https://alex.avibe.bot",
+    "redirect_uri": "https://alex.avibe.bot/auth/callback",
+    "tunnel_token": "tunnel-token",
+    "instance_secret": "instance-secret",
+}
+
+
+def _prepare_pairing_environment(monkeypatch, tmp_path) -> V2Config:
+    """Fresh unpaired host with the redeem response ready to be returned."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.session_secret = ""
+    config.save()
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+    return config
+
+
+def test_pair_preflight_failure_never_reaches_the_redeem(monkeypatch, tmp_path) -> None:
+    """#2080: a predictable local save failure must not consume the pairing key."""
+    _prepare_pairing_environment(monkeypatch, tmp_path)
+    warned = _config()
+    warned.load_warnings = ("recovered from a backup",)
+    monkeypatch.setattr(remote_access.V2Config, "load", classmethod(lambda cls: warned))
+    monkeypatch.setattr(
+        remote_access,
+        "_run_pending_deferred_context_migration",
+        lambda: {"legacy_deferred_definitions": 0, "legacy_deferred_runs": 0, "legacy_deferred_deliveries": 0, "binding_status": "sealed"},
+    )
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("preflight failure must not redeem")),
+    )
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_local_write_unavailable"
+    assert "recovery warnings" in result["detail"]
+    sealed_dir = tmp_path / "state" / "pending-pairing"
+    assert not sealed_dir.exists() or not any(sealed_dir.glob("*.json"))
+
+
+def test_pair_save_failure_after_redeem_reports_the_orphaned_binding(monkeypatch, tmp_path) -> None:
+    """#2080: a post-redeem save failure names the orphaned binding, not a traceback."""
+    _prepare_pairing_environment(monkeypatch, tmp_path)
+    monkeypatch.setattr(remote_access, "_json_request", lambda *args, **kwargs: dict(_PAIRING_RESPONSE))
+
+    def exploding_save_config(payload, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(remote_access.api, "save_config", exploding_save_config)
+
+    result = remote_access.pair("vrp_test", "https://backend.test", device_name="test-device")
+
+    assert result["ok"] is False
+    assert result["error"] == "pairing_save_failed_after_redeem"
+    assert result["detail"] == "disk full"
+    assert result["orphaned_binding"] == {"instance_id": "inst_123", "device_name": "test-device"}
+    sealed = tmp_path / "state" / "pending-pairing" / "inst_123.json"
+    assert sealed.exists()
+    sealed_payload = json.loads(sealed.read_text(encoding="utf-8"))
+    assert sealed_payload["tunnel_token"] == "tunnel-token"
+    assert sealed_payload["backend_url"] == "https://backend.test"
+
+
+def test_pair_resumes_a_sealed_pairing_without_consuming_a_new_key(monkeypatch, tmp_path) -> None:
+    """#2080: after a post-redeem save failure the next pair() completes the sealed redeem."""
+    config = _prepare_pairing_environment(monkeypatch, tmp_path)
+    redeem_calls: list[str] = []
+
+    def counting_redeem(url, payload, **kwargs):
+        redeem_calls.append(payload["pairing_key"])
+        return dict(_PAIRING_RESPONSE)
+
+    monkeypatch.setattr(remote_access, "_json_request", counting_redeem)
+    save_attempts: list[int] = []
+
+    def flaky_save_config(payload, **kwargs):
+        save_attempts.append(1)
+        if len(save_attempts) == 1:
+            raise RuntimeError("disk full")
+        return V2Config.load()
+
+    save_payloads: list[dict] = []
+
+    def flaky_save_config(payload, **kwargs):
+        save_attempts.append(1)
+        save_payloads.append(payload)
+        if len(save_attempts) == 1:
+            raise RuntimeError("disk full")
+        cloud = payload["remote_access"]["vibe_cloud"]
+        config.remote_access.vibe_cloud.instance_id = cloud["instance_id"]
+        config.remote_access.vibe_cloud.tunnel_token = cloud["tunnel_token"]
+        return config
+
+    monkeypatch.setattr(remote_access.api, "save_config", flaky_save_config)
+
+    first = remote_access.pair("vrp_test", "https://backend.test")
+    assert first["ok"] is False
+    assert first["error"] == "pairing_save_failed_after_redeem"
+
+    # Retry needs no key at all: the sealed credentials complete the pairing.
+    second = remote_access.pair("", "")
+
+    assert second["ok"] is True
+    assert redeem_calls == ["vrp_test"]  # the retry never contacted the cloud
+    assert save_attempts == [1, 1]  # one failed save, one completed save
+    sealed = tmp_path / "state" / "pending-pairing" / "inst_123.json"
+    assert not sealed.exists()
+    # The completed save carried the credentials from the sealed redeem.
+    resumed_cloud = save_payloads[1]["remote_access"]["vibe_cloud"]
+    assert resumed_cloud["instance_id"] == "inst_123"
+    assert resumed_cloud["tunnel_token"] == "tunnel-token"
+
+
+def test_pair_still_requires_a_key_when_nothing_is_sealed(monkeypatch, tmp_path) -> None:
+    """#2080: the seal outranks the missing-key check only when a seal exists."""
+    _prepare_pairing_environment(monkeypatch, tmp_path)
+
+    assert remote_access.pair("", "") == {"ok": False, "error": "missing_pairing_key"}
