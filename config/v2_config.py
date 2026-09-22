@@ -952,12 +952,6 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
-        if path == "memory.cloud" or path.startswith("memory.cloud."):
-            return "memory.cloud"
-        if path.startswith("memory.processing.rerank"):
-            return "memory.rerank"
-        if path.startswith("memory.processing.multimodal"):
-            return "memory.multimodal"
         if path == "platform":
             return "platforms"
         if path.startswith("agents."):
@@ -967,10 +961,6 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return path.split(".", 1)[0]
 
     lowered = message.lower()
-    if "memory rerank endpoint" in lowered:
-        return "memory.rerank"
-    if "memory multimodal endpoint" in lowered:
-        return "memory.multimodal"
     if "unsupported enabled platform" in lowered:
         return "platforms"
     for platform_id in supported_platform_ids():
@@ -992,7 +982,6 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return "model_hub"
     for section in (
         "model_hub",
-        "memory",
         "remote_access",
         "audio_asr",
         "runtime",
@@ -1013,17 +1002,6 @@ def _recovery_field_for_error(section: Optional[str], error: BaseException) -> O
     de-duplicating — as a whole, which is what stops the recovery loop.
     """
 
-    if section == "memory" and "Config 'memory.profile_enabled'" in str(error):
-        return "profile_enabled"
-    if section == "memory.cloud":
-        match = re.search(r"Config '([^']+)'", str(error))
-        if not match:
-            return None
-        path = match.group(1)
-        prefix = "memory.cloud."
-        if not path.startswith(prefix):
-            return None
-        return path[len(prefix) :].split(".", 1)[0]
     if section == "runtime":
         match = re.search(r"Config '([^']+)'", str(error))
         if not match:
@@ -1135,28 +1113,11 @@ def _reset_recoverable_config_section(
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
-    if section == "memory" and field_name == "profile_enabled":
-        payload["memory"]["profile_enabled"] = False
-        return True
     if section == "runtime" and field_name is not None:
         if _recover_runtime_field(payload, field_name):
             return True
     if section in _FIELD_SCOPED_RECOVERY_SECTIONS:
         return _recover_switch_section_field(payload, section, field_name)
-    if section == "memory.rerank":
-        memory = payload.get("memory")
-        processing = memory.get("processing") if isinstance(memory, dict) else None
-        if not isinstance(processing, dict):
-            return False
-        processing.pop("rerank", None)
-        return True
-    if section == "memory.multimodal":
-        memory = payload.get("memory")
-        processing = memory.get("processing") if isinstance(memory, dict) else None
-        if not isinstance(processing, dict):
-            return False
-        processing.pop("multimodal", None)
-        return True
     if section == "runtime":
         # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
         # required cwd, so an empty object would make the recovery loop fail a
@@ -1169,7 +1130,6 @@ def _reset_recoverable_config_section(
         payload[section] = {"enabled": False, "runtime_default_applied": True}
         return True
     if section in {
-        "memory",
         "remote_access",
         "update",
     }:
