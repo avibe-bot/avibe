@@ -10,6 +10,9 @@
     "./**/*.tsx",
     "../ImportKeysNotice.test.tsx",
     "../setupAction.types.test.ts",
+    "../setupConfig.test.ts",
+    "../SetupFlowShell.test.tsx",
+    "../WizardCompletion.test.tsx",
     "../../../i18n/i18next.d.ts"
   ],
   "exclude": []

@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
+import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
 import { Button } from './ui/button';
 import { AccessTiles } from './onboarding/AccessTiles';
 import { RouteSurfaceActiveContext, useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
-import { loadingRegion, beginRegionRead, failRegionRead } from './settings/models/regionRead';
+import { loadingRegion, readyRegion, beginRegionRead, failRegionRead } from './settings/models/regionRead';
+import { modelsApi } from './settings/models/modelsApi';
+import { apiFetch } from '@/lib/apiFetch';
 import { INITIAL_SETUP_FLOW_STATE, setupBackTarget, setupCapability, setupNavigationReady, type SetupAction, type SetupCapability, type SetupScreenId, type SetupScreenHandle, type SetupScreenProps } from './onboarding/setupFlow';
 import { mediaQuery, playSetupHandoff, setupHandoffAllowed } from './onboarding/setupHandoff';
 import { fetchSetupConfig, type SetupConfigRead, type SetupConfigSnapshot } from './onboarding/setupConfig';
@@ -14,6 +16,13 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Welcome } from './steps/Welcome';
 import { AgentDetection } from './steps/AgentDetection';
+import { ProvidersScreen } from './onboarding/providers/ProvidersScreen';
+import {
+  GatewayBootstrapError,
+  bootstrapGateway,
+  readRuntimeObservation,
+  type GatewayBootstrapDeps,
+} from './onboarding/providers/gatewayBootstrap';
 import logoImg from '@/assets/logo.png';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi, type VibeAgentBrief } from '../context/ApiContext';
@@ -207,6 +216,25 @@ export function SetupFlowShell({ sequence, capability, gatewayEnabled, onRetrySe
   </div>;
 }
 
+/**
+ * The providers screen, plus the one fact about it the shell's props cannot state:
+ * that this journey has ARRIVED here.
+ *
+ * D11 is an entry event, not a condition. Every screen is mounted from the first
+ * render — that is how drafts survive leaving one — so a mount says nothing about
+ * where the person is, and `active` turning true again on the way back from the
+ * assistants must not seed a config or start a controller a second time. So the edge
+ * is reported once, from inside the tree that knows it, and what to do with it stays
+ * with the shell's single runtime owner.
+ */
+const ProvidersEntry = forwardRef<SetupScreenHandle, SetupScreenProps & { onEnter: () => void }>(
+  function ProvidersEntry({ onEnter, ...props }, ref) {
+    const { active } = props;
+    useEffect(() => { if (active) onEnter(); }, [active, onEnter]);
+    return <ProvidersScreen ref={ref} {...props} />;
+  },
+);
+
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
@@ -219,9 +247,9 @@ export function Wizard() {
   const [capability, setCapability] = useState<SetupCapability>('pending');
   const [gatewayEnabled, setGatewayEnabled] = useState<boolean | null>(null);
   const configGeneration = useRef(0);
-  // The shell owns the region and its request generation. L2 integrates a stateless
-  // D11 loader here on active provider entry; it returns a validated RuntimeDependency.
-  // Until that screen is registered, config reads authorize no runtime read/bootstrap.
+  // The shell owns the region and its request generation; the stateless D11 sequence
+  // below is what fills it, once the journey actually reaches the provider screen.
+  // A config read on its own authorizes no runtime read and no bootstrap.
   const [runtimeRead, setRuntimeRead] = useState<SetupScreenProps['runtimeRead']>(() => loadingRegion());
   const completing = useRef(false);
   /**
@@ -257,7 +285,6 @@ export function Wizard() {
   }, [t]);
   const load = useCallback(async () => {
     const generation = ++configGeneration.current;
-    setRuntimeRead((previous) => beginRegionRead(previous));
     setLoading(true); setError(null); setCapability('pending'); setGatewayEnabled(null);
     const result = await fetchSetupConfig();
     // A newer read — another Retry, or a completion boundary — already owns the state.
@@ -266,6 +293,77 @@ export function Wizard() {
     setLoading(false);
   }, [applyRead]);
   useEffect(() => { void load(); return () => { configGeneration.current += 1; }; }, [load]);
+  // ── The runtime region's one owner ────────────────────────────────────────
+  //
+  // `load` deliberately does not touch the region. It re-runs for reasons that have
+  // nothing to do with the machine — a language change re-resolves the copy a failed
+  // read is reported in — and marking a ready region as refreshing there would strand
+  // it: nothing would re-observe the runtime, because nothing asked anything to.
+  // Reporting a read in flight belongs to whoever is actually reading, which is here.
+  const [providersEntered, setProvidersEntered] = useState(false);
+  const enterProviders = useCallback(() => setProvidersEntered(true), []);
+  // A retry is one request for one attempt. The ticket is what a request increments
+  // and the attempt records, so an effect that re-runs — a config read landing, a
+  // capability arriving, a re-render — cannot turn one request into several.
+  const [bootstrapTicket, setBootstrapTicket] = useState(0);
+  const attemptedTicket = useRef(-1);
+  // Whether the sequence has already established what it establishes. Afterwards a
+  // refresh is the observation alone: the config exists and the controller is up, so
+  // re-seeding or re-starting would act on state that is already proven.
+  const bootstrapped = useRef(false);
+  const runtimeGeneration = useRef(0);
+  const bootstrapDeps = useMemo<GatewayBootstrapDeps>(() => ({
+    // Wrapped rather than passed by reference: the sequence is a dependency injection
+    // seam, and a test that spies on a module after this tree rendered must still be
+    // the thing that runs.
+    fetch: (input, init) => apiFetch(input, init),
+    getBackendConnection: (backend) => api.getBackendConnection(backend),
+    control: (action) => control(action),
+    getRuntimeStatus: () => modelsApi.getRuntimeStatus(),
+  }), [api, control]);
+  const retrySetup = useCallback(() => {
+    // Order matters only in what it means: re-read the configuration, and let the
+    // runtime owner resume from whatever that read says — which, when it says the
+    // gateway is off, is nothing at all.
+    setBootstrapTicket((previous) => previous + 1);
+    void load();
+  }, [load]);
+  useEffect(() => {
+    if (!providersEntered || loading) return;
+    // C2's boundary, read from the shell's own config state rather than assumed: a
+    // disabled deployment or a gateway somebody turned off authorizes no attempt.
+    if (!setupNavigationReady(capability, gatewayEnabled)) return;
+    if (attemptedTicket.current === bootstrapTicket) return;
+    attemptedTicket.current = bootstrapTicket;
+    const generation = ++runtimeGeneration.current;
+    setRuntimeRead((previous) => beginRegionRead(previous));
+    void (async () => {
+      try {
+        const runtime = bootstrapped.current
+          ? await readRuntimeObservation(bootstrapDeps)
+          : (await bootstrapGateway(bootstrapDeps, ASSISTANT_ORDER[0])).runtime;
+        if (generation !== runtimeGeneration.current) return;
+        bootstrapped.current = true;
+        setRuntimeRead(readyRegion(runtime));
+      } catch (cause) {
+        if (generation !== runtimeGeneration.current) return;
+        if (cause instanceof GatewayBootstrapError && cause.reason === 'disabled') {
+          // The sequence read a configuration this shell does not have yet, and the
+          // answer a person is owed is the configuration path rather than a retry.
+          // Re-reading is how that arrives: the config owner is the only thing that
+          // may set capability and saved intent, so the alert and the disabled cards
+          // come from the same authoritative read as everything else, and nothing
+          // here invents a flag or turns one back on.
+          void load();
+          return;
+        }
+        // Everything else is the region's own failure, and the provider screen's
+        // gateway card owns what to offer for it. Raising a second flow-level error
+        // beside that card would put two Retrys on screen for one machine.
+        setRuntimeRead((previous) => failRegionRead(previous));
+      }
+    })();
+  }, [providersEntered, loading, capability, gatewayEnabled, bootstrapTicket, bootstrapDeps, load]);
   /**
    * Read the prerequisite as it is now, and answer whether setup may still act on it.
    *
@@ -382,10 +480,12 @@ export function Wizard() {
     <SetupHeader />
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
-        runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={() => void load()}
+        runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={retrySetup}
         navigationLocked={Boolean(platformRecovery || recovery)} renderScreen={(id, props, ref) => id === 'intro'
           ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
+          : id === 'providers'
+          ? <ProvidersEntry ref={ref} {...props} onEnter={enterProviders} />
           : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
               completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : recovery ? <SetupModelRecovery key={recovery.id} agent={recovery} onComplete={complete} onCancel={() => setRecovery(null)} /> : undefined}
               onNext={complete} />}

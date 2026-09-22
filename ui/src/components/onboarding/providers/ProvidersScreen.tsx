@@ -633,7 +633,10 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     return (
       <div className="onboarding-setup">
         <header className="onboarding-heading">
-          <h2>{t('onboarding.providers.title')}</h2>
+          {/* `h1` with a programmatic tab stop, like every other screen's heading: the
+              shell moves focus here on activation, and a heading it cannot find or
+              cannot focus leaves a keyboard journey standing on the footer button. */}
+          <h1 tabIndex={-1}>{t('onboarding.providers.title')}</h1>
           <p>{t('onboarding.providers.subtitle')}</p>
         </header>
 

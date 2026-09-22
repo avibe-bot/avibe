@@ -5,15 +5,25 @@ import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Wizard } from '../Wizard';
+import { CONTRACT_VERSION, type RuntimeDependency, type Source } from '../settings/models/types';
 import en from '../../i18n/en.json';
 
 const mock = vi.hoisted(() => ({ supply: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
   getOpencodeProviders: vi.fn(), readOpencodeOptionsForModelPicker: vi.fn(), readModelHubAgentCatalogForModelPicker: vi.fn(), updateVibeAgent: vi.fn(), getVibeAgent: vi.fn(), listVibeAgents: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
-} }));
+},
+  // The endpoints the second screen reads. Only the endpoints: the collection
+  // authority, the lifecycle helper and the take-over dialog underneath them are the
+  // real ones, which is what makes the journey below the journey rather than a direct
+  // mount of the third screen.
+  models: { listSources: vi.fn(), listAgents: vi.fn(), refreshAgentPresence: vi.fn(), scanMigration: vi.fn(), getRuntimeStatus: vi.fn() },
+}));
 vi.mock('../../context/ApiContext', async (importOriginal) => ({ ...await importOriginal<typeof import('../../context/ApiContext')>(), useApi: () => mock.api }));
 vi.mock('@/lib/apiFetch', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/apiFetch')>(), apiFetch: mock.apiFetch }));
-vi.mock('../settings/models/modelsApi', () => ({ modelsApi: { getAgentSources: mock.supply } }));
+vi.mock('../settings/models/modelsApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
+  return { ...actual, modelsApi: { ...actual.modelsApi, getAgentSources: mock.supply, ...mock.models } };
+});
 vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_agents: true, can_manage_access_members: mock.manageAccess } }) }));
 vi.mock('../../context/StatusContext', () => ({ useStatus: () => ({ control: mock.control }) }));
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.toast }) }));
@@ -31,6 +41,17 @@ const baseConfig = (overrides: Record<string, unknown> = {}) => ({
   version: 'v2', setup_completed: false, runtime: {}, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true },
   agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } }, platforms: { primary: 'slack', enabled: [] }, ...overrides,
 });
+// The second screen's own prerequisites: one usable Hub source and a running runtime is
+// what makes its primary say "continue" rather than "add a source" or "connect".
+const HUB_SOURCE: Source = {
+  id: 'src_openai', vendor: 'openai', display_name: 'OpenAI', kind: 'api_key', protocol: 'openai_chat',
+  supply_channel: 'hub', billing: 'metered', state: { status: 'active' }, models: [], last_discovered_at: null,
+};
+const RUNTIME_OK: RuntimeDependency = {
+  contract_version: CONTRACT_VERSION,
+  manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'sha', assets: [] },
+  status: { verified: true, health: 'ok' },
+};
 let fresh: () => Promise<Response>;
 /** Serve one config to both the cached projection and the uncached prerequisite GET. */
 function serveConfig(config: Record<string, unknown>) { mock.api.getConfig.mockResolvedValue(config); fresh = async () => jsonResponse(config); }
@@ -55,16 +76,37 @@ beforeEach(() => {
   mock.api.listVibeAgents.mockResolvedValue({ ok: true, default_agent_name: 'missing-codex', agents: [{ name: 'claude-agent', backend: 'claude', enabled: true }] });
   mock.api.setDefaultVibeAgent.mockResolvedValue({ ok: true });
   mock.api.mutateConfig.mockResolvedValue({ setup_completed: true });
-  mock.control.mockImplementation(async () => { running = true; return { ok: true }; });
+  // `/api/control` answers `{ok, action, status}`; the bootstrap only accepts a start it
+  // can see acknowledged, so the fixture has to answer in the server's shape.
+  mock.control.mockImplementation(async () => { running = true; return { ok: true, action: 'start' }; });
+  mock.models.listSources.mockResolvedValue([HUB_SOURCE]);
+  mock.models.listAgents.mockResolvedValue([]);
+  mock.models.refreshAgentPresence.mockResolvedValue([]);
+  mock.models.scanMigration.mockResolvedValue({ items: [] });
+  mock.models.getRuntimeStatus.mockResolvedValue(RUNTIME_OK);
   // Hub-enabled config routes the OpenCode completion read through the supply
   // projection; Direct mode keeps every case authored before the gate on its path.
   mock.supply.mockResolvedValue({ backend: 'opencode', mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' });
 });
 afterEach(async () => { cleanup(); await i18n.changeLanguage('en'); });
-async function setup() {
-  mount(); fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+/** The registered journey, not a direct mount of the last screen: the second screen is
+ *  in the sequence, so every completion case below reaches the third one through it. */
+async function arriveAtProviders() {
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+  await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
+  await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
+}
+/** `stopped` is about the state the completion has to find, not the state the journey
+ *  needed: arriving at the second screen legitimately starts the Hub, so a case that
+ *  owns the completion's own start has to take the runtime back down after the handoff
+ *  and forget the bootstrap's calls. Otherwise it would be asserting on both. */
+async function setup(options: { stopped?: boolean } = {}) {
+  await arriveAtProviders();
+  fireEvent.click(primaryAction());
   const enter = await screen.findByRole('button', { name: 'Enter workspace' });
   await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+  if (options.stopped) { running = false; mock.control.mockClear(); }
   return enter;
 }
 describe('explicit any-one-ready completion', () => {
@@ -80,8 +122,7 @@ describe('explicit any-one-ready completion', () => {
     expect(mock.permission).not.toHaveBeenCalled(); expect(mock.control).not.toHaveBeenCalled();
   });
   it('allows stopped entry and confirms start before committing setup', async () => {
-    running = false;
-    const enter = await setup(); fireEvent.click(enter);
+    const enter = await setup({ stopped: true }); fireEvent.click(enter);
     await screen.findByTestId('destination');
     expect(mock.control).toHaveBeenCalledExactlyOnceWith('start');
     expect(mock.control.mock.invocationCallOrder[0]).toBeLessThan(mock.api.mutateConfig.mock.invocationCallOrder[0]);
@@ -92,17 +133,15 @@ describe('explicit any-one-ready completion', () => {
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
   });
   it.each(['start', 'legacy IM'])('keeps failed completion recoverable (%s)', async (failure) => {
-    if (failure === 'start') { running = false; mock.control.mockRejectedValue(new Error('Start unavailable')); }
-    else mock.api.mutateConfig.mockRejectedValue(new Error("Config 'slack.bot_token' must be provided"));
-    fireEvent.click(await setup());
+    if (failure !== 'start') mock.api.mutateConfig.mockRejectedValue(new Error("Config 'slack.bot_token' must be provided"));
+    const enter = await setup({ stopped: failure === 'start' });
+    if (failure === 'start') mock.control.mockRejectedValue(new Error('Start unavailable'));
+    fireEvent.click(enter);
     await screen.findByRole('alert');
     expect(screen.queryByTestId('destination')).toBeNull();
     if (failure === 'start') expect(mock.api.mutateConfig).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
-    mock.control.mockImplementation(async () => { running = true; return { ok: true }; });
-  // Hub-enabled config routes the OpenCode completion read through the supply
-  // projection; Direct mode keeps every case authored before the gate on its path.
-  mock.supply.mockResolvedValue({ backend: 'opencode', mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' });
+    mock.control.mockImplementation(async () => { running = true; return { ok: true, action: 'start' }; });
     mock.api.mutateConfig.mockResolvedValue({ setup_completed: true });
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' })));
     await screen.findByTestId('destination');
@@ -241,8 +280,8 @@ function incompleteSlack() {
 // AUTH-SETUP-120: the actual Wizard consumes legacy-IM recovery and narrow mutations.
 describe('saved messaging recovery', () => {
   it('mounts only after explicit repair, saves changed credentials only, then rechecks and completes', async () => {
-    const config = incompleteSlack(); running = false;
-    fireEvent.click(await setup());
+    const config = incompleteSlack();
+    fireEvent.click(await setup({ stopped: true }));
     await screen.findByRole('region', { name: en.onboarding.connection.platformRepair });
     expect(mock.control).not.toHaveBeenCalled(); expect(mock.api.slackManifest).not.toHaveBeenCalled();
     mock.api.mutateConfig.mockImplementation(async (mutations) => {
@@ -429,9 +468,10 @@ describe('fresh prerequisite boundary', () => {
   it('an older enabled read settling last cannot revive a newer disabled answer or finish setup', async () => {
     const enter = await setup();
     let releaseEntry!: (value: Response) => void;
+    const readsBefore = mock.apiFetch.mock.calls.length;
     serveFreshOnly(() => new Promise<Response>((resolve) => { releaseEntry = resolve; }));
     fireEvent.click(enter);
-    await waitFor(() => expect(mock.apiFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(mock.apiFetch.mock.calls.length).toBe(readsBefore + 1));
     // A language change re-runs the shell's load, which is how a second config read
     // legitimately starts while the completion boundary's first one is still open.
     serveFreshOnly(async () => jsonResponse(baseConfig({ model_hub: { enabled: false } })));
@@ -442,8 +482,7 @@ describe('fresh prerequisite boundary', () => {
     expectNoForwardWrite();
   });
   it('rereads the prerequisite after the awaited readiness work and before the final writes', async () => {
-    running = false;
-    const enter = await setup();
+    const enter = await setup({ stopped: true });
     // The gateway goes off while the start and the Agent listing are in flight.
     mock.api.listVibeAgents.mockImplementation(async () => {
       serveFreshOnly(async () => jsonResponse(baseConfig({ model_hub: { enabled: false } })));
@@ -465,8 +504,7 @@ describe('fresh prerequisite boundary', () => {
     ['the prerequisite became unreadable', async () => { throw new Error('network down'); }, en.onboarding.connection.readFailed],
   ] as const;
   it.each(overtaken)('stops before the start it was authorised to make once %s', async (_label, respond, explanation) => {
-    running = false;
-    const enter = await setup();
+    const enter = await setup({ stopped: true });
     const answer = mock.api.getBackendConnection.getMockImplementation()!;
     let release!: () => void;
     const held = new Promise<void>((resolve) => { release = resolve; });
@@ -574,8 +612,8 @@ describe('recovery navigation ownership', () => {
   // is offered, not started: until somebody asks for it nothing runs, so the pair is
   // held rather than busy, and refusing it returns the journey untouched.
   it('a platform repair holds both controls without a busy spinner, and gives them back on cancel', async () => {
-    incompleteSlack(); running = false;
-    fireEvent.click(await setup());
+    incompleteSlack();
+    fireEvent.click(await setup({ stopped: true }));
     await screen.findByRole('region', { name: en.onboarding.connection.platformRepair });
     expect(backAction().hasAttribute('disabled')).toBe(true);
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
@@ -588,7 +626,7 @@ describe('recovery navigation ownership', () => {
     expect(screen.queryByTestId('destination')).toBeNull();
   });
   it('keeps the journey put while a deferred platform repair is unsettled, survives its failure, and completes on a later success', async () => {
-    const config = incompleteSlack(); running = false;
+    const config = incompleteSlack();
     let releaseApply!: (ok: boolean) => void;
     mock.api.mutateConfig.mockImplementation(async (mutations: { path: string[] }[]) => {
       if (mutations[0].path[0] !== 'slack') return {};
@@ -596,7 +634,7 @@ describe('recovery navigation ownership', () => {
       serveConfig({ ...config, slack: { ...config.slack, has_bot_token: true } });
       return {};
     });
-    fireEvent.click(await setup());
+    fireEvent.click(await setup({ stopped: true }));
     fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
     fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.slackConfig.step2Title) }));
     const input = await screen.findByPlaceholderText(en.slackConfig.botTokenPlaceholder);
@@ -647,13 +685,100 @@ describe('recovery navigation ownership', () => {
     expect(await screen.findByTestId('destination')).toBeTruthy();
   });
   it('an ordinary not-yet-ready primary still lets the journey go back', async () => {
+    await arriveAtProviders();
+    // Only now: the second screen's own admission needs a connection answer, so hanging
+    // it from the start would hold the journey before it ever reached the third screen.
     mock.api.getBackendConnection.mockImplementation(() => new Promise(() => {}));
-    mount();
-    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    fireEvent.click(primaryAction());
     await screen.findByRole('button', { name: 'Enter workspace' });
     expect(primaryAction().hasAttribute('disabled')).toBe(true);
     expect(backAction().hasAttribute('disabled')).toBe(false);
     fireEvent.click(backAction());
-    await waitFor(() => expect(document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen')).toBe('intro'));
+    await waitFor(() => expect(document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen')).toBe('providers'));
+  });
+});
+
+// C2/D11: the journey is three screens, and the middle one is where the controller is
+// made answerable. These cases own that edge — when it happens, how often, and what a
+// failure leaves on screen — from the assembled Wizard rather than from the sequence
+// module, which cannot say anything about when a React tree calls it.
+describe('the registered journey', () => {
+  const screenId = () => document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen');
+  const seeds = () => mock.apiFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST');
+  const gateway = () => document.querySelector('.setup-gateway')!;
+
+  it('establishes the controller on arrival at the second screen, never on mount', async () => {
+    mount();
+    const start = await screen.findByRole('button', { name: 'Get started' });
+    // Nothing is seeded or started for somebody who has not asked to go anywhere yet.
+    expect(seeds()).toHaveLength(0);
+    expect(mock.models.getRuntimeStatus).not.toHaveBeenCalled();
+
+    fireEvent.click(start);
+    await waitFor(() => expect(screenId()).toBe('providers'));
+    await waitFor(() => expect(mock.models.getRuntimeStatus).toHaveBeenCalledOnce());
+    expect(seeds()).toHaveLength(1);
+    expect(seeds()[0][1]).toMatchObject({ method: 'POST', body: '{}' });
+    // The readback is the next call and is uncached: the seed cleared no projection,
+    // so a cached read here would describe the world before the write.
+    const seedIndex = mock.apiFetch.mock.calls.indexOf(seeds()[0]);
+    expect((mock.apiFetch.mock.calls[seedIndex + 1]?.[1] as RequestInit | undefined)?.cache).toBe('no-store');
+    expect(mock.api.getBackendConnection).toHaveBeenCalledWith('claude');
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
+    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
+  });
+
+  it('keeps the second screen on the way back without re-establishing anything', async () => {
+    await arriveAtProviders();
+    fireEvent.click(primaryAction());
+    const enter = await screen.findByRole('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+
+    fireEvent.click(backAction());
+    await waitFor(() => expect(screenId()).toBe('providers'));
+    // The screen re-reads its own supply, which is data somebody may have changed while
+    // the journey was away. What does not repeat is the establishment: returning is a
+    // return, not a second arrival, and the config and controller are already proven.
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
+    expect(seeds()).toHaveLength(1);
+    expect(mock.models.getRuntimeStatus).toHaveBeenCalledOnce();
+    expect(mock.control).not.toHaveBeenCalled();
+
+    fireEvent.click(primaryAction());
+    await waitFor(() => expect(screenId()).toBe('assistants'));
+    expect(seeds()).toHaveLength(1);
+    const again = await screen.findByRole('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(again.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(again);
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+  });
+
+  it('holds the journey on a failed establishment, and its own Retry gives it back', async () => {
+    mock.models.getRuntimeStatus.mockRejectedValueOnce(new Error('runtime unreadable'));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(gateway().getAttribute('data-state')).toBe('failed'));
+    // The shell's read failed, not an attempt this screen made — so the card names no
+    // step, and the one Retry on screen is the card's rather than the footer's.
+    expect(gateway().hasAttribute('data-failed-step')).toBe(false);
+    expect(flowError()).toBeNull();
+    expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue);
+    expect(primaryAction().hasAttribute('disabled')).toBe(true);
+    const retry = gateway().querySelector('.setup-gateway-retry') as HTMLButtonElement;
+    expect(retry.textContent).toContain(en.common.retry);
+    expect(screenId()).toBe('providers');
+    expectNoForwardWrite();
+
+    // An explicit retry is the one thing that may seed again: the first attempt's write
+    // was acknowledged, and only a person asking re-runs the sequence that made it.
+    fireEvent.click(retry);
+    await waitFor(() => expect(gateway().getAttribute('data-state')).toBe('running'));
+    expect(seeds()).toHaveLength(2);
+    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
+    fireEvent.click(primaryAction());
+    const enter = await screen.findByRole('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(enter);
+    expect(await screen.findByTestId('destination')).toBeTruthy();
   });
 });
