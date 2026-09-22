@@ -1029,6 +1029,23 @@ def create_app(controller: "Controller") -> FastAPI:
         except Exception as exc:
             logger.exception("internal backend auth test failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    @app.post("/internal/sessions/archive")
+    async def _archive_session(request: Request) -> Any:
+        body = await _safe_json(request)
+        session_id = body.get("session_id") if isinstance(body, dict) else None
+        if not isinstance(session_id, str) or not session_id.strip():
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_session_id"})
+        try:
+            session = await controller.archive_session(session_id.strip())
+        except LookupError:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "session_not_found"})
+        except PermissionError as exc:
+            return JSONResponse(status_code=403, content={"ok": False, "error": getattr(exc, "code", "forbidden")})
+        except Exception:
+            logger.exception("internal session archive failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
+        return {"ok": True, "session": session}
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""

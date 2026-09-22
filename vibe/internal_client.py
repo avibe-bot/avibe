@@ -321,6 +321,20 @@ async def dispatch_async(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def archive_session(session_id: str, *, socket_path: Optional[Path] = None, timeout: float = 10.0) -> dict[str, Any]:
+    """Archive a Workbench session through the controller lifecycle seam."""
+    target = await _verified_socket_path_async(socket_path)
+    try:
+        transport = httpx.AsyncHTTPTransport(uds=str(target))
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost", timeout=httpx.Timeout(timeout, connect=5.0)) as client:
+            resp = await client.post("/internal/sessions/archive", json={"session_id": session_id})
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def reconcile_platforms(
     *,
     socket_path: Optional[Path] = None,

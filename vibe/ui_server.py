@@ -9848,8 +9848,7 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
-    For an active row, the controller owns the terminal session write. Memory
-    a volatile Memory barrier is best-effort after that write and never blocks archive. If the
+    For an active row, the controller owns the terminal session write. If the
     controller seam itself is unavailable, archive fails closed.
 
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
@@ -9915,7 +9914,7 @@ async def sessions_archive(session_id: str):
         from vibe import internal_client
 
         try:
-            archive_result = await internal_client.memory_archive_session(session_id)
+            archive_result = await internal_client.archive_session(session_id)
         except (
             internal_client.InternalServerUnavailable,
             internal_client.InternalServerTimeout,
