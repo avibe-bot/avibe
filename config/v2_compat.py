@@ -165,6 +165,5 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         include_user_info=v2.include_user_info,
         reply_enhancements=v2.reply_enhancements,
         resource_governance=v2.runtime.resource_governance,
-        memory=v2.memory,
         harness_prompt_echo=v2.runtime.harness_prompt_echo,
     )

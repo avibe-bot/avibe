@@ -70,18 +70,15 @@ def _path_file_lock(lock_path: Path, *, timeout_seconds: float | None):
 
 
 @contextmanager
-
-
-@contextmanager
 def config_write_transaction(config_path: Optional[Path] = None) -> Iterator["V2Config"]:
     """Cross-process read-modify-write transaction for ``config.json`` (#1458).
 
-    Generalizes the Memory transaction: the same file lock serializes the
+    The file lock serializes the
     WHOLE load→mutate→save cycle, so the mutator always sees a snapshot
     loaded inside the transaction and cannot revert a concurrent writer's
     fields (the stale-snapshot race ``CONFIG_LOCK`` cannot fix because it
     is process-local while the UI API and controller are separate
-    processes). Lock order and re-entrancy match the Memory transaction:
+    processes). Lock order and re-entrancy match the config lock:
     ``CONFIG_LOCK`` first, then the file lock; both are re-entrant, so a
     nested transaction on the same config takes the same pair.
 
