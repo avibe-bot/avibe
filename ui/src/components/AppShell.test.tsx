@@ -25,6 +25,7 @@ import {
   SETTINGS_MENU_PLACEMENT_STORAGE_KEY,
   useStandaloneSettingsMenu,
 } from '../lib/settingsMenuPlacement';
+import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '../lib/settingsSectionMemory';
 import { AppShell } from './AppShell';
 
 const viewport = vi.hoisted(() => {
@@ -781,6 +782,66 @@ describe('AppShell persistent Workbench chrome', () => {
     expect(screen.queryByTestId('language-switcher')).toBeNull();
     expect(screen.queryByTestId('theme-toggle')).toBeNull();
     expect(screen.queryByTestId('account-menu')).toBeNull();
+  });
+
+  it('opens Settings on the section this device was left on', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+            <Route path="settings/backends" element={<div data-testid="backends" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    // Resolved on the link itself, not left to the Settings root to redirect,
+    // so the section is what the click paints rather than what a second frame
+    // corrects — and so the href a user hovers names where they will land.
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/backends');
+
+    await user.click(settingsToggle);
+    expect(await screen.findByTestId('backends')).toBeTruthy();
+  });
+
+  it('follows the section another tab moved to', async () => {
+    viewport.isDesktop = true;
+    window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/backends');
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    const settingsToggle = screen.getByRole('link', { name: 'appShell.openControlPanel' });
+    expect(settingsToggle.getAttribute('href')).toBe('/settings/backends');
+
+    // A second tab of the same origin selecting a different row reaches this
+    // one as a storage event. Without a subscriber the link keeps offering the
+    // section the rail has left, for as long as nothing else rerenders here.
+    act(() => {
+      window.localStorage.setItem(SETTINGS_LAST_SECTION_STORAGE_KEY, '/settings/replies');
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: SETTINGS_LAST_SECTION_STORAGE_KEY,
+        newValue: '/settings/replies',
+      }));
+    });
+
+    expect(screen.getByRole('link', { name: 'appShell.openControlPanel' }).getAttribute('href'))
+      .toBe('/settings/replies');
   });
 
   it('uses the Settings button to return to the route that opened Settings', async () => {

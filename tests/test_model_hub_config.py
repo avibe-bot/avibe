@@ -595,6 +595,33 @@ def test_source_client_nonce_round_trips_and_is_unique():
         ModelHubConfig.from_payload(duplicate.to_payload())
 
 
+def test_the_usage_count_maximum_is_the_bound_the_producer_can_prove():
+    """The contract's ceiling on a count has to be one the producer cannot exceed.
+
+    It is a product of two limits that already exist — how many rows the file
+    keeps, and how large a counter it admits — so a change to either silently
+    moves what the producer can publish. Asserting the derivation here is what
+    keeps the declared maximum from drifting into one of the two shapes this
+    contract has already been through: a bound the producer could violate, and no
+    bound at all.
+
+    Nothing clamps to it. It states the range, it does not enforce one.
+    """
+
+    from core.handlers.model_hub.usage import (
+        USAGE_COUNTER_CEILING,
+        USAGE_MAX_ROWS,
+        USAGE_PUBLISHED_COUNT_BOUND,
+    )
+
+    count = _schema("usage-summary.schema.json")["definitions"]["Count"]
+    assert USAGE_PUBLISHED_COUNT_BOUND == USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
+    assert count["maximum"] == USAGE_PUBLISHED_COUNT_BOUND
+    assert count["minimum"] == 0
+    # A finite double, so no consumer of this document can be handed an Infinity.
+    assert float(USAGE_PUBLISHED_COUNT_BOUND) < float("inf")
+
+
 def test_every_frozen_schema_example_is_valid_and_json_round_trips():
     for path in sorted(CONTRACTS.glob("*.schema.json")):
         schema = json.loads(path.read_text(encoding="utf-8"))

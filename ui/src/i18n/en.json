@@ -1379,7 +1379,8 @@
           "search": "Search sources or models",
           "confirm": "Add",
           "noMatch": "No source or model matches that",
-          "none": "No source/model pair is available to add"
+          "none": "No source/model pair is available to add",
+          "manual": "Enter a model ID manually"
         },
         "edit": {
           "confirm": "Replace",
@@ -2654,6 +2655,7 @@
       "replied": "Replied",
       "loadMore": "Load more",
       "moreUnreadBeyond": "More unread sessions may be further down — load more to see them.",
+      "moreUnreadInFull": "Some unread sessions aren't in this preview — open the full inbox.",
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
@@ -4337,6 +4339,8 @@
       "sendNow": "Send now",
       "sendingNow": "Sending…",
       "confirmingNow": "Send status not confirmed",
+      "sendFailed": "Couldn't send this message right now. Please try again.",
+      "sendStatusUnknown": "We couldn't confirm whether this message was sent. Check the conversation and queue to avoid sending it twice.",
       "sendDeferred": "Couldn't send into the current turn. Your message is still queued.",
       "attachmentsUnavailable": "An attachment is no longer available. Your message is still queued; upload the attachment again to resend it.",
       "sendReconciling": "We couldn't confirm whether this message was sent. It is kept here, and Avibe won't send it again. Refresh to check the latest status.",
@@ -5244,8 +5248,8 @@
   "onboarding": {
     "welcome": {
       "getStarted": "Get started",
-      "title": "Great on their own. Better together",
-      "subtitle": "Claude Code, Codex, and OpenCode — from planning to delivery",
+      "title": "Different strengths. One team.",
+      "subtitle": "Bring Claude Code, Codex, and OpenCode together",
       "detecting": "Checking…",
       "detectionFailed": "Could not check your assistants. Try again."
     },
@@ -5277,7 +5281,7 @@
     },
     "access": {
       "label": "Work from anywhere",
-      "description": "Work on the go with the Avibe app or your favorite chat apps",
+      "description": "6 ways to work. Wherever you are.",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5337,6 +5341,7 @@
       "savedSubscription": "Subscription credentials detected",
       "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
+      "readFailedStatus": "Unable to read connection state (HTTP {{status}}). Try again.",
       "saveFailed": "Unable to save the connection. Try again.",
       "applyFailed": "Credentials saved, but runtime application failed. Retry the save.",
       "applyPending": "Runtime application is not confirmed yet. Refresh the connection state.",
@@ -5484,6 +5489,11 @@
       "done": "Done",
       "confirm": "Start migration",
       "notNow": "Not now"
+    },
+    "flow": {
+      "backToIntro": "Back to introduction",
+      "backToProviders": "Back to models",
+      "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry."
     }
   }
 }

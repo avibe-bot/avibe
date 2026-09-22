@@ -15,6 +15,14 @@ why `token_reports` is tracked separately instead of treating a missing report a
 zero usage. And nothing here ever feeds admission, routing, or cooldown — a
 hostile upstream must not be able to change resolution behavior by lying about
 usage.
+
+What "bounded" bounds is the file: a fixed number of daily rows over a fixed
+retention window, each carrying counters the settings page can still read back
+exactly. It was never a bound on the counts themselves — how much a user spends
+is not ours to cap — so every aggregate here is an exact sum, and
+`USAGE_COUNTER_CEILING` constrains only what crosses into the file and back out
+of it. A row carrying a counter past it is dropped at whichever door it reaches,
+loudly, rather than rewritten into a number nobody spent.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
 from .state_file import write_state_document
-from .stream_wire import USAGE_TOKEN_CEILING, ProtocolUsageReport
+from .stream_wire import ProtocolUsageReport
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +50,54 @@ logger = logging.getLogger(__name__)
 USAGE_RETENTION_DAYS: Final = 62
 USAGE_MAX_ROWS: Final = 400
 USAGE_DEFAULT_WINDOW_DAYS: Final = 30
-# Anything older than every instant this ledger can hold, so a row that never
-# recorded one sorts as the least recently metered.
+# The largest integer the settings page holds exactly. Nothing on this side of the
+# wire needs it: `json.loads` reads a counter of any size into an exact `int`, and
+# so do the rpc and client hops. The doubles appear one boundary later, in the
+# browser parsing the published summary, and this is the only number in the module
+# that comes from there — which is worth saying plainly, because calling it a
+# property of the file is what made it look reusable as a bound on a sum.
+#
+# It is applied at the file's doors because that is where a value can still be
+# refused. A published aggregate is a sum, and refusing a sum is the defect this
+# module was fixed for; admitting a row only up to this instead bounds every
+# published count at `USAGE_MAX_ROWS` times it, a range the consumer holds as a
+# finite double and the contract can therefore declare and satisfy — with no
+# ceiling anywhere on how much a user may spend.
+#
+# Deliberately not the per-report ceiling, and nothing between the two doors
+# clamps to it. Nothing this module writes can approach it either: a window spans
+# at most `USAGE_RETENTION_DAYS` days of calls each bounded by
+# `stream_wire.USAGE_REPORT_TOKEN_CEILING`, so what it actually guards is a corrupt
+# or hand-edited file. There it drops the row rather than saturating it: a
+# saturated counter is a number nobody spent, and saturating a subset with its
+# superset forces a cached-input share to exactly 100% — the artifact this module
+# exists to not produce.
+USAGE_COUNTER_CEILING: Final = 2**53 - 1
+# The largest count `summary` can publish, and the maximum
+# `usage-summary.schema.json` declares. Derived rather than imposed: a published
+# count is a sum over one window, `window` reports at most `USAGE_MAX_ROWS` rows,
+# and no row reaches it carrying a counter past `USAGE_COUNTER_CEILING` — not from
+# the file, where `_counter` clears each one, and not from a merge, which `_read`
+# re-checks because a sum of cleared addends is not itself cleared.
+#
+# Both capacities binding the reported set is what makes the product a bound on
+# what this module can publish, rather than a description of the files it happens
+# to write. Deriving it from the write path alone was true of every file this
+# ledger produces and false of every other one — a reader handed a larger file
+# published a total above its own contract.
+#
+# Saying it out loud is what lets the contract carry a maximum that is both true
+# and satisfiable; the two things tried before were a maximum the producer could
+# violate, and none at all, which left a consumer nothing to size against and said
+# nothing about where exactness ends. Never a clamp: it states the range, and
+# nothing compares a sum against it. Every value in the range is a finite double,
+# only the part above `USAGE_COUNTER_CEILING` rounds, and reaching that at all
+# takes a corrupt file — a window spans at most `USAGE_RETENTION_DAYS` days of
+# real calls.
+USAGE_PUBLISHED_COUNT_BOUND: Final = USAGE_MAX_ROWS * USAGE_COUNTER_CEILING
+# Anything older than every instant this ledger can hold, so a row whose recency
+# cannot be read — it recorded no instant, or recorded one that has not happened —
+# sorts as the least recently metered.
 _OLDEST_INSTANT: Final = datetime.min.replace(tzinfo=timezone.utc)
 
 _COUNTER_KEYS: Final = (
@@ -115,14 +169,36 @@ def local_usage_day(moment: datetime) -> date:
     return _aware(moment).astimezone().date()
 
 
-def _bounded_counter(value: object) -> int:
-    """Read one persisted counter, degrading anything unusable to zero."""
+def _counter(value: object) -> Optional[int]:
+    """Read one persisted counter, or None when its whole row is unreadable.
+
+    Two unusable shapes, two answers, because they cost different things. A value
+    that is not a count — not an integer, a bool, negative — carries no magnitude,
+    and zero is the one substitute that claims none either: it is the identity of
+    every sum this module performs, so the rest of the row still reports what it
+    does know.
+
+    A value above `USAGE_COUNTER_CEILING` is the opposite problem. It carries a
+    magnitude no published document could carry to its reader, so every substitute
+    invents one in its place, and an
+    invented counter that large dominates whatever aggregate it enters; saturating
+    it would additionally hand a subset and its superset the same number and force
+    a cached-input share to exactly 100%. So that row is not read at all. It is
+    dropped and counted with every other unusable row, and the next write is what
+    takes it out of the file.
+
+    No reading of a real count is refused here: the ceiling is a property of the
+    consumer, and `_write` is what keeps this module from ever persisting a counter
+    past it.
+    """
 
     if not isinstance(value, int) or isinstance(value, bool):
         return 0
     if value < 0:
         return 0
-    return min(value, USAGE_TOKEN_CEILING)
+    if value > USAGE_COUNTER_CEILING:
+        return None
+    return value
 
 
 def _text(value: object) -> Optional[str]:
@@ -218,11 +294,17 @@ def _normalize_row(row: object) -> Optional[dict]:
     calendar_day = _calendar_day(day)
     if calendar_day is None:
         return None
+    counters: dict[str, int] = {}
+    for key in _COUNTER_KEYS:
+        counter = _counter(row.get(key))
+        if counter is None:
+            return None
+        counters[key] = counter
     normalized = {
         "day": calendar_day.isoformat(),
         "source_id": source_id,
         "model_id": model_id,
-        **{key: _bounded_counter(row.get(key)) for key in _COUNTER_KEYS},
+        **counters,
     }
     for subset, superset in _COUNTER_SUBSETS:
         normalized[subset] = min(normalized[subset], normalized[superset])
@@ -281,16 +363,42 @@ def _keyed_identities(
     return sources, models
 
 
-def _recency(row: dict) -> tuple[str, datetime]:
+def _recency(row: dict, ceiling: datetime) -> tuple[str, datetime]:
     """Order rows oldest-metered first, so the bound evicts what costs least.
 
     Ordering by key instead would evict by spelling: an early-sorting model would
     be recreated and evicted again on every write while later-sorting stale rows
     survived, so its usage could never accumulate. Instants are compared as points
     in time — text order is not time order once two rows carry different offsets.
+
+    An instant later than `ceiling` is not a recency at all. Nothing was metered
+    after the reading the caller just took, so such a row is not the set's most
+    recently used one — it is one whose recency cannot be read, which is the case
+    `_OLDEST_INSTANT` already answers for a row that recorded no instant. It gets
+    the same answer, and not because a corrupt row deserves to lose: a row this
+    ordering cannot place is the only row it can evict without discarding usage it
+    can account for.
+
+    Bounding it to `ceiling` instead is not enough, which is worth stating because
+    it is the obvious remedy. That makes the row as recent as the reading, so it
+    still outranks every row metered before it and still evicts real usage; it
+    narrows the lie without changing who pays for it. Placing the bound here at all
+    — rather than leaving it to whoever assembled the rows — is what stops this from
+    recurring: `_retained` keeps a future instant out of the file, and each time
+    that was the only place it happened, the report path ordered by the raw value.
+
+    The day is a different question and is deliberately not answered here. A row
+    dated after today reports nothing to anybody, so it does not belong in the set
+    at all; ranking it as though it were today's would still let it evict a real
+    row. Membership is each caller's own filter — a retention window on the way in,
+    the requested window on the way out — and the one caller that had neither is the
+    defect this ordering keeps being handed.
     """
 
-    return (row["day"], _instant(row["last_metered_at"]) or _OLDEST_INSTANT)
+    metered = _instant(row["last_metered_at"])
+    if metered is None or metered > ceiling:
+        return (row["day"], _OLDEST_INSTANT)
+    return (row["day"], metered)
 
 
 def _row_key(row: dict) -> tuple[str, str, str]:
@@ -302,8 +410,27 @@ def _empty_totals() -> dict:
 
 
 def _accumulate(target: dict, row: dict) -> None:
+    """Add one row's counters into an aggregate, exactly.
+
+    Nothing is clamped here, and that absence is the point. Every addend already
+    passed the door that bounds it — a live report at
+    `stream_wire.USAGE_REPORT_TOKEN_CEILING`, a persisted one at
+    `USAGE_COUNTER_CEILING` — so a ceiling on the sum would no longer protect the
+    aggregate from a hostile upstream. It would cap how much usage the user is
+    allowed to have had, and it read as exactly that: a truncated total is
+    indistinguishable from a real one, and clamping a subset and its superset
+    independently drove every cached-input share to exactly 100% once either
+    saturated, which presents a broken number as perfect caching.
+
+    Two callers persist what they accumulate — the duplicate-key merge in `_read`
+    and the fold in `record_many` — and neither makes a bound belong here. A sum
+    that outgrows the file is a fact about the file, so `_write` answers it, for
+    every writer at once and without a published aggregate ever being quietly
+    reduced to keep a row writable.
+    """
+
     for key in _COUNTER_KEYS:
-        target[key] = min(target[key] + row[key], USAGE_TOKEN_CEILING)
+        target[key] += row[key]
 
 
 def _newer_timestamp(current: Optional[str], candidate: Optional[str]) -> Optional[str]:
@@ -346,6 +473,33 @@ class BoundedUsageLedger:
         self._now = now
         self._lock = threading.RLock()
 
+    def _within_capacity(self, rows: list[dict], *, measured: datetime) -> list[dict]:
+        """Return at most `max_rows` of these rows, evicting the least recently metered.
+
+        `_recency` orders by day first, so this may only be handed rows that are
+        already reportable. Given a future-dated row it does the opposite of its
+        job: that row outranks every real one, survives, and then reads refuse it
+        — which is the defect `_retained` exists to close, and which reappeared
+        the one time this was called on rows straight out of the file.
+
+        So the two callers are the two places a reportable set is formed, and
+        neither is the parse. `_write` calls it on rows `_retained` has already
+        placed inside the ledger's own day window; `window` calls it on rows it
+        has already filtered to the requested one. Both keep the same survivors
+        in the same order.
+
+        `measured` is what those two filters cannot supply: the day they bound is
+        only the first half of the order, and an instant inside today can still be
+        one no clock has reached. It is the reading each caller already took for its
+        own window, so the eviction and the placement answer to one clock — and on
+        the write path it changes nothing, because `_retained` has already brought
+        every instant back under it.
+        """
+
+        if len(rows) <= self.max_rows:
+            return rows
+        return sorted(rows, key=lambda row: _recency(row, measured))[-self.max_rows :]
+
     def _read(self) -> list[dict]:
         if not self.path.exists():
             return []
@@ -387,10 +541,56 @@ class BoundedUsageLedger:
             logger.warning(
                 "Model Hub usage ledger %s dropped %d unusable row(s)", self.path, dropped
             )
-        return sorted(rows.values(), key=_row_key)
+        # A merge builds a counter no row in the file carried. `_counter` cleared
+        # each addend, and their sum can still land past the ceiling — only a
+        # file holding duplicate keys reaches this, which is one this ledger never
+        # wrote. Same answer as every other door, for the same reason: a row whose
+        # magnitude no published document could carry is dropped, not saturated.
+        held = []
+        for row in rows.values():
+            if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
+                held.append(row)
+                continue
+            logger.warning(
+                "Model Hub usage ledger %s dropped row %s: merged counters outgrew "
+                "what the file can carry",
+                self.path,
+                _row_key(row),
+            )
+        return sorted(held, key=_row_key)
 
-    def _write(self, rows: list[dict]) -> None:
-        retained = sorted(rows, key=_recency)[-self.max_rows :]
+    def _write(self, rows: list[dict], *, measured: datetime) -> None:
+        """Persist the rows the file can hold, at both of the capacities it has.
+
+        `max_rows` is one, and `_within_capacity` is where it is applied for this
+        door and for `window` together — holding it here alone is what let a larger
+        file be read back and published whole. The other capacity is what a stored
+        counter may be without putting the published document out of the
+        range its reader holds exactly, and it needs the same door for a reason
+        the exact merges upstream make unavoidable: folding an increment onto a row
+        near the ceiling, or merging two duplicate-keyed rows a corrupt file holds,
+        can produce a counter past it. Persisting that would put the loss somewhere
+        worse than here — the next read would find a row it cannot use, and the
+        usage would go missing with nothing having said so.
+
+        So the row stops where it stops fitting, once, with its identity in the
+        log. That is also what heals the file: a bucket whose stored counters were
+        never real disappears instead of saturating, and the next call recorded
+        against it starts a row that means what it says.
+        """
+
+        holdable: list[dict] = []
+        for row in rows:
+            if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
+                holdable.append(row)
+                continue
+            logger.warning(
+                "Model Hub usage ledger %s dropped row %s: counters outgrew what the "
+                "file can carry",
+                self.path,
+                _row_key(row),
+            )
+        retained = self._within_capacity(holdable, measured=measured)
         write_state_document(self.path, sorted(retained, key=_row_key))
 
     def record(
@@ -492,7 +692,7 @@ class BoundedUsageLedger:
             if not folded:
                 return
             retained = self._retained(list(rows.values()), persisted_at)
-            self._write(retained)
+            self._write(retained, measured=persisted_at)
 
     def _retained(self, rows: list[dict], measured: datetime) -> list[dict]:
         """Keep the rows this ledger's own clock can place, bounded at both edges.
@@ -538,7 +738,26 @@ class BoundedUsageLedger:
         last_day = today.isoformat()
         with self._lock:
             rows = self._read()
-        return [row for row in rows if first_day <= row["day"] <= last_day]
+        placed = [row for row in rows if first_day <= row["day"] <= last_day]
+        # The reportable set is formed here, so this is where the file's row
+        # capacity bounds what `summary` can publish — after the date filter, never
+        # before it. Every row left is one a reader can see, which is the condition
+        # `_within_capacity` needs to evict the right one.
+        #
+        # `_write` never emits more rows than the file holds, so reaching this at
+        # all means reading a file this ledger did not write. That is worth saying
+        # once, unlike eviction on the write path, which is retention working as
+        # designed and happens constantly.
+        held = self._within_capacity(placed, measured=_aware(now))
+        if len(held) < len(placed):
+            logger.warning(
+                "Model Hub usage ledger %s held %d reportable row(s) over its "
+                "capacity of %d; dropped the least recently metered",
+                self.path,
+                len(placed) - len(held),
+                self.max_rows,
+            )
+        return sorted(held, key=_row_key)
 
     def summary(
         self,

@@ -1379,7 +1379,8 @@
           "search": "搜索供应商或模型",
           "confirm": "添加",
           "noMatch": "没有匹配的供应商或模型",
-          "none": "没有可添加的供应商或模型"
+          "none": "没有可添加的供应商或模型",
+          "manual": "手动输入模型 ID"
         },
         "edit": {
           "confirm": "替换",
@@ -2654,6 +2655,7 @@
       "replied": "已回复",
       "loadMore": "加载更多",
       "moreUnreadBeyond": "还有未读会话在后面的分页里,点击「加载更多」查看。",
+      "moreUnreadInFull": "有未读会话不在这个预览里,打开完整收件箱查看。",
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
@@ -4337,6 +4339,8 @@
       "sendNow": "立即发送",
       "sendingNow": "发送中…",
       "confirmingNow": "发送状态未确认",
+      "sendFailed": "暂时无法发送这条消息，请稍后重试。",
+      "sendStatusUnknown": "暂时无法确认发送结果，请先查看会话记录和队列，避免重复发送。",
       "sendDeferred": "暂时无法发送到当前任务，消息仍保留在队列中。",
       "attachmentsUnavailable": "部分附件已不可用，原消息仍保留在队列中。请重新上传附件后再发送。",
       "sendReconciling": "暂时无法确认这条消息是否发送成功。消息已保留，系统不会重复发送；请刷新页面查看最新状态。",
@@ -5243,7 +5247,7 @@
   },
   "onboarding": {
     "welcome": {
-      "getStarted": "开始使用",
+      "getStarted": "立即开始",
       "title": "各有所长，接力完成",
       "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
       "detecting": "检测中…",
@@ -5277,7 +5281,7 @@
     },
     "access": {
       "label": "随时随地安排工作",
-      "description": "手机 APP 和常用聊天应用，随时随地安排工作",
+      "description": "6个工作入口，随时随地安排工作",
       "avibe": "Avibe App",
       "slack": "Slack",
       "discord": "Discord",
@@ -5337,6 +5341,7 @@
       "savedSubscription": "已检测到订阅凭据",
       "savedDisabled": "凭据已保存。此助手当前未启用。",
       "readFailed": "无法读取连接状态，请重试",
+      "readFailedStatus": "无法读取连接状态（HTTP {{status}}），请重试",
       "saveFailed": "无法保存连接，请重试",
       "applyFailed": "凭据已保存，但运行时应用失败，请重试保存",
       "applyPending": "运行时尚未确认生效，请刷新连接状态",
@@ -5484,6 +5489,11 @@
       "done": "完成",
       "confirm": "开始迁移",
       "notNow": "暂不迁移"
+    },
+    "flow": {
+      "backToIntro": "返回介绍",
+      "backToProviders": "返回模型",
+      "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。"
     }
   }
 }

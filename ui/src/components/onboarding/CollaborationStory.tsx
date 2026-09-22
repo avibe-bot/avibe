@@ -135,9 +135,9 @@ function Circuit({ handoff }: { handoff: { wire: number; progress: number } | nu
 }
 
 /** The design has no playback controls, so the loop starts with the screen and owns itself. */
-export function CollaborationStory() {
+export function CollaborationStory({ active = true }: { active?: boolean }) {
   const { t } = useTranslation();
-  const { ref, reducedMotion, running } = useOnboardingMotion();
+  const { ref, reducedMotion, running } = useOnboardingMotion(active);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (!running) return;

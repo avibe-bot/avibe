@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
@@ -131,8 +134,13 @@ const deferred = <T,>() => {
   });
   return { promise, reject, resolve };
 };
-const renderStockedDialog = () => {
+const renderStockedDialog = (
+  // The inventory the picker draws from. Its kinds decide whether the manual
+  // pair is rendered at all, which is why one test supplies its own.
+  supplied: (stockedSources: Source[]) => Source[] = (stockedSources) => stockedSources,
+) => {
   const fixture = stocked();
+  const fixtureSources = supplied(fixture.sources);
   vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
   render(
     <I18nextProvider i18n={i18n}>
@@ -142,11 +150,11 @@ const renderStockedDialog = () => {
           modelId: "opus-5",
           read: readyRegion(chain),
         }}
-        sources={fixture.sources}
+        sources={fixtureSources}
         onClose={vi.fn()}
         onCommitted={vi.fn()}
         readAgents={vi.fn().mockResolvedValue(observation([fixture.agent]))}
-        readSources={vi.fn().mockResolvedValue(observation(fixture.sources))}
+        readSources={vi.fn().mockResolvedValue(observation(fixtureSources))}
       />
     </I18nextProvider>,
   );
@@ -360,6 +368,7 @@ describe("RouteChainDialog", () => {
       } }, [sources[0]]);
 
       await user.click(await screen.findByRole('button', { name: 'Add a hop' }));
+      await user.click(screen.getByRole('button', { name: 'Enter a model ID manually' }));
       await user.type(screen.getByLabelText('Exact model ID'), hop.model_id);
       await user.click(screen.getByRole('button', { name: 'Add' }));
       await user.click(screen.getByRole('button', { name: 'Save' }));
@@ -680,6 +689,9 @@ describe("RouteChainDialog", () => {
     const user = userEvent.setup();
     renderStockedDialog();
     await user.click(await screen.findByRole('button', { name: 'Add a hop' }));
+    // The pair is folded away until asked for; the picker opens on the list.
+    expect(screen.queryByLabelText('Exact model ID')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Enter a model ID manually' }));
     expect(screen.getByLabelText('Source').querySelectorAll('option')).toHaveLength(1);
     await user.type(screen.getByLabelText('Exact model ID'), 'unlisted-model');
     await user.click(screen.getByRole('button', { name: 'Add' }));
@@ -1231,6 +1243,99 @@ describe("RouteChainDialog", () => {
     expect(
       wheelPrevented(document.body.appendChild(document.createElement("div"))),
     ).toBe(true);
+  });
+
+  // The panel is one flexible list plus bands that cannot shrink, so whatever a
+  // new band takes, it takes from the list — which is how the manual
+  // source/model pair once squeezed it to a sliver. `modelHubSurface.css` now
+  // carries a term per band in `--model-hub-route-selector-min`, and the style
+  // policy checks that arithmetic; what arithmetic cannot see is a band nobody
+  // wrote a term for. This is that half: every in-flow child of the column is
+  // either the list or a band the budget already pays for.
+  it("leaves no band in the add-hop panel outside the height budget", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    // Each band the column draws, in order, against the term that pays for it.
+    const budgeted: Array<[string, string]> = [
+      ["[cmdk-input-wrapper]", "--model-hub-route-selector-search-height"],
+      [".model-hub-route-selector-head", "--model-hub-route-selector-head-height"],
+      [".model-hub-route-selector-list", "--model-hub-route-selector-list-min"],
+      [".model-hub-route-selector-manual", "--model-hub-route-selector-manual-height"],
+      [".model-hub-route-selector-foot", "--model-hub-route-selector-foot-height"],
+    ];
+    const census = (root: string, bands: Array<[string, string]>) => {
+      const parent = document.querySelector<HTMLElement>(root);
+      expect(parent, `${root} is not rendered`).not.toBeNull();
+      const inFlow = [...parent!.children].filter(
+        // cmdk's own accessible label is absolutely positioned, so it costs the
+        // column nothing and needs no term.
+        (child) => getComputedStyle(child).position !== "absolute",
+      );
+      expect(inFlow.map((child) => (
+        bands.find(([selector]) => child.matches(selector))?.[1] ?? `unbudgeted: ${child.outerHTML.slice(0, 80)}`
+      ))).toEqual(bands.map(([, term]) => term));
+    };
+    census(".model-hub-route-selector-command", budgeted);
+
+    // The rare path is folded, so its fields are a band only once opened — and
+    // then they are one too, not free space taken out of the list.
+    await user.click(screen.getByRole("button", { name: "Enter a model ID manually" }));
+    census(".model-hub-route-selector-manual", [
+      [".model-hub-route-selector-manual-toggle", "--model-hub-route-selector-manual-height"],
+      [".model-hub-route-custom", "--model-hub-route-selector-manual-fields-height"],
+    ]);
+
+    // ...and those are the budget's own terms, not a list this test agrees with
+    // itself about: the fixed bands are what the list's floor is measured
+    // against, and the remaining term is that floor.
+    const css = readFileSync(join(__dirname, "modelHubSurface.css"), "utf8");
+    const budget = css.match(/--model-hub-route-selector-bands:([^;]*);/)?.[1] ?? "";
+    for (const [selector, term] of [...budgeted, ["", "--model-hub-route-selector-manual-fields-height"] as const]) {
+      expect(selector === ".model-hub-route-selector-list" ? css : budget).toContain(`var(${term})`);
+    }
+  });
+
+  // A subscription-only inventory has no model ID to type by hand, so the
+  // disclosure is not rendered — and must not be budgeted either. A term held
+  // for a row that is not on screen is 30px the panel refuses to give back, and
+  // it comes out of the bottom of the screen where the confirm button is.
+  it("drops the manual band from the budget where nothing can be typed", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog((stockedSources) =>
+      stockedSources.map((source) => ({ ...source, kind: "subscription" as const })));
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    const panel = document.querySelector<HTMLElement>(".model-hub-route-selector");
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector(".model-hub-route-selector-manual")).toBeNull();
+    expect(panel!.className).not.toContain("model-hub-route-selector--manual");
+    // ...and the candidates are still there: this is a shorter panel, not an
+    // empty one.
+    expect(document.querySelectorAll(".model-hub-route-candidate").length).toBeGreaterThan(0);
+  });
+
+  // cmdk answers Enter on its own root: it selects the highlighted candidate and
+  // prevents the default, which for a focused button is that button's own
+  // activation. A disclosure inside the command column has to keep the key it is
+  // focused for, or the rare path is reachable by pointer only.
+  it("opens the manual pair from the keyboard, where cmdk owns Enter", async () => {
+    const user = userEvent.setup();
+    renderStockedDialog();
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+
+    const toggle = screen.getByRole("button", { name: "Enter a model ID manually" });
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.queryByLabelText("Exact model ID")).not.toBeNull();
+
+    // And the same key folds it again, rather than reaching the list below.
+    await user.keyboard("{Enter}");
+    expect(screen.queryByLabelText("Exact model ID")).toBeNull();
   });
 
   it("announces the one-based position of the hop focused after removal", async () => {

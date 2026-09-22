@@ -1472,8 +1472,6 @@ class TurnCorrelationRegistry:
                     and trace is not None
                     and not trace.ambiguous
                     and request_id in trace.pending_attempts
-                    and gateway_model_id
-                    in {trace.gateway_request_model_id, trace.gateway_model_id}
                 ):
                     # Admission may close after this request opened. Its
                     # ownership remains valid through the bounded drain.
@@ -1549,11 +1547,33 @@ class TurnCorrelationRegistry:
             if explicit is None:
                 return None, False
             _key, _scope, route, _route_id = explicit
-            if gateway_model_id not in {
-                route.gateway_request_model_id,
-                route.resolved_model_id,
-            }:
-                return None, False
+            # An explicit handle proves which process holds it and which turn
+            # it was minted for. It deliberately does not fix the model. A
+            # dispatched turn names another of Avibe's own models as a matter
+            # of course, and Codex always does at a model change: it
+            # re-serialises the thread under the OUTGOING model before the
+            # first turn on the new one, so that hop arrives on the new turn's
+            # handle carrying the old id. Refusing it here strands the thread
+            # for good — the re-serialisation never lands, so every later turn
+            # repeats it and fails the same way. Whether Avibe configured the
+            # named model is resolution's question, not routing's: the caller
+            # model below reaches `effective_model_route`, which serves only
+            # ids already in this agent's menu and returns an empty route for
+            # anything else. Answering it a second time here would duplicate
+            # that authority and report an unconfigured model as an
+            # incompatible request.
+            if gateway_model_id == route.gateway_request_model_id:
+                # The one id that proves a request is on its own route: what
+                # Avibe told this launch to send. The route's upstream target
+                # proves nothing, because menu ids and upstream ids are
+                # separate namespaces that may be spelled the same — reading
+                # that spelling as this route's would send the outgoing
+                # model's re-serialisation down the new route, to another
+                # source under another model. Where no distinct id was minted
+                # the two coincide, and this one comparison covers both.
+                caller_model_id = route.requested_model_id
+            else:
+                caller_model_id = gateway_model_id
             identity = self._request_identity(request_metadata)
             assert identity is not None
             _route_id, turn_id = identity
@@ -1564,11 +1584,11 @@ class TurnCorrelationRegistry:
                     route=route,
                 ):
                     return None, False
-                return route.requested_model_id, True
+                return caller_model_id, True
             # Completed turn IDs are intentionally not retained. A valid
             # process-owned route handle can route a late continuation, but it
             # cannot claim a newer active turn.
-            return route.requested_model_id, False
+            return caller_model_id, False
         route = credential.route
         if route is None:
             # No route was known when this credential was minted: the shared
