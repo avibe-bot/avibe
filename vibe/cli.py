@@ -15286,7 +15286,6 @@ def cmd_upgrade():
     try:
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,
-            memory_enabled=configured_memory_enabled(),
             target_version=info.get("latest"),
         )
     except MemoryRequirementUnreadableError:
