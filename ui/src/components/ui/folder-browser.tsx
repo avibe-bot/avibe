@@ -84,7 +84,13 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const navSeq = useRef(0);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
+  const initialPathResolving = useRef<string | null>(null);
+  const mounted = useRef(true);
   const previousShowHidden = useRef(showHidden);
+
+  useEffect(() => () => {
+    mounted.current = false;
+  }, []);
 
   const changeQuery = useCallback((value: string) => {
     searchAbort.current?.abort();
@@ -97,11 +103,15 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   }, []);
 
   const navigate = useCallback(
-    (path: string) => {
+    (path: string, options: { preserveQuery?: boolean } = {}) => {
       initialPathHandled.current = true;
       previousShowHidden.current = showHidden;
       const seq = ++navSeq.current;
-      changeQuery('');
+      if (options.preserveQuery) {
+        setError(null);
+      } else {
+        changeQuery('');
+      }
       setCreatingFolder(false);
       setListingError(null);
       setLoading(true);
@@ -137,19 +147,17 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     const home = sysFavs.find((favorite) => favorite.key === 'home')?.path;
     const start = initialPath || recentProject || (sysFavsLoaded ? home || '~' : undefined);
     if (!start) return;
-    initialPathHandled.current = true;
-    let cancelled = false;
+    if (initialPathResolving.current === start) return;
+    initialPathResolving.current = start;
     Promise.resolve().then(() => {
-      if (cancelled) return undefined;
       return needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
     }).then((resolved) => {
-      if (!cancelled && resolved) navigate(resolved);
+      if (mounted.current && resolved) navigate(resolved);
     }).catch((cause: unknown) => {
-      if (!cancelled) setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+      if (mounted.current) setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+    }).finally(() => {
+      if (initialPathResolving.current === start) initialPathResolving.current = null;
     });
-    return () => {
-      cancelled = true;
-    };
   }, [initialPath, navigate, projects, sysFavs, sysFavsLoaded, t]);
 
   const refreshSearch = useCallback(() => {
@@ -164,6 +172,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const refreshCurrent = useCallback(() => {
     if (!cwd) return;
     if (query.trim()) {
+      navigate(cwd, { preserveQuery: true });
       refreshSearch();
     } else {
       navigate(cwd);

@@ -101,10 +101,16 @@ it('falls back to home when system favorites fail during initial navigation', as
 });
 
 it('resolves relative configured paths before using the Files API', async () => {
-  resolveDirectoryPath.mockResolvedValueOnce('/resolved/workspace');
+  let resolvePath!: (path: string) => void;
+  resolveDirectoryPath.mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolvePath = resolve;
+    }),
+  );
   render(<FolderBrowser initialPath='./workspace' onSelect={() => {}} onClose={() => {}} />);
 
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
+  resolvePath('/resolved/workspace');
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/resolved/workspace', false));
 });
 
@@ -137,6 +143,20 @@ it('preserves the active search when refreshing', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.refresh' }));
   expect((search as HTMLInputElement).value).toBe('src');
   await waitFor(() => expect(searchNames).toHaveBeenCalledTimes(2));
+});
+
+it('refreshes the directory listing when hidden files change during search', async () => {
+  searchNames.mockResolvedValue({ results: [], truncated: false });
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await screen.findByText('src');
+  const search = screen.getByRole('textbox');
+  fireEvent.change(search, { target: { value: 'src' } });
+  await waitFor(() => expect(searchNames).toHaveBeenCalledWith('/workspace', 'src', false, expect.any(AbortSignal)));
+
+  fireEvent.click(screen.getByRole('checkbox'));
+  expect((search as HTMLInputElement).value).toBe('src');
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/workspace', true));
 });
 
 it('does not show a false empty state while search is pending', async () => {
