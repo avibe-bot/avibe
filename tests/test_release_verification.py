@@ -339,7 +339,14 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     for directory, assets in ((dist, packages), (runtime, runtimes)):
         for name, data in assets.items():
             (directory / name).write_bytes(data)
-    all_assets = {**packages, **runtimes}
+    desktop = {}
+    if workflow_name == "release_ai.yml":
+        desktop_dir = workspace / "desktop-dist"
+        desktop_dir.mkdir()
+        desktop = {"Avibe_3.1.0-rc.1_aarch64-apple-darwin.dmg": b"desktop installer"}
+        for name, data in desktop.items():
+            (desktop_dir / name).write_bytes(data)
+    all_assets = {**packages, **runtimes, **desktop}
     existing = dict(all_assets) if state == "identical" else {}
     if state not in {"empty", "identical"}:
         existing = {name: all_assets[name] for name in (
@@ -397,7 +404,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
     result = subprocess.run(
         ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
         cwd=workspace, env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
-                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe"},
+                            "TMPDIR": str(temporary), "GITHUB_REPOSITORY": "avibe-bot/avibe", "SOURCE_SHA": "a" * 40},
         capture_output=True, text=True, timeout=20,
     )
     success = state in {"empty", "identical", "partial"}
@@ -413,7 +420,7 @@ def test_upload_protects_all_existing_bytes_before_any_write(tmp_path, workflow_
         if uploads:
             first_upload = events.index(uploads[0])
             assert all(event[1] != "download" for event in events[first_upload:])
-        kinds = [name in packages for name in uploaded]
+        kinds = [name in packages or name in desktop for name in uploaded]
         assert kinds == sorted(kinds), "Runtime uploads must complete before package uploads"
     assert not list(temporary.iterdir())
 
@@ -463,33 +470,38 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
 
 @pytest.mark.parametrize("tag", ["v3.1.0", "v3.2.0rc1", "gh-v3.2.0rc1"])
 @pytest.mark.parametrize("build_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("desktop_result", ["success", "skipped", "failure", "cancelled"])
 @pytest.mark.parametrize("cancelled", [False, True])
 @pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
-def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(tag, build_result, cancelled, event):
+def test_notes_skip_unused_official_build_but_never_publish_a_failed_preview(
+    tag, build_result, desktop_result, cancelled, event,
+):
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())
     jobs = workflow["jobs"]
     preview_condition = "startsWith(github.event.inputs.tag || github.ref_name, 'gh-v')"
     for name in ("resolve-show-runtime-ref", "memory-runtime-bundles"):
         assert jobs[name]["if"] == preview_condition
     assert jobs["show-runtime-bundles"]["needs"] == "resolve-show-runtime-ref"
-    assert jobs["build-assets"]["needs"] == ["show-runtime-bundles", "memory-runtime-bundles"]
-    assert jobs["release"]["needs"] == "build-assets"
+    assert jobs["build-assets"]["needs"] == ["resolve-desktop-release", "show-runtime-bundles", "memory-runtime-bundles"]
+    assert jobs["release"]["needs"] == ["build-assets", "resolve-desktop-release", "desktop-packages"]
     # Evaluate the actual bounded job expression for both event kinds. This
     # catches skipped-needs propagation without replacing the condition itself.
     expression = jobs["release"]["if"].strip().removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("needs.build-assets.result", "build_result")
+    expression = expression.replace("needs.desktop-packages.result", "desktop_result")
+    expression = expression.replace("needs.resolve-desktop-release.result", "desktop_result")
     expression = expression.replace("github.event.inputs.tag", "input_tag").replace("github.ref_name", "ref")
     expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
     expression = " ".join(expression.split())
     result = eval(expression, {"__builtins__": {}}, {
-        "build_result": build_result, "input_tag": tag if event == "workflow_dispatch" else "",
+        "build_result": build_result, "desktop_result": desktop_result, "input_tag": tag if event == "workflow_dispatch" else "",
         "ref": "master" if event == "workflow_dispatch" else tag,
         "cancelled": lambda: cancelled,
         "startsWith": lambda value, prefix: value.startswith(prefix),
     })
     expected = not cancelled and (
         build_result == "success" or (build_result == "skipped" and not tag.startswith("gh-v"))
-    )
+    ) and (not tag.startswith("gh-v") or desktop_result == "success")
     assert result == expected
 
 
@@ -505,7 +517,7 @@ def test_release_verification_is_workflow_owned_after_tagged_artifacts_are_built
     verify = _step(job, "Verify distribution package matrix")
 
     expected_source_ref = (
-        "${{ github.event.inputs.tag || github.ref }}" if workflow_name == "release_ai.yml"
+        "${{ needs.resolve-desktop-release.outputs.source_sha }}" if workflow_name == "release_ai.yml"
         else "${{ needs.resolve-tag.outputs.tag }}"
     )
     assert source["with"]["ref"] == expected_source_ref

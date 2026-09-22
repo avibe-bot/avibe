@@ -87,8 +87,8 @@ is not part of the application or private Runtime.
 - Intel macOS (`x86_64-apple-darwin`);
 - Windows x64 (`x86_64-pc-windows-msvc`).
 
-The macOS path is credential-gated; whichever state it produces is recorded in
-a `SIGNATURE` file next to the artifact hashes:
+The manual macOS path is credential-gated; whichever state it produces is recorded
+in a target-qualified `.SIGNATURE` metadata file next to the artifact hashes:
 
 - **With repository secrets configured** (`APPLE_CERTIFICATE` +
   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY` + `APPLE_API_ISSUER` +
@@ -98,13 +98,12 @@ a `SIGNATURE` file next to the artifact hashes:
   (`SIGNATURE: app-identity-signed`). The credential set must be complete —
   a partially populated set fails the build rather than silently producing a
   signed-but-unnotarized artifact.
-- **Without those secrets** the workflow produces unsigned acceptance
-  artifacts, exactly as before: the DMG carries an ad-hoc signature only so
-  macOS can verify its complete app/resource structure; it has no trusted
-  developer identity.
+- **Without those secrets** the app inside the DMG is ad-hoc signed so macOS can
+  verify its complete app/resource structure; it has no trusted developer
+  identity. The outer DMG is unsigned and unnotarized.
 
 Two signing layers are deliberately NOT in this workflow yet and remain
-tracked release gates (see the distribution-signing-completion issue):
+tracked release gates (see [#1976](https://github.com/avibe-bot/avibe/issues/1976)):
 signing/notarizing the outer DMG image itself, and signing the Mach-O
 binaries inside the embedded `runtime.zip` before archiving. Windows
 signing is likewise not yet implemented; NSIS artifacts remain unsigned
@@ -112,28 +111,42 @@ acceptance builds. Windows ARM64 stays outside the current product gate.
 
 ### Initial test distribution
 
-The initial test build uses the existing manually triggered
-`desktop-self-contained-package` workflow. Choose a SemVer version and the
-source ref in GitHub Actions; the workflow builds that ref and produces
-artifact-only DMG and NSIS installers. It does not publish a public GitHub
-Release or enable the auto-updater.
+`Release (AI Notes)` calls the existing `desktop-self-contained-package` workflow
+for canonical `gh-vX.Y.ZrcN` tags. For example, `gh-v3.1.2rc1` builds the tag's
+exact commit, stamps desktop version `3.1.2-rc.1`, and bundles Avibe `3.1.2rc1`.
+All three native builds must succeed before the existing release job publishes
+the GitHub prerelease. Official `v*` releases and PyPI publication keep their
+existing workflow; they do not acquire desktop assets from this TEST path.
 
-Without Apple signing secrets, the app copy inside the macOS DMG is ad-hoc
-signed so macOS can verify the bundle structure, while the outer DMG remains
-unsigned and unnotarized. Windows NSIS installers are unsigned. Test machines
-may therefore show Gatekeeper or SmartScreen warnings; keep the operating
-system protections enabled and use the package's documented verification
-evidence rather than bypassing them globally. Each artifact set includes
-`SHA256SUMS` and `SIGNATURE` files, and GitHub retains these workflow artifacts
-for 14 days.
+TEST builds never receive Apple or Windows signing credentials, even when the
+repository has them configured. The macOS app is ad-hoc signed, its outer DMG
+is unsigned/unnotarized, and the Windows NSIS installer is unsigned. Each raw
+DMG/EXE download has a target-qualified `.SHA256SUMS`, `.SIGNATURE`,
+`.SOURCE.json`, and `.runtime-manifest.json` alongside it. `SIGNATURE` describes
+the verified layer; it is not a cryptographic signature. Hashes and source
+metadata are checked before upload and downloaded desktop bytes are checked
+again before publication. A failed build or check leaves the release unpublished.
+Existing asset bytes cannot be overwritten; a changed build requires a new rc.
+Already-published releases cannot be retrofitted with missing desktop assets.
 
-The package contains its runtime and does not require Python, `uv`, Node, or
-`npm` on the test machine. Upgrades during this test phase are manual:
-download the replacement installer, verify its recorded hashes and signature
-state, and install it over or in place of the existing application according
-to the platform's normal installer flow. The optional Developer ID signing,
-notarization, and other trusted-signing path remains available when its
-repository secrets are configured.
+The manual workflow remains available for artifact-only builds: select a source
+ref and SemVer version in Actions. It retains optional Developer ID signing and
+notarization when its complete Apple secret set is configured. Actions artifacts
+are retained for 14 days; neither path enables a desktop auto-updater.
+
+See [Desktop TEST installation](../docs/desktop-test-installation.md) for
+architecture selection, hash checks, app-specific Gatekeeper/SmartScreen
+approval, manual replacement upgrades that preserve `~/.avibe`, and removal.
+Python, Avibe, Node, and npm are bundled; no separate installation is required.
+
+Release operators need the existing `OPENAI_API_KEY` for AI notes, Actions
+permissions to read runtime sources and write GitHub Releases, and all three
+hosted native runners. Apple/Windows signing credentials are not prerequisites
+for TEST publication. Do not create a tag or dispatch a release without owner
+authorization. Start with a new rc on the approved source; wait for all runtime,
+package, and desktop builds plus the sole `release_ai` finalizer. A rerun may
+reuse identical bytes in a draft, but native rebuilds are not guaranteed to be
+byte-reproducible: use a new rc if immutable asset comparison fails.
 
 ### Uninstalling a product package
 
@@ -307,9 +320,9 @@ and session deep-link targets require follow-up work. See
 `desktop/**` or the two central bootstrap locale sections change: `npm ci`,
 `npm run test:i18n`, `npm run build`, `cargo fmt --check`,
 `cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
-sign. `.github/workflows/desktop-package.yml` manually builds
-architecture-specific, self-contained DMG and NSIS artifacts; on macOS it
-signs and notarizes when the repository secrets are configured (see "Product
-packages" above) and otherwise produces unsigned acceptance artifacts. Its
-required SemVer input is stamped into both application metadata and artifact
-names. Publication remains a release gate.
+sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
+self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
+build unit for `.github/workflows/release_ai.yml`. The manual signing policy and
+the deterministic TEST policy are described above. Native packaging and a real
+installation on each supported architecture remain separate acceptance gates
+from unit/contract tests.

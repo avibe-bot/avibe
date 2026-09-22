@@ -1,16 +1,25 @@
 name: desktop-self-contained-package
 
-# Manual acceptance artifacts. Signing and notarization are gated on secrets:
-# with APPLE_CERTIFICATE (+ password) and APPLE_API_* present the macOS bundle
-# is Developer ID signed and notarized; without them the artifact stays an
-# unsigned acceptance build, exactly as before. Every artifact produced here
-# contains Python, Avibe, Node, and npm and can be tested on a machine with
-# none of them installed.
+# Manual artifacts retain optional Apple identity signing. Reusable TEST builds
+# receive no signing secrets and always use an ad-hoc app / unsigned installer.
 on:
   workflow_dispatch:
     inputs:
       version:
         description: SemVer version stamped into the desktop application and installer
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      source_sha:
+        description: Exact peeled commit of the validated TEST tag
+        required: true
+        type: string
+      release_tag:
+        description: Canonical gh-vX.Y.ZrcN TEST tag
         required: true
         type: string
 
@@ -45,6 +54,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           fetch-depth: 0
+          ref: ${{ inputs.source_sha || github.sha }}
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
@@ -81,39 +91,22 @@ jobs:
           npm ci
           npm run build
 
-      - name: Build verified private Runtime
-        run: >
-          python desktop/scripts/build-runtime-bundle.py
-          --target "${{ matrix.target }}"
-
       - name: Prepare package version
         shell: bash
         env:
           AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
-          python - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
+          python scripts/desktop_release.py prepare \
+            --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
+            --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
+            --env-file "$GITHUB_ENV"
 
-          version = os.environ["AVIBE_DESKTOP_VERSION"]
-          match = re.fullmatch(
-              r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
-              r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
-              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
-              version,
-          )
-          if not match or any(
-              identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0")
-              for identifier in (match.group("prerelease") or "").split(".")
-          ):
-              raise SystemExit("version must be valid SemVer")
-          Path("desktop/tauri.release.conf.json").write_text(
-              json.dumps({"version": version}),
-              encoding="utf-8",
-          )
-          PY
+      - name: Build verified private Runtime
+        run: >
+          python desktop/scripts/build-runtime-bundle.py
+          --target "${{ matrix.target }}"
 
       - name: Clean prior bundle output
         shell: bash
@@ -124,7 +117,7 @@ jobs:
       # variable only when its secret is non-empty, so absence keeps the
       # unsigned acceptance path exactly as before.
       - name: Export Apple signing credentials when configured
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.release_tag == ''
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -223,7 +216,11 @@ jobs:
             codesign --verify --deep --strict "$app"
             echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
           else
-            echo "signature_state=unsigned-acceptance" >> "$GITHUB_ENV"
+            # Seal the complete app before DMG staging and prove the TEST layer.
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict "$app"
+            codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+            echo "signature_state=app-adhoc" >> "$GITHUB_ENV"
           fi
 
       - name: Create headless-safe DMG
@@ -234,40 +231,38 @@ jobs:
           target/release/bundle/macos/Avibe.app
           "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
 
+      - name: Verify unsigned Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one NSIS installer" }
+          $signature = Get-AuthenticodeSignature $installers[0].FullName
+          if ($signature.Status -ne 'NotSigned') { throw "Expected an unsigned TEST installer" }
+
       - name: Record artifact hashes
         shell: bash
         env:
-          # Shell default on GitHub-hosted runners is uppercase RUNNER_OS.
+          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          TARGET: ${{ matrix.target }}
           RUNNER_OS: ${{ runner.os }}
         run: |
-          mkdir -p desktop-package
-          cp ${{ matrix.artifact_glob }} desktop-package/
-          cp desktop/src-tauri/resources/runtime/runtime-manifest.json desktop-package/
-          # Signature state is evidence about the artifact, recorded beside the
-          # hashes so an acceptance build can never be mistaken for a signed
-          # release artifact downstream. The state names the LAYER it proved:
-          # "app-identity-signed" means the .app inside the DMG is Developer ID
-          # signed and notarized; the DMG image itself and the embedded
-          # runtime's Mach-O contents remain unsigned layers tracked in the
-          # distribution-signing-completion issue. Non-macOS targets have no
-          # macOS signature; the Windows signing path is not yet implemented.
+          set -euo pipefail
+          installers=(${{ matrix.artifact_glob }})
+          [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
           if [ "$RUNNER_OS" = "macOS" ]; then
-            printf '%s\n' "${signature_state:-unsigned-acceptance}" > desktop-package/SIGNATURE
+            signing="${signature_state}"$'\ndmg-unsigned-unnotarized'
           else
-            printf '%s\n' "unsigned-acceptance" > desktop-package/SIGNATURE
+            signing="installer-unsigned"
           fi
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
+          python scripts/desktop_release.py record \
+            --version "$AVIBE_DESKTOP_VERSION" --target "$TARGET" --tag "$RELEASE_TAG" \
+            --source-sha "$(git rev-parse HEAD)" --installer "${installers[0]}" \
+            --runtime desktop/src-tauri/resources/runtime --output desktop-package \
+            --signing "$signing"
 
-          root = Path("desktop-package")
-          lines = []
-          for path in sorted(item for item in root.iterdir() if item.is_file()):
-              lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
-          (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
-
-      - uses: actions/upload-artifact@b7c566a772e6db3ef3c5f8a56943fffe632ef53  # v6
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
           path: desktop-package/
