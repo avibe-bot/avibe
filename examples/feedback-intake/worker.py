@@ -123,7 +123,18 @@ def _database():
     connection = sqlite3.connect(path, timeout=2, isolation_level=None)
     connection.row_factory = sqlite3.Row
     try:
-        connection.execute("PRAGMA journal_mode=WAL")
+        # delete -> WAL is a mode transition needing an exclusive database lock, so
+        # concurrent first touch of a brand-new ledger loses the race outright and a
+        # busy timeout only makes losing slower. Serialize it on a sidecar lock, as
+        # _write_slot does; once the header already says WAL the pragma is free, and
+        # the lock must not sit on the ledger's own descriptor because closing any
+        # descriptor for a file drops this process's POSIX locks on it.
+        lock_fd = os.open(str(path) + ".init", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            connection.execute("PRAGMA journal_mode=WAL")
+        finally:
+            os.close(lock_fd)
         connection.execute("PRAGMA synchronous=FULL")
         connection.executescript("""
             CREATE TABLE IF NOT EXISTS receipts (
