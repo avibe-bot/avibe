@@ -511,7 +511,6 @@ def _schedule_restart_locked(
     trigger: str,
     scope: str,
     prepare_show_runtime: bool,
-    memory_ui_secret: str | None,
     python_executable: str | None,
 ) -> dict:
     """Spawn the detached restart job while the caller owns activation."""
