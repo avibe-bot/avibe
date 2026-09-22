@@ -1017,22 +1017,9 @@ def _spawn_runtime_log_sinks(stdout_path: Path, stderr_path: Path) -> tuple[subp
     return stdout_sink, stderr_sink
 
 
-def _spawn_stdin(
-    process: subprocess.Popen,
-    *,
-    memory_ui_secret: str | None,
-) -> None:
-    if memory_ui_secret is None or process.stdin is None:
-        return
-    process.stdin.write(f"{memory_ui_secret}\n".encode("utf-8"))
-    process.stdin.close()
-
-
 def independent_process_env(
     env: dict[str, str] | None,
-    *,
-    memory_ui_secret: str | None = None,
-) -> dict[str, str]:
+ ) -> dict[str, str]:
     """Build the environment for a process Avibe owns, not one it runs for a caller.
 
     The service, the UI server, the connector and the restart supervisor all
@@ -1060,14 +1047,12 @@ def spawn_background(
     stdout_name: str,
     stderr_name: str,
     env: dict[str, str] | None = None,
-    *,
-    memory_ui_secret: str | None = None,
 ):
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
+    stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
@@ -1077,9 +1062,8 @@ def spawn_background(
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
+            env=independent_process_env(env),
         )
-        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:
         if stdin is not subprocess.PIPE:
             stdin.close()
@@ -1094,14 +1078,12 @@ def spawn_service_background_process(
     stdout_name: str,
     stderr_name: str,
     env: dict[str, str] | None = None,
-    *,
-    memory_ui_secret: str | None = None,
 ) -> subprocess.Popen:
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
+    stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
@@ -1111,9 +1093,8 @@ def spawn_service_background_process(
             start_new_session=True,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
+            env=independent_process_env(env),
         )
-        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
     finally:
         if stdin is not subprocess.PIPE:
             stdin.close()
@@ -1799,7 +1780,6 @@ def start_service(
     *,
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
-    memory_ui_secret: str | None = None,
     launcher: ServiceLauncher | None = None,
 ) -> int:
     """Start the service and return the pid, by default only once it is up.
@@ -1836,7 +1816,6 @@ def start_service(
     pid = _resolve_service_pid(
         wait_for_ready=wait_for_ready,
         initial_ready_timeout=initial_ready_timeout,
-        memory_ui_secret=memory_ui_secret,
         launcher=launcher,
     )
     if not wait_for_ready:
@@ -1851,7 +1830,6 @@ def _resolve_service_pid(
     *,
     wait_for_ready: bool,
     initial_ready_timeout: float,
-    memory_ui_secret: str | None,
     launcher: ServiceLauncher | None,
 ) -> int:
     """Which process is the service, starting one if nothing holds the lock.
@@ -1862,9 +1840,6 @@ def _resolve_service_pid(
     """
 
     from storage.migrations import guard_source_checkout_default_state_bootstrap
-    from vibe.memory_ui_access import process_ui_read_secret
-
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
@@ -2088,12 +2063,8 @@ def start_ui(
     port,
     *,
     wait_for_ready: bool = True,
-    memory_ui_secret: str | None = None,
     launcher: ServiceLauncher | None = None,
 ):
-    from vibe.memory_ui_access import process_ui_read_secret
-
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:
