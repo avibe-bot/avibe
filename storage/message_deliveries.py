@@ -29,8 +29,12 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
-# Delivery states whose input has reached the native Turn.
-WRITTEN_DELIVERY_STATES = frozenset({"accepted"})
+# Delivery states whose input may have reached the native Turn. ``steering``
+# and ``reconciling_steer`` count: the adapter may already have written the
+# prompt and returned an unknown acknowledgement. Only ``queued`` and
+# ``pending_steer`` are definitively unwritten.
+POSSIBLY_WRITTEN_DELIVERY_STATES = frozenset({"accepted", "steering", "reconciling_steer"})
+UNWRITTEN_STEER_STATES = frozenset({"queued", "pending_steer"})
 FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
@@ -648,10 +652,9 @@ def current_turn_memory_authority_conflict(session_id: str) -> bool:
         initial_authority = memory_authority_for_payload(initial_payload)
         initial_owner = memory_owner_from_payload(initial_payload)
         for delivery in deliveries_for_turn(conn, str(turn["id"])):
-            # Only a written input can carry foreign authority into the Turn.
-            # Provisional rows (queued, pending_steer, steering, reconciling)
-            # may still be refused without a native write.
-            if delivery.get("state") not in WRITTEN_DELIVERY_STATES:
+            # Only an input that may already be in the native Turn can carry
+            # foreign authority into it; a definitively unwritten row cannot.
+            if delivery.get("state") not in POSSIBLY_WRITTEN_DELIVERY_STATES:
                 continue
             payload = execution_delivery_payload(conn, delivery)
             if (

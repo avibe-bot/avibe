@@ -26,9 +26,13 @@ ownership.
 `Controller._memory_admission`, or emits Memory-specific refusal reasons. The
 Memory boundary evaluates the active Turn's immutable delivery rows at
 consumption time. A host-owned storage helper compares the initial delivery's
-authority with executing deliveries; a conflicting authority drops the
-session's recorded Memory scope, so existing internal Memory endpoints return
-403 while the accepted delivery continues.
+authority with every delivery that may already be in the Turn (`accepted`,
+`steering`, `reconciling_steer`); definitively unwritten rows (`queued`,
+`pending_steer`) are ignored. On a conflict, or when the check cannot be
+evaluated, Memory scope resolution returns no scope for that call, so internal
+Memory endpoints answer 403 while the conflicting Turn is active. The cached
+owner scope is preserved and re-evaluated on every call, so the owner's next
+Turn is readable again without re-admission.
 
 ## Tests and evidence
 
