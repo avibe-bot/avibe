@@ -4,7 +4,9 @@ import { StrictMode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const projects = vi.hoisted(() => ({ value: [] as unknown[] | null }));
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
+
+const projects = vi.hoisted(() => ({ value: [] as unknown[] | null, error: null as string | null }));
 const listDir = vi.hoisted(() =>
   vi.fn(async (path: string) => ({
     ok: true as const,
@@ -24,7 +26,9 @@ const systemFavorites = vi.hoisted(() => vi.fn().mockResolvedValue([{ key: 'home
 const resolveDirectoryPath = vi.hoisted(() => vi.fn());
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
-vi.mock('../../context/WorkbenchProjectsContext', () => ({ useWorkbenchProjectsTree: () => ({ projects: projects.value }) }));
+vi.mock('../../context/WorkbenchProjectsContext', () => ({
+  useWorkbenchProjectsTree: () => ({ projects: projects.value, projectsError: projects.error }),
+}));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
 vi.mock('../../lib/filesApi', () => ({
   fileBrowserErrorMessage: (_error: unknown, _t: unknown, fallback: string) => fallback,
@@ -47,6 +51,18 @@ afterEach(() => {
 
 beforeEach(() => {
   projects.value = [];
+  projects.error = null;
+  listDir.mockReset().mockImplementation(async (path: string) => ({
+    ok: true as const,
+    path,
+    parent: path === '/workspace' ? '/' : '/workspace',
+    entries: path === '/workspace'
+      ? [
+          { name: 'src', kind: 'dir' as const, size: null, mtime: 2, ext: '' },
+          { name: 'README.md', kind: 'file' as const, size: 12, mtime: 1, ext: 'md' },
+        ]
+      : [],
+  }));
 });
 
 it('reuses the Files surface while keeping folder selection actions focused', async () => {
@@ -123,6 +139,85 @@ it('resolves relative configured paths before using the Files API', async () => 
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
   resolvePath('/resolved/workspace');
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/resolved/workspace', false));
+});
+
+it('does not override explicit navigation when initial path resolution finishes later', async () => {
+  let resolvePath!: (path: string) => void;
+  resolveDirectoryPath.mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolvePath = resolve;
+    }),
+  );
+  render(<FolderBrowser initialPath="./workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
+  fireEvent.click((await screen.findAllByRole('button', { name: 'workspace' }))[0]);
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
+
+  resolvePath('/resolved/workspace');
+  await waitFor(() => expect(listDir).not.toHaveBeenCalledWith('/resolved/workspace', false));
+});
+
+it('refreshes a pending destination when hidden files change', async () => {
+  const requests: Array<{
+    path: string;
+    showHidden: boolean;
+    resolve: (result: {
+      ok: true;
+      path: string;
+      parent: string;
+      entries: Array<{ name: string; kind: 'dir'; size: null; mtime: number; ext: string }>;
+    }) => void;
+  }> = [];
+  listDir.mockImplementation((path: string, showHidden: boolean) => new Promise((resolve) => {
+    requests.push({ path, showHidden, resolve });
+  }));
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await waitFor(() => expect(requests).toHaveLength(1));
+  requests[0].resolve({ ok: true, path: '/workspace', parent: '/', entries: [{ name: 'src', kind: 'dir', size: null, mtime: 1, ext: '' }] });
+  await screen.findByText('src');
+
+  fireEvent.click(screen.getByText('src'));
+  await waitFor(() => expect(requests.some(({ path, showHidden }) => path === '/workspace/src' && !showHidden)).toBe(true));
+  fireEvent.click(screen.getByRole('checkbox'));
+  await waitFor(() => expect(requests.some(({ path, showHidden }) => path === '/workspace/src' && showHidden)).toBe(true));
+});
+
+it('falls back when the project tree fails to load', async () => {
+  projects.value = null;
+  projects.error = 'project tree unavailable';
+  render(<FolderBrowser onSelect={() => {}} onClose={() => {}} />);
+
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
+});
+
+it('keeps a new-folder draft while the route surface is suspended', async () => {
+  const props = { initialPath: '/workspace', onSelect: () => {}, onClose: () => {} };
+  const view = render(
+    <RouteSurfaceActiveContext.Provider value>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.newFolder' }));
+  const input = screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder') as HTMLInputElement;
+  fireEvent.change(input, { target: { value: 'draft-folder' } });
+
+  view.rerender(
+    <RouteSurfaceActiveContext.Provider value={false}>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+  expect(screen.queryByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeNull();
+
+  view.rerender(
+    <RouteSurfaceActiveContext.Provider value>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+  expect((await screen.findByPlaceholderText('apps.fileBrowser.newFolderPlaceholder') as HTMLInputElement).value).toBe('draft-folder');
 });
 
 it('re-fetches the initial listing when hidden files are toggled while loading', async () => {

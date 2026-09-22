@@ -1663,19 +1663,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         </div>
       )}
+        {movePickerItems && (
+          <FilePicker
+            mode="open-directory"
+            initialPath={cwd}
+            onCancel={() => setMovePickerItems(null)}
+            onConfirm={async ({ path }) => {
+              await moveItemsInto(movePickerItems, path);
+              setMovePickerItems(null);
+            }}
+          />
+        )}
       </div>
-
-      {movePickerItems && (
-        <FilePicker
-          mode="open-directory"
-          initialPath={cwd}
-          onCancel={() => setMovePickerItems(null)}
-          onConfirm={async ({ path }) => {
-            await moveItemsInto(movePickerItems, path);
-            setMovePickerItems(null);
-          }}
-        />
-      )}
 
       {/* Destructive delete confirmation (product dialog; replaces window.confirm). The wording
           stays neutral about undoability — whether the backend could stage the entry is only known

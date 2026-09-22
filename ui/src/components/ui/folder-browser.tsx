@@ -65,7 +65,7 @@ function needsDirectoryResolution(path: string): boolean {
 
 export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSelect, onClose }) => {
   const { t } = useTranslation();
-  const { projects } = useWorkbenchProjectsTree();
+  const { projects, projectsError } = useWorkbenchProjectsTree();
   const isDesktop = useIsDesktop();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -80,8 +80,10 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchRevision, setSearchRevision] = useState(0);
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
   const [searchTruncated, setSearchTruncated] = useState(false);
   const navSeq = useRef(0);
+  const pendingNavigation = useRef<string | null>(null);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
   const initialPathResolving = useRef<string | null>(null);
@@ -98,7 +100,10 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const changeQuery = useCallback((value: string) => {
     searchAbort.current?.abort();
     setQuery(value);
-    if (value.trim()) setCreatingFolder(false);
+    if (value.trim()) {
+      setCreatingFolder(false);
+      setNewFolderName('');
+    }
     setSearchRows(null);
     setSearchTruncated(false);
     setSearchBusy(value.trim().length > 0);
@@ -110,12 +115,14 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       initialPathHandled.current = true;
       previousShowHidden.current = showHidden;
       const seq = ++navSeq.current;
+      pendingNavigation.current = path;
       if (options.preserveQuery) {
         setError(null);
       } else {
         changeQuery('');
       }
       setCreatingFolder(false);
+      setNewFolderName('');
       setListingError(null);
       setLoading(true);
       listDir(path, showHidden)
@@ -130,7 +137,10 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           }
         })
         .finally(() => {
-          if (seq === navSeq.current) setLoading(false);
+          if (seq === navSeq.current) {
+            pendingNavigation.current = null;
+            setLoading(false);
+          }
         });
     },
     [changeQuery, showHidden, t],
@@ -145,7 +155,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
 
   useEffect(() => {
     if (initialPathHandled.current) return;
-    if (!initialPath && projects === null) return;
+    if (!initialPath && projects === null && !projectsError) return;
     const recentProject = sortProjectsByRecent(projects || [])[0]?.folder_path;
     const home = sysFavs.find((favorite) => favorite.key === 'home')?.path;
     const start = initialPath || recentProject || (sysFavsLoaded ? home || '~' : undefined);
@@ -155,13 +165,13 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     Promise.resolve().then(() => {
       return needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
     }).then((resolved) => {
-      if (mounted.current && resolved) navigate(resolved);
+      if (mounted.current && !initialPathHandled.current && resolved) navigate(resolved);
     }).catch((cause: unknown) => {
       if (mounted.current) setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
     }).finally(() => {
       if (initialPathResolving.current === start) initialPathResolving.current = null;
     });
-  }, [initialPath, navigate, projects, sysFavs, sysFavsLoaded, t]);
+  }, [initialPath, navigate, projects, projectsError, sysFavs, sysFavsLoaded, t]);
 
   const refreshSearch = useCallback(() => {
     searchAbort.current?.abort();
@@ -173,12 +183,13 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   }, []);
 
   const refreshCurrent = useCallback(() => {
-    if (!cwd) return;
-    if (query.trim()) {
-      navigate(cwd, { preserveQuery: true });
+    const target = pendingNavigation.current || cwd;
+    if (!target) return;
+    if (query.trim() && !pendingNavigation.current) {
+      navigate(target, { preserveQuery: true });
       refreshSearch();
     } else {
-      navigate(cwd);
+      navigate(target);
     }
   }, [cwd, navigate, query, refreshSearch]);
 
@@ -244,6 +255,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
 
   const cancelCreateFolder = () => {
     setCreatingFolder(false);
+    setNewFolderName('');
     setError(null);
   };
 
@@ -259,7 +271,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     }
     try {
       await makeDir(joinPath(cwd, trimmed));
-      setCreatingFolder(false);
+      cancelCreateFolder();
       navigate(cwd);
     } catch (cause: unknown) {
       setError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.createFolderFailed')));
@@ -311,6 +323,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
               disabled={!cwd || loading || !!listingError || creatingFolder}
               onClick={() => {
                 changeQuery('');
+                setNewFolderName('');
                 setCreatingFolder(true);
               }}
             >
@@ -334,6 +347,8 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
                     <Folder className="size-4 shrink-0 text-cyan-ink" />
                     <InlineNameInput
                       initial=""
+                      value={newFolderName}
+                      onChange={setNewFolderName}
                       placeholder={t('apps.fileBrowser.newFolderPlaceholder')}
                       onCommit={(value) => void createFolder(value)}
                       onCancel={cancelCreateFolder}
