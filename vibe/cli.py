@@ -71,7 +71,6 @@ from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
     CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
-    MemoryRequirementUnreadableError,
     PACKAGE_NAME,
     AtomicActivation,
     DEFERRED_ACTIVATION_TIMEOUT_SECONDS,
@@ -83,7 +82,6 @@ from vibe.upgrade import (
     atomic_upgrade_lock,
     build_upgrade_plan,
     cache_running_vibe_path,
-    configured_memory_enabled,
     execute_upgrade_plan,
     defer_upgrade_activation,
     get_latest_version_info,
