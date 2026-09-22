@@ -491,8 +491,14 @@ describe('SettingsLayout', () => {
     renderLayout('/settings', { gateModelHub: true });
 
     expect(await screen.findByText('backends-body')).toBeTruthy();
-    expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
-      .toBe('/settings/backends');
+    // The redirect lands in the DOM one commit before the trail effect records
+    // where it landed, so reading storage the instant the page appears catches a
+    // real but momentary disagreement. The contract is that the memory follows
+    // the redirect, not that it arrives in the same commit.
+    await waitFor(() => {
+      expect(window.localStorage.getItem(SETTINGS_LAST_SECTION_STORAGE_KEY))
+        .toBe('/settings/backends');
+    });
   });
 
   it.each([
