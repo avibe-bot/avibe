@@ -957,8 +957,20 @@ def test_managed_watch_service_forever_timeout_retries_when_explicitly_allowed(t
 
     async def _run() -> None:
         await _start_watch_service(service)
-        await asyncio.sleep(0.2)
-        await service.stop()
+        # A fixed sleep bets that a real interpreter spawn, its 50ms deadline and
+        # the write-back all land inside one window; on a contended runner they do
+        # not, and the assertion samples ``last_exit_code`` while it is still None.
+        # Wait for the recorded outcome instead, so a genuinely wrong code still fails.
+        try:
+            for _ in range(250):
+                recorded = store.get_watch(watch.id)
+                if recorded is not None and recorded.last_exit_code is not None:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("waiter timeout outcome was never recorded")
+        finally:
+            await service.stop()
 
     asyncio.run(_run())
 
