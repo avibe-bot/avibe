@@ -92,7 +92,15 @@ def test_concurrent_writers_publish_whole_payloads_never_fragments(tmp_path) -> 
     target = tmp_path / "status.json"
     payloads = [json.dumps({"writer": index, "filler": "x" * 40_000}) for index in range(8)]
     whole = set(payloads)
-    observed: list[str] = []
+    # A set, not a list: no assertion below reads how *many* times the reader got
+    # through, only which distinct payloads it saw. Keeping every read instead
+    # ties this test's memory to how slow the disk is -- the reader spins until
+    # the writers finish, so a slower filesystem buys more 40KB strings, and the
+    # resulting paging slows the writers it is waiting on. That feedback loop
+    # measured 3.5GB RSS and 216s on an IO-constrained container against the 1s
+    # this file records on CI. Deduplicating keeps it bounded by the payload set
+    # and loses nothing: a torn read is a value outside ``whole`` either way.
+    observed: set[str] = set()
     stop = threading.Event()
 
     def _write(payload: str) -> None:
@@ -102,7 +110,7 @@ def test_concurrent_writers_publish_whole_payloads_never_fragments(tmp_path) -> 
     def _read() -> None:
         while not stop.is_set():
             try:
-                observed.append(target.read_text(encoding="utf-8"))
+                observed.add(target.read_text(encoding="utf-8"))
             except FileNotFoundError:
                 continue
 
@@ -118,7 +126,7 @@ def test_concurrent_writers_publish_whole_payloads_never_fragments(tmp_path) -> 
 
     assert target.read_text(encoding="utf-8") in whole
     assert observed, "reader never managed to observe the file"
-    assert set(observed) <= whole
+    assert observed <= whole
     assert list(tmp_path.glob(f".{target.name}.*")) == []
 
 

@@ -102,3 +102,68 @@ byte-reproducible; immutable comparison can require a new rc after a rebuild.
   replacement upgrade preserving user data, and uninstall cleanup/preservation.
   The existing AI notes secret and Actions/repository permissions are still
   prerequisites. Apple and Windows signing credentials are not TEST prerequisites.
+
+### Pre-push master refresh
+
+At 08:31Z the explicit remote fetch found `master` advanced from `16bf1be3` to
+`a582c87f0156082f87548be2912e063f09fc2bb1` (#2112), while remote `desktop`
+remained `8440cf81737be5db46a16992ecce41fe29beb866`. Push authorization for
+`da11a508bcb4f9602b8a368a2a1fc4f46fbd9ed9` was therefore held. The new master
+changes only pytest configuration comments, the advisory async-plugin guard,
+its consuming tests, and the bounded atomic-IO test reader. These four files
+merged without conflicts; all eight release implementation files were unchanged
+before this evidence update. The merged tree passed 750 tests (seven existing
+SQLAlchemy reflection warnings) across those new tests, six release suites,
+desktop bundle builder, desktop Runtime, IPC, and UI installation consumers.
+The parent process HOME/XDG/backend state paths were redirected into a temporary
+test directory as well as the repository's per-test isolation. Ruff passed for
+the release changes and incoming Python files. The updated local candidate is
+returned for independent inspection before any push. All five historical PR
+threads remain resolved, no review is pending, and the original lane Watch
+`54efbc6d5cec` remains live with its cursor unchanged under Session
+`sesu7hnukugyr`; orchestrator Watch `25111cdab6a3` remains separate.
+
+## Owner authorization and next TEST release
+
+At 2026-09-22 08:34:44Z the owner explicitly authorized publishing the desktop
+TEST prerelease after review passes. This supersedes the earlier no-publication
+boundary for this conditional GitHub-only TEST release; merging into master is
+still not authorized. The exact final desktop commit must have Codex PASS, zero
+unresolved threads, all expected `lint` and `desktop-shell` checks green, clean
+mergeability, and latest-master ancestry. The orchestrator independently verifies
+that gate before executing or delegating the release tag push. No further owner
+confirmation is required for that authorized sequence.
+
+The intended next tag is `gh-v3.1.1rc4` (desktop `3.1.1-rc.4`, bundled Avibe
+`3.1.1rc4`), subject to a fresh remote tag/Release lookup immediately before
+allocation. If another publisher uses it first, choose the next unused rc in the
+same sequence. Do not reserve or overwrite a tag or existing asset. Create an
+annotated tag on the exact reviewed desktop commit with the following annotation:
+
+```text
+Desktop TEST prerelease: macOS ad-hoc app in unsigned/unnotarized DMG; unsigned Windows x64 installer.
+
+<!-- avibe:update-notification=none -->
+```
+
+Publication runs only through the tag-triggered `Release (AI Notes)` workflow as
+a GitHub prerelease with `latest=false`; no manually created competing Release,
+official `v*` tag, PyPI publish, production service change, or local service
+restart is authorized. Apple/Windows signing credentials are not required. The
+orchestrator confirmed the existing `OPENAI_API_KEY` secret name is present,
+without reading its value.
+
+Before any tag push, arm a separate exact-source/tag Actions Watch through
+`background-watch-hook` for `Release (AI Notes)`, with independent state and both
+timeout layers disabled. Confirm liveness and explicitly diagnose a missing or
+failed workflow. Preserve the two existing PR Watches/cursors until the PR gate
+report; establish durable release observation before retiring the lane PR loop.
+
+Completion requires a successful workflow for the exact source/tag and all three
+public native installers plus matched provenance, hashes and signature metadata,
+verified by download/readback. Report direct URLs for Apple silicon and Intel
+DMGs and the Windows x64 EXE. Contract tests are not native packaging evidence.
+Actual install, manual replacement upgrade and uninstall remain separate manual
+acceptance; never install over the owner's live Avibe to claim those passed.
+Any packaging defect requires a bounded fix, new exact-head review, and a fresh
+rc when immutable bytes would change, rather than blind reruns or asset replacement.
