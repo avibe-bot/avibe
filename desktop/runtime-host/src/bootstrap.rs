@@ -219,40 +219,46 @@ impl RuntimeHost {
         self.probe.is_healthy(origin).await
     }
 
-    /// Releases retry and stop ownership after readiness loss.
+    /// Releases only completed helper retry state after readiness loss.
     ///
-    /// This does not stop a process or prove that it has exited. It only allows
-    /// the next bootstrap run to launch again while retaining the uninstall
-    /// fence for uncertain liveness. A successful scoped stop or completed
-    /// removal clears that fence.
-    pub fn reset_after_confirmed_runtime_loss(&self) {
+    /// Readiness loss is not process-loss evidence. A pending helper remains
+    /// retained so recovery cannot overlap it, and a valid started receipt
+    /// remains scoped stop authority. This transition never changes stopping
+    /// state or clears the liveness fence.
+    pub fn release_after_readiness_loss(&self) {
         let mut state = self.launched_runtime();
-        state.attempt = None;
-        state.ownership = None;
-        state.stopping = false;
+        if state.stopping {
+            return;
+        }
+        if state
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.runtime.watch.succeeded() || attempt.runtime.watch.failed())
+        {
+            state.retain_completed_attempt_liveness();
+            state.attempt = None;
+        }
     }
 
     /// Gracefully stops and removes an app-private Runtime owned by this host.
     ///
     /// Installed/user-managed launchers return `false` and are never modified.
     pub async fn remove_private_runtime(&self, active_origin: Option<&LoopbackOrigin>) -> Result<bool, LaunchError> {
-        let (launched_by_host, liveness_uncertain) = {
+        let liveness_uncertain = {
             let state = self.launched_runtime();
-            (
-                state.ownership.is_some(),
-                state.runtime_may_be_running || state.attempt.is_some(),
-            )
+            state.runtime_may_be_running || state.attempt.is_some()
         };
+        // A receipt authorizes only receipt-scoped stop, never the launcher's
+        // unscoped managed removal. Unavailable readiness remains unknown until
+        // a successful scoped stop clears local liveness evidence.
         let state = match active_origin {
             Some(origin) => match self.probe.readiness(origin).await {
                 Some(readiness) if readiness.desktop_ui_runtime_id.is_some() => RuntimeRemovalState::Unknown,
                 Some(readiness) if readiness.desktop_runtime_id.is_some() => RuntimeRemovalState::Managed,
                 Some(_) if liveness_uncertain => RuntimeRemovalState::Unknown,
                 Some(_) => RuntimeRemovalState::External,
-                None if launched_by_host => RuntimeRemovalState::Managed,
                 None => RuntimeRemovalState::Unknown,
             },
-            None if launched_by_host => RuntimeRemovalState::Managed,
             None if liveness_uncertain => RuntimeRemovalState::Unknown,
             None => RuntimeRemovalState::Inactive,
         };
@@ -645,6 +651,7 @@ mod tests {
         ownership_lost: Arc<AtomicBool>,
         removals: Arc<Mutex<Vec<RuntimeRemovalState>>>,
         watch: LaunchWatch,
+        private_cleanup: Option<Arc<crate::BundledVibeLauncher>>,
     }
 
     impl Default for RecordingLauncher {
@@ -657,6 +664,7 @@ mod tests {
                 ownership_lost: Arc::default(),
                 removals: Arc::default(),
                 watch: receipt_watch("started"),
+                private_cleanup: None,
             }
         }
     }
@@ -669,7 +677,10 @@ mod tests {
 
         fn remove_private_runtime(&self, state: RuntimeRemovalState) -> Result<bool, LaunchError> {
             self.removals.lock().expect("record removals").push(state);
-            Err(LaunchError::RuntimeRemoval)
+            match &self.private_cleanup {
+                Some(launcher) => launcher.remove_private_runtime(state),
+                None => Err(LaunchError::RuntimeRemoval),
+            }
         }
     }
 
@@ -820,7 +831,7 @@ mod tests {
             LaunchWatch::exited(false),
             receipt_watch("reused"),
         ] {
-            let completed = watch.succeeded();
+            let completed = watch.succeeded() || watch.failed();
             let launcher = Arc::new(RecordingLauncher {
                 watch,
                 ..RecordingLauncher::default()
@@ -829,13 +840,13 @@ mod tests {
             host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
             assert!(host.has_launched());
             assert!(!host.has_owned_runtime());
-            if completed {
-                assert!(host.clear_successful_launch());
-                assert!(
-                    !host.has_launched(),
-                    "completed non-owning helpers release retry deduplication"
-                );
-            }
+            host.release_after_readiness_loss();
+            assert_eq!(
+                host.has_launched(),
+                !completed,
+                "only completed helpers release retry deduplication"
+            );
+            assert!(!host.has_owned_runtime(), "readiness loss never grants authority");
             assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
             assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
             assert!(matches!(
@@ -914,13 +925,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_loss_revokes_stop_authority() {
+    async fn readiness_loss_releases_retry_slot_but_retains_scoped_stop_authority() {
         let launcher = Arc::new(RecordingLauncher::default());
         let host = RuntimeHost::new(Arc::new(ReadyProbe), launcher.clone(), RuntimeHostSettings::default());
         host.launch_if_needed(Some(launcher.clone())).expect("fake launch");
-        host.reset_after_confirmed_runtime_loss();
-        assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
-        assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+        host.release_after_readiness_loss();
+        assert!(!host.has_launched(), "completed helper retry slot is released");
+        assert!(
+            host.has_owned_runtime(),
+            "readiness loss does not revoke a valid receipt"
+        );
         assert!(matches!(
             host.remove_private_runtime(None).await,
             Err(LaunchError::RuntimeRemoval)
@@ -929,6 +943,121 @@ mod tests {
             *launcher.removals.lock().expect("recorded removal"),
             [RuntimeRemovalState::Unknown]
         );
+        host.stop_owned_runtime()
+            .await
+            .expect("the retained receipt reaches explicit scoped stop");
+        assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+        assert!(
+            !host.has_owned_runtime(),
+            "successful stop clears the receipt and liveness fence"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replacement_receipt_cannot_stop_the_previous_launcher() {
+        let previous = Arc::new(RecordingLauncher::default());
+        let mut replacement_receipt = serde_json::to_value(receipt_watch("started").owned_receipt().unwrap()).unwrap();
+        replacement_receipt["service_pid"] = serde_json::json!(4321);
+        let replacement = Arc::new(RecordingLauncher {
+            watch: LaunchWatch::exited_with_receipt(true, serde_json::from_value(replacement_receipt).unwrap()),
+            ..RecordingLauncher::default()
+        });
+        let host = RuntimeHost::new(Arc::new(ReadyProbe), previous.clone(), RuntimeHostSettings::default());
+
+        host.launch_if_needed(Some(previous.clone())).expect("previous launch");
+        host.release_after_readiness_loss();
+        let previous_receipt = previous
+            .watch
+            .owned_receipt()
+            .expect("previous started receipt")
+            .clone();
+        previous.ownership_lost.store(true, Ordering::SeqCst);
+
+        host.launch_if_needed(Some(replacement.clone()))
+            .expect("replacement launch");
+        assert!(
+            host.has_owned_runtime(),
+            "the newer receipt replaces old scoped authority"
+        );
+        assert!(matches!(
+            previous.stop(&previous_receipt),
+            Err(LaunchError::OwnershipLost)
+        ));
+        let previous_stop_attempts = previous.stops.load(Ordering::SeqCst);
+        host.stop_owned_runtime()
+            .await
+            .expect("the replacement receipt is stoppable");
+        assert_eq!(previous.stops.load(Ordering::SeqCst), previous_stop_attempts);
+        assert_eq!(replacement.stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_receipt_requires_scoped_stop_before_unknown_private_files_can_be_removed() {
+        // The real bundled remover must refuse before preparing a bundle or
+        // invoking unscoped handover. All paths below belong to this test.
+        for refused in [false, true] {
+            let root = std::env::temp_dir().join(format!("avibe-h4-removal-{}-{refused}", std::process::id()));
+            let installs = root.join("runtime");
+            let backends = root.join("backends");
+            std::fs::create_dir_all(&installs).unwrap();
+            std::fs::create_dir_all(&backends).unwrap();
+            std::fs::write(installs.join("active"), b"live runtime bytes").unwrap();
+            std::fs::write(backends.join("active"), b"live backend bytes").unwrap();
+            std::fs::write(root.join("unrelated"), b"unrelated state").unwrap();
+            let launcher = Arc::new(RecordingLauncher {
+                private_cleanup: Some(Arc::new(crate::BundledVibeLauncher::new(
+                    root.join("missing-bundle"),
+                    installs.clone(),
+                    backends.clone(),
+                ))),
+                ..RecordingLauncher::default()
+            });
+            let host = RuntimeHost::new(
+                Arc::new(TransientProbe(AtomicBool::new(false))),
+                launcher.clone(),
+                RuntimeHostSettings {
+                    ready_timeout: Duration::ZERO,
+                    ..RuntimeHostSettings::default()
+                },
+            );
+            host.launch_if_needed(Some(launcher.clone())).unwrap();
+            host.release_after_readiness_loss();
+            assert!(host.has_owned_runtime());
+            let origin = LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap();
+            for active in [None, Some(&origin)] {
+                assert!(matches!(
+                    host.remove_private_runtime(active).await,
+                    Err(LaunchError::RuntimeRemoval)
+                ));
+            }
+            assert_eq!(*launcher.removals.lock().unwrap(), [RuntimeRemovalState::Unknown; 2]);
+            assert_eq!(launcher.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(std::fs::read(installs.join("active")).unwrap(), b"live runtime bytes");
+            assert_eq!(std::fs::read(backends.join("active")).unwrap(), b"live backend bytes");
+            launcher.ownership_lost.store(refused, Ordering::SeqCst);
+            let stopped = host.stop_owned_runtime().await;
+            if refused {
+                assert!(matches!(stopped, Err(LaunchError::OwnershipLost)));
+                assert!(!host.has_owned_runtime());
+                assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+                assert!(matches!(
+                    host.remove_private_runtime(None).await,
+                    Err(LaunchError::RuntimeRemoval)
+                ));
+                assert!(installs.join("active").exists() && backends.join("active").exists());
+            } else {
+                stopped.unwrap();
+                assert!(host.remove_private_runtime(None).await.unwrap());
+                assert!(!installs.exists() && !backends.exists());
+                assert_eq!(
+                    launcher.removals.lock().unwrap().last(),
+                    Some(&RuntimeRemovalState::Inactive)
+                );
+            }
+            assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(std::fs::read(root.join("unrelated")).unwrap(), b"unrelated state");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

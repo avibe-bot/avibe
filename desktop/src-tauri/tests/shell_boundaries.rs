@@ -467,7 +467,7 @@ fn post_navigation_recovery_stays_in_the_unprivileged_rust_shell() {
     let source = shipping_source("src/lib.rs");
     for required in [
         "host.is_ready(&origin).await",
-        "reset_after_confirmed_runtime_loss",
+        "release_after_readiness_loss",
         "return_to_bootstrap(&app)",
         "spawn_owned_bootstrap(app)",
     ] {
@@ -522,7 +522,7 @@ fn recreated_windows_transfer_monitor_ownership_before_bootstrapping() {
         .map(|offset| awaited_probe + offset)
         .expect("the monitor rechecks ownership after readiness");
     let state_mutation = source[ownership_recheck..]
-        .find("if readiness_loss.observe(ready)")
+        .find("if readiness_loss.begin_recovery(ready,")
         .map(|offset| ownership_recheck + offset)
         .expect("the monitor mutates state only after the ownership recheck");
     assert!(

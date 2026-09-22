@@ -629,6 +629,34 @@ impl ReadinessLoss {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         self.consecutive_failures >= READINESS_FAILURE_THRESHOLD
     }
+
+    fn begin_recovery(
+        &mut self,
+        ready: bool,
+        host: &RuntimeHost,
+        activity: &AtomicU8,
+        generation: &AtomicU64,
+        observed_generation: u64,
+    ) -> bool {
+        if generation.load(Ordering::SeqCst) != observed_generation
+            || activity.load(Ordering::SeqCst) != ACTIVITY_MONITOR
+            || !self.observe(ready)
+            || activity
+                .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return false;
+        }
+        // A window recreation can advance the generation between the initial
+        // fence and the activity claim. Leave recovery ownership with the new
+        // bootstrap instead of mutating the host for the stale monitor.
+        if generation.load(Ordering::SeqCst) != observed_generation {
+            return false;
+        }
+        // Three readiness misses do not prove process exit or revoke a receipt.
+        host.release_after_readiness_loss();
+        true
+    }
 }
 
 /// Publishes bootstrap progress to the bootstrap page, and keeps the latest value
@@ -907,17 +935,8 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                     TrayRuntimeState::Unreachable
                 },
             );
-            if readiness_loss.observe(ready) {
-                if activity
-                    .compare_exchange(ACTIVITY_MONITOR, ACTIVITY_BOOTSTRAP, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-                {
-                    break;
-                }
-                // This only releases retained launch ownership. The desktop
-                // shell never sends a stop signal to the old Runtime.
+            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation) {
                 notifications::stop(&app);
-                host.reset_after_confirmed_runtime_loss();
                 if return_to_bootstrap(&app) {
                     spawn_owned_bootstrap(app);
                     break;
@@ -1398,6 +1417,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use avibe_runtime_host::{HealthProbe, LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn stop_authority_requires_ownership_and_exclusive_idle_or_monitor_activity() {
@@ -1473,6 +1495,174 @@ mod tests {
         assert!(!loss.observe(false));
         assert!(!loss.observe(false));
         assert!(loss.observe(false));
+    }
+
+    struct RecoveryProbe(Mutex<std::collections::VecDeque<bool>>);
+
+    #[async_trait]
+    impl HealthProbe for RecoveryProbe {
+        async fn readiness(&self, _origin: &LoopbackOrigin) -> Option<avibe_runtime_host::RuntimeReadiness> {
+            self.0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false)
+                .then_some(avibe_runtime_host::RuntimeReadiness {
+                    desktop_runtime_id: None,
+                    desktop_ui_runtime_id: None,
+                })
+        }
+    }
+
+    struct RecoveryLauncher {
+        watches: Mutex<std::collections::VecDeque<LaunchWatch>>,
+        launches: Arc<AtomicUsize>,
+        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+    }
+
+    struct RecoveryExecutable {
+        watch: LaunchWatch,
+        launches: Arc<AtomicUsize>,
+        stops: Arc<Mutex<Vec<avibe_runtime_host::launcher::StartupReceipt>>>,
+    }
+
+    impl RuntimeLauncher for RecoveryLauncher {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            Ok(Arc::new(RecoveryExecutable {
+                watch: self.watches.lock().unwrap().pop_front().expect("expected resolution"),
+                launches: self.launches.clone(),
+                stops: self.stops.clone(),
+            }))
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for RecoveryExecutable {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap())
+        }
+
+        fn launch(&self) -> Result<LaunchedRuntime, LaunchError> {
+            self.launches.fetch_add(1, Ordering::SeqCst);
+            Ok(LaunchedRuntime {
+                pid: 1,
+                watch: self.watch.clone(),
+            })
+        }
+
+        fn stop(&self, receipt: &avibe_runtime_host::launcher::StartupReceipt) -> Result<(), LaunchError> {
+            self.stops.lock().unwrap().push(receipt.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn monitor_recovery_preserves_started_authority_and_pending_helper_exclusion() {
+        use avibe_runtime_host::launcher::StartupReceipt;
+        use avibe_runtime_host::{DiscardStatus, RuntimeHostSettings};
+
+        let receipt: StartupReceipt = serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "outcome": "started", "service_pid": 1234, "ui_pid": 5678,
+            "service_create_unix_ms": 1789010100123.5, "ui_create_unix_ms": 1789010100456.5,
+        }))
+        .unwrap();
+        let mut reused_json = serde_json::to_value(&receipt).unwrap();
+        reused_json["outcome"] = serde_json::json!("reused");
+        let reused: StartupReceipt = serde_json::from_value(reused_json).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+
+        for pending in [false, true] {
+            // Start -> ready -> three monitor misses -> recovery helper -> ready.
+            let probe = Arc::new(RecoveryProbe(Mutex::new(
+                [false, true, false, false, false, false, true].into(),
+            )));
+            let launcher = Arc::new(RecoveryLauncher {
+                watches: Mutex::new(
+                    [
+                        if pending {
+                            LaunchWatch::default()
+                        } else {
+                            LaunchWatch::exited_with_receipt(true, receipt.clone())
+                        },
+                        LaunchWatch::exited_with_receipt(true, reused.clone()),
+                    ]
+                    .into(),
+                ),
+                launches: Arc::default(),
+                stops: Arc::default(),
+            });
+            let host = RuntimeHost::new(
+                probe,
+                launcher.clone(),
+                RuntimeHostSettings {
+                    poll_interval: Duration::from_millis(1),
+                    ready_timeout: Duration::from_secs(1),
+                    ..RuntimeHostSettings::default()
+                },
+            );
+            runtime.block_on(async {
+                let ready = host.bootstrap(&DiscardStatus).await;
+                assert_eq!(ready.phase, BootstrapPhase::Ready);
+                let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
+                let activity = AtomicU8::new(ACTIVITY_MONITOR);
+                let generation = AtomicU64::new(7);
+                let mut loss = ReadinessLoss::default();
+                // A stale monitor or a stop activity cannot release this helper.
+                for current in [ACTIVITY_MONITOR, ACTIVITY_STOP] {
+                    activity.store(current, Ordering::SeqCst);
+                    for _ in 0..3 {
+                        assert!(!loss.begin_recovery(
+                            false,
+                            &host,
+                            &activity,
+                            &generation,
+                            if current == ACTIVITY_MONITOR { 6 } else { 7 }
+                        ));
+                    }
+                    assert!(host.has_launched());
+                }
+                activity.store(ACTIVITY_MONITOR, Ordering::SeqCst);
+                let mut loss = ReadinessLoss::default();
+                for miss in 1..=3 {
+                    let ready = host.is_ready(&origin).await;
+                    assert!(!ready);
+                    assert_eq!(loss.begin_recovery(ready, &host, &activity, &generation, 7), miss == 3);
+                }
+                assert_eq!(host.has_launched(), pending);
+                assert_eq!(host.has_owned_runtime(), !pending);
+                assert!(!stop_is_available(
+                    host.has_owned_runtime(),
+                    activity.load(Ordering::SeqCst)
+                ));
+                let recovered = host.bootstrap(&DiscardStatus).await;
+                assert_eq!(recovered.phase, BootstrapPhase::Ready);
+                let window_generation = AtomicU64::new(1);
+                assert_eq!(
+                    complete_workbench_handoff(&activity, &window_generation, 1),
+                    WorkbenchHandoff::Monitor
+                );
+                assert_eq!(
+                    stop_is_available(host.has_owned_runtime(), activity.load(Ordering::SeqCst)),
+                    !pending
+                );
+                assert_eq!(launcher.launches.load(Ordering::SeqCst), if pending { 1 } else { 2 });
+                if pending {
+                    assert!(matches!(host.stop_owned_runtime().await, Err(LaunchError::NotOwned)));
+                    assert!(launcher.stops.lock().unwrap().is_empty());
+                } else {
+                    host.stop_owned_runtime()
+                        .await
+                        .expect("original receipt survives reused recovery");
+                    assert_eq!(
+                        launcher.stops.lock().unwrap().as_slice(),
+                        std::slice::from_ref(&receipt)
+                    );
+                    assert!(!host.has_owned_runtime());
+                }
+            });
+        }
     }
 
     #[test]

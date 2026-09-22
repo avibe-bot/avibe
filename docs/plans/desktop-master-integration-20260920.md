@@ -456,3 +456,34 @@ pushed fix is evidenced.
   test spot-check. It has not been pushed; the first push remains held. The
   latest remote desktop still needs an immediate explicit-refspec check before
   any authorized push.
+
+### H4 readiness-loss transition correction
+
+- 2026-09-22: The exact-head Codex review identified a real monitor boundary
+  defect: three consecutive `/ready` misses discarded a valid startup receipt,
+  even though readiness loss supplied no process-exit or ownership-loss
+  evidence. The repeated receipt/provenance class was diagnosed at the
+  orchestrator level before this bounded edit; no receipt schema, persistence,
+  parser, launcher signaling policy, or lifecycle redesign was introduced.
+- The shared RuntimeHost transition is now named
+  `release_after_readiness_loss`. It releases only a completed helper's retry
+  slot. A pending helper remains the single deduplicated launch, a valid
+  `started` receipt remains paired with its original resolved launcher, and
+  `runtime_may_be_running` remains set. Scoped `OwnershipLost` still revokes
+  only that receipt and preserves the unknown-liveness fence; a successful
+  scoped stop clears the state.
+- Private removal now fails closed whenever local launch/liveness evidence is
+  present but readiness is unavailable. A retained receipt therefore cannot
+  make `BundledVibeLauncher::remove_private_runtime(Managed)` invoke unscoped
+  handover. Affirmative managed readiness remains sufficient for managed
+  cleanup, while external/UI-only readiness and unknown readiness retain their
+  existing boundaries.
+- The production shell monitor uses the shared transition after its existing
+  generation and activity checks. RuntimeHost tests cover retained receipt,
+  explicit scoped stop, pending-helper deduplication, replacement receipt
+  authority, reused/receipt-less/failed no-authority outcomes, unknown removal,
+  and successful cleanup. The shell crate test drives the same recovery
+  transition after three misses with a real RuntimeHost and confirms that a
+  pending helper is not overlapped. The former
+  `confirmed_runtime_loss` expectation was corrected to distinguish readiness
+  loss from confirmed process loss.

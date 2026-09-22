@@ -84,11 +84,35 @@ byte-reproducible; immutable comparison can require a new rc after a rebuild.
   Action revisions referenced by these workflows. The previous desktop upload
   revision returned 404; it now matches the repository's working v6 pin.
 
+## H4 and latest-master integration candidate
+
+The implementation candidate now includes the real merge of upstream master
+`335f62e6c15987d0ab72f6139c16fe49eea706e8` into the desktop release lineage,
+preserving the six upstream Model Hub route-picker paths. It also contains the
+bounded H4 readiness-loss correction recorded in the integration plan. Release
+workflow, producer, consumer, and package files remain byte-identical to the
+reviewed release implementation; the only release-plan changes are evidence
+updates.
+
+The shared RuntimeHost transition retains a valid started receipt and its
+original launcher through three readiness misses, releases only completed
+helper retry state, keeps pending helper deduplication, and classifies
+unavailable readiness as `Unknown` while local liveness evidence remains. The
+shell monitor invokes that transition after its existing generation/activity
+fences. The candidate evidence is 96 RuntimeHost library tests, 28 bootstrap
+consumer tests, 19 desktop shell unit tests, 27 shell boundary tests, and
+`cargo fmt --all -- --check`; the focused shell test drives the same transition
+used by production and proves started/reused recovery plus pending-helper
+exclusion. Cargo emitted its existing shared-cache cleanup permission warning;
+compilation and tests completed successfully.
+
 ## Remaining gates and handoff
 
-- This lane delivers only a local commit on `feat/desktop-test-release-20260922`
-  from `5589edc71292921281f95d072916628a9790fa6a`. No push, PR, tag, dispatch,
-  Release mutation, merge, deployment, or Watch changes were performed.
+- This lane delivers one local candidate commit on
+  `feat/desktop-test-release-20260922`, descended from the release merge
+  `5589edc71292921281f95d072916628a9790fa6a` and the latest-master merge
+  above. No push, PR, tag, dispatch, Release mutation, merge into master,
+  deployment, or Watch changes were performed.
 - The orchestrator independently accepted integration evidence commit
   `33eeb3eefbeecf0a479f4f70b922f900466102fb`; its code is identical to this lane's
   base and its additional plan evidence will be integrated by the orchestrator.

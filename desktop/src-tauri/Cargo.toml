@@ -35,6 +35,9 @@ tauri-plugin-window-state = "2"
 tokio.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+async-trait.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [

@@ -814,30 +814,27 @@ async fn a_zero_exit_launch_without_readiness_can_be_retried() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn confirmed_runtime_loss_releases_the_launch_slot_for_recovery() {
-    let probe = FakeProbe::never_healthy();
+#[tokio::test]
+async fn readiness_loss_keeps_a_pending_helper_deduplicated() {
     let launcher = FakeLauncher::working();
-    let host = host(probe, launcher.clone(), immediate_timeout_settings());
-
-    let first = host.bootstrap(&Recorder::default()).await;
-    assert_eq!(first.phase, BootstrapPhase::Failed);
-    assert!(host.has_launched());
-    assert_eq!(launcher.calls(), 1);
-
-    host.reset_after_confirmed_runtime_loss();
-    assert!(
-        !host.has_launched(),
-        "confirmed readiness loss releases only the retained launch ownership"
+    let host = host(
+        FakeProbe::never_healthy(),
+        launcher.clone(),
+        immediate_timeout_settings(),
     );
 
-    let second = host.bootstrap(&Recorder::default()).await;
-    assert_eq!(second.phase, BootstrapPhase::Failed);
     assert_eq!(
-        launcher.calls(),
-        2,
-        "the recovery bootstrap may launch after confirmed Runtime loss"
+        host.bootstrap(&Recorder::default()).await.notice.code,
+        BootstrapNoticeCode::ReadyTimeout
     );
+    assert!(host.has_launched(), "the timeout retains the pending helper");
+    host.release_after_readiness_loss();
+
+    assert!(
+        host.has_launched(),
+        "a pending helper remains the single recovery owner"
+    );
+    assert_eq!(launcher.calls(), 1);
 }
 
 #[tokio::test(start_paused = true)]
