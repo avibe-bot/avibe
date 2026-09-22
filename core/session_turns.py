@@ -749,11 +749,6 @@ class SessionTurnManager:
         if self._session_lifecycle_states.get(raw_session_id) is not state:
             raise RuntimeError("session lifecycle ownership changed")
         state.epoch += 1
-        if abandon_captures:
-            adapter = getattr(self.controller, "memory_adapter", None)
-            abandon = getattr(adapter, "abandon_memory_captures_for_session", None)
-            if callable(abandon):
-                abandon(raw_session_id)
 
     async def run_session_lifecycle(
         self,

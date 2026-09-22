@@ -8810,8 +8810,6 @@ _ALLOWED_DEP_INSTALLS = {
     "avault",
     "model-hub-engine",
     "show-runtime",
-    "memory-package",
-    "memory-runtime",
     "tmux",
 }
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
@@ -9080,8 +9078,6 @@ DEPENDENCY_IDS = (
     "avault",
     "show-runtime",
     "model-hub-engine",
-    "memory-package",
-    "memory-runtime",
     "tmux",
     "node",
 )

@@ -1361,8 +1361,8 @@ def _is_local_request(config: V2Config | None = None) -> bool:
     return _is_setup_host_request(config)
 
 
-def is_direct_loopback_memory_request() -> bool:
-    """Strict Memory-only browser admission, intentionally narrower than UI local.
+def _is_direct_loopback_browser_request() -> bool:
+    """Strict same-origin browser admission for local author attribution.
 
     Memory content and settings never accept proxy forwarding, Docker bridge
     allowances, LAN setup hosts, or remote-access cookies. The browser must be
@@ -1375,8 +1375,8 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
-def memory_ui_user_key() -> str | None:
-    """Resolve the Memory principal for a trusted browser request.
+def _trusted_browser_author_key() -> str | None:
+    """Resolve the authenticated browser author for local or remote requests.
 
     Direct loopback keeps the install-local identity. Remote browser access is
     admitted only through the configured Avibe Cloud origin with a valid signed
@@ -1385,7 +1385,7 @@ def memory_ui_user_key() -> str | None:
     used as a cross-origin Memory oracle.
     """
 
-    if is_direct_loopback_memory_request():
+    if _is_direct_loopback_browser_request():
         return "avibe:local"
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
@@ -6320,11 +6320,11 @@ def _web_push_user_key() -> str:
 def _workbench_author_id() -> str | None:
     """Return an author only when the browser passes strict Memory admission."""
 
-    memory_user_key = memory_ui_user_key()
+    author_key = _trusted_browser_author_key()
     prefix = "avibe:"
-    if not isinstance(memory_user_key, str) or not memory_user_key.startswith(prefix):
+    if not isinstance(author_key, str) or not author_key.startswith(prefix):
         return None
-    author_id = memory_user_key[len(prefix) :].strip()
+    author_id = author_key[len(prefix) :].strip()
     return author_id or None
 
 
@@ -7972,8 +7972,6 @@ _ALLOWED_DEPENDENCIES = {
     "avault",
     "model-hub-engine",
     "show-runtime",
-    "memory-package",
-    "memory-runtime",
     "tmux",
 }
 

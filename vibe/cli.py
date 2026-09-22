@@ -554,66 +554,6 @@ def _configured_cli_language() -> str:
 
 
 
-_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS = {
-    "disabled": "memory.cli.runtimeState.disabled",
-    "starting": "memory.cli.runtimeState.starting",
-    "running": "memory.cli.runtimeState.running",
-    "degraded": "memory.cli.runtimeState.degraded",
-    "needs_repair": "memory.cli.runtimeState.needsRepair",
-}
-_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
-    "ok": "memory.cli.providerState.ok",
-}
-_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS = {
-    "ready": "memory.cli.attachmentCaptureState.ready",
-    "not_configured": "memory.cli.attachmentCaptureState.notConfigured",
-    "unavailable": "memory.cli.attachmentCaptureState.unavailable",
-}
-_MEMORY_CLI_REASON_I18N_KEYS = {
-    "memory_disabled": "memory.cli.reason.memoryDisabled",
-    "memory_invalid_input": "memory.cli.reason.invalidInput",
-    "memory_access_denied": "memory.cli.reason.accessDenied",
-    "memory_input_too_large": "memory.cli.reason.inputTooLarge",
-    "memory_queue_full": "memory.cli.reason.queueFull",
-    "memory_low_disk_space": "memory.cli.reason.lowDiskSpace",
-    "memory_store_unavailable": "memory.cli.reason.storeUnavailable",
-    "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
-    "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
-    "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
-    "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
-    "memory_wake_failed": "memory.cli.reason.wakeFailed",
-    "memory_runtime_busy": "memory.cli.reason.runtimeBusy",
-    "memory_permission_denied": "memory.cli.reason.permissionDenied",
-    "memory_disk_unavailable": "memory.cli.reason.diskUnavailable",
-    "memory_local_data_unusable": "memory.cli.reason.localDataUnusable",
-    "memory_legacy_recovery_required": "memory.cli.reason.legacyRecoveryRequired",
-    "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
-    "memory_provider_timeout": "memory.cli.reason.providerTimeout",
-    "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
-    "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
-    "memory_processing_failed": "memory.cli.reason.processingFailed",
-    "memory_loss_confirmation_required": "memory.cli.reason.lossConfirmationRequired",
-    "memory_embedding_unavailable": "memory.cli.reason.embeddingUnavailable",
-    "memory_llm_unavailable": "memory.cli.reason.llmUnavailable",
-    "memory_rerank_unavailable": "memory.cli.reason.rerankUnavailable",
-    "memory_multimodal_unavailable": "memory.cli.reason.multimodalUnavailable",
-    "memory_repair_failed": "memory.cli.reason.repairFailed",
-    "memory_repair_not_required": "memory.cli.reason.repairNotRequired",
-    "memory_delete_data_failed": "memory.cli.reason.deleteDataFailed",
-    "memory_reconfigure_failed": "memory.cli.reason.reconfigureFailed",
-    "memory_operation_in_progress": "memory.cli.reason.operationInProgress",
-    "memory_implementation_unavailable": "memory.cli.reason.implementationUnavailable",
-    "memory_implementation_incompatible": "memory.cli.reason.implementationIncompatible",
-}
-_DOCTOR_MEMORY_REASON_I18N_KEYS = {
-    "memory_runtime_install_requires_stopped_memory": "memory.cli.reason.runtimeInstallRequiresStoppedMemory",
-    "memory_runtime_preparation_import_timeout": "memory.cli.reason.runtimePreparationImportTimeout",
-    "memory_runtime_preparation_import_failed": "memory.cli.reason.runtimePreparationImportFailed",
-    "memory_runtime_preparation_scrubber_timeout": "memory.cli.reason.runtimePreparationScrubberTimeout",
-    "memory_runtime_preparation_scrubber_failed": "memory.cli.reason.runtimePreparationScrubberFailed",
-    "memory_runtime_preparation_sync_contract_failed": "memory.cli.reason.runtimePreparationSyncContractFailed",
-    "memory_runtime_preparation_failed": "memory.cli.reason.runtimePreparationFailed",
-}
 
 
 
@@ -11470,7 +11410,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "model-hub-engine": i18n_t("doctor.value.modelHubEngine", language),
         "tmux": "tmux runtime",
         "git-runtime": "Git Runtime",
-        "memory-runtime": i18n_t("doctor.value.memoryRuntime", language),
         "node": "Node.js",
     }
     repair_targets = {
@@ -11478,7 +11417,6 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
         "avault": "avault",
         "model-hub-engine": "model-hub-engine",
         "git-runtime": "git-runtime",
-        "memory-runtime": "memory-runtime",
         "tmux": "tmux",
     }
     items: list[dict] = []
@@ -11525,7 +11463,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 "dependency_reason": dependency.get("reason"),
                 "dependency_required": bool(dependency.get("required")),
             }
-            if dependency_id == "memory-runtime"
+            if False
             else {}
         )
         if ready:
@@ -11547,7 +11485,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                         version=version,
                     ),
                     code=f"dependencies.{dependency_id}.ready",
-                    dependency_status=status if dependency_id == "memory-runtime" else None,
+                    dependency_status=None,
                     **memory_details,
                 )
             continue
@@ -11573,10 +11511,10 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 i18n_t("doctor.action.dependencyPlatformUnsupported", language),
                 code=(
                     f"dependencies.{dependency_id}.unsupported"
-                    if dependency_id == "memory-runtime"
+                    if False
                     else f"dependencies.{dependency_id}.platform_unsupported"
                 ),
-                dependency_status=status if dependency_id == "memory-runtime" else None,
+                dependency_status=None,
                 **memory_details,
             )
             continue
@@ -15881,7 +15819,6 @@ def _runtime_clean_verdict(result: Mapping[str, Any], *, dry_run: bool) -> _Runt
 def _managed_runtime_label(runtime_id: str) -> str:
     labels = {
         "git": "Git Runtime",
-        "memory-runtime": "Memory Runtime",
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
     }
