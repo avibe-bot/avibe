@@ -15,14 +15,18 @@
         {"id": "claude-haiku-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-opus-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-sonnet-4-5", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "claude-opus-4", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "claude-sonnet-4", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "claude-haiku-4", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "opus", "label": "opus [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "sonnet", "label": "sonnet [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "haiku", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "opus[1m]", "label": "opus[1m] [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
-        {"id": "sonnet[1m]", "label": "sonnet[1m] [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]}
+        {"id": "sonnet[1m]", "label": "sonnet[1m] [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
+        {"id": "claude-opus-4", "visibility": "hide"},
+        {"id": "claude-sonnet-4", "visibility": "hide"},
+        {"id": "claude-haiku-4", "visibility": "hide"},
+        {"id": "claude-sonnet-4-0", "visibility": "hide"},
+        {"id": "claude-sonnet-4-20250514", "visibility": "hide"},
+        {"id": "claude-sonnet-3-7", "visibility": "hide"},
+        {"id": "claude-haiku-3-5", "visibility": "hide"}
       ]
     },
     "codex": {

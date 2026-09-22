@@ -739,6 +739,19 @@ def backend_model_entries(backend: str, catalog: dict[str, Any] | None) -> list[
     return [entry for entry in entries if entry]
 
 
+def visible_backend_model_entries(
+    backend: str, catalog: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Backend rows a picker may offer, with tombstoned rows dropped.
+
+    Callers that merge catalogs keep the raw entries instead, because
+    ``merge_model_sources`` needs to see a tombstone to suppress the same id in
+    the lower-priority sources behind it.
+    """
+
+    return [entry for entry in backend_model_entries(backend, catalog) if not _model_hidden(entry)]
+
+
 def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> dict[str, Any]:
     backend_key = (backend or "").strip().lower()
     if backend_key not in _SUPPORTED_BACKENDS:

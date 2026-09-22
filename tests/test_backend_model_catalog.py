@@ -932,6 +932,71 @@ def test_gpt_6_sol_and_luna_follow_astra_in_the_bundled_catalog():
         assert codex[model]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
 
 
+RETIRED_CLAUDE_MODELS = (
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-haiku-4",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-3-7",
+    "claude-haiku-3-5",
+)
+
+
+def test_retired_claude_models_are_tombstoned_in_the_bundled_catalog():
+    entries = backend_model_catalog.backend_model_entries(
+        "claude", backend_model_catalog.load_bundled_catalog()
+    )
+    by_id = {entry["id"]: entry for entry in entries}
+    for model in RETIRED_CLAUDE_MODELS:
+        assert model in by_id, f"{model} must stay declared so the tombstone can suppress it"
+        assert by_id[model].get("visibility") == "hide", model
+
+
+def test_retired_claude_models_leave_the_merged_listing(monkeypatch):
+    catalog = backend_model_catalog.load_bundled_catalog()
+    monkeypatch.setattr(
+        backend_model_catalog, "load_cached_remote_catalog", lambda **kwargs: catalog
+    )
+
+    snapshot = backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=False)
+
+    for model in RETIRED_CLAUDE_MODELS:
+        assert model not in snapshot["models"], model
+        assert model not in snapshot["reasoning_options"], model
+    # Survivors that the retired ids sit next to must be untouched.
+    for model in ("claude-opus-5", "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"):
+        assert model in snapshot["models"], model
+
+
+def test_tombstones_stay_out_of_the_fixed_menu():
+    from config.v2_config import model_hub_fixed_menu_ids
+
+    fixed_menu = set(model_hub_fixed_menu_ids("claude"))
+
+    assert fixed_menu.isdisjoint(RETIRED_CLAUDE_MODELS)
+    assert "claude-opus-5" in fixed_menu
+
+
+def test_visible_backend_model_entries_drops_only_hidden_rows():
+    catalog = {
+        "backends": {
+            "claude": {
+                "models": [
+                    {"id": "claude-opus-5"},
+                    {"id": "claude-gone", "visibility": "hide"},
+                    {"id": "claude-also-gone", "visibility": "hidden"},
+                    {"id": "claude-kept", "visibility": "list"},
+                ]
+            }
+        }
+    }
+
+    visible = backend_model_catalog.visible_backend_model_entries("claude", catalog)
+
+    assert [entry["id"] for entry in visible] == ["claude-opus-5", "claude-kept"]
+
+
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
     refresh_started = threading.Event()
     release_refresh = threading.Event()

@@ -20,9 +20,6 @@ FALLBACK_CLAUDE_MODELS: tuple[str, ...] = (
     "claude-haiku-4-5",
     "claude-opus-4-5",
     "claude-sonnet-4-5",
-    "claude-opus-4",
-    "claude-sonnet-4",
-    "claude-haiku-4",
 )
 
 # Fable is Anthropic's Mythos-class tier, positioned above Opus, so it sorts first.

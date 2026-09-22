@@ -240,11 +240,11 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
 
     if backend not in {"claude", "codex"}:
         return ()
-    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+    from vibe.backend_model_catalog import load_bundled_catalog, visible_backend_model_entries
 
     return tuple(
         entry["id"]
-        for entry in backend_model_entries(backend, load_bundled_catalog())
+        for entry in visible_backend_model_entries(backend, load_bundled_catalog())
     )
 
 
