@@ -487,3 +487,19 @@ pushed fix is evidenced.
   pending helper is not overlapped. The former
   `confirmed_runtime_loss` expectation was corrected to distinguish readiness
   loss from confirmed process loss.
+
+### Latest master refresh: #2118 lint-gate test-only delta
+
+- 2026-09-22: Explicit refspec refresh moved `origin/master` from
+  `335f62e6c15987d0ab72f6139c16fe49eea706e8` to
+  `4b964fef223862c2cf7d5cec852ac0d3aa64e323` (#2118). The delta is one
+  test-only path, `ui/scripts/lintBaseline.test.mjs`: its temporary integrity
+  probe now explains its ownership and asserts that the diagnostic contains one
+  inline-policy finding. It changes no desktop runtime, shell, release, or
+  product behavior.
+- The real merge into the desktop candidate is conflict-free and has parents
+  `deedb50b4bb814b180953ebdbf14b64350e51ff3` and
+  `4b964fef223862c2cf7d5cec852ac0d3aa64e323`. The existing release and H4
+  implementation paths remain unchanged. Focused Vitest coverage for the
+  incoming file passed with 33 tests; GitHub lint and desktop-shell remain the
+  authoritative pushed-head checks.

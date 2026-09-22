@@ -191,3 +191,15 @@ Actual install, manual replacement upgrade and uninstall remain separate manual
 acceptance; never install over the owner's live Avibe to claim those passed.
 Any packaging defect requires a bounded fix, new exact-head review, and a fresh
 rc when immutable bytes would change, rather than blind reruns or asset replacement.
+
+### Latest master ancestry refresh
+
+The explicit remote refresh on 2026-09-22 found `origin/master` at
+`4b964fef223862c2cf7d5cec852ac0d3aa64e323` (#2118), ahead of the previously
+integrated `335f62e6c15987d0ab72f6139c16fe49eea706e8`. That upstream change is
+limited to `ui/scripts/lintBaseline.test.mjs`, where the temporary integrity
+probe now carries cleanup guidance and verifies exactly one inline-policy
+diagnostic. It has no release, RuntimeHost, shell, or product behavior delta.
+The change was merged as a real conflict-free second parent into the desktop
+candidate. Focused Vitest evidence passed 33 tests; the new exact-head GitHub
+lint and desktop-shell gates remain required before push and TEST publication.
