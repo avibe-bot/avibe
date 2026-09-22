@@ -976,6 +976,24 @@ def test_tombstones_stay_out_of_the_fixed_menu():
 
     assert fixed_menu.isdisjoint(RETIRED_CLAUDE_MODELS)
     assert "claude-opus-5" in fixed_menu
+    # The bare aliases are why claude_builtin_ids exists: they carry no
+    # "claude-"/"anthropic-" prefix, so dropping them would make every persisted
+    # alias selection inadmissible.
+    assert {"opus", "sonnet", "haiku", "opus[1m]", "sonnet[1m]"} <= fixed_menu
+
+
+def test_retiring_a_model_keeps_persisted_selections_admissible():
+    """Persisted-shape rule: a released version may already have written these ids."""
+
+    from config.v2_config import model_hub_fixed_menu_ids
+    from core.handlers.model_hub.catalog_admission import backend_model_admission_error
+
+    builtin_ids = model_hub_fixed_menu_ids("claude")
+    for model in (*RETIRED_CLAUDE_MODELS, "opus", "sonnet", "haiku"):
+        assert (
+            backend_model_admission_error("claude", model, claude_builtin_ids=builtin_ids)
+            is None
+        ), model
 
 
 def test_visible_backend_model_entries_drops_only_hidden_rows():
