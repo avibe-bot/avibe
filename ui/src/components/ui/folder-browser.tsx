@@ -5,6 +5,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { sortProjectsByRecent } from '../../lib/projectOrder';
+import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import {
   fileBrowserErrorMessage,
@@ -66,6 +67,7 @@ function needsDirectoryResolution(path: string): boolean {
 export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSelect, onClose }) => {
   const { t } = useTranslation();
   const { projects, projectsError } = useWorkbenchProjectsTree();
+  const surfaceActive = useRouteSurfaceActive();
   const isDesktop = useIsDesktop();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -116,8 +118,8 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   }, []);
 
   useEffect(() => {
-    if (pathEditing) pathInputRef.current?.focus();
-  }, [pathEditing]);
+    if (pathEditing && surfaceActive) pathInputRef.current?.focus();
+  }, [pathEditing, surfaceActive]);
 
   const cancelPathEdit = useCallback(() => {
     pathRequestSeq.current += 1;
@@ -321,6 +323,12 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
         closeLabel={t('common.close')}
         mobileSheetHeight="tall"
         className="flex h-[min(84dvh,760px)] max-w-5xl flex-col gap-0 overflow-hidden border-border-strong bg-surface p-0 max-md:p-0 max-md:pb-0"
+        onOpenAutoFocus={(event) => {
+          if (pathEditing) {
+            event.preventDefault();
+            pathInputRef.current?.focus();
+          }
+        }}
         onEscapeKeyDown={(event) => {
           if (creatingFolder) {
             event.preventDefault();

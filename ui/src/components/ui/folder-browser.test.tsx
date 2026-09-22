@@ -304,6 +304,36 @@ it('keeps a new-folder draft while the route surface is suspended', async () => 
   expect((await screen.findByPlaceholderText('apps.fileBrowser.newFolderPlaceholder') as HTMLInputElement).value).toBe('draft-folder');
 });
 
+it('restores path editor focus after the route surface resumes', async () => {
+  const props = { initialPath: '/workspace', onSelect: () => {}, onClose: () => {} };
+  const view = render(
+    <RouteSurfaceActiveContext.Provider value>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const input = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(input, { target: { value: '/draft' } });
+
+  view.rerender(
+    <RouteSurfaceActiveContext.Provider value={false}>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+  expect(screen.queryByRole('textbox', { name: 'directoryBrowser.editPath' })).toBeNull();
+
+  view.rerender(
+    <RouteSurfaceActiveContext.Provider value>
+      <FolderBrowser {...props} />
+    </RouteSurfaceActiveContext.Provider>,
+  );
+  const resumedInput = await screen.findByRole('textbox', { name: 'directoryBrowser.editPath' });
+  expect((resumedInput as HTMLInputElement).value).toBe('/draft');
+  await waitFor(() => expect(document.activeElement).toBe(resumedInput));
+});
+
 it('re-fetches the initial listing when hidden files are toggled while loading', async () => {
   let resolveInitial!: (result: { ok: true; path: string; parent: string; entries: never[] }) => void;
   listDir.mockImplementationOnce(
