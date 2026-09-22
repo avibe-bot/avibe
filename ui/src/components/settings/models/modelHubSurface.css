@@ -1275,9 +1275,46 @@
   flex: 1 1 auto;
   overflow-y: auto;
 }
-.model-hub-route-selector-group { padding: 0 6px 6px; }
+/* The source column, kept in view. The group lays its heading over the first
+   column while its rows span the whole grid, so the name occupies the cell the
+   rows leave empty and the selected row still washes edge to edge under it.
+   Sticky against the list means the name is on screen for exactly as long as
+   one of its own models is: the next group's heading arrives at the top by
+   pushing this one out, which is the same order the groups are read in. */
+.model-hub-route-selector-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  /* cmdk's group ships `overflow: hidden`. Left on, it would be the heading's
+     own scroll container — a box that never scrolls — and the heading would
+     stick to the top of the group it is already at the top of, which is to say
+     it would not move at all. The list is the scroller; the group is not. */
+  overflow: visible;
+  padding: 0 6px 6px;
+}
+.model-hub-route-selector-group [cmdk-group-heading] {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  grid-area: 1 / 1 / 2 / 2;
+  align-self: start;
+  /* Aligned with the rows it labels: the row's own inline padding, and the
+     block padding that centers one line in the 28px row beside it. */
+  padding: 6px 8px;
+  /* Its grid cell bounds the column, not the text: a source named at length
+     would otherwise run straight across the models it is there to label. Kept
+     from the cell this replaced, which truncated for the same reason. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 16px;
+}
+.model-hub-route-selector-group [cmdk-group-items] { grid-area: 1 / 1 / 2 / -1; }
 .model-hub-route-candidate { min-height: 28px; font-size: 11.5px; line-height: 16px; }
-.model-hub-route-candidate-model { color: var(--model-hub-ink-73); }
+.model-hub-route-candidate-model { grid-column: 2; color: var(--model-hub-ink-73); }
 .model-hub-route-candidate:hover { background: var(--model-hub-wash-0a); }
 .model-hub-route-candidate[data-selected="true"] {
   background: var(--model-hub-mint-1a);

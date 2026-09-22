@@ -310,3 +310,92 @@ for (const [label, width] of [['small', 390], ['large', 430]] as const) {
     expect(head.x).toBeGreaterThanOrEqual(0);
   });
 }
+
+// Two columns, and the left one names the source that supplies the models in the
+// right one. Written into that source's first row, the name is on screen for
+// exactly as long as that one row is: a few models down the left column is
+// blank, and the reader is left to remember what they are looking at. The name
+// belongs to the group, so the assertion is the reader's own question — look at
+// the left column, level with the models on screen, and read what is there. Not
+// which element the fix draws it in, and not the accessibility tree, where a
+// screen-reader-only label would answer correctly while the column beside the
+// models sat empty.
+const sourceColumnAtTop = (list: Locator) => list.evaluate((element: HTMLElement) => {
+  const edge = element.getBoundingClientRect();
+  return document
+    .elementsFromPoint(edge.left + edge.width * 0.25, edge.top + 8)
+    .filter((node) => element.contains(node))
+    .map((node) => node.textContent?.trim() ?? '')
+    .find((text) => text.length > 0) ?? '';
+});
+
+test('MH-ROUTING-007: the picker keeps each source beside its own models', async ({ page }) => {
+  const copy = (key: string) => hub(key, {}, 'zh');
+  await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
+  await page.getByRole('button', { name: 'Open route', exact: true }).click();
+  const dialog = page.locator('.model-hub-route-dialog');
+  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  const selector = page.locator('.model-hub-route-selector');
+  await expect(selector).toBeVisible();
+  await settled(selector);
+
+  const list = selector.locator('.model-hub-route-selector-list');
+  const firstRow = list.locator('.model-hub-route-selector-group').first()
+    .locator('.model-hub-route-candidate').first();
+  const box = (await list.boundingBox())!;
+  const restingRow = (await firstRow.boundingBox())!;
+  expect(await sourceColumnAtTop(list)).toBe('Provider A');
+
+  const scrolled = await list.evaluate((element: HTMLElement) => {
+    const own = [...element.querySelector('.model-hub-route-selector-group')!
+      .querySelectorAll<HTMLElement>('.model-hub-route-candidate')];
+    // As far down this one group as the list goes: the name has to hold for as
+    // long as any of its own models are on screen, not only for its first.
+    element.scrollTop = Math.min(
+      own[own.length - 1].offsetTop - own[0].offsetTop,
+      element.scrollHeight - element.clientHeight,
+    );
+    return element.scrollTop;
+  });
+  // A list with nothing below its fold would make everything after this vacuous,
+  // and the row the name used to be written into has gone off the top of it,
+  // which is exactly what used to leave the column blank.
+  expect(scrolled).toBeGreaterThan(0);
+  const movedRow = (await firstRow.boundingBox())!;
+  expect(movedRow.y).toBeLessThan(restingRow.y);
+  expect(movedRow.y + movedRow.height).toBeLessThanOrEqual(box.y);
+
+  // This source's own models are still what is being read, so its name is still
+  // owed. Past its last one the next group's name takes the top, which is the
+  // order the groups are read in anyway.
+  const showing = await list.evaluate((element: HTMLElement) => {
+    const edge = element.getBoundingClientRect();
+    return [...element.querySelector('.model-hub-route-selector-group')!
+      .querySelectorAll<HTMLElement>('.model-hub-route-candidate')]
+      .filter((row) => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > edge.top && rect.top < edge.bottom;
+      }).length;
+  });
+  expect(showing).toBeGreaterThan(0);
+  expect(await sourceColumnAtTop(list)).toBe('Provider A');
+});
+
+// A row you can click says so under the pointer. The global rule in `index.css`
+// covers buttons and anything wearing a button role; a candidate is neither — it
+// is `role="option"` — and the primitive it is built from ships an arrow on
+// purpose. Every item in this codebase carries an `onSelect`, so the cursor is
+// read off the rendered row rather than off the class meant to produce it.
+test('MH-ROUTING-007: a candidate row reads as clickable', async ({ page }) => {
+  const copy = (key: string) => hub(key, {}, 'zh');
+  await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
+  await page.getByRole('button', { name: 'Open route', exact: true }).click();
+  const dialog = page.locator('.model-hub-route-dialog');
+  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  const selector = page.locator('.model-hub-route-selector');
+  await expect(selector).toBeVisible();
+
+  const row = selector.locator('.model-hub-route-candidate').first();
+  await row.hover();
+  expect(await row.evaluate((element: HTMLElement) => getComputedStyle(element).cursor)).toBe('pointer');
+});

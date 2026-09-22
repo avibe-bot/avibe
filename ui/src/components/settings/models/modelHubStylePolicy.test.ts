@@ -272,6 +272,44 @@ describe('Model Hub visual token policy', () => {
     expect(route).toMatch(/--radix-popover-content-available-width,\s*var\(--model-hub-route-selector-inline-max\)/);
   });
 
+  // The panel has two columns and the left one names a source that supplies
+  // several models. Written into a row, that name is on screen for exactly as
+  // long as that one row is: six models down the column beside the list is
+  // blank, which is a reader being asked to remember what they are looking at.
+  // The name belongs to the group, so it is drawn on the group's own heading and
+  // held against the list that scrolls. These are one mechanism in three rules
+  // and none of them works alone, which is why they are read together.
+  it('keeps each source beside its own models while the list scrolls', () => {
+    const group = surfaceCssBody
+      .match(/\.model-hub-route-selector-group\s*\{([^}]*)\}/)?.[1] ?? '';
+    const heading = surfaceCssBody
+      .match(/\.model-hub-route-selector-group \[cmdk-group-heading\]\s*\{([^}]*)\}/)?.[1] ?? '';
+    const items = surfaceCssBody
+      .match(/\.model-hub-route-selector-group \[cmdk-group-items\]\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(heading).toMatch(/position:\s*sticky/);
+    expect(heading).toMatch(/top:\s*0/);
+    // Sticky is resolved against the nearest scrolling ancestor, and cmdk's group
+    // ships `overflow: hidden`, which makes the group that ancestor: a box that
+    // never scrolls, so the heading would hold a position it already holds and
+    // leave with the rest of the group. The list is the scroller, not the group.
+    expect(group).toMatch(/overflow:\s*visible/);
+    // The heading covers the first column while the rows span both, so the name
+    // lands in the cell the rows leave empty and a highlighted row still washes
+    // the full width underneath it.
+    expect(group).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/);
+    expect(heading).toMatch(/grid-area:\s*1 \/ 1 \/ 2 \/ 2/);
+    expect(items).toMatch(/grid-area:\s*1 \/ 1 \/ 2 \/ -1/);
+    // Against the top of its own rows rather than centred over all of them: a
+    // heading stretched down the group would sit beside its third model and stick
+    // from there.
+    expect(heading).toMatch(/align-self:\s*start/);
+    // And bounded by that cell, which the cell it replaced already was: a source
+    // named at length reads across the models it is there to label otherwise.
+    expect(heading).toMatch(/text-overflow:\s*ellipsis/);
+    expect(heading).toMatch(/white-space:\s*nowrap/);
+  });
+
   // The panel is one flexible list plus bands that cannot shrink, so the list is
   // the only child a new band can be paid for out of — which is what happened:
   // the manual source/model pair went straight into the column, nothing

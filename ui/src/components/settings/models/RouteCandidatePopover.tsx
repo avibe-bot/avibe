@@ -202,21 +202,25 @@ export const RouteCandidatePopover: React.FC<{
               </CommandEmpty>
             )}
             {groups.map((group) => (
+              // The source is a property of the group, not of its first row.
+              // Printed into that row it was the first thing to scroll away,
+              // and a reader six models down had a blank column where the name
+              // belonged. cmdk already emits one heading per group — the
+              // accessible label for this very set — so the name is drawn there
+              // instead of duplicated into a cell, and CSS keeps it in view for
+              // as long as any of its own models are.
               <CommandGroup
                 key={group.source.id}
                 heading={group.source.display_name}
-                className="model-hub-route-selector-group [&_[cmdk-group-heading]]:sr-only"
+                className="model-hub-route-selector-group"
               >
-                {group.items.map((item, itemIndex) => (
+                {group.items.map((item) => (
                   <CommandItem
                     key={candidateKey(item.hop)}
                     value={candidateKey(item.hop)}
                     onSelect={() => { setCustomModel(''); setCandidate(item); }}
                     className="model-hub-route-candidate model-hub-route-selector-row text-foreground"
                   >
-                    <span className="model-hub-route-candidate-source truncate">
-                      {itemIndex === 0 ? group.source.display_name : ""}
-                    </span>
                     <span className="model-hub-route-candidate-model truncate font-mono">
                       {item.hop.model_id}
                     </span>
