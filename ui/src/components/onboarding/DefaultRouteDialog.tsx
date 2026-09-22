@@ -82,6 +82,7 @@ export function DefaultRouteDialog({
     getAgentChain: modelsApi.getAgentChain,
     previewAgentChain: modelsApi.previewAgentChain,
     putAgentChain: modelsApi.putAgentChain,
+    getAgentModelCandidates: modelsApi.getAgentModelCandidates,
     putAgentModels: modelsApi.putAgentModels,
   }), [api, agentReads]);
 

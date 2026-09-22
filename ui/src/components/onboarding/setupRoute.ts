@@ -3,8 +3,15 @@ import type { AssistantId } from './collaborationTimeline';
 import { ASSISTANT_ORDER } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 import { routeChainMatchesAttempt, sameManualOverride, sameRouteDraft } from '../settings/models/routeChainDraft';
-import { catalogModels, draftWithId, unstatedBackendModel } from '../settings/models/backendCatalog';
-import type { AgentBackend, AgentChain, AgentSupply, BackendModelsPut, RouteHop } from '../settings/models/types';
+import { candidateBackendModel, catalogModels, offeredCandidates } from '../settings/models/backendCatalog';
+import type {
+  AgentBackend,
+  AgentChain,
+  AgentSupply,
+  BackendModelCandidates,
+  BackendModelsPut,
+  RouteHop,
+} from '../settings/models/types';
 
 export const hopIdentity = (hop: RouteHop): string => `${hop.source_id}\0${hop.model_id}`;
 
@@ -79,6 +86,7 @@ export type SetupRouteWriteApi = {
     model: string,
     body: { hops: RouteHop[] },
   ) => Promise<{ chain: AgentChain }>;
+  getAgentModelCandidates: (backend: AgentBackend) => Promise<BackendModelCandidates>;
   putAgentModels: (backend: AgentBackend, body: BackendModelsPut) => Promise<AgentSupply>;
 };
 
@@ -285,8 +293,18 @@ const precheckTarget = async (
  *
  * Only the open-menu path, and only a model the catalog does not already hold: a
  * fixed-menu backend ships its own catalog, and a server that predates backend
- * catalogs states none at all, so both are left exactly as they were. The row
- * states nothing beyond the id, because no editor opened and nobody was asked.
+ * catalogs states none at all, so both are left exactly as they were.
+ *
+ * The row is the candidate the server offers for that id, so its OpenCode
+ * protocol is the one the server derived. Deriving it here instead would mean
+ * guessing, and the guess has a direction: the generic default is Responses, so
+ * an Anthropic-family model adopted without asking would be written down as a
+ * Responses model and every later turn would speak the wrong protocol — a
+ * silently wrong config in place of a loud refusal. So when no offered candidate
+ * names this id, or the one that does states no protocol, nothing is written and
+ * the preview refuses exactly as it did before: the person is sent to the
+ * catalog to say what this model is, rather than being given an answer nobody
+ * gave.
  */
 const adoptTargetModel = async (
   target: SetupRouteTargetSnapshot,
@@ -296,7 +314,10 @@ const adoptTargetModel = async (
   if (!supply || supply.menu_kind !== 'open') return;
   const catalog = catalogModels(supply);
   if (!catalog || catalog.some((model) => model.id === target.modelId)) return;
-  const adopted = draftWithId(unstatedBackendModel(), target.modelId, target.backend);
+  const offered = offeredCandidates(await api.getAgentModelCandidates(target.backend));
+  const candidate = offered.get(target.modelId);
+  if (!candidate?.native_protocol) return;
+  const adopted = candidateBackendModel(candidate);
   await api.putAgentModels(target.backend, { baseline: catalog, models: [...catalog, adopted] });
 };
 

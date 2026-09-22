@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import type { AgentChain, AgentSupply, BackendModel, RouteHop } from '../settings/models/types';
+import type {
+  AgentChain,
+  AgentSupply,
+  BackendModel,
+  ModelCandidate,
+  NativeProtocol,
+  RouteHop,
+} from '../settings/models/types';
 import {
   classifyRetry,
   hydrateSetupRoutes,
@@ -177,6 +184,7 @@ describe('saveSetupRoutes', () => {
           store[key] = next;
           return { chain: next };
         }),
+        getAgentModelCandidates: vi.fn(async () => ({ builtin: [], providers: [], in_list: [] })),
         putAgentModels: vi.fn(async () => supply('claude', [{ name: 'claude', model: 'opus-5' }])),
       },
     };
@@ -269,17 +277,39 @@ describe('saveSetupRoutes', () => {
   // route override against that catalog, so the preview is refused for a model nobody
   // has had the chance to add — which is every first route this step tries to save.
   describe('an open-menu catalog that does not yet name the Agent\'s model', () => {
-    const opencodeWrites = (catalog: BackendModel[]) => {
+    // What the server offers for an id. Its protocol is the server's answer: for
+    // OpenCode it is derived per model, so an Anthropic-family model states
+    // `anthropic` and nothing in the browser may decide otherwise.
+    const candidate = (id: string, native_protocol?: NativeProtocol): ModelCandidate => ({
+      id,
+      display_name: id.toUpperCase(),
+      reasoning_efforts: [],
+      suppliers: [],
+      origin: 'provider',
+      ...(native_protocol ? { native_protocol } : {}),
+    });
+
+    const opencodeWrites = (
+      modelId: string,
+      catalog: BackendModel[],
+      candidates: ModelCandidate[],
+    ) => {
       const calls: string[] = [];
-      const store: Record<string, AgentChain> = { 'opencode:glm-4.6': chainOf('opencode', 'glm-4.6', [], 'automatic') };
+      const store: Record<string, AgentChain> = {
+        [`opencode:${modelId}`]: chainOf('opencode', modelId, [], 'automatic'),
+      };
       let listed = catalog;
       const api = {
-        getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(brief(name, 'opencode', 'glm-4.6')) })),
+        getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(brief(name, 'opencode', modelId)) })),
         listAgents: vi.fn(async () => [{
-          ...supply('opencode', [{ name: 'opencode', model: 'glm-4.6' }]),
+          ...supply('opencode', [{ name: 'opencode', model: modelId }]),
           menu_kind: 'open' as const,
           catalog_models: listed,
         }]),
+        getAgentModelCandidates: vi.fn(async () => {
+          calls.push('candidates');
+          return { builtin: [], providers: candidates, in_list: [] };
+        }),
         getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => {
           const current = store[`${backend}:${model}`];
           if (!current) throw new Error(`missing ${backend} ${model}`);
@@ -307,31 +337,66 @@ describe('saveSetupRoutes', () => {
     };
     // The first route this machine ever saves: nothing is chained yet, and the person
     // has just put one source under the model their Agent already names.
-    const live = () => ({ ...target('opencode', 'glm-4.6', [], ['opencode'], 'automatic'), membership: [A] });
+    const live = (modelId: string) => ({
+      ...target('opencode', modelId, [], ['opencode'], 'automatic'),
+      membership: [A],
+    });
 
     it('reconciles the saved model into the catalog before the preview, and the save lands', async () => {
-      const { api, calls, store } = opencodeWrites([]);
-      const results = await saveSetupRoutes([A], [live()], api, { dirty: true });
-      expect(calls).toEqual(['models', 'preview']);
+      const { api, calls, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses')]);
+      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      expect(calls).toEqual(['candidates', 'models', 'preview']);
       expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
         baseline: [],
         models: [expect.objectContaining({
-          id: 'glm-4.6', origin: 'manual', native_protocol: 'openai_responses', locked: false, routeable: true,
+          id: 'glm-4.6', display_name: 'GLM-4.6', origin: 'provider',
+          native_protocol: 'openai_responses', locked: false, routeable: true,
         })],
       });
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
       expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
     });
 
-    it('writes no catalog when it already names the model', async () => {
+    // The reason the row is the server's candidate rather than one built here. An
+    // Anthropic-family model driven through OpenCode speaks the Anthropic protocol;
+    // a row built locally would default to Responses and the config would be quietly
+    // wrong for every later turn, which is worse than the refusal it replaced.
+    it('adopts an Anthropic-family model with the protocol the server states', async () => {
+      const id = 'claude-sonnet-4-5';
+      const { api, store } = opencodeWrites(id, [], [candidate(id, 'anthropic')]);
+      const results = await saveSetupRoutes([A], [live(id)], api, { dirty: true });
+      expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
+        baseline: [],
+        models: [expect.objectContaining({ id, native_protocol: 'anthropic' })],
+      });
+      expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+      expect(store[`opencode:${id}`]?.manual_override).toEqual({ hops: [A] });
+    });
+
+    // Nobody has an authoritative answer for this id, so nobody invents one: the
+    // save refuses exactly as it did before, and the person is sent to the catalog.
+    it.each([
+      ['no candidate names the model', [] as ModelCandidate[]],
+      ['the candidate states no protocol', [candidate('claude-sonnet-4-5')]],
+    ])('writes no catalog when %s', async (_label, candidates) => {
+      const id = 'claude-sonnet-4-5';
+      const { api, calls } = opencodeWrites(id, [], candidates);
+      const results = await saveSetupRoutes([A], [live(id)], api, { dirty: true });
+      expect(api.putAgentModels).not.toHaveBeenCalled();
+      expect(calls).toEqual(['candidates', 'preview']);
+      expect(results).toEqual([expect.objectContaining({ kind: 'failed', error: `unknown model ${id}` })]);
+    });
+
+    it('reads no candidates and writes no catalog when it already names the model', async () => {
       const held: BackendModel = {
         id: 'glm-4.6', display_name: 'GLM 4.6', origin: 'manual', models_dev_id: null,
         context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
         supports_tools: null, supports_reasoning: null, reasoning_efforts: [],
         native_protocol: 'openai_responses', locked: false, routeable: true,
       };
-      const { api, calls } = opencodeWrites([held]);
-      const results = await saveSetupRoutes([A], [live()], api, { dirty: true });
+      const { api, calls } = opencodeWrites('glm-4.6', [held], [candidate('glm-4.6', 'openai_responses')]);
+      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      expect(api.getAgentModelCandidates).not.toHaveBeenCalled();
       expect(api.putAgentModels).not.toHaveBeenCalled();
       expect(calls).toEqual(['preview']);
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);

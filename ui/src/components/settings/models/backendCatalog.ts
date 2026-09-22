@@ -92,7 +92,7 @@ export function catalogModelIds(agent: AgentSupply): string[] {
  * into rows nobody had opened — the runtime projection reads that as 「this model
  * does not reason」 and drops the very efforts the row was created with.
  */
-export const unstatedBackendModel = (): BackendModel => ({
+const unstatedBackendModel = (): BackendModel => ({
   id: '',
   display_name: null,
   origin: 'manual',
