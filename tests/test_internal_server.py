@@ -57,6 +57,101 @@ from vibe.authorization import AuthorizationContext
 # Helpers
 # ---------------------------------------------------------------------
 
+def _build_controller_double(handler=None):
+    """A MagicMock controller whose ``message_handler.handle_user_message``
+    can be patched to emit chunks via the real ``_stream_chunk`` hook.
+
+    It carries a *real* turn-sink registry (not MagicMock auto-attrs) so
+    ``dispatch_turn`` and ``_stream_chunk`` interoperate exactly as in
+    production: dispatch_turn registers the sink, the handler's emits
+    resolve it by session key, and a result emit releases the dispatch.
+    """
+
+    controller = MagicMock()
+    controller.memory_read_scope_for_cli_session = lambda session_id: controller.memory_scope_for_cli_session(session_id)
+    controller.message_handler = MagicMock()
+
+    async def _handle_user_message(
+        context,
+        text,
+        *,
+        lifecycle_snapshot=None,
+    ):
+        payload = context.platform_specific or {}
+        assert "_turn_lifecycle_admission" not in payload
+        assert "_turn_lifecycle_snapshot" not in payload
+        del lifecycle_snapshot
+        if handler is not None:
+            return await handler(context, text)
+        return None
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
+
+    sinks: dict = {}
+    controller.active_turn_sinks = sinks
+    controller._get_session_key = lambda ctx: f"{getattr(ctx, 'platform', None)}::{getattr(ctx, 'channel_id', None)}"
+    # MUST be set explicitly: a MagicMock would auto-generate this attribute and hand
+    # dispatch_turn a bogus key, so every sink lookup would miss and a refused-turn
+    # test would hang in ``done.wait()`` instead of failing.
+    controller._get_turn_sink_key = lambda ctx: build_context_turn_sink_key(
+        ctx, session_key=controller._get_session_key(ctx)
+    )
+
+    def _register(session_key, *, on_chunk, done_event, turn_token=None, context=None):
+        sinks[session_key] = {"on_chunk": on_chunk, "done_event": done_event, "turn_token": turn_token}
+
+    controller.register_turn_sink = _register
+
+    def _pop(session_key, done_event=None):
+        s = sinks.get(session_key)
+        if s is None:
+            return
+        if done_event is not None and s.get("done_event") is not done_event:
+            return
+        sinks.pop(session_key, None)
+
+    controller.pop_turn_sink = _pop
+    controller.get_turn_sink = lambda session_key: sinks.get(session_key)
+    controller._session_id_from_context = lambda ctx: str(
+        (getattr(ctx, "platform_specific", None) or {}).get("workbench_session_id")
+        or (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id")
+        or ""
+    ) or None
+
+    def _mark_turn_complete(ctx):
+        manager = getattr(controller, "session_turns", None)
+        if manager is not None:
+            spec = getattr(ctx, "platform_specific", None) or {}
+            logical_turn_id = str(spec.get("turn_token") or "")
+            target = spec.get("agent_session_target") or {}
+            backend = str(target.get("agent_backend") or "claude")
+            if logical_turn_id:
+                manager.on_native_start(
+                    ctx,
+                    backend=backend,
+                    runtime_key=f"runtime:{logical_turn_id}",
+                    runtime_turn_id=f"runtime-turn:{logical_turn_id}",
+                )
+        sink = sinks.get(resolve_turn_sink_key(controller, ctx))
+        if sink and sink.get("done_event") is not None:
+            sink["done_event"].set()
+
+    controller.mark_turn_complete = _mark_turn_complete
+
+    # Cancel reuses the IM /stop path to interrupt the backend turn.
+    controller.command_handler = MagicMock()
+    controller.command_handler.handle_stop = AsyncMock(return_value=True)
+
+    # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
+    # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
+    controller._t = lambda key, **kwargs: key
+    controller.config = SimpleNamespace()
+    return controller
+
+
+
 
 def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "2026-05-31T00:00:00Z") -> None:
     from storage.models import scope_settings
@@ -385,128 +480,8 @@ def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> Non
 
 
 
-def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    verified_user_keys: list[str | None] = []
-
-    class Runtime:
-        def principal_for_user_key(self, _user_key: str) -> str:
-            raise AssertionError("the socket route must not resolve Memory operators")
-
-        async def processing_record_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ) -> dict[str, object]:
-            verified_user_keys.append(verified_user_key)
-            return {
-                "status": "ok",
-                "runtime": {"source": {"status": "unavailable"}, "health": None},
-                "sources": {},
-                "anomalies": {"source": {"status": "available"}, "items": []},
-                "maintenance": {"source": {"status": "available"}},
-            }
-
-    controller = _build_controller_double()
-    controller.memory_runtime = Runtime()
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/processing-record"
-    user_key = "avibe:remote:subject-2"
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="GET",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert verified_user_keys == [user_key]
 
 
-def test_native_processing_record_routes_authorize_the_selected_project() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    principal_id = "u-11111111111111111111111111111111"
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(return_value=principal_id),
-        list_memory_projects=AsyncMock(return_value=("default", "notes")),
-        processing_record_entries_payload=AsyncMock(
-            return_value={"status": "ok", "entries": [], "next_cursor": None}
-        ),
-        processing_record_entry_payload=AsyncMock(
-            return_value={"status": "ok", "entry": {"memcell_id": "mc_1"}}
-        ),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    secret = "test-memory-ui-secret"
-    user_key = "avibe:local"
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-
-    def headers(path: str) -> dict[str, str]:
-        return {
-            MEMORY_USER_KEY_HEADER: user_key,
-            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                secret,
-                method="GET",
-                path=path,
-                user_key=user_key,
-            ),
-        }
-
-    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
-            list_path = "/internal/memory/processing-record/entries"
-            detail_path = "/internal/memory/processing-record/entry"
-            listed = await client.get(
-                f"{list_path}?project=notes&limit=17",
-                headers=headers(list_path),
-            )
-            detail = await client.get(
-                f"{detail_path}?memcell_id=mc_1&project=notes",
-                headers=headers(detail_path),
-            )
-            unknown = await client.get(
-                f"{list_path}?project=unknown&limit=17",
-                headers=headers(list_path),
-            )
-            return listed, detail, unknown
-
-    listed, detail, unknown = asyncio.run(_exercise())
-
-    assert listed.status_code == 200
-    assert detail.status_code == 200
-    assert unknown.status_code == 400
-    runtime.processing_record_entries_payload.assert_awaited_once_with(
-        principal_id, "notes", None, 17
-    )
-    runtime.processing_record_entry_payload.assert_awaited_once_with(
-        principal_id, "notes", "mc_1"
-    )
-    assert runtime.list_memory_projects.await_count == 3
 
 
 

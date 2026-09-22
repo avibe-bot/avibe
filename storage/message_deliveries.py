@@ -557,6 +557,12 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
+    """Read a delivery's immutable message snapshot when one is available."""
+    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+
+
 def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
     """Return whether an immutable Delivery snapshot records remote origin."""
 
