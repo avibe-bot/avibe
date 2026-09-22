@@ -2342,24 +2342,6 @@ class SessionTurnManager:
                 continue
             return None
 
-    def restore_memory_context(self, session_id: str, turn_id: str) -> Optional["MessageContext"]:
-        """Reconstruct only this still-live execution, never a later Session turn."""
-        with self._sqlite_engine().connect() as conn:
-            turn = delivery_store.get_turn(conn, turn_id)
-            if not turn or turn["session_id"] != session_id or turn["state"] not in delivery_store.TURN_OWNER_STATES:
-                return None
-            delivery = delivery_store.delivery_for_turn(conn, turn_id)
-        if delivery is None:
-            return None
-        context = self._delivery_context(session_id)
-        self._hydrate_delivery_context(context, delivery)
-        self._restore_scheduled_dispatch_context(context, delivery)
-        context.platform_specific["turn_token"] = turn_id
-        context.platform_specific["turn_source"] = (
-            SOURCE_SCHEDULED if context.platform_specific.get("delivery_source") == "harness" else SOURCE_HUMAN
-        )
-        return context
-
     def _hydrate_delivery_context(
         self,
         context: "MessageContext",
@@ -2398,27 +2380,6 @@ class SessionTurnManager:
             context.user_id = str(author_id)
         context.message_kind = normalize_message_kind(payload.get("message_kind"))
         context.is_original_human_text = context.message_kind == "original"
-        memory_enabled = bool(
-            getattr(
-                getattr(getattr(self.controller, "config", None), "memory", None),
-                "enabled",
-                False,
-            )
-        )
-        memory_cli_admitted = bool(
-            context.platform == "avibe"
-            and payload.get("source") == "user"
-            and memory_enabled
-            and author_id
-            and (
-                not legacy_workbench
-                or delivery_store.legacy_is_cli_admitted(metadata)
-            )
-        )
-        if memory_cli_admitted:
-            context.platform_specific["memory_cli_admitted"] = True
-        else:
-            context.platform_specific.pop("memory_cli_admitted", None)
         context.platform_specific.update(
             {
                 "delivery_id": str(delivery["id"]),

@@ -2957,9 +2957,6 @@ class CodexAgent(BaseAgent):
             include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
             and platform != "wechat",
             include_codex_generated_images=True,
-                profile_enabled=bool(
-                    getattr(getattr(self.controller.config, "memory", None), "profile_enabled", True)
-                ),
             context=request.context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),
