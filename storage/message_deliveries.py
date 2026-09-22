@@ -29,6 +29,12 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
+# Delivery states whose input may have reached the native Turn. ``steering``
+# and ``reconciling_steer`` count: the adapter may already have written the
+# prompt and returned an unknown acknowledgement. Only ``queued`` and
+# ``pending_steer`` are definitively unwritten.
+POSSIBLY_WRITTEN_DELIVERY_STATES = frozenset({"accepted", "steering", "reconciling_steer"})
+UNWRITTEN_STEER_STATES = frozenset({"queued", "pending_steer"})
 FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
@@ -622,6 +628,42 @@ def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None
             return None
         payload = execution_delivery_payload(conn, delivery)
     return memory_owner_from_payload(payload)
+
+
+def current_turn_memory_authority_conflict(session_id: str) -> bool:
+    """Return whether an active Turn carries an owner from another authority.
+
+    This is deliberately a read-only host-side check for the Memory boundary.
+    Delivery admission and native steering must not call Memory or consult this
+    helper; the boundary evaluates the immutable delivery rows at consumption
+    time instead.
+    """
+
+    from storage.db import get_cached_sqlite_engine
+
+    with get_cached_sqlite_engine().connect() as conn:
+        turn = active_turn(conn, session_id)
+        if not turn:
+            return False
+        initial = delivery_for_turn(conn, str(turn["id"]))
+        if initial is None:
+            return False
+        initial_payload = execution_delivery_payload(conn, initial)
+        initial_authority = memory_authority_for_payload(initial_payload)
+        initial_owner = memory_owner_from_payload(initial_payload)
+        for delivery in deliveries_for_turn(conn, str(turn["id"])):
+            # Only an input that may already be in the native Turn can carry
+            # foreign authority into it; a definitively unwritten row cannot.
+            if delivery.get("state") not in POSSIBLY_WRITTEN_DELIVERY_STATES:
+                continue
+            payload = execution_delivery_payload(conn, delivery)
+            if (
+                delivery.get("id") != initial.get("id")
+                and (initial_owner is not None or memory_owner_from_payload(payload) is not None)
+                and memory_authority_for_payload(payload) != initial_authority
+            ):
+                return True
+    return False
 
 
 def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
