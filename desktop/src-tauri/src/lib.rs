@@ -1202,6 +1202,39 @@ fn recover_after_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8
 }
 
 #[cfg(feature = "bundled-runtime")]
+fn report_runtime_removal_failure(app: &AppHandle, activity: Arc<AtomicU8>, catalog: &NativeUninstallCatalog) {
+    recover_after_runtime_removal_failure(app, activity);
+    app.dialog()
+        .message(catalog.failure_message.clone())
+        .title(catalog.failure_title.clone())
+        .kind(MessageDialogKind::Error)
+        .show(|_| {});
+}
+
+/// The confirmed uninstall's one decision: an opt-in login registration is
+/// cleared before the private Runtime is deleted, so the OS never keeps
+/// launching an application the user just removed. Failing to inspect or to
+/// clear that registration is an uninstall failure — the Runtime stays and the
+/// caller reports it — rather than a silently stale entry.
+#[cfg(feature = "bundled-runtime")]
+fn remove_runtime_after_login_cleanup(
+    login_enabled: Result<bool, String>,
+    disable_login: impl FnOnce() -> Result<(), String>,
+    remove_runtime: impl FnOnce(),
+    report_failure: impl FnOnce(),
+) {
+    let cleared = match login_enabled {
+        Ok(true) => disable_login(),
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
+    match cleared {
+        Ok(()) => remove_runtime(),
+        Err(_) => report_failure(),
+    }
+}
+
+#[cfg(feature = "bundled-runtime")]
 fn request_private_runtime_removal(app: AppHandle) {
     if app.state::<Shell>().dialog_pending.swap(true, Ordering::SeqCst) {
         return;
@@ -1242,29 +1275,34 @@ fn request_private_runtime_removal(app: AppHandle) {
                 return;
             }
 
-            notifications::stop(&confirmation_app);
-            tauri::async_runtime::spawn(async move {
-                match host.remove_private_runtime(active_origin.as_ref()).await {
-                    Ok(true) => {
-                        let exit_app = confirmation_app.clone();
-                        confirmation_app
-                            .dialog()
-                            .message(catalog.success_message.clone())
-                            .title(catalog.success_title.clone())
-                            .kind(MessageDialogKind::Info)
-                            .show(move |_| exit_shell(&exit_app));
-                    }
-                    Ok(false) | Err(_) => {
-                        recover_after_runtime_removal_failure(&confirmation_app, activity);
-                        confirmation_app
-                            .dialog()
-                            .message(catalog.failure_message.clone())
-                            .title(catalog.failure_title.clone())
-                            .kind(MessageDialogKind::Error)
-                            .show(|_| {});
-                    }
-                }
-            });
+            let manager = confirmation_app.autolaunch();
+            let removal_activity = activity.clone();
+            let removal_catalog = catalog.clone();
+            remove_runtime_after_login_cleanup(
+                manager.is_enabled().map_err(|error| error.to_string()),
+                || manager.disable().map_err(|error| error.to_string()),
+                || {
+                    notifications::stop(&confirmation_app);
+                    let removal_app = confirmation_app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match host.remove_private_runtime(active_origin.as_ref()).await {
+                            Ok(true) => {
+                                let exit_app = removal_app.clone();
+                                removal_app
+                                    .dialog()
+                                    .message(removal_catalog.success_message.clone())
+                                    .title(removal_catalog.success_title.clone())
+                                    .kind(MessageDialogKind::Info)
+                                    .show(move |_| exit_shell(&exit_app));
+                            }
+                            Ok(false) | Err(_) => {
+                                report_runtime_removal_failure(&removal_app, removal_activity, &removal_catalog)
+                            }
+                        }
+                    });
+                },
+                || report_runtime_removal_failure(&confirmation_app, activity, &catalog),
+            );
         });
 }
 
@@ -1710,6 +1748,72 @@ mod tests {
 
         assert!(!claim_runtime_removal(&activity));
         assert_eq!(activity.load(Ordering::SeqCst), ACTIVITY_BOOTSTRAP);
+    }
+
+    /// Every effect the confirmed uninstall can produce. `RemoveRuntime` stands
+    /// for the whole success branch the shell wires into it — stopping
+    /// notifications, deleting the private Runtime, the success dialog and the
+    /// shell exit — so a run without it is a run that reported failure and left
+    /// the installation intact.
+    #[cfg(feature = "bundled-runtime")]
+    #[derive(Debug, PartialEq, Eq)]
+    enum UninstallEffect {
+        DisableLogin,
+        RemoveRuntime,
+        ReportFailure,
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    fn uninstall_effects(
+        login_enabled: Result<bool, String>,
+        disable_login: Result<(), String>,
+    ) -> Vec<UninstallEffect> {
+        let effects = std::cell::RefCell::new(Vec::new());
+        remove_runtime_after_login_cleanup(
+            login_enabled,
+            || {
+                effects.borrow_mut().push(UninstallEffect::DisableLogin);
+                disable_login
+            },
+            || effects.borrow_mut().push(UninstallEffect::RemoveRuntime),
+            || effects.borrow_mut().push(UninstallEffect::ReportFailure),
+        );
+        effects.into_inner()
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_clears_an_enabled_login_item_before_removing_the_private_runtime() {
+        assert_eq!(
+            uninstall_effects(Ok(true), Ok(())),
+            vec![UninstallEffect::DisableLogin, UninstallEffect::RemoveRuntime],
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_leaves_an_already_disabled_login_item_alone() {
+        assert_eq!(
+            uninstall_effects(Ok(false), Ok(())),
+            vec![UninstallEffect::RemoveRuntime]
+        );
+    }
+
+    #[cfg(feature = "bundled-runtime")]
+    #[test]
+    fn uninstall_fails_closed_when_the_login_item_cannot_be_cleared() {
+        // Clearing failed, so the Runtime is never touched: no success dialog,
+        // no exit, and the user is told the uninstall failed.
+        assert_eq!(
+            uninstall_effects(Ok(true), Err("disable failed".to_owned())),
+            vec![UninstallEffect::DisableLogin, UninstallEffect::ReportFailure],
+        );
+        // The registration could not even be inspected — same answer, and
+        // nothing is disabled on a state the shell could not read.
+        assert_eq!(
+            uninstall_effects(Err("state unavailable".to_owned()), Ok(())),
+            vec![UninstallEffect::ReportFailure],
+        );
     }
 
     #[cfg(feature = "bundled-runtime")]

@@ -10194,6 +10194,7 @@ def reconcile_startup_dependencies() -> dict:
             _set_startup_dependency_reconciling("avault", False)
         result["avault"] = avault
 
+        _set_startup_dependency_reconciling("model-hub-engine", True)
         try:
             model_hub_engine = ensure_model_hub_engine_installed(force=False)
         except Exception as exc:  # noqa: BLE001
@@ -10203,6 +10204,8 @@ def reconcile_startup_dependencies() -> dict:
                 exc_info=True,
             )
             model_hub_engine = {"ok": False, "message": str(exc)}
+        finally:
+            _set_startup_dependency_reconciling("model-hub-engine", False)
         result["model_hub_engine"] = model_hub_engine
 
         try:

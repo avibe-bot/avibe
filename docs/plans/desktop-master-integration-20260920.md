@@ -503,3 +503,59 @@ pushed fix is evidenced.
   implementation paths remain unchanged. Focused Vitest coverage for the
   incoming file passed with 33 tests; GitHub lint and desktop-shell remain the
   authoritative pushed-head checks.
+
+### H5 review round: reconciling marker, identity reuse, login-item cleanup
+
+- 2026-09-22/23: The exact-head Codex review on `d65847228` opened three
+  threads. All three were diagnosed as independent local defects, not one
+  repeated root-cause class, so the circuit breaker did not trip: one missing
+  status marker, one parser verdict, and one uninstall ordering gap.
+- **Model Hub reconciling flag.** `reconcile_startup_dependencies` installed
+  the Model Hub engine without ever marking that dependency as reconciling, so
+  the dependency surface showed a settled state during a live install. The
+  marker is now set before the install and cleared in a `finally`, matching the
+  other dependencies in the same function. The consuming test observes
+  `dependencies_status(...)["reconciling_dependencies"]` from inside the
+  installer callback and asserts it is `["model-hub-engine"]` while the install
+  runs and empty afterwards, so a missing set or a missing clear each fail.
+- **`runtime_identity_invalid` reuse.** `_ui_ready_identity_state` mapped every
+  well-formed 503 to "incompatible but adoptable", which let the launcher adopt
+  a UI process that had already declared its runtime identity invalid. That one
+  code now returns `None`, and because `_ui_server_compatible` is
+  `readiness is not None`, the process is treated as incompatible and replaced.
+  Evidence is two layers: the predicate test, and a `start_ui` test that drives
+  the real replacement path and asserts the stale PID was stopped and a new one
+  spawned.
+- **Uninstall login item.** Confirmed uninstall deleted the private Runtime and
+  exited without clearing an opt-in **Start at Login** registration, leaving the
+  OS launching an application that no longer exists. The confirmed uninstall now
+  clears an enabled registration first and fails closed: a failure to inspect or
+  to clear it returns through the existing uninstall failure/recovery path
+  instead of deleting the Runtime behind a stale entry.
+- That decision is the single function `remove_runtime_after_login_cleanup`,
+  which owns both outcomes — it calls the removal effect or the failure effect,
+  never both. The duplicated recovery-plus-failure-dialog pair became one
+  `report_runtime_removal_failure` helper, so the login-cleanup failure returns
+  through literally the same path as an async removal failure rather than a
+  parallel copy. No second uninstall lifecycle, no RuntimeHost receipt change,
+  and no process-stop policy change was introduced.
+- The consuming test drives that production function with recorded effects and
+  asserts the exact effect sequence for each of the four inputs: enabled clears
+  then removes; already disabled removes without any disable call; a disable
+  failure and an unreadable registration each report failure with no removal.
+  Because the shell wires notification stop, `remove_private_runtime`, the
+  success dialog and `exit_shell` entirely inside the removal effect, a run that
+  never produces `RemoveRuntime` is a run with no success dialog and no exit.
+  The earlier draft's source-substring ordering assertion was removed: it
+  asserted the order of two identifiers in a file, which cannot distinguish the
+  fail-closed path from a silently continuing one.
+- The extracted boundary is bound to production by the build, not by a string
+  match: CI runs `cargo clippy --workspace --all-targets --all-features -D
+  warnings`, so a version of the shell that stopped calling the function would
+  fail on dead code rather than keep a green test.
+- The draft also renamed the removal handle and the host/origin bindings, which
+  silently broke two pre-existing `shell_boundaries.rs` invariants — the
+  uninstall path must retain `notifications::stop(&confirmation_app)` and
+  `host.remove_private_runtime(active_origin.as_ref()).await`. Both original
+  names are restored; the notification stop now happens at the point the shell
+  commits to removal, and the async handle is cloned there.

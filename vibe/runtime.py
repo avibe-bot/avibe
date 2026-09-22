@@ -2074,7 +2074,7 @@ def _ui_ready_identity_state(response) -> bool | None:
             "code": code,
         }
     ):
-        return False
+        return None if code == "runtime_identity_invalid" else False
     return None
 
 

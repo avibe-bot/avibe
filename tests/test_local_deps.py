@@ -2786,6 +2786,7 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     askill_calls = []
     avault_calls = []
     model_hub_calls = []
+    model_hub_active_dependencies = []
     memory_calls = []
 
     def reconcile_memory_package():
@@ -2805,12 +2806,33 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
         return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
 
     monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
+
     monkeypatch.setattr(
         api,
-        "ensure_model_hub_engine_installed",
-        lambda *, force=False: model_hub_calls.append(force)
-        or {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"},
+        "_model_hub_engine_dependency_status",
+        lambda: {
+            "id": "model-hub-engine",
+            "kind": "runtime",
+            "required": True,
+            "installed": True,
+            "version": "v7.2.149",
+            "latest_version": "v7.2.149",
+            "has_update": False,
+            "status": "ready",
+            "action_class": "none",
+            "reason": None,
+            "download_error": None,
+        },
     )
+
+    def fake_ensure_model_hub_engine(*, force=False):
+        model_hub_calls.append(force)
+        model_hub_active_dependencies.append(
+            api.dependencies_status(dependency_ids=["model-hub-engine"])["reconciling_dependencies"]
+        )
+        return {"ok": True, "installed": True, "changed": True, "version": "v7.2.149"}
+
+    monkeypatch.setattr(api, "ensure_model_hub_engine_installed", fake_ensure_model_hub_engine)
 
     import core.show_runtime as srt_mod
 
@@ -2851,6 +2873,8 @@ def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeyp
     assert askill_calls == [False]
     assert avault_calls == [False]
     assert model_hub_calls == [False]
+    assert model_hub_active_dependencies == [["model-hub-engine"]]
+    assert api.dependencies_status(dependency_ids=["model-hub-engine"])["reconciling_dependencies"] == []
     assert out["model_hub_engine"]["version"] == "v7.2.149"
     assert manager.prepared == [(False, True)]
     assert out["node"]["status"] == "ready"

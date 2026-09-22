@@ -567,6 +567,102 @@ def test_ui_server_compatibility_rejects_invalid_not_ready_identity(monkeypatch,
     assert runtime._ui_server_compatible("100.97.103.112", 5123) is False
 
 
+def test_ui_server_compatibility_rejects_a_valid_runtime_identity_invalid_response(monkeypatch):
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": "runtime_identity_invalid",
+        }
+    ).encode("utf-8")
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise urllib.error.HTTPError(
+                url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(payload),
+            )
+        return Response()
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+
+    assert runtime._ui_server_compatible("100.97.103.112", 5123) is False
+
+
+def test_start_ui_replaces_a_ui_with_an_invalid_runtime_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
+    runtime.ensure_dirs()
+    paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "product": "avibe",
+            "ready": False,
+            "code": "runtime_identity_invalid",
+        }
+    ).encode("utf-8")
+    stopped = []
+    spawned = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fake_urlopen(url, timeout):
+        del timeout
+        if url.endswith("/ready"):
+            raise urllib.error.HTTPError(
+                url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(payload),
+            )
+        return Response()
+
+    def fake_spawn(_args, pid_path, _stdout_name, _stderr_name, env=None):
+        del env
+        spawned.append(True)
+        pid_path.write_text("67890", encoding="utf-8")
+        return 67890
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(
+        runtime,
+        "get_process_command",
+        lambda pid: "from vibe.ui_server import run_ui_server; run_ui_server('100.97.103.112', 5123)"
+        if pid == 12345
+        else None,
+    )
+    monkeypatch.setattr(runtime, "stop_pid", lambda pid: stopped.append(pid) or True)
+    monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda _host, _port: True)
+
+    assert runtime.start_ui("100.97.103.112", 5123) == 67890
+    assert stopped == [12345]
+    assert spawned == [True]
+
+
 def test_start_ui_restarts_old_specific_bind_without_desktop_listener(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".avibe")
     runtime.ensure_dirs()

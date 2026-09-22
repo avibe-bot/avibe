@@ -203,3 +203,38 @@ diagnostic. It has no release, RuntimeHost, shell, or product behavior delta.
 The change was merged as a real conflict-free second parent into the desktop
 candidate. Focused Vitest evidence passed 33 tests; the new exact-head GitHub
 lint and desktop-shell gates remain required before push and TEST publication.
+
+### H5 candidate: lane handover, master refresh, local evidence
+
+- 2026-09-23: The previous implementation lane (Session `sesu7hnukugyr`, codex
+  backend) is dead — every run failed with `model_hub_recovery_exhausted` and a
+  resume failed again immediately. A replacement lane inherited its worktree and
+  its uncommitted H5 draft rather than resetting the branch; the draft's two
+  Python fixes were kept and its Rust test was replaced with a real consuming
+  test. Root-cause detail for all three H5 threads lives in
+  `docs/plans/desktop-master-integration-20260920.md`.
+- **Latest master.** An explicit refspec fetch put `origin/master` at
+  `c400da2df4eb09feab84678c8f3d5c76d3af1b12`, ahead of the previously integrated
+  `4b964fef223862c2cf7d5cec852ac0d3aa64e323`. The incoming delta is Model Hub UI
+  and Claude model catalog work across 37 files; it touches no desktop shell,
+  RuntimeHost, or release path. It was merged as a real conflict-free second
+  parent, and `origin/master` is now an ancestor of the candidate. The PR's
+  `baseRefOid` was not used for this: it was stale.
+- **TEST release surface unchanged.** The seven release implementation files
+  from `13082a8501ce5d1e771f56395a72fc062859cf8b` — the two workflows,
+  `desktop/README.md`, `docs/desktop-test-installation.md`,
+  `scripts/desktop_release.py`, `tests/test_desktop_release.py`, and
+  `tests/test_release_verification.py` — were re-verified byte-identical by
+  object hash after the merge. No UI or workflow file is touched by this
+  candidate's own commit.
+- **Local validation on the candidate tree.** 107 focused Python tests pass
+  (`tests/test_desktop_runtime.py` in full, plus the reconcile/model-hub
+  selection from `tests/test_local_deps.py`), all under the repository's
+  per-test `HOME`/XDG isolation. `ruff check` is clean on the four changed
+  Python files. The Rust workspace passes `cargo fmt --all --check`, 201 tests
+  under `cargo test --workspace --all-features` — including the shell unit tests
+  and the `shell_boundaries.rs` integration guards — and `cargo clippy
+  --workspace --all-targets --all-features -- -D warnings`. GitHub `lint` and
+  `desktop-shell` at the pushed head remain the authoritative gates.
+- Push is held pending explicit orchestrator candidate clearance. Replies to the
+  three H5 threads follow the pushed head, not this commit.
