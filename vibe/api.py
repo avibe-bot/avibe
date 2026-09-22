@@ -1519,7 +1519,6 @@ def config_to_payload(
     include_internal: bool = False,
 ) -> dict:
     from config.platform_registry import platform_descriptors
-    from config.v2_config import memory_config_to_payload
     from modules.agents.catalog import agent_backend_catalog_payload
 
     system_hostname = _system_hostname()
@@ -1578,11 +1577,6 @@ def config_to_payload(
             # resets ``agents.avault.cli_path`` to the dataclass default.
             "avault": config.agents.avault.__dict__,
         },
-        "memory": memory_config_to_payload(
-            config.memory,
-            include_secrets=include_secrets,
-            include_internal=include_internal,
-        ),
         "model_hub": config.model_hub.to_payload(),
         "gateway": _project_secret_fields(
             config.gateway.__dict__ if config.gateway else None,

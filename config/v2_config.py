@@ -4300,7 +4300,11 @@ class V2Config:
             avault=avault,
         )
 
-        memory = memory_config_from_payload(payload.get("memory", {}))
+        # ``memory`` was a product feature removed in v2. Treat the legacy
+        # subtree as an opaque obsolete field: do not validate or activate it.
+        # This deliberately accepts malformed values (including ``enabled``)
+        # and leaves no memory data or runtime side effects.
+        memory = MemoryConfig()
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
@@ -4582,11 +4586,6 @@ class V2Config:
                 "codex": self.agents.codex.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
-            "memory": memory_config_to_payload(
-                memory,
-                include_secrets=True,
-                include_internal=True,
-            ),
             "model_hub": self.model_hub.to_payload(),
             "gateway": self.gateway.__dict__ if self.gateway else None,
             "ui": self.ui.__dict__,
