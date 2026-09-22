@@ -37,7 +37,11 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
-from core.handlers.model_hub.stream_wire import ProtocolObservation, ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import (
+    ProtocolObservation,
+    ProtocolUsageReport,
+    observe_buffered_protocol_response,
+)
 from vibe.model_hub_runtime import adapter as runtime_adapter_module
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
@@ -6251,6 +6255,47 @@ def test_engine_http_error_carries_redacted_upstream_detail_apart_from_classific
     )
     assert "sk-live" not in outcome.upstream_detail
     assert classify_outcome(outcome).error_code == "upstream_request_invalid"
+
+
+def test_engine_streamed_error_event_carries_upstream_detail() -> None:
+    state = client_module.ProtocolSSEState("anthropic")
+    state.observe(
+        b'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error",'
+        b'"message":"Claude Code 2.1.261 is too old;  key=sk-live_abcdefghijklmnop"}}\n\n'
+    )
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert "sk-live" not in repr(observation)
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert outcome is not None
+    assert outcome.upstream_detail == "Claude Code 2.1.261 is too old; key=[redacted]"
+
+
+def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
+    body = json.dumps(
+        {"type": "error", "error": {"type": "invalid_request_error", "message": "model retired"}}
+    ).encode()
+
+    observation = observe_buffered_protocol_response("anthropic", io.BytesIO(body))
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=200,
+        stream_started=False,
+    )
+
+    assert observation.outcome == "failed_terminal"
+    assert outcome is not None
+    assert outcome.upstream_detail == "model retired"
 
 
 @pytest.mark.parametrize(

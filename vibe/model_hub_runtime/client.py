@@ -1510,9 +1510,13 @@ def _reduce_protocol_observation(
             stream_started=stream_started,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
-            upstream_detail=_upstream_error_detail(
-                observation.error_payload or b"",
-                observation.error_envelope_paths or (("error",),),
+            upstream_detail=(
+                _bounded_upstream_detail(observation.error_message)
+                if observation.error_message is not None
+                else _upstream_error_detail(
+                    observation.error_payload or b"",
+                    observation.error_envelope_paths or (("error",),),
+                )
             ),
         )
     return _outcome(
@@ -1647,13 +1651,20 @@ def _upstream_error_detail(
     if not payload or not project_json_reader(io.BytesIO(payload), message_paths, visit):
         return None
     for path in message_paths:
-        text = " ".join(values.get(path, "").split())
+        text = _bounded_upstream_detail(values.get(path, ""))
         if text:
-            text = redact_credential_material(text)
-            if len(text) > _UPSTREAM_DETAIL_CHARS:
-                text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
             return text
     return None
+
+
+def _bounded_upstream_detail(message: str) -> str | None:
+    text = " ".join(message.split())
+    if not text:
+        return None
+    text = redact_credential_material(text)
+    if len(text) > _UPSTREAM_DETAIL_CHARS:
+        text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def _safe_error_code(value: object) -> str | None:
