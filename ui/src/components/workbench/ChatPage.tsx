@@ -63,6 +63,7 @@ import { AnnotationMessage } from './AnnotationMessage';
 import { FailureRetry } from './FailureRetry';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
+import { SenderHead } from './SenderHead';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import {
@@ -3974,6 +3975,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   footer,
 }) => {
   const { t } = useTranslation();
+  const { instanceKind } = useInstanceAuthorization();
   const recovery = useModelHubRecovery(modelRecovery, working);
   const navigate = useNavigate();
   const { openApp } = useWindowManager();
@@ -4030,6 +4032,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const forkSourceBanner =
     isForkedSession && forkSourceSessionId ? (
       <ForkSourceBanner sourceSessionId={forkSourceSessionId} sourceTitle={forkSourceSessionTitle} />
+    ) : null;
+  // One line at the head of a shared transcript saying why the bubbles below
+  // now carry names (design.pen nlrCu). Organization instances only — on a
+  // personal one there is nothing to explain.
+  const organizationNotice =
+    instanceKind === 'organization' ? (
+      <div className="flex h-10 shrink-0 items-center gap-2 rounded-lg border border-mint/20 bg-mint-soft px-3.5 text-[12px] font-medium text-mint-ink">
+        <Info className="size-4 shrink-0" />
+        <span className="truncate">{t('chat.organizationNotice')}</span>
+      </div>
     ) : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -4444,6 +4456,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8"
       >
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
+          {organizationNotice}
           {forkSourceBanner}
           {/* One slot at the head of the history for every way paging can end, so
               each outcome resolves in place instead of the top twitching: still
@@ -4661,6 +4674,10 @@ export const MessageRow = memo(function MessageRow({
 }: MessageRowProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  // Read here rather than threaded down as a prop: context reaches through the
+  // row's memo, so a personal↔organization change repaints the transcript
+  // without the page having to re-create every row's props.
+  const { instanceKind } = useInstanceAuthorization();
   // Harness rows are collapsed by default; this tracks the per-row expand state.
   const [expanded, setExpanded] = useState(false);
 
@@ -4850,14 +4867,27 @@ export const MessageRow = memo(function MessageRow({
 
   // ----- User: right-aligned neutral bubble (kept distinct from agent mint) ---
   if (isUser) {
+    // On an Organization instance the bubble gets a head naming who wrote it
+    // (design.pen nlrCu) — which also carries the time, so the hover stamp
+    // underneath would just repeat it. A personal instance keeps the row
+    // exactly as it was: one owner, nothing to attribute.
+    const senderHead =
+      instanceKind === 'organization' ? (
+        <SenderHead
+          authorId={message.author_id}
+          label={message.sender_label}
+          createdAt={message.created_at}
+        />
+      ) : null;
     return (
       <div data-message-id={message.id} className={rowClass('justify-end')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-end gap-1">
+          {senderHead}
           <div className={USER_BUBBLE} style={messageFontStyle}>
             {bodyNode}
             {attachmentsNode}
           </div>
-          {time}
+          {senderHead ? null : time}
         </div>
       </div>
     );

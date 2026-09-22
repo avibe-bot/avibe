@@ -33,6 +33,7 @@ from storage.models import (
     vault_requests,
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
+from storage.sender_identity import attach_sender_labels
 from storage.sessions_service import session_agent_display_label
 from vibe.authorization import AuthorizationContext, require_instance_role
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES, NOTIFY_TYPE, VAULT_TYPE
@@ -336,6 +337,26 @@ def _attach_harness_provenance(
     return payloads
 
 
+def _attach_transcript_identity(
+    conn: Connection,
+    payloads: list[dict[str, Any]],
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Everything a transcript row needs read-side but does not store.
+
+    One entry point for both enrichments so a new transcript window inherits
+    them together instead of picking up whichever one its neighbour happened to
+    call.
+    """
+    return attach_sender_labels(
+        conn,
+        _attach_harness_provenance(
+            conn, payloads, authorization_context=authorization_context
+        ),
+    )
+
+
 def transcript_order_value(table: Any = messages) -> Any:
     """SQLite ordering key for when a Message entered the transcript.
 
@@ -616,7 +637,13 @@ def get_message(
     if session_id is not None:
         query = query.where(messages.c.session_id == session_id)
     row = conn.execute(query).mappings().first()
-    return _row_to_payload(dict(row), conn=conn) if row else None
+    if not row:
+        return None
+    # The ``message.new`` publisher loads the live row through here, so the
+    # sender resolved on delivery is the one the following reload shows.
+    return attach_sender_labels(
+        conn, [_row_to_payload(dict(row), conn=conn)]
+    )[0]
 
 
 def native_message_exists(
@@ -958,7 +985,7 @@ def list_session_messages(
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_harness_provenance(
+        merged = _attach_transcript_identity(
             conn,
             older + anchor_rows + newer,
             authorization_context=authorization_context,
@@ -975,7 +1002,7 @@ def list_session_messages(
         query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
             effective_limit + 1
         )
-        rows = _attach_harness_provenance(
+        rows = _attach_transcript_identity(
             conn,
             [
                 _row_to_payload(
@@ -1008,7 +1035,7 @@ def list_session_messages(
         query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
             effective_limit + 1
         )
-        rows = _attach_harness_provenance(
+        rows = _attach_transcript_identity(
             conn,
             [
                 _row_to_payload(
@@ -1042,7 +1069,7 @@ def list_session_messages(
     query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(
         effective_limit + 1
     )
-    rows = _attach_harness_provenance(
+    rows = _attach_transcript_identity(
         conn,
         [
             _row_to_payload(
