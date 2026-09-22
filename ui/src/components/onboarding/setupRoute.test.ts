@@ -433,5 +433,21 @@ describe('saveSetupRoutes', () => {
       expect(calls).toEqual(['preview']);
       expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
     });
+
+    // Why the adoption sits where it does. Another Settings surface moved this
+    // target's chain after hydration, so the save reconciles — and reconciling
+    // has to mean nothing was persisted. The catalog addition is a write like
+    // the chain write, so the decision that refuses both has to happen before
+    // either; deciding afterwards and undoing it would answer an ordering rule
+    // with a rollback.
+    it('writes nothing at all, catalog included, when the chain moved after hydration', async () => {
+      const { api, calls, store } = opencodeWrites('glm-4.6', [], [candidate('glm-4.6', 'openai_responses')]);
+      store['opencode:glm-4.6'] = chainOf('opencode', 'glm-4.6', [C], 'manual');
+      const results = await saveSetupRoutes([A], [live('glm-4.6')], api, { dirty: true });
+      expect(results).toEqual([expect.objectContaining({ kind: 'reconcile' })]);
+      expect(api.putAgentModels).not.toHaveBeenCalled();
+      expect(api.putAgentChain).not.toHaveBeenCalled();
+      expect(calls).toEqual([]);
+    });
   });
 });

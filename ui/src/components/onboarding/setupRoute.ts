@@ -346,11 +346,13 @@ const writeTarget = async (
 ): Promise<TargetSaveResult> => {
   const key = targetKey(target.backend, target.modelId);
   try {
-    // The save path already read the supply to decide this target was writable;
-    // a retry arrives without one and reads it here rather than skipping a step
-    // whose absence is exactly what it may be retrying.
-    await adoptTargetModel(target, api, supply ?? (await api.listAgents()).find((row) => row.backend === target.backend));
-    await api.previewAgentChain(target.backend, target.modelId, { manual_override: { hops: desired } });
+    // Everything that decides whether this save may write at all comes first,
+    // because a decision made after a write is not a decision. The contract
+    // re-reads the chain against the baseline before each write, and a target
+    // another Settings surface has moved since hydration is sent to
+    // reconciliation — which has to mean nothing was persisted, not that what
+    // was persisted gets taken back. The catalog addition below is a write like
+    // any other, so it sits on this side of the check with the chain write.
     const pre = await api.getAgentChain(target.backend, target.modelId);
     if (routeChainMatchesAttempt(pre, {
       backend: target.backend,
@@ -362,6 +364,15 @@ const writeTarget = async (
     }
     const check = classifyRetry(target, pre, desired);
     if (check === 'reconcile') return { key, kind: 'reconcile', chain: pre };
+    // Still ahead of the preview, which is what needs it: the backend validates
+    // an override against its catalog, so the model has to be in there before
+    // anything asks to route it.
+    //
+    // The save path already read the supply to decide this target was writable;
+    // a retry arrives without one and reads it here rather than skipping a step
+    // whose absence is exactly what it may be retrying.
+    await adoptTargetModel(target, api, supply ?? (await api.listAgents()).find((row) => row.backend === target.backend));
+    await api.previewAgentChain(target.backend, target.modelId, { manual_override: { hops: desired } });
     await api.putAgentChain(target.backend, target.modelId, { hops: desired });
     const readback = await api.getAgentChain(target.backend, target.modelId);
     if (routeChainMatchesAttempt(readback, {
