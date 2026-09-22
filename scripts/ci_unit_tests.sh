@@ -15,6 +15,13 @@
 # use the checked-in per-file timing snapshot when available and fall back to a
 # deterministic file-size/test-count estimate for new or missing files.
 #
+# Each file gets its own watchdog budget from that same snapshot: a multiple of
+# what the file itself has recorded, floored at CI_TEST_FILE_TIMEOUT_SECONDS. A
+# single fixed budget cannot separate "hung" from "slow" across a suite whose
+# files span three orders of magnitude -- it is generous for a 1s file and thin
+# for a 74s one, so a uniformly slow runner kills the slowest file first and
+# names it as the culprit. Files with no recorded duration keep the floor.
+#
 # Excludes ``tests/e2e`` (Docker) and the ``integration`` marker (Docker +
 # platform tokens) — those run in dedicated jobs. ``-p no:randomly`` keeps a
 # deterministic order if pytest-randomly happens to be installed (no-op when it
@@ -60,6 +67,8 @@ if [ -z "$PYTHON_BIN" ]; then
   fi
 fi
 
+# The floor under every per-file budget, and the whole budget for any file the
+# timing snapshot does not know about.
 FILE_TIMEOUT="${CI_TEST_FILE_TIMEOUT_SECONDS:-300}"
 case "$FILE_TIMEOUT" in
   ''|*[!0-9]*)
@@ -87,26 +96,48 @@ metrics = FileMetrics(sys.argv[1], started_at)
 exit_code = pytest.main(sys.argv[1:], plugins=[metrics])
 metrics.emit(diagnostics, int(exit_code))
 sys.exit(exit_code)
-' "$FILE_TIMEOUT")
+')
 
+# Emits "<path>\t<budget seconds>\t<recorded seconds, blank if unknown>".
 select_unit_test_files() {
-  "$PYTHON_BIN" scripts/ci_unit_test_shards.py "$SHARD_INDEX" "$SHARD_TOTAL"
+  "$PYTHON_BIN" scripts/ci_unit_test_shards.py \
+    --budget-floor="$FILE_TIMEOUT" "$SHARD_INDEX" "$SHARD_TOTAL"
 }
 
 failed=""
 empty=""
 selected=0
 discovered=0
-while IFS= read -r f; do
+while IFS=$'\t' read -r f budget baseline; do
+  [ -n "$f" ] || continue
+  case "$budget" in ''|*[!0-9]*) budget="$FILE_TIMEOUT" ;; esac
   discovered=$((discovered + 1))
   selected=$((selected + 1))
   started_at=$(date +%s)
-  echo "Starting $f (timeout ${FILE_TIMEOUT}s)."
-  "${PYTEST[@]}" "$f" -m "not integration" -p no:randomly -p no:faulthandler -o addopts="" -v
+  if [ -n "$baseline" ]; then
+    echo "Starting $f (timeout ${budget}s, budgeted from its recorded ${baseline}s)."
+  else
+    echo "Starting $f (timeout ${budget}s)."
+  fi
+  "${PYTEST[@]}" "$budget" "$f" -m "not integration" -p no:randomly -p no:faulthandler -o addopts="" -v
   rc=$?
   finished_at=$(date +%s)
   elapsed=$((finished_at - started_at))
   echo "Finished $f in ${elapsed}s with exit code $rc."
+  if [ "$rc" -ne 0 ] && [ "$elapsed" -ge "$budget" ]; then
+    # Say what the dump above is and is not. faulthandler prints whichever frame
+    # the main thread occupied when the budget expired; in a file whose cost is
+    # spread over many tests that is usually an ordinary cheap frame, and reading
+    # it as the stall site sends the next reader after an innocent test.
+    echo "  ^ $f hit its ${budget}s watchdog."
+    if [ -n "$baseline" ]; then
+      echo "    That budget is a multiple of this file's own recorded ${baseline}s, so being the slowest file is not enough to reach it."
+    else
+      echo "    No recorded duration for this file, so it ran on the ${FILE_TIMEOUT}s floor; refresh scripts/ci_unit_test_timings.json to give it a budget of its own."
+    fi
+    echo "    The traceback above is where the main thread stood when the budget expired, not necessarily where it stalled."
+    echo "    Before blaming the named test, compare the 'Finished ... in Ns' lines in this shard against scripts/ci_unit_test_timings.json: if they are slow across the board, the runner was slow, not this file."
+  fi
   if [ "$rc" -eq 0 ]; then
     :
   elif [ "$rc" -eq 5 ]; then
