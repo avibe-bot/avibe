@@ -99,10 +99,13 @@ describe('RegionRead', () => {
     expect(violations).toEqual([]);
   });
 
-  it('routes overview collections and exact chain reads through the per-backend latest authority', () => {
+  it('routes overview collections and exact chain reads through the per-chain latest authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const definitionStart = page.indexOf('const readChainRequests');
-    const definitionEnd = page.indexOf('\n\nconst settleAgentChainIndex');
+    // Ends on the last reader's own closing line rather than on whatever
+    // declaration follows it: anchored on a neighbour, a doc comment added there
+    // silently widens this slice into code it was never about.
+    const definitionEnd = page.indexOf('\n});', page.indexOf('const readExactAgentChain')) + '\n});'.length;
     const definitions = page.slice(definitionStart, definitionEnd);
     const withoutDefinition = `${page.slice(0, definitionStart)}${page.slice(definitionEnd)}`;
     const affectedRefresh = page.slice(
@@ -125,6 +128,6 @@ describe('RegionRead', () => {
     expect(landing).toMatch(/readers\.chains\(affectedChains\)/);
     expect(landing).not.toMatch(/getAgentChain/);
     expect(page).not.toMatch(/\breadChains\b/);
-    expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(activeBackends\)/);
+    expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(\(key\) => activeBackends\.has\(chainKeyBackend\(key\)\)\)/);
   });
 });

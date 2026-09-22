@@ -33,7 +33,7 @@ import {
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import { UsageTab } from './UsageTab';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
@@ -48,7 +48,7 @@ import {
   type SourceMutationSettlement,
   type TrackSourceMutation,
 } from './mutationSettlement';
-import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
+import { chainKeyBackend, modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
   beginRegionRead,
   failRegionRead,
@@ -125,25 +125,23 @@ const readExactAgentChain = async (
   ),
 });
 
-const settleAgentChainIndex = (
-  previous: ModelChainIndex,
-  agent: AgentSupply,
-  incoming: ModelChainIndex,
-): ModelChainIndex => {
-  const prefix = `${agent.backend}\u0000`;
-  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
-  for (const [key, read] of Object.entries(incoming)) {
-    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
-  }
-  return next;
-};
-
-const settleExactAgentChain = (
+/**
+ * Installs exactly the chains this read still owns.
+ *
+ * There is no backend-wide sweep here. A read owns chain keys, not a backend,
+ * so a key it does not own belongs to a newer read and has to be left exactly
+ * as that read left it. Retiring the keys of models a backend no longer has is
+ * `beginAgentChainIndex`'s job, which reseeds the backend from the Agent's
+ * current catalogue before every whole-backend read.
+ */
+const settleChainIndex = (
   previous: ModelChainIndex,
   incoming: ModelChainIndex,
+  owned: ReadonlySet<string>,
 ): ModelChainIndex => {
   const next = { ...previous };
   for (const [key, read] of Object.entries(incoming)) {
+    if (!owned.has(key)) continue;
     next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
   }
   return next;
@@ -161,10 +159,6 @@ const beginAgentChainIndex = (
   }
   return next;
 };
-
-type ChainAuthorityLanding =
-  | { scope: 'backend'; agent: AgentSupply; chains: ModelChainIndex }
-  | { scope: 'models'; chains: ModelChainIndex };
 
 type AuthorizedSurfaceLanding = {
   landing: SourceMutationLandingReads;
@@ -486,19 +480,18 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
-  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, ChainAuthorityLanding>((_backend, incoming) => {
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKeySet<string, ModelChainIndex>((incoming, owned) => {
     if (!aliveRef.current) return;
-    setChainsRead((previous) => {
-      const current = foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+    setChainsRead((previous) => readyRegion(settleChainIndex(
+      foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
         loading: () => ({}),
         ready: (data) => data,
         unread: () => ({}),
         degraded: (staleData) => staleData,
-      });
-      return readyRegion(incoming.scope === 'backend'
-        ? settleAgentChainIndex(current, incoming.agent, incoming.chains)
-        : settleExactAgentChain(current, incoming.chains));
-    });
+      }),
+      incoming,
+      owned,
+    )));
   }));
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
@@ -508,34 +501,28 @@ export const SettingsModelsPage: React.FC = () => {
       unread: () => ({}),
       degraded: (staleData) => staleData,
     }), agent)));
-    await chainReadAuthority.run(agent.backend, async () => ({
-      agent,
-      chains: await readAgentChains(agent),
-      scope: 'backend' as const,
-    }));
+    await chainReadAuthority.run(
+      modelChainRequests([agent]).map(({ backend, modelId }) => modelChainKey(backend, modelId)),
+      () => readAgentChains(agent),
+    );
   }, [chainReadAuthority]);
 
   const refreshAffectedChains = React.useCallback(async (
     requests: readonly ModelChainRequest[],
   ): Promise<ModelChainIndex> => {
-    const byBackend = new Map<AgentBackend, ModelChainRequest[]>();
-    for (const request of requests) {
-      const backendRequests = byBackend.get(request.backend) ?? [];
-      backendRequests.push(request);
-      byBackend.set(request.backend, backendRequests);
-    }
-    const landings = await Promise.all([...byBackend].map(async ([backend, backendRequests]) => {
-      let incoming: ModelChainIndex = {};
-      const result = await chainReadAuthority.run(backend, async () => {
-        incoming = await readChainRequests(backendRequests);
-        return { scope: 'models' as const, chains: incoming };
-      });
-      // A superseded read is not an unreadable chain: the newer read for this
-      // backend owns those keys and is the one installing them. Reporting them
-      // as unread here would hand the caller a failure the surface never had.
-      return result === 'landed' ? incoming : {};
-    }));
-    return Object.assign({}, ...landings);
+    let incoming: ModelChainIndex = {};
+    const owned = await chainReadAuthority.run(
+      requests.map(({ backend, modelId }) => modelChainKey(backend, modelId)),
+      async () => {
+        incoming = await readChainRequests(requests);
+        return incoming;
+      },
+    );
+    // What drops out here is exactly the chains a newer read took over, and that
+    // read is the one installing them — a superseded key is not an unreadable
+    // one. Every key this read still owns stays, failed or not, because no other
+    // read is going to answer for it.
+    return Object.fromEntries(Object.entries(incoming).filter(([key]) => owned.has(key)));
   }, [chainReadAuthority]);
 
   const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
@@ -545,14 +532,14 @@ export const SettingsModelsPage: React.FC = () => {
       !suspendedBackends.has(agent.backend)
       && agent.backend !== routeCommitBackend);
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
-    chainReadAuthority.invalidateExcept(activeBackends);
+    chainReadAuthority.invalidateExcept((key) => activeBackends.has(chainKeyBackend(key)));
     setChainsRead((previous) => readyRegion(Object.fromEntries(
       Object.entries(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
         loading: () => ({}),
         ready: (data) => data,
         unread: () => ({}),
         degraded: (staleData) => staleData,
-      })).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
+      })).filter(([key]) => activeBackends.has(chainKeyBackend(key))),
     )));
     for (const agent of probeAgents) void refreshAgentChains(agent);
   }, [chainReadAuthority, refreshAgentChains, routeCommitBackend, suspendedRouteAttempts]);
@@ -1075,7 +1062,7 @@ export const SettingsModelsPage: React.FC = () => {
     onStatus: setRouteCommitStatus,
   }), [readRouteAgents, readRouteSources]);
   const routeCommitted = React.useCallback((result: RouteReport) => {
-    chainReadAuthority.invalidate(result.chain.backend);
+    chainReadAuthority.invalidate([modelChainKey(result.chain.backend, result.chain.model_id)]);
     routeObserved(result.chain);
     setSuspendedRouteAttempts((attempts) =>
       releaseSuspendedRouteAttempt(attempts, result.chain.backend),
@@ -1130,10 +1117,10 @@ export const SettingsModelsPage: React.FC = () => {
       suspendedChainBaselinesRef.current.set(held.backend, chainsRead);
       void (async () => {
         try {
-          await chainReadAuthority.run(held.backend, async () => ({
-            chains: await readExactAgentChain(freshAgent, held.modelId),
-            scope: 'models' as const,
-          }));
+          await chainReadAuthority.run(
+            [modelChainKey(held.backend, held.modelId)],
+            () => readExactAgentChain(freshAgent, held.modelId),
+          );
           if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
         } catch {
           if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
