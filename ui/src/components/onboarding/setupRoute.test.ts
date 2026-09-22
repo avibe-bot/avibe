@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import type { AgentChain, AgentSupply, RouteHop } from '../settings/models/types';
+import type { AgentChain, AgentSupply, BackendModel, RouteHop } from '../settings/models/types';
 import {
   classifyRetry,
   hydrateSetupRoutes,
@@ -177,6 +177,7 @@ describe('saveSetupRoutes', () => {
           store[key] = next;
           return { chain: next };
         }),
+        putAgentModels: vi.fn(async () => supply('claude', [{ name: 'claude', model: 'opus-5' }])),
       },
     };
   };
@@ -261,5 +262,79 @@ describe('saveSetupRoutes', () => {
     const current = chainOf('claude', 'opus-5', desired, 'manual');
     expect(classifyRetry(claude, current, desired)).toBe('skip');
     expect(classifyRetry(claude, claude.chain, desired)).toBe('retry');
+  });
+
+  // A machine that has just installed OpenCode answers with an empty catalog and an
+  // Agent that already names the model it was installed with. The backend validates a
+  // route override against that catalog, so the preview is refused for a model nobody
+  // has had the chance to add — which is every first route this step tries to save.
+  describe('an open-menu catalog that does not yet name the Agent\'s model', () => {
+    const opencodeWrites = (catalog: BackendModel[]) => {
+      const calls: string[] = [];
+      const store: Record<string, AgentChain> = { 'opencode:glm-4.6': chainOf('opencode', 'glm-4.6', [], 'automatic') };
+      let listed = catalog;
+      const api = {
+        getVibeAgent: vi.fn(async (name: string) => ({ ok: true, agent: full(brief(name, 'opencode', 'glm-4.6')) })),
+        listAgents: vi.fn(async () => [{
+          ...supply('opencode', [{ name: 'opencode', model: 'glm-4.6' }]),
+          menu_kind: 'open' as const,
+          catalog_models: listed,
+        }]),
+        getAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string) => {
+          const current = store[`${backend}:${model}`];
+          if (!current) throw new Error(`missing ${backend} ${model}`);
+          return current;
+        }),
+        // The backend's own check, as the route override validator states it: a model
+        // the catalog does not name cannot carry hops.
+        previewAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string, body: { manual_override: { hops: RouteHop[] } | null }) => {
+          calls.push('preview');
+          if (!listed.some((row) => row.id === model)) throw new Error(`unknown model ${model}`);
+          return chainOf(backend, model, body.manual_override?.hops ?? [], 'manual');
+        }),
+        putAgentChain: vi.fn(async (backend: AgentChain['backend'], model: string, body: { hops: RouteHop[] }) => {
+          const next = chainOf(backend, model, body.hops, 'manual');
+          store[`${backend}:${model}`] = next;
+          return { chain: next };
+        }),
+        putAgentModels: vi.fn(async (_backend: AgentChain['backend'], body: { models: BackendModel[] }) => {
+          calls.push('models');
+          listed = body.models;
+          return supply('opencode', [{ name: 'opencode', model: 'glm-4.6' }]);
+        }),
+      };
+      return { api, calls, store };
+    };
+    // The first route this machine ever saves: nothing is chained yet, and the person
+    // has just put one source under the model their Agent already names.
+    const live = () => ({ ...target('opencode', 'glm-4.6', [], ['opencode'], 'automatic'), membership: [A] });
+
+    it('reconciles the saved model into the catalog before the preview, and the save lands', async () => {
+      const { api, calls, store } = opencodeWrites([]);
+      const results = await saveSetupRoutes([A], [live()], api, { dirty: true });
+      expect(calls).toEqual(['models', 'preview']);
+      expect(api.putAgentModels).toHaveBeenCalledWith('opencode', {
+        baseline: [],
+        models: [expect.objectContaining({
+          id: 'glm-4.6', origin: 'manual', native_protocol: 'openai_responses', locked: false, routeable: true,
+        })],
+      });
+      expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+      expect(store['opencode:glm-4.6']?.manual_override).toEqual({ hops: [A] });
+    });
+
+    it('writes no catalog when it already names the model', async () => {
+      const held: BackendModel = {
+        id: 'glm-4.6', display_name: 'GLM 4.6', origin: 'manual', models_dev_id: null,
+        context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+        supports_tools: null, supports_reasoning: null, reasoning_efforts: [],
+        native_protocol: 'openai_responses', locked: false, routeable: true,
+      };
+      const { api, calls } = opencodeWrites([held]);
+      const results = await saveSetupRoutes([A], [live()], api, { dirty: true });
+      expect(api.putAgentModels).not.toHaveBeenCalled();
+      expect(calls).toEqual(['preview']);
+      expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
+    });
   });
 });

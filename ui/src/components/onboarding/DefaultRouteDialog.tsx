@@ -82,6 +82,7 @@ export function DefaultRouteDialog({
     getAgentChain: modelsApi.getAgentChain,
     previewAgentChain: modelsApi.previewAgentChain,
     putAgentChain: modelsApi.putAgentChain,
+    putAgentModels: modelsApi.putAgentModels,
   }), [api, agentReads]);
 
   const load = React.useCallback(async () => {

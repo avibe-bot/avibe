@@ -3,7 +3,8 @@ import type { AssistantId } from './collaborationTimeline';
 import { ASSISTANT_ORDER } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 import { routeChainMatchesAttempt, sameManualOverride, sameRouteDraft } from '../settings/models/routeChainDraft';
-import type { AgentBackend, AgentChain, AgentSupply, RouteHop } from '../settings/models/types';
+import { catalogModels, draftWithId, unstatedBackendModel } from '../settings/models/backendCatalog';
+import type { AgentBackend, AgentChain, AgentSupply, BackendModelsPut, RouteHop } from '../settings/models/types';
 
 export const hopIdentity = (hop: RouteHop): string => `${hop.source_id}\0${hop.model_id}`;
 
@@ -78,6 +79,7 @@ export type SetupRouteWriteApi = {
     model: string,
     body: { hops: RouteHop[] },
   ) => Promise<{ chain: AgentChain }>;
+  putAgentModels: (backend: AgentBackend, body: BackendModelsPut) => Promise<AgentSupply>;
 };
 
 export type TargetSaveResult =
@@ -253,7 +255,7 @@ const errorMessage = (error: unknown): string => (error instanceof Error ? error
 const precheckTarget = async (
   target: SetupRouteTargetSnapshot,
   api: SetupRouteWriteApi,
-): Promise<'ok' | 'reconcile' | { kind: 'failed'; error: string }> => {
+): Promise<{ kind: 'ok'; supply: AgentSupply } | 'reconcile' | { kind: 'failed'; error: string }> => {
   try {
     const supplies = await api.listAgents();
     const supply = supplies.find((row) => row.backend === target.backend);
@@ -261,7 +263,7 @@ const precheckTarget = async (
     for (const name of target.agentNames) {
       const result = await api.getVibeAgent(name, { cache: false });
       if (result.ok && result.agent && result.agent.backend === target.backend && result.agent.model === target.modelId) {
-        return 'ok';
+        return { kind: 'ok', supply };
       }
     }
     return 'reconcile';
@@ -270,13 +272,46 @@ const precheckTarget = async (
   }
 };
 
+/**
+ * Make the backend know the model this target is for, before anything asks it to
+ * route one.
+ *
+ * A route is previewed and saved against a model the backend's catalog names. An
+ * open-menu backend's catalog is the user's own, so a machine that just installed
+ * OpenCode has an empty one — while the Agent it was installed with already carries
+ * the model this target was hydrated from. Without this, the first preview of that
+ * model is refused for a model nobody could have added yet, and setup's route step
+ * can never succeed on a new install.
+ *
+ * Only the open-menu path, and only a model the catalog does not already hold: a
+ * fixed-menu backend ships its own catalog, and a server that predates backend
+ * catalogs states none at all, so both are left exactly as they were. The row
+ * states nothing beyond the id, because no editor opened and nobody was asked.
+ */
+const adoptTargetModel = async (
+  target: SetupRouteTargetSnapshot,
+  api: SetupRouteWriteApi,
+  supply: AgentSupply | undefined,
+): Promise<void> => {
+  if (!supply || supply.menu_kind !== 'open') return;
+  const catalog = catalogModels(supply);
+  if (!catalog || catalog.some((model) => model.id === target.modelId)) return;
+  const adopted = draftWithId(unstatedBackendModel(), target.modelId, target.backend);
+  await api.putAgentModels(target.backend, { baseline: catalog, models: [...catalog, adopted] });
+};
+
 const writeTarget = async (
   target: SetupRouteTargetSnapshot,
   desired: RouteHop[],
   api: SetupRouteWriteApi,
+  supply?: AgentSupply,
 ): Promise<TargetSaveResult> => {
   const key = targetKey(target.backend, target.modelId);
   try {
+    // The save path already read the supply to decide this target was writable;
+    // a retry arrives without one and reads it here rather than skipping a step
+    // whose absence is exactly what it may be retrying.
+    await adoptTargetModel(target, api, supply ?? (await api.listAgents()).find((row) => row.backend === target.backend));
     await api.previewAgentChain(target.backend, target.modelId, { manual_override: { hops: desired } });
     const pre = await api.getAgentChain(target.backend, target.modelId);
     if (routeChainMatchesAttempt(pre, {
@@ -332,11 +367,11 @@ export async function saveSetupRoutes(
       results.push({ key, kind: 'reconcile', chain });
       continue;
     }
-    if (typeof precheck === 'object') {
+    if (precheck.kind === 'failed') {
       results.push({ key, kind: 'failed', error: precheck.error });
       continue;
     }
-    results.push(await writeTarget(target, desired, api));
+    results.push(await writeTarget(target, desired, api, precheck.supply));
   }
   return results;
 }
