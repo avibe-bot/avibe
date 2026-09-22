@@ -13,6 +13,7 @@
  * `docs/plans/setup-three-screen/copy-contract.json` (C1).
  */
 import type { Dispatch, SetStateAction } from 'react';
+import type { ParseKeys } from 'i18next';
 import type { TranslationKey } from '@/i18n/types';
 import type { AgentBackend, MigrationScan, RouteHop, RuntimeDependency } from '../settings/models/types';
 import { foldRegionRead, type RegionRead } from '../settings/models/regionRead';
@@ -33,24 +34,46 @@ export type SetupHandoffTarget = Exclude<SetupScreenId, 'intro'>;
 /** The leading glyph the shell draws inside the primary action. */
 export type SetupActionIcon = 'none' | 'arrow-right' | 'spinner';
 
+/** Written as a generic so the conditional distributes over the key union: the same test
+ *  applied to `ParseKeys` directly matches the whole union at once and yields `never`. */
+type PluralBase<Key> = Key extends `${infer Base}_other` ? Base : never;
+
+/**
+ * A C1 plural family, named by the base `t(base, { count })` resolves it under.
+ *
+ * `TranslationKey` is deliberately the leaves that resolve WITHOUT a count, so it cannot
+ * name a counted label at all — and "Review 2 selected" is exactly a counted label. This
+ * widens what a screen may claim by nothing: the base is derived from the `_other` form
+ * C1 already requires in both bundles, so a string that has not shipped as a family is
+ * still not nameable, and the count that makes it resolvable is required below rather
+ * than left to the shell to guess.
+ */
+export type SetupCountedLabelKey = PluralBase<ParseKeys>;
+
+/** Interpolation values for `labelKey`, e.g. `{ count: 2 }` or `{ name: 'Codex' }`. */
+export type SetupActionArgs = Record<string, string | number>;
+
 /**
  * One screen's claim on the shell's primary action. The shell owns the element — that is
  * what makes "the button never moves" a property of the tree rather than an agreement
  * between two stylesheets — so a screen describes the button and never renders it.
  *
  * `labelKey` is a key from C1. It is typed against the live bundle, so a screen cannot
- * name a string that has not shipped.
+ * name a string that has not shipped. A counted label is the second member: its family
+ * resolves only with a count, so the count travels as part of the claim instead of being
+ * something the shell hopes was passed. The fields and their meanings are the same in
+ * both members, so a consumer reads `labelKey` and `labelArgs` without narrowing.
  */
 export type SetupAction = {
-  labelKey: TranslationKey;
-  /** Interpolation values for `labelKey`, e.g. `{ count: 2 }` or `{ name: 'Codex' }`. */
-  labelArgs?: Record<string, string | number>;
   disabled: boolean;
   /** Renders the spinner glyph and suppresses the arrow. Distinct from `disabled`: a busy
    *  action is also disabled, but a disabled one is not necessarily busy. */
   busy: boolean;
   icon: SetupActionIcon;
-};
+} & (
+  | { labelKey: TranslationKey; labelArgs?: SetupActionArgs }
+  | { labelKey: SetupCountedLabelKey; labelArgs: SetupActionArgs & { count: number } }
+);
 
 /**
  * How the shell drives the active screen. The primary action is the shell's, so the click

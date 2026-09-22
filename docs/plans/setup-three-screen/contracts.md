@@ -76,6 +76,15 @@ and the shell-owned `SetupFlowState`.
   inactive/stale publications and clicks only the current `SetupScreenHandle.activate()`.
   Clear the previous action on navigation; disable it during capability reads, handoffs,
   and pending mutations. `busy` also disables clicking. `activate()` must reject re-entry.
+- `SetupAction.labelKey` names a shipped C1 string, in one of the two forms C1 actually
+  ships: a text leaf that resolves on its own, or the base of a `_one`/`_other` family
+  together with a required `labelArgs.count`. A family does not resolve without a count, so
+  the count is part of the claim rather than something the shell supplies on faith, and
+  `TranslationKey` alone — deliberately the leaves that resolve without count — cannot name
+  a counted label at all. The two forms are derived from the live bundle, so a string that
+  has not shipped stays unnameable either way. Field names and the publication protocol are
+  unchanged: a screen publishes `labelKey`/`labelArgs` and the shell resolves them in one
+  `t` call, with no narrowing.
 - All registered screens remain mounted, `hidden` + `inert` when inactive. This preserves
   drafts but does NOT suspend effects. Screens gate polling, authorization, scans and
   animations on `active` (and dialog open state). A hidden screen must not start installs,
@@ -349,7 +358,7 @@ of silently changing either the handoff or another owner.
 | counts | CTA count = deduplicated appliable item IDs in selected complete groups; summary provider count = distinct displayed providers of those items. Capsule count = distinct key IDs in complete, unblocked, key-only groups, independent of selection. `importedCount` = confirmed `result.applied`, once per successful submitted batch, not number of sources or guessed key count. `addedThroughMore` = unique IDs returned by successful manual creation, badge filtered against current usable sources |
 | capsule | retain dismissal signature owner `modelHubMigrationDismiss` and the reserved slot. Existing `ImportKeysNotice` scans/owns a dialog internally: L2 must adapt it to the shared scan/selection owner before claiming consistency; it is not a drop-in consumer of C2 |
 | import / Detected tab | use the complete-group rule below. Hiding card duplicates or out-of-scope rows must never shrink consent. Already-added status follows fresh scan/source evidence, not a vendor-name match. D10 delegates confirmation/apply/recovery to the existing migration feature; setup never applies from selection or normal navigation |
-| add — API key | shared `AddApiKeyDialog` form: observe then create with the confirmed observation, preserve its existing unknown-write recovery. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready |
+| add — API key | shared `AddApiKeyDialog` form: one create carrying `save_unverified: true` (`apiKeySourceDraft.ts`), no observe or probe first — the credential is saved on the person's word and verified afterwards, so a provider that is slow or briefly down does not cost them the key they pasted. Preserve its existing unknown-write recovery exactly: only a server-named non-409 4xx settles the write (`apiKeyWriteSettled`), anything else reconciles against `client_nonce` through `reconcileUnknownWrite` rather than repeating the create. Read `SourceCreated.source` and placement tails (`added_to`, `adopted_by`); refresh sources and affected supplies before reporting ready, and a source that comes back `verification_pending` is shown as saved-but-unverified per the `selected and connected` row — never as a completed verification |
 | add — subscription | reuse `subscriptionOptions.ts` / `OAuthConnectDialog` / `OAuthFlowParts` for the offered product vendors, custody choice and flow ownership. Setup limits the shipped vendor list to OpenAI/Anthropic per handoff; there is no callable vendor-capability-list API in `ModelsApi`, and no such producer should be invented. `getOAuthStatus` / `submitOAuth` return `OAuthResult`; terminal create carries `created.source` and placement tails. Do not create the source a second time or equate terminal OAuth with assistant readiness |
 | picker order | `apiKeyVendors.ts` reads `vibe/data/api_key_vendors.json`; first eight in file order, remainder plus custom. No browser re-sort or prototype Cohere |
 | runtime | with enabled capability and saved intent, D11 starts only a confirmed stopped controller; its existing recovery owns initial ensure/start and server admission. The browser then observes health and only requests admitted recovery if still needed (D3). Healthy-engine writes follow the operation table below, independently of new-install permission. Unsupported/non-running or unread stays on the normal flow with retry/guide/Back; no install-confirmation or automatic credential takeover |
