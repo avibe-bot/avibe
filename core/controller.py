@@ -560,6 +560,8 @@ class Controller:
         if "avibe" not in self.agent_router.platform_routes:
             self.agent_router.platform_routes["avibe"] = self.agent_router.platform_routes[self.primary_platform]
 
+        for platform, client in runtime_clients.items():
+            self._inject_runtime_dependencies(platform, client)
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -1484,7 +1486,7 @@ class Controller:
         *,
         deadline_seconds: float = 5.0,
     ) -> dict[str, Any]:
-        """Archive one Workbench session and offer its post-commit event."""
+        """Archive one Workbench session through its serialized lifecycle."""
 
         from core.services import sessions as workbench_sessions_service
         from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
@@ -1526,12 +1528,7 @@ class Controller:
                 engine.dispose()
 
         async def archive_operation() -> dict[str, Any]:
-            loop = asyncio.get_running_loop()
-
-            def archive_and_schedule() -> dict[str, Any]:
-                return archive_session()
-
-            return await run_blocking(archive_and_schedule)
+            return await run_blocking(archive_session)
 
         turn_manager = getattr(self, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)

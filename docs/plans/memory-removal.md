@@ -182,6 +182,61 @@ Supported repair evidence:
 
 ## Scope safety
 
+### Shared lifecycle audit at 970facd01 (2026-09-23)
+
+The orchestrator authorized a bounded whole-contract repair before another push.
+The repeated class is generic behavior lost with co-located Memory code; green
+CI/import/startup evidence did not test concurrency, mutation completion or IM
+business readiness. Inventory: `PRRT_kwDOPbFPYs6kz9WY` config lock inversion;
+`PRRT_kwDOPbFPYs6kz9Wm` archive reporting deadline;
+`PRRT_kwDOPbFPYs6kz9Wt` missing initial adapter dependency injection. Historical
+release threads `kypQL` and `kypQq` remain pending owner decision.
+
+Contracts to audit and prove before push:
+
+- All generic config save/transaction/migration entrants acquire CONFIG_LOCK
+  before the per-file lock, with nested reentrancy and preserved concurrent
+  fields. The removed Memory transaction supplied that ordering incidentally;
+  restore it at the shared config boundary without any Memory lock.
+- UI archive -> internal RPC -> controller lifecycle -> durable archive awaits
+  accepted completion without a transport reporting deadline. Connection
+  failure may remain bounded; preserve success/domain-failure mapping and do
+  not retry or restore the retired endpoint.
+- Initial runtime clients receive the same settings/controller dependencies as
+  hot-added clients, after managers/router exist. Audit all platform descriptors
+  and the auxiliary avibe contract. Exercise actual adapter authorization, not
+  only injection call counts; no live SDK connections or feature runtime.
+
+Compare complete original/current surrounding functions and retained callers,
+then use deterministic concurrency and lifecycle gates in test-owned state.
+Installed-service liveness remains distinct from IM authorization readiness.
+
+Audit result: compared complete original/current `_init_modules`,
+`_inject_runtime_dependencies`, `_register_client_runtime`, config transaction,
+save/load/migration helpers and archive controller/RPC/UI callers. The generic
+losses were CONFIG_LOCK acquisition, the final startup injection loop and the
+archive client's no-reporting-deadline contract. Migration locking and hot
+registration were unchanged; archive's removed post-commit observer was
+Memory-only, so it stays removed. Removed the now-trivial archive observer
+wrapper/unused loop variable, preserving the blocking completion helper.
+Only two production entrants take the private config file lock: the shared
+boundary and migration persistence; both now take CONFIG_LOCK first.
+
+Evidence: **354 passed** across ten focused config/controller/platform/internal
+RPC/UI/archive suites; **177 passed** across config-read, migration persistence,
+API-save and file-lock suites. New barrier/event-driven regression proves
+transaction/load-persistence overlap preserves both updates and nested
+load/save transactions re-enter safely. Archive test traverses actual UI HTTP,
+internal client with asserted transport timeouts, internal ASGI route, real
+Controller archive method and test SQLite; a gated lifecycle proves pending
+acceptance does not become an early response, then checks commit or 404 mapping.
+Adapter tests execute the real `_init_modules` and shared injection, all five
+actual adapter setters at startup/hot registration, and Discord allowed/denied/
+unknown channel authorization against real test settings. SDK construction and
+network startup are excluded; this is not a live IM end-to-end claim. The avibe
+auxiliary adapter remains outside runtime injection; forbidden feature imports
+and absent Memory runtime are asserted. No production state/service touched.
+
 ### PWA compatibility boundary completion (review 5280345842)
 
 Before edits, the orchestrator verified `PRRT_kwDOPbFPYs6kzQa_` at

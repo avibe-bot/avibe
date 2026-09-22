@@ -1276,8 +1276,11 @@ def config_file_lock(config_path: Optional[Path] = None) -> Iterator[None]:
 
     path = config_path or paths.get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _config_file_lock(path):
-        yield
+    # Match load/migration and callers already holding the process-local lock.
+    # Both locks are re-entrant; never acquire them in the opposite order.
+    with CONFIG_LOCK:
+        with _config_file_lock(path):
+            yield
 
 
 def _write_config_payload(path: Path, payload: dict) -> None:
