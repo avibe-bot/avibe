@@ -588,6 +588,9 @@
   font-weight: 500;
 }
 .model-hub-model-collapse svg { width: 13px; height: 13px; }
+.model-hub-model-collapse--repair {
+  --model-hub-model-collapse-ink: var(--model-hub-danger-ink);
+}
 
 .model-hub-footer-action {
   --model-hub-footer-action-font-size: 11.5px;

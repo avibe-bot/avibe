@@ -62,6 +62,10 @@ export const SourcesCard: React.FC<{
       <div className="flex h-14 shrink-0 items-center gap-2 border-t border-border px-3.5">
         <Button
           ref={subscriptionTriggerRef}
+          // Survives every list state this card can reach — loading, unread,
+          // empty, or a row removed out from under the keyboard — which is what
+          // makes it the card's focus anchor of last resort.
+          data-model-hub-focus-anchor=""
           variant="default"
           size="xs"
           aria-haspopup="menu"

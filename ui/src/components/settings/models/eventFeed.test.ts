@@ -217,10 +217,12 @@ describe('the page reads the feed through this owner', () => {
 
   it('lets the ancillary feed read fail without losing the rows', () => {
     // A slow or broken /events must not enter the operational first-paint barrier.
-    const landing = mutationSettlement.slice(
-      mutationSettlement.indexOf('export const readSurfaceLanding'),
-      mutationSettlement.indexOf('\n\nexport type SourceMutationLanding ='),
-    );
+    const landingStart = mutationSettlement.indexOf('export const readSurfaceLanding');
+    // Ends on the reader's own closing brace rather than on whatever declaration
+    // follows it, so a neighbour gaining a doc comment cannot silently widen the
+    // slice into code this assertion was never about.
+    const landing = mutationSettlement.slice(landingStart, mutationSettlement.indexOf('\n};', landingStart));
+    expect(landingStart).toBeGreaterThanOrEqual(0);
     expect(landing).not.toMatch(/listEvents|events/);
     expect(page).toMatch(/createLatestAsyncAuthority<RegionRead<ResolutionEvent\[\]>>/);
     expect(page).toMatch(/createLatestAsyncAuthority<AuthorizedSurfaceLanding>/);

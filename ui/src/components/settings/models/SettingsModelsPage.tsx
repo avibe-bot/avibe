@@ -20,11 +20,10 @@ import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport, type SuspendedRouteAttempt } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
-import { SourceMutationReport } from './SourceMutationReport';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
-import { focusModelHubProjection } from './modelHubFocus';
+import { focusDialogReturn, focusModelHubProjection } from './modelHubFocus';
 import { buildSupplyRelations } from './supplyRelations';
 import {
   emptySuspendedRouteAttempts,
@@ -34,21 +33,22 @@ import {
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import { UsageTab } from './UsageTab';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import {
   readSurfaceLanding,
-  sourceMutationLanding,
+  sourceMutationReadFailed,
+  SOURCE_MUTATION_TOAST,
   type PresentSourceMutationCommit,
   type SourceMutationLanding,
   type SourceMutationLandingReads,
   type SourceMutationSettlement,
   type TrackSourceMutation,
 } from './mutationSettlement';
-import { modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
+import { chainKeyBackend, modelChainKey, modelChainRequests, type ModelChainIndex, type ModelChainRequest } from './modelRows';
 import {
   beginRegionRead,
   failRegionRead,
@@ -63,7 +63,6 @@ import {
 } from './regionRead';
 import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
-import { useSourceMutationReport } from './useSourceMutationReport';
 import { handOffProviderTab } from './providerTab';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
@@ -131,25 +130,23 @@ const readExactAgentChain = async (
   ),
 });
 
-const settleAgentChainIndex = (
-  previous: ModelChainIndex,
-  agent: AgentSupply,
-  incoming: ModelChainIndex,
-): ModelChainIndex => {
-  const prefix = `${agent.backend}\u0000`;
-  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
-  for (const [key, read] of Object.entries(incoming)) {
-    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
-  }
-  return next;
-};
-
-const settleExactAgentChain = (
+/**
+ * Installs exactly the chains this read still owns.
+ *
+ * There is no backend-wide sweep here. A read owns chain keys, not a backend,
+ * so a key it does not own belongs to a newer read and has to be left exactly
+ * as that read left it. Retiring the keys of models a backend no longer has is
+ * `beginAgentChainIndex`'s job, which reseeds the backend from the Agent's
+ * current catalogue before every whole-backend read.
+ */
+const settleChainIndex = (
   previous: ModelChainIndex,
   incoming: ModelChainIndex,
+  owned: ReadonlySet<string>,
 ): ModelChainIndex => {
   const next = { ...previous };
   for (const [key, read] of Object.entries(incoming)) {
+    if (!owned.has(key)) continue;
     next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
   }
   return next;
@@ -167,10 +164,6 @@ const beginAgentChainIndex = (
   }
   return next;
 };
-
-type ChainAuthorityLanding =
-  | { scope: 'backend'; agent: AgentSupply; chains: ModelChainIndex }
-  | { scope: 'models'; chains: ModelChainIndex };
 
 type AuthorizedSurfaceLanding = {
   landing: SourceMutationLandingReads;
@@ -428,7 +421,6 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const [presenceRefreshing, setPresenceRefreshing] = React.useState(false);
-  const sourceMutationReport = useSourceMutationReport();
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const pageRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
@@ -502,19 +494,18 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
-  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, ChainAuthorityLanding>((_backend, incoming) => {
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKeySet<string, ModelChainIndex>((incoming, owned) => {
     if (!aliveRef.current) return;
-    setChainsRead((previous) => {
-      const current = foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+    setChainsRead((previous) => readyRegion(settleChainIndex(
+      foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
         loading: () => ({}),
         ready: (data) => data,
         unread: () => ({}),
         degraded: (staleData) => staleData,
-      });
-      return readyRegion(incoming.scope === 'backend'
-        ? settleAgentChainIndex(current, incoming.agent, incoming.chains)
-        : settleExactAgentChain(current, incoming.chains));
-    });
+      }),
+      incoming,
+      owned,
+    )));
   }));
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
@@ -524,36 +515,28 @@ export const SettingsModelsPage: React.FC = () => {
       unread: () => ({}),
       degraded: (staleData) => staleData,
     }), agent)));
-    await chainReadAuthority.run(agent.backend, async () => ({
-      agent,
-      chains: await readAgentChains(agent),
-      scope: 'backend' as const,
-    }));
+    await chainReadAuthority.run(
+      modelChainRequests([agent]).map(({ backend, modelId }) => modelChainKey(backend, modelId)),
+      () => readAgentChains(agent),
+    );
   }, [chainReadAuthority]);
 
   const refreshAffectedChains = React.useCallback(async (
     requests: readonly ModelChainRequest[],
   ): Promise<ModelChainIndex> => {
-    const byBackend = new Map<AgentBackend, ModelChainRequest[]>();
-    for (const request of requests) {
-      const backendRequests = byBackend.get(request.backend) ?? [];
-      backendRequests.push(request);
-      byBackend.set(request.backend, backendRequests);
-    }
-    const landings = await Promise.all([...byBackend].map(async ([backend, backendRequests]) => {
-      let incoming: ModelChainIndex = {};
-      const result = await chainReadAuthority.run(backend, async () => {
-        incoming = await readChainRequests(backendRequests);
-        return { scope: 'models' as const, chains: incoming };
-      });
-      return result === 'landed'
-        ? incoming
-        : Object.fromEntries(backendRequests.map(({ backend: requestBackend, modelId }) => [
-            modelChainKey(requestBackend, modelId),
-            unreadRegion(),
-          ]));
-    }));
-    return Object.assign({}, ...landings);
+    let incoming: ModelChainIndex = {};
+    const owned = await chainReadAuthority.run(
+      requests.map(({ backend, modelId }) => modelChainKey(backend, modelId)),
+      async () => {
+        incoming = await readChainRequests(requests);
+        return incoming;
+      },
+    );
+    // What drops out here is exactly the chains a newer read took over, and that
+    // read is the one installing them — a superseded key is not an unreadable
+    // one. Every key this read still owns stays, failed or not, because no other
+    // read is going to answer for it.
+    return Object.fromEntries(Object.entries(incoming).filter(([key]) => owned.has(key)));
   }, [chainReadAuthority]);
 
   const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
@@ -563,14 +546,14 @@ export const SettingsModelsPage: React.FC = () => {
       !suspendedBackends.has(agent.backend)
       && !routeCommitBackends.has(agent.backend));
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
-    chainReadAuthority.invalidateExcept(activeBackends);
+    chainReadAuthority.invalidateExcept((key) => activeBackends.has(chainKeyBackend(key)));
     setChainsRead((previous) => readyRegion(Object.fromEntries(
       Object.entries(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
         loading: () => ({}),
         ready: (data) => data,
         unread: () => ({}),
         degraded: (staleData) => staleData,
-      })).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
+      })).filter(([key]) => activeBackends.has(chainKeyBackend(key))),
     )));
     for (const agent of probeAgents) void refreshAgentChains(agent);
   }, [chainReadAuthority, refreshAgentChains, routeCommitBackends, suspendedRouteAttempts]);
@@ -693,12 +676,13 @@ export const SettingsModelsPage: React.FC = () => {
       }, affectedChains);
       return { landing: outcome.landing, sourceSnapshot };
     });
-    const landing = sourceMutationLanding(
-      outcome.landing,
-      affectedChains,
-      aliveRef.current && result === 'landed',
-    );
-    if (aliveRef.current && result === 'landed' && landing.verdict === 'degraded') {
+    if (!aliveRef.current || result === 'stale') return null;
+    const landing = outcome.landing;
+    // Every region this read installs is in scope, route chains included: a
+    // chain card's own Retry is not always rendered, so dropping the page line
+    // would leave a real read failure with nothing that says so. What is out of
+    // scope is supersession, which no longer reaches here as a failure.
+    if (landing !== null && sourceMutationReadFailed(landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
     return landing;
@@ -953,7 +937,16 @@ export const SettingsModelsPage: React.FC = () => {
   const landingLoading = sourcesRead.kind === 'loading'
     && supplyRead.kind === 'loading'
     && runtimeRead.kind === 'loading';
-  const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
+  // A newer region observation (including a Source entity echo) does not settle
+  // a retained M6 failure. Compose its Retry into the receiving view without
+  // changing the actual read authority or discarding newly observed data.
+  const sourcesDisplayRead = routeCommitStatus?.failed.has('sources')
+    ? failRegionRead(sourcesRead)
+    : sourcesRead;
+  const supplyDisplayRead = routeCommitStatus?.failed.has('agents')
+    ? failRegionRead(supplyRead)
+    : supplyRead;
+  const directEmpty = modelsSurfaceKindFromReads(supplyDisplayRead, sourcesDisplayRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
   const hubBackends = agents.filter((agent) => agent.mode === 'hub').map((agent) => agent.backend);
   const activeBackends = supplyRead.kind === 'ready' ? new Set(hubBackends) : undefined;
@@ -982,7 +975,7 @@ export const SettingsModelsPage: React.FC = () => {
       void startRuntime();
     }
   };
-  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyRead, {
+  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyDisplayRead, {
     loading: () => loadingRegion(),
     ready: () => readyRegion(installedAgents),
     unread: (retryable) => unreadRegion(retryable),
@@ -1009,11 +1002,28 @@ export const SettingsModelsPage: React.FC = () => {
    * `sourceDetail.gone` stays for the case a close cannot cover: the source
    * disappeared out of band — removed from another surface, or found missing by
    * an edit or a refetch — with no delete of ours to close the dialog.
+   *
+   * The commit reports itself in one toast and the surface read runs behind it.
+   * A post-commit modal would only repeat the impact the guard already made the
+   * user confirm before the write, and it turned an ordinary superseded or
+   * failed read into a second decision about a change that already landed. The
+   * write is done; what a failed read owes the user is the page's own stale
+   * projection and Retry, which every region already carries.
    */
   const presentSourceMutation = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
-    if (commit.action === 'delete') selectSource(null);
-    await sourceMutationReport.present(commit);
-  }, [selectSource, sourceMutationReport.present]);
+    // Only a removal closes the dialog. An edit that found its Source absent
+    // leaves it open on `sourceDetail.gone`, which is the same fact the toast
+    // states — the page never announces an update that did not happen.
+    if (commit.outcome === 'removed') selectSource(null);
+    const toast = SOURCE_MUTATION_TOAST[commit.outcome];
+    showToast(t(toast.key) as string, toast.tone);
+    try {
+      await commit.settle();
+    } catch {
+      // `refresh` already owns what a read can say: a failed projection keeps
+      // its own stale treatment and Retry, and raises the page's refresh toast.
+    }
+  }, [selectSource, showToast, t]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
@@ -1126,7 +1136,7 @@ export const SettingsModelsPage: React.FC = () => {
     opener: HTMLElement | null,
   ) => {
     pendingRouteOpenersRef.current.set(result, opener);
-    chainReadAuthority.invalidate(result.chain.backend);
+    chainReadAuthority.invalidate([modelChainKey(result.chain.backend, result.chain.model_id)]);
     routeObserved(result.chain);
     setSuspendedRouteAttempts((attempts) =>
       releaseSuspendedRouteAttempt(attempts, result.chain.backend),
@@ -1177,10 +1187,10 @@ export const SettingsModelsPage: React.FC = () => {
       suspendedChainBaselinesRef.current.set(held.backend, chainsRead);
       void (async () => {
         try {
-          await chainReadAuthority.run(held.backend, async () => ({
-            chains: await readExactAgentChain(freshAgent, held.modelId),
-            scope: 'models' as const,
-          }));
+          await chainReadAuthority.run(
+            [modelChainKey(held.backend, held.modelId)],
+            () => readExactAgentChain(freshAgent, held.modelId),
+          );
           if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
         } catch {
           if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
@@ -1388,7 +1398,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesRead} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesDisplayRead} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1502,10 +1512,18 @@ export const SettingsModelsPage: React.FC = () => {
           onCloseAutoFocus={(event) => {
             const returnFocus = sourceDetailReturnFocusRef.current;
             sourceDetailReturnFocusRef.current = null;
-            const target = returnFocus?.();
-            if (!target?.isConnected) return;
-            event.preventDefault();
-            target.focus();
+            // A removal deletes the row that opened this dialog, so the return
+            // target is already disconnected. The overview is the nearest
+            // neighbourhood to fall back into — except when the removal took the
+            // last Source with it, which unmounts the overview too and leaves the
+            // shell as the smallest surface still standing. Either beats
+            // `document.body`, where the next Tab restarts at the top of the page.
+            if (focusDialogReturn({
+              root: overviewRef.current ?? pageRef.current,
+              returnTarget: returnFocus?.() ?? null,
+            })) {
+              event.preventDefault();
+            }
           }}
           onEscapeKeyDown={(event) => {
             // Radix observes Escape before React's row handlers; marked editors own it locally.
@@ -1529,11 +1547,6 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
-      <SourceMutationReport
-        report={sourceMutationReport.report}
-        onComplete={() => { void sourceMutationReport.complete(); }}
-        onDismiss={sourceMutationReport.dismiss}
-      />
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
       {subscriptionVendor && (
         <OAuthConnectDialog
