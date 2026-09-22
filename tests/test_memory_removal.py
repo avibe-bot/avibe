@@ -31,3 +31,19 @@ def test_config_write_transaction_loads_test_owned_snapshot(tmp_path: Path, monk
     config.save(path)
     with config_write_transaction(path) as snapshot:
         assert snapshot.runtime.default_cwd == config.runtime.default_cwd
+
+import pytest
+
+
+@pytest.mark.parametrize("obsolete", [True, None, "legacy", [], {"enabled": True}])
+def test_json_obsolete_memory_shapes_are_ignored(obsolete, tmp_path):
+    payload = {
+        "mode": "self_host",
+        "version": "v2",
+        "memory": obsolete,
+        "runtime": {"default_cwd": str(tmp_path / "work")},
+        "agents": {"opencode": {}, "claude": {}, "codex": {}, "avault": {}},
+        "slack": {"bot_token": "", "app_token": ""},
+    }
+    config = V2Config.from_payload(json.loads(json.dumps(payload)))
+    assert config.runtime.default_cwd == str(tmp_path / "work")
