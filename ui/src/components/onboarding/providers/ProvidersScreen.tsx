@@ -125,6 +125,26 @@ const gatewayReadAnswered = (against: GatewayEvidence | null, now: GatewayEviden
     || against.capability !== now.capability)
   && gatewayEvidenceSettled(now);
 
+/**
+ * An observation as a VALUE, rather than as the object that carried it.
+ *
+ * What a supply read is taken against is the machine that will answer it, and these
+ * are the facts that decide whether it can: whether it is up, whether it is the
+ * runtime it claims to be, which build is installed, and whether one may exist on
+ * this host at all. A shell that hands down an equal read it rebuilt — a refresh
+ * that confirmed nothing changed, a parent that re-created its props — has observed
+ * nothing new, so taking the carrier's identity for the observation would restart
+ * the read on every render that produced one.
+ */
+const observationOf = (runtime: RuntimeDependency | null): string => (runtime === null
+  ? 'none'
+  : [
+    runtime.status.health,
+    runtime.status.verified,
+    runtime.status.installed_version ?? '',
+    runtime.manifest.resolution,
+  ].join(':'));
+
 /** Locale-correct enumeration without inventing a separator string for each language.
  *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
 const formatNames = (names: readonly string[], locale: string): string => {
@@ -230,16 +250,17 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
      * second bootstrap, and a read that fails AFTER establishment is still the explicit
      * Retry it always was, because nothing new has been observed since.
      *
-     * A refresh keeps the value it is refreshing, so the identity only changes when a
-     * genuinely new observation lands — which is also how coming back to this screen
-     * brings current server facts rather than the ones it left behind.
+     * Held as the observation's own value — see `observationOf` — so it changes when a
+     * genuinely new one lands and not when the shell merely re-reports the one already
+     * standing. That is also how coming back to this screen brings current server facts
+     * rather than the ones it left behind.
      */
-    const observed = foldRegionRead(runtimeRead, {
+    const observation = observationOf(foldRegionRead(runtimeRead, {
       loading: () => null,
       ready: (runtime) => runtime,
       unread: () => null,
       degraded: (stale) => stale,
-    });
+    }));
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
@@ -288,7 +309,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
         seededSelectionRef.current = true;
       })();
       return () => { cancelled = true; };
-    }, [active, ready, observed, supplyToken, setFlowState, sourceReads]);
+    }, [active, ready, observation, supplyToken, setFlowState, sourceReads]);
 
     // ── Gateway ─────────────────────────────────────────────────────────────
 

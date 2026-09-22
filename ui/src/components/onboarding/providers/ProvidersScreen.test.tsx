@@ -525,6 +525,35 @@ describe('ProvidersScreen — the stage', () => {
     expect(modelsApi.startRuntime).not.toHaveBeenCalled();
   });
 
+  it('re-reads supply for a new observation, and not for the same one re-reported', async () => {
+    // The shell owns the runtime region and hands one down on every render it makes.
+    // What this screen takes its inventory against is the machine that answers it, not
+    // the object that described the machine — a refresh that confirmed nothing changed,
+    // or a parent that rebuilt its props, is the same observation said twice. Reading
+    // again for one of those does not merely waste a request: every answer publishes
+    // selection state, which is another render, which is another carrier.
+    serve();
+    const { show } = renderScreen({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await settled();
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    expect(modelsApi.scanMigration).toHaveBeenCalledTimes(1);
+
+    // A genuinely different machine is the other half, and the half that matters: the
+    // engine that could not answer the first read is why it failed, and the sequence
+    // that fixes one publishes into the shell's region rather than into this screen.
+    await show({
+      runtimeRead: readyRegion(runtimeOf('ok', {
+        status: { verified: true, health: 'ok', installed_version: '2.0.0' },
+      })),
+    });
+    await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));
+    // A read is all it is. Nothing here authorizes a mutation of the engine.
+    expect(modelsApi.installRuntime).not.toHaveBeenCalled();
+    expect(modelsApi.startRuntime).not.toHaveBeenCalled();
+  });
+
   it('keeps the sources that did arrive when the scan beside them fails', async () => {
     // Two reads, two questions. A scan that fails says nothing about the sources,
     // and throwing away a list that did arrive would report providers that exist as
