@@ -3011,15 +3011,52 @@ def test_supervisor_keeps_an_unconfirmed_engine_tracked_beside_the_new_one(
     assert not record.exists()
 
 
-def test_supervisor_leaves_an_unreadable_engine_record_untouched(tmp_path: Path) -> None:
-    supervisor, store = _fixture_supervisor(tmp_path)
+def test_supervisor_refuses_to_run_an_engine_it_cannot_record(tmp_path: Path) -> None:
+    spawned: list[subprocess.Popen] = []
+
+    def spawn(*args, **kwargs):
+        spawned.append(subprocess.Popen(*args, **kwargs))
+        return spawned[-1]
+
+    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
+    # An unreadable record is left untouched, so the new engine could not be named.
     record = store.root / "engine-process.json"
     record.mkdir(parents=True)
 
-    supervisor.ensure_running()
-    supervisor.stop()
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
 
+    assert raised.value.reason == "engine_untracked"
+    assert spawned and spawned[0].poll() is not None
+    assert supervisor._process is None
     assert record.is_dir()
+
+
+def test_supervisor_refuses_an_engine_whose_identity_was_not_captured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module, "capture_spawned_process_identity", lambda *_: None)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    with pytest.raises(EngineUnavailableError):
+        supervisor.ensure_running()
+
+    assert supervisor._process is None
+    assert not (store.root / "engine-process.json").exists()
+
+
+def test_supervisor_credential_invalidation_reaps_a_recorded_engine(tmp_path: Path) -> None:
+    orphan = _orphan_engine(tmp_path)
+    supervisor, store = _fixture_supervisor(tmp_path)
+
+    supervisor.invalidate_configs()
+
+    _wait_for(lambda: orphan.poll() is not None)
+    assert not (store.root / "engine-process.json").exists()
+    assert supervisor._process is None
 
 
 def test_supervisor_reaps_an_engine_left_running_by_a_dead_service(tmp_path: Path) -> None:

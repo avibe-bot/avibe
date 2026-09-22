@@ -113,8 +113,9 @@ class EngineSupervisor:
         """Remove secret-bearing configs and recreate one only for a live engine."""
         with self._lock:
             should_restart = self._is_running_locked() and self._healthy_locked()
-            if self._is_running_locked():
-                self._stop_locked()
+            # Always stop: with no local handle this still reaps a recorded engine a
+            # previous service left running with the credential being revoked.
+            self._stop_locked()
             self.state_store.clear_runtime_configs()
             if should_restart:
                 try:
@@ -233,7 +234,11 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        self._record_engine_locked(process, marker, survivors)
+        if not self._record_engine_locked(process, marker, survivors):
+            # An engine no record names would become a permanent orphan if this
+            # service died, so it never runs untracked.
+            self._stop_locked()
+            raise EngineUnavailableError("models.engine.start_failed", reason="engine_untracked")
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
         exit_code: int | None = None
@@ -343,12 +348,12 @@ class EngineSupervisor:
                 records.append(identity)
         return records
 
-    def _store_engine_records_locked(self, records: list[PersistedProcessIdentity]) -> None:
+    def _store_engine_records_locked(self, records: list[PersistedProcessIdentity]) -> bool:
         path = self._engine_record_path
         try:
             if not records:
                 path.unlink(missing_ok=True)
-                return
+                return True
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             write_atomic(
                 path,
@@ -360,20 +365,25 @@ class EngineSupervisor:
             )
         except OSError:
             logger.warning("Model Hub engine process record could not be written", exc_info=True)
+            return False
+        return True
 
     def _record_engine_locked(
         self,
         process: Any,
         marker: str,
         survivors: list[PersistedProcessIdentity] | None,
-    ) -> None:
+    ) -> bool:
+        """Durably name the new engine; return whether it is tracked."""
+
         if survivors is None:
             # Rewriting a record we could not read would drop identities it may hold.
-            return
+            return False
         pid = getattr(process, "pid", None)
         identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
-        if identity is not None:
-            self._store_engine_records_locked([*survivors, identity])
+        if identity is None:
+            return False
+        return self._store_engine_records_locked([*survivors, identity])
 
     def _reap_recorded_engines_locked(self) -> list[PersistedProcessIdentity] | None:
         """Stop every recorded engine tree; return those still unconfirmed.
