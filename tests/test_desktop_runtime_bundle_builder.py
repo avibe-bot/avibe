@@ -230,3 +230,34 @@ def test_probe_diagnostics_report_every_log_including_the_ones_that_are_missing(
     assert "tail line" in report
     assert "head" not in report
     assert "last 64 of 271 bytes" in report
+
+
+def test_timed_out_stop_renders_the_streams_a_timeout_leaves_undecoded(monkeypatch, tmp_path):
+    # `subprocess.run` decodes its streams on the completion path a timeout
+    # never reaches, so `TimeoutExpired` carries bytes even though the call asked
+    # for text, and an unwritten stream as None. This runs from a `finally`:
+    # formatting bytes there would raise a TypeError over the probe failure the
+    # report exists to explain.
+    def timing_out(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 60, output=captured_stdout, stderr=captured_stderr)
+
+    monkeypatch.setattr(builder.subprocess, "run", timing_out)
+
+    captured_stdout = b"stopping the private runtime\n"
+    captured_stderr = b"dispatch socket still held \xff\n"
+    stopped, report = builder.stop_private_runtime(["vibe"], tmp_path, {})
+
+    assert stopped is False
+    assert "timed out after 60s" in report
+    assert "stopping the private runtime" in report
+    # Undecodable output is reported, not raised.
+    assert "dispatch socket still held �" in report
+
+    # The shape the Windows job actually produced: output captured, nothing on
+    # stderr at all.
+    captured_stderr = None
+    stopped, report = builder.stop_private_runtime(["vibe"], tmp_path, {})
+
+    assert stopped is False
+    assert "stopping the private runtime" in report
+    assert "vibe stop stderr" not in report

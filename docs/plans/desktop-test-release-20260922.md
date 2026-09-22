@@ -434,4 +434,27 @@ in the frozen release-implementation set and is **not** touched here. The same
 analysis applies — its `adhoc` is always empty, the identity branch still turns
 on `-z "$authority"`, and the TEST branch uses `grep -q` directly rather than the
 sed — so it is noise with no behavioural consequence, reported to the
-orchestrator rather than fixed under the freeze.
+orchestrator rather than fixed under the freeze. **Deferred by orchestrator
+decision, to be fixed in a later round**: touching a frozen release-implementation
+file to correct cosmetic noise is not worth the re-verification it would cost
+this close to a TEST prerelease.
+
+### The stop report's own timeout branch
+
+Review of the change above caught the one place where the fix reproduced the
+defect it was written to remove. `subprocess.run` decodes its streams on the
+completion path, which a timeout never reaches: `TimeoutExpired` carries what it
+captured before the deadline as raw bytes even when the call passed `text=True`,
+and an unwritten stream as `None`. `_stop_report` would have joined bytes into a
+string and raised `TypeError` — from inside the `finally`, over the probe failure
+the report exists to explain.
+
+This is not hypothetical for the next run. The Windows job that motivated the
+whole round took exactly this branch: `vibe stop` ran the full sixty seconds and
+timed out. `stop_private_runtime` now normalizes both streams before formatting
+them, decoding the same way `collect_probe_diagnostics` does so an undecodable
+byte is reported rather than raised.
+
+Only two subprocess calls in the file carry a timeout at all, and the other one
+— `taskkill` in `terminate_probe_processes` — never reads its streams, so it does
+not share this defect.

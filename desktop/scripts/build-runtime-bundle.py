@@ -527,6 +527,22 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> di
     }
 
 
+def _decode_stop_stream(stream: Any) -> str | None:
+    """Normalize a captured stream that may have skipped `text=True` decoding.
+
+    `subprocess.run` decodes its streams on the completion path, which a timeout
+    never reaches: `TimeoutExpired` carries whatever was captured before the
+    deadline as raw bytes even when the call asked for text, and an unwritten
+    stream as `None`. Formatting those bytes would raise a `TypeError` out of
+    the `finally` that calls this, masking the probe failure this whole path
+    exists to report. Decode the way the probe diagnostics do, so an undecodable
+    byte is reported rather than raised.
+    """
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return stream
+
+
 def _stop_report(outcome: str, stdout: str | None, stderr: str | None) -> str:
     lines = [f"--- vibe stop ({outcome}) ---"]
     for name, stream in (("stdout", stdout), ("stderr", stderr)):
@@ -556,7 +572,11 @@ def stop_private_runtime(command: list[str], work_dir: Path, env: dict[str, str]
             timeout=60,
         )
     except subprocess.TimeoutExpired as error:
-        return False, _stop_report("timed out after 60s", error.stdout, error.stderr)
+        return False, _stop_report(
+            "timed out after 60s",
+            _decode_stop_stream(error.stdout),
+            _decode_stop_stream(error.stderr),
+        )
     except OSError as error:
         return False, _stop_report(f"could not run: {error}", None, None)
     return result.returncode == 0, _stop_report(f"exit {result.returncode}", result.stdout, result.stderr)
