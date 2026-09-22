@@ -826,9 +826,6 @@ class ManagedWatchStore:
             if waiter_lifecycle_changed:
                 watch.metadata = dict(watch.metadata)
                 watch.metadata.pop(RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
-                watch.metadata = metadata_with_delegated_memory_owner(
-                watch.metadata, session_id=session_id
-            )
             watch.updated_at = _utc_now_iso()
             if not self._write_watch(
                 watch,

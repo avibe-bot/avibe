@@ -1776,9 +1776,6 @@ class ScheduledTaskStore:
             metadata if metadata is not None else task.metadata,
             user_context,
         )
-        task.metadata = metadata_with_delegated_memory_owner(
-            task.metadata, session_id=session_id
-        )
         task.updated_at = _utc_now_iso()
         if not self._write_task(
             task,
