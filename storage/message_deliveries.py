@@ -29,6 +29,8 @@ from storage.models import (
 
 
 TURN_OWNER_STATES = ("starting", "active")
+# Delivery states whose input has reached the native Turn.
+WRITTEN_DELIVERY_STATES = frozenset({"accepted"})
 FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
@@ -646,6 +648,11 @@ def current_turn_memory_authority_conflict(session_id: str) -> bool:
         initial_authority = memory_authority_for_payload(initial_payload)
         initial_owner = memory_owner_from_payload(initial_payload)
         for delivery in deliveries_for_turn(conn, str(turn["id"])):
+            # Only a written input can carry foreign authority into the Turn.
+            # Provisional rows (queued, pending_steer, steering, reconciling)
+            # may still be refused without a native write.
+            if delivery.get("state") not in WRITTEN_DELIVERY_STATES:
+                continue
             payload = execution_delivery_payload(conn, delivery)
             if (
                 delivery.get("id") != initial.get("id")

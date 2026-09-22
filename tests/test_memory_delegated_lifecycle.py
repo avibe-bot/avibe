@@ -206,7 +206,54 @@ def test_steering_preserves_effective_memory_authority(active_delegated, user, m
         assert asyncio.run(_search(controller)) == scope
     else:
         asyncio.run(_search(controller, status=403))
-        assert "ses_fsm" not in controller._memory_scopes_by_session
+        # Denial is per active Turn, not a revocation of the owner's scope.
+        assert "ses_fsm" in controller._memory_scopes_by_session
+
+
+def test_unwritten_cross_authority_steer_keeps_owner_scope_readable(active_delegated):
+    """A provisional steer row cannot deny the owner's Memory before any native write."""
+    manager, _, engine, controller, task, active, tmp = active_delegated
+    scope = asyncio.run(_search(controller))
+    result = asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="incoming request",
+                author_id="remote:bob",
+                message_kind="original",
+            ),
+            context=_context(),
+        )
+    )
+    from storage import message_deliveries
+
+    with engine.begin() as conn:
+        message_deliveries.open_pending_steer_batch(
+            conn,
+            deliveries=[message_deliveries.get_delivery(conn, result.delivery_id)],
+            turn_id=active.turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+    with engine.connect() as conn:
+        assert message_deliveries.get_delivery(conn, result.delivery_id)["state"] == "pending_steer"
+    assert asyncio.run(_search(controller)) == scope
+
+
+def test_unanswerable_authority_check_fails_closed_without_revoking(active_delegated, monkeypatch):
+    """The Memory boundary denies the call, and only the call, when isolation cannot be evaluated."""
+    manager, _, engine, controller, task, active, tmp = active_delegated
+    scope = asyncio.run(_search(controller))
+    from storage import message_deliveries
+
+    def boom(_session_id):
+        raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(message_deliveries, "current_turn_memory_authority_conflict", boom)
+    asyncio.run(_search(controller, status=403))
+    assert "ses_fsm" in controller._memory_scopes_by_session
+    monkeypatch.undo()
+    assert asyncio.run(_search(controller)) == scope
 
 
 @pytest.mark.parametrize("active_delegated", ["create_once"], indirect=True)

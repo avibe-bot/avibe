@@ -2535,11 +2535,14 @@ def test_legacy_workbench_strict_author_keeps_memory_admission(managers) -> None
 def test_durable_workbench_turn_restores_memory_admission_facts(
     managers,
     launch_path: str,
+    monkeypatch,
 ) -> None:
     from core.controller import Controller
     from core.memory_cli_access import configure_memory_cli_access
 
     manager, _other, engine, _engine_b, _starts = managers
+    # The Memory boundary reads the cached store; bind it to this fixture's engine.
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
     manager.controller.config.memory = SimpleNamespace(enabled=True)
     classifications: list[bool | None] = []
     routing_users: list[str | None] = []

@@ -3504,15 +3504,18 @@ class Controller:
 
             authority_conflict = current_turn_memory_authority_conflict(session_key)
         except Exception:
+            # The Memory boundary fails closed: an unanswerable isolation check
+            # denies this call only. The cached scope is kept so a transient
+            # storage failure does not permanently revoke the owner's access.
             logger.debug(
                 "memory scope delivery-authority check failed for session=%s",
                 session_key,
                 exc_info=True,
             )
-            authority_conflict = False
+            return None
         if authority_conflict:
-            self._memory_scopes_by_session.pop(session_key, None)
-            self._memory_cli_facts_by_session.pop(session_key, None)
+            # Denial is per active Turn and re-evaluated on every call; the
+            # recorded scope stays so the owner's next Turn is readable again.
             return None
         if (
             getattr(self, "_memory_implementation_error", None) is not None
