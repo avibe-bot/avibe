@@ -369,7 +369,18 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // This uncached projection reads persisted enabled even after a rejected
       // write. Apply failure cannot roll back config that was already committed.
       await refreshConnection(backend);
-      await agentReads?.refresh();
+      // The presence read is a follow-up to the write, not the write itself. It is also
+      // the only thing in here that can reject, and this job is a link in the serial
+      // queue: a rejection settles the queue rejected, so every toggle after it chains
+      // onto a continuation that never runs and the person's next enable silently does
+      // nothing. Its failure is reported where this screen already reports a read that
+      // failed, and it does not bury what the write had to say.
+      try {
+        await agentReads?.refresh();
+      } catch (error) {
+        if (enableIntent.current[backend] !== intent) return;
+        setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
+      }
     });
   };
 
