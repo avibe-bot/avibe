@@ -12902,7 +12902,7 @@ def _start_service_after_repair(
     live_ui_pid = _live_ui_server_pid()
     language = _configured_cli_language()
     try:
-        new_pid = runtime.start_service(memory_ui_secret=memory_ui_secret)
+        new_pid = runtime.start_service()
     except Exception as exc:
         _write_refreshed_runtime_status()
         return _doctor_repair_result(
