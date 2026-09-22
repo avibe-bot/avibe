@@ -7203,8 +7203,12 @@ def test_oauth_flow_handles_new_refreshed_and_conflicting_auth_records(
         )
 
         if oauth_record_case == "conflict":
+            # Signing in again to an account another Source already holds is a
+            # duplicate add, reported as such, and that Source's file is kept.
             assert completed.state == "failed"
-            assert completed.error_key == "models.oauth.binding_failed"
+            assert completed.error_key == "models.oauth.account_already_added"
+            assert (store.auth_dir / "claude-account.json").exists()
+            assert not client.deletes
             assert completed.channel == "hub"
             assert completed.retained_material_disposition is RetainedMaterialDisposition.FOREIGN_SOURCE_REF
             assert completed.retained_credential_ref is None
@@ -7439,3 +7443,100 @@ def test_supervisor_fails_closed_with_direct_mode_escape(tmp_path: Path) -> None
     assert exc_info.value.error_key == "models.engine.install_failed"
     assert exc_info.value.reason == "model_hub_engine_archive_checksum_mismatch"
     assert exc_info.value.direct_mode_available is True
+
+
+@pytest.mark.parametrize("second_account", ["other", "same"])
+def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
+    tmp_path: Path,
+    second_account: str,
+) -> None:
+    """A second subscription of one vendor is its own Source; a repeat is refused.
+
+    The first account's file keeps changing in the background (token refresh,
+    status), so it must not be mistaken for the login a later flow produced.
+    """
+    first = {
+        "id": "codex-a.json",
+        "name": "codex-a.json",
+        "provider": "codex",
+        "modtime": "2026-09-23T01:00:00Z",
+        "id_token": {"chatgpt_account_id": "acct-a"},
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.auth_calls = 0
+            self.patches: list[dict[str, object]] = []
+            self.deletes: list[str] = []
+
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/auth-files":
+                if method == "DELETE":
+                    self.deletes.append(str((query or {}).get("name")))
+                    return {"status": "ok"}
+                self.auth_calls += 1
+                if self.auth_calls == 1:
+                    return {"files": [first]}
+                refreshed = {**first, "modtime": "2026-09-23T01:40:00Z"}
+                new = {
+                    "id": "codex-b.json",
+                    "name": "codex-b.json",
+                    "provider": "codex",
+                    "modtime": "2026-09-23T01:41:00Z",
+                    "id_token": {"chatgpt_account_id": "acct-b" if second_account == "other" else "acct-a"},
+                }
+                return {"files": [refreshed, new]}
+            if path == "/codex-auth-url":
+                return {"state": "engine-state", "url": "https://example.test/oauth"}
+            if path == "/get-auth-status":
+                return {"status": "ok"}
+            if path == "/auth-files/fields":
+                self.patches.append(dict(payload or {}))
+                return {"status": "ok"}
+            raise AssertionError((method, path, query, payload, timeout))
+
+    class Supervisor:
+        def __init__(self, store: EngineStateStore, client: Client) -> None:
+            self.state_store = store
+            self._client = client
+
+        def client(self):
+            return self._client
+
+        def client_if_running(self):
+            return None
+
+        def invalidate_configs(self) -> None:
+            self.state_store.clear_runtime_configs()
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        for name in ("codex-a.json", "codex-b.json"):
+            (store.auth_dir / name).write_text("{}", encoding="utf-8")
+            (store.auth_dir / name).chmod(0o600)
+        first_ref = store.bind_oauth_credential("src_first12345", "openai", "codex-a.json")
+        client = Client()
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(store, client),  # type: ignore[arg-type]
+            state_store=store,
+        )
+        flow = await adapter.start_oauth("src_second1234", "openai")
+        completed = await adapter.oauth_status(flow.flow_id)
+
+        assert store.credential_metadata(first_ref)["source_id"] == "src_first12345"
+        assert (store.auth_dir / "codex-a.json").exists()
+        if second_account == "other":
+            assert completed.state == "success"
+            assert completed.credential_ref and completed.credential_ref != first_ref
+            assert store.credential_metadata(completed.credential_ref)["auth_name"] == "codex-b.json"
+            assert [patch["name"] for patch in client.patches] == ["codex-b.json"]
+        else:
+            assert completed.state == "failed"
+            assert completed.error_key == "models.oauth.account_already_added"
+            assert completed.retained_material_disposition is RetainedMaterialDisposition.NONE
+            assert client.deletes == ["codex-b.json"]
+            assert not (store.auth_dir / "codex-b.json").exists()
+            assert not client.patches
+
+    asyncio.run(run())

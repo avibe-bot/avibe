@@ -2690,13 +2690,28 @@ class CLIProxyEngineAdapter:
         flow.grant_write_possible = True
         inventory = await asyncio.to_thread(_auth_inventory, client)
         provider_records = [record for record in inventory.values() if record.provider == flow.auth_provider]
-        candidates = [
+        try:
+            foreign = await asyncio.to_thread(self._foreign_bound_identities, provider_records, flow.source_id)
+        except EngineStateError:
+            self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.binding_failed")
+            return
+        changed = [
             record
             for record in provider_records
             if flow.before_auth_fingerprints.get(record.identity) != record.fingerprint
         ]
-        if not candidates and len(provider_records) == 1:
+        # A record that did not exist before this flow is the login it produced.
+        # Accounts other Sources already hold keep changing in the background
+        # (refresh, status), so they only count when nothing new appeared: then
+        # the login rewrote an existing file, which is either this Source's own
+        # account (re-auth) or an account another Source already owns.
+        fresh = [record for record in changed if record.identity not in flow.before_auth_fingerprints]
+        candidates = fresh or [record for record in changed if record.identity not in foreign]
+        if not candidates and not changed and len(provider_records) == 1:
             candidates = provider_records
+        if not candidates and changed:
+            candidates = changed
         if len(candidates) != 1:
             if not candidates:
                 flow.state = "verifying"
@@ -2705,6 +2720,21 @@ class CLIProxyEngineAdapter:
             self._fail_flow(flow, "models.oauth.ambiguous_engine_binding")
             return
         auth = candidates[0]
+        foreign_accounts = {
+            record.account_id for record in provider_records if record.identity in foreign and record.account_id
+        }
+        if auth.identity in foreign or (auth.account_id and auth.account_id in foreign_accounts):
+            # The same account is already a Source. A new file for it is this
+            # flow's own material and is removed; an existing one belongs to the
+            # other Source and is never touched.
+            if auth.identity not in flow.before_auth_fingerprints and await self._delete_auth_files(client, auth.name):
+                self._set_retained_material(flow, RetainedMaterialDisposition.NONE)
+            elif auth.identity in foreign:
+                self._set_retained_material(flow, RetainedMaterialDisposition.FOREIGN_SOURCE_REF)
+            else:
+                self._set_retained_material(flow, RetainedMaterialDisposition.UNKNOWN)
+            self._fail_flow(flow, "models.oauth.account_already_added")
+            return
         try:
             existing_credential_ref = await asyncio.to_thread(
                 self.state_store.oauth_credential_ref,
@@ -2814,6 +2844,26 @@ class CLIProxyEngineAdapter:
         )
         flow.state = "success"
         self._release_provider(flow)
+
+    def _foreign_bound_identities(self, records: Sequence[_AuthRecord], source_id: str) -> set[str]:
+        """Identities of auth records another Source's credential is bound to."""
+        foreign: set[str] = set()
+        for record in records:
+            credential_ref = self.state_store.oauth_credential_ref(record.name)
+            if credential_ref is None:
+                continue
+            owner = self.state_store.credential_metadata(credential_ref).get("source_id")
+            if owner and owner != source_id:
+                foreign.add(record.identity)
+        return foreign
+
+    async def _delete_auth_files(self, client: EngineClient, auth_name: str) -> bool:
+        try:
+            await asyncio.to_thread(client.management_request, "DELETE", "/auth-files", query={"name": auth_name})
+            await asyncio.to_thread(self.state_store.delete_oauth_auth_file, auth_name)
+        except (EngineClientError, EngineStateError):
+            return False
+        return True
 
     async def _cleanup_oauth_material(
         self,

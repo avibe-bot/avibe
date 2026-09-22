@@ -2038,6 +2038,7 @@
       "submission_failed": "粘贴的内容没能提交，请重试",
       "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
       "binding_failed": "该账号已被另一个供应商使用",
+      "account_already_added": "这个账号已经添加过了，不能重复添加。要添加另一个订阅，请登录其他账号。",
       "expired": "授权超时，请重新连接"
     },
     "probe": {

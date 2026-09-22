@@ -2038,6 +2038,7 @@
       "submission_failed": "Couldn't submit what you pasted, please retry",
       "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
       "binding_failed": "That account is already used by another source",
+      "account_already_added": "This account is already added. Sign in with a different account to add another subscription.",
       "expired": "Authorization timed out, please reconnect"
     },
     "probe": {
