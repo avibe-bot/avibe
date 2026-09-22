@@ -3499,6 +3499,21 @@ class Controller:
             return None
         session_key = str(session_id or "").strip()
         implementation_sessions = getattr(self, "_memory_implementation_cli_sessions", None)
+        try:
+            from storage.message_deliveries import current_turn_memory_authority_conflict
+
+            authority_conflict = current_turn_memory_authority_conflict(session_key)
+        except Exception:
+            logger.debug(
+                "memory scope delivery-authority check failed for session=%s",
+                session_key,
+                exc_info=True,
+            )
+            authority_conflict = False
+        if authority_conflict:
+            self._memory_scopes_by_session.pop(session_key, None)
+            self._memory_cli_facts_by_session.pop(session_key, None)
+            return None
         if (
             getattr(self, "_memory_implementation_error", None) is not None
             and isinstance(implementation_sessions, set)

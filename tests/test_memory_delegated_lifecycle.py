@@ -200,23 +200,13 @@ def test_steering_preserves_effective_memory_authority(active_delegated, user, m
         asyncio.run(manager._run_pending_steers("ses_fsm", active.turn_id, _context()))
     with engine.connect() as conn:
         state = message_deliveries.get_delivery(conn, result.delivery_id)["state"]
-    assert asyncio.run(_search(controller)) == scope
+    assert state == "accepted"
+    manager._steer.assert_awaited_once()
     if user == "local":
-        assert state == "accepted"
-        manager._steer.assert_awaited_once()
+        assert asyncio.run(_search(controller)) == scope
     else:
-        assert state == "queued"
-        manager._steer.assert_not_called()
-        next_scopes = []
-
-        async def following(_s, ctx, _text, **_kw):
-            admitted = configure_memory_cli_access(controller, ctx)
-            next_scopes.append(await _search(controller, status=200 if admitted else 403))
-
-        manager._run = following
-        manager.controller.config.memory = SimpleNamespace(enabled=True)
-        asyncio.run(manager.terminalize_turn(active.turn_id))
-        assert len(next_scopes) == 1 and next_scopes[0] != scope
+        asyncio.run(_search(controller, status=403))
+        assert "ses_fsm" not in controller._memory_scopes_by_session
 
 
 @pytest.mark.parametrize("active_delegated", ["create_once"], indirect=True)
@@ -371,9 +361,9 @@ def test_active_poll_restores_proof_and_read_scope(active_delegated, monkeypatch
                 ),
                 context=_context(),
             )
-            assert result.state == "queued"
-            new.session_turns._steer.assert_not_called()
-            await _search(new)
+            assert result.state == "accepted"
+            new.session_turns._steer.assert_awaited_once()
+            await _search(new, status=403)
         release.set()
         await asyncio.gather(*agent._active_requests.values())
 
@@ -385,7 +375,7 @@ def test_active_poll_restores_proof_and_read_scope(active_delegated, monkeypatch
         assert verify_caller_session_proof(
             "ses_fsm", bound[0]["extra_env"]["AVIBE_CALLER_SESSION_PROOF"], {"platform": "avibe", "user_id": "local"}
         )
-        assert new.memory_search_payload.await_count == 2
+        assert new.memory_search_payload.await_count == 1
 
 
 @pytest.mark.parametrize("active_delegated", ["remote"], indirect=True)

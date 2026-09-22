@@ -4,7 +4,6 @@ import asyncio
 import gc
 import json
 import sqlite3
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
@@ -490,44 +489,6 @@ def _row(engine, delivery_id: str) -> dict:
         row = delivery_store.get_delivery(conn, delivery_id)
     assert row is not None
     return row
-
-
-def _steer_memory_payload(
-    *,
-    source: str,
-    owner: dict[str, object] | None = None,
-    resource_user_context: dict[str, object] | None = None,
-) -> dict[str, object]:
-    metadata: dict[str, object] = {}
-    if owner is not None:
-        message_metadata: dict[str, object] = {"delegated_memory_owner": owner}
-        if resource_user_context is not None:
-            message_metadata["resource_user_context"] = resource_user_context
-        metadata["scheduled_provenance"] = {
-            "platform_specific": {
-                "task_trigger_kind": "watch",
-                "message_metadata": message_metadata,
-            }
-        }
-    return {"session_id": "ses_fsm", "source": source, "metadata": metadata}
-
-
-def _stub_steer_memory_payloads(
-    monkeypatch: pytest.MonkeyPatch,
-    active: dict[str, object],
-    incoming: dict[str, object],
-) -> list[dict[str, object]]:
-    monkeypatch.setattr(
-        delivery_store,
-        "delivery_for_turn",
-        lambda _conn, _turn_id: {"id": "active"},
-    )
-    monkeypatch.setattr(
-        delivery_store,
-        "execution_delivery_payload",
-        lambda _conn, row: active if row["id"] == "active" else row,
-    )
-    return [incoming]
 
 
 def _configure_activation_owner(
@@ -1329,197 +1290,80 @@ async def test_steering_preparation_failure_preserves_a_definitively_unwritten_b
 
 
 @pytest.mark.anyio
-async def test_steering_memory_check_failure_restores_a_retryable_queue_row(managers):
-    manager, _other, engine, _engine_b, _starts = managers
-    await _activate(manager, text="active")
-    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
-    manager._compatible_steer_memory_authority = Mock(
-        side_effect=ModuleNotFoundError("avibe_memory")
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
+async def test_delivery_path_reaches_native_write_without_memory_admission(managers, priority):
+    """Memory is not consulted by any delivery priority."""
+
+    manager, _other, _engine, _engine_b, _starts = managers
+    if priority == "p1":
+        await _activate(manager, text="active")
+    manager.controller._memory_admission = Mock(
+        side_effect=AssertionError("Memory admission must not be called")
     )
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
 
     result = await manager.deliver(
         DeliveryRequest(
             session_id="ses_fsm",
-            priority="p1",
-            content="retry after memory recovery",
+            priority=priority,
+            content="steer" if priority != "p0" else "replacement",
         ),
         context=_context(),
     )
 
-    assert result.state == "queued"
-    manager._steer.assert_not_awaited()
-    queued = [row for row in _rows(engine) if row["state"] == "queued"]
-    assert len(queued) == 1
-    assert queued[0]["dispatch_text"] == "retry after memory recovery"
-    assert queued[0]["current_attempt_id"] is None
-
-
-@pytest.mark.parametrize(
-    "implementation_error",
-    [MemoryImplementationUnavailableError("missing"), MemoryImplementationIncompatibleError("incompatible")],
-)
-def test_steer_memory_unavailable_keeps_human_input_independent_of_optional_import(
-    managers,
-    monkeypatch,
-    implementation_error,
-):
-    manager, _other, _engine, _engine_b, _starts = managers
-    manager.controller.config.memory = SimpleNamespace(enabled=True)
-    manager.controller.memory_runtime = None
-    manager.controller._memory_implementation_error = implementation_error
-    manager.controller._memory_admission = Mock(side_effect=AssertionError("Memory admission must not be called"))
-    active = _steer_memory_payload(source="user")
-    incoming = _steer_memory_payload(source="user")
-    incoming["id"] = "incoming"
-    deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
-
-    with patch.dict(sys.modules, {"avibe_memory.admission": None}):
-        assert manager._compatible_steer_memory_authority("turn", deliveries)
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    else:
+        manager._steer.assert_not_awaited()
     manager.controller._memory_admission.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("incoming_owner", "incoming_resource", "expected"),
-    [
-        ({"platform": "avibe", "user_id": "local", "is_dm": False}, None, True),
-        ({"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, None, True),
-        ({"platform": "avibe", "user_id": "local", "is_dm": False}, {"sub": "other"}, True),
-    ],
-)
-def test_steer_memory_unavailable_keeps_delegated_policy_without_readable_scope(
-    managers,
-    monkeypatch,
-    incoming_owner,
-    incoming_resource,
-    expected,
-):
-    manager, _other, _engine, _engine_b, _starts = managers
-    manager.controller.config.memory = SimpleNamespace(enabled=True)
-    manager.controller.memory_runtime = None
-    manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
-    manager.controller._memory_scopes_by_session = {}
-    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
-    resource = {"sub": "local"}
-    active = _steer_memory_payload(
-        source="harness",
-        owner=owner,
-        resource_user_context=resource,
-    )
-    incoming = _steer_memory_payload(
-        source="harness",
-        owner=incoming_owner,
-        resource_user_context=incoming_resource if incoming_resource is not None else resource,
-    )
-    incoming["id"] = "incoming"
-    deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
-
-    assert manager._compatible_steer_memory_authority("turn", deliveries) is expected
-
-
-@pytest.mark.parametrize(
-    ("incoming_owner", "incoming_resource"),
-    [
-        ({"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, None),
-        ({"platform": "avibe", "user_id": "local", "is_dm": False}, {"sub": "other"}),
-    ],
-)
-def test_steer_memory_unavailable_preserves_recorded_scope_boundaries(
-    managers,
-    monkeypatch,
-    incoming_owner,
-    incoming_resource,
-):
-    manager, _other, _engine, _engine_b, _starts = managers
-    manager.controller.config.memory = SimpleNamespace(enabled=True)
-    manager.controller.memory_runtime = None
-    manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
-    manager.controller._memory_scopes_by_session = {"ses_fsm": object()}
-    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
-    active = _steer_memory_payload(
-        source="harness",
-        owner=owner,
-        resource_user_context={"sub": "local"},
-    )
-    incoming = _steer_memory_payload(
-        source="harness",
-        owner=incoming_owner,
-        resource_user_context=incoming_resource or {"sub": "local"},
-    )
-    incoming["id"] = "incoming"
-    deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
-
-    assert manager._compatible_steer_memory_authority("turn", deliveries) is False
-
-
 @pytest.mark.anyio
-async def test_steering_memory_admission_failure_restores_retryable_queue_row(managers):
-    manager, _other, engine, _engine_b, _starts = managers
-    await _activate(manager, text="active")
-    manager.controller.config.memory = SimpleNamespace(enabled=True)
-    manager.controller.memory_runtime = SimpleNamespace()
-    manager.controller._memory_implementation_error = None
-    manager.controller._memory_admission = Mock(side_effect=RuntimeError("admission unavailable"))
-    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
-
-    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
-    result = await manager.deliver(
-        DeliveryRequest(
-            session_id="ses_fsm",
-            priority="p1",
-            content="retry after admission failure",
-            source="harness",
-            author="harness",
-            message_type="harness",
-            metadata={
-                "scheduled_provenance": {
-                    "platform_specific": {
-                        "task_trigger_kind": "watch",
-                        "message_metadata": {"delegated_memory_owner": owner},
-                    }
-                }
-            },
-        ),
-        context=_context(),
-    )
-
-    assert result.state == "queued"
-    manager._steer.assert_not_awaited()
-    queued = [row for row in _rows(engine) if row["state"] == "queued"]
-    assert len(queued) == 1
-    events = json.loads(queued[0]["delivery_history_json"])["events"]
-    assert events[-1]["receipt"]["reason"] == "memory_runtime_unavailable"
-
-
+@pytest.mark.parametrize("priority", ["p0", "p1", "p3"])
 @pytest.mark.parametrize(
-    ("admitted", "incoming_owner", "expected"),
-    [
-        (True, {"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, False),
-        (True, {"platform": "avibe", "user_id": "local", "is_dm": False}, True),
-        (False, {"platform": "avibe", "user_id": "remote:bob", "is_dm": False}, True),
-    ],
+    "memory_state",
+    ["disabled", "missing", "incompatible", "runtime_raising", "conflicting", "matching"],
 )
-def test_steer_memory_available_retains_admission_authority_semantics(
-    managers,
-    monkeypatch,
-    admitted,
-    incoming_owner,
-    expected,
-):
-    manager, _other, _engine, _engine_b, _starts = managers
-    manager.controller.config.memory = SimpleNamespace(enabled=True)
-    manager.controller.memory_runtime = SimpleNamespace()
-    manager.controller._memory_implementation_error = None
-    admission = Mock()
-    admission.admits.return_value = admitted
-    manager.controller._memory_admission = Mock(return_value=admission)
-    owner = {"platform": "avibe", "user_id": "local", "is_dm": False}
-    active = _steer_memory_payload(source="harness", owner=owner)
-    incoming = _steer_memory_payload(source="harness", owner=incoming_owner)
-    incoming["id"] = "incoming"
-    deliveries = _stub_steer_memory_payloads(monkeypatch, active, incoming)
+async def test_delivery_state_is_memory_independent(managers, priority, memory_state):
+    """Every Memory state preserves the delivery result of the disabled path."""
 
-    assert manager._compatible_steer_memory_authority("turn", deliveries) is expected
-    assert admission.admits.call_count >= 1
+    manager, _other, _engine, _engine_b, _starts = managers
+    await _activate(manager, text="active") if priority == "p1" else None
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    manager.controller._memory_admission = Mock()
+    admission = Mock()
+    if memory_state == "disabled":
+        manager.controller.config.memory = SimpleNamespace(enabled=False)
+    else:
+        manager.controller.config.memory = SimpleNamespace(enabled=True)
+        manager.controller.memory_runtime = SimpleNamespace()
+        manager.controller._memory_implementation_error = None
+        if memory_state == "missing":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationUnavailableError("missing")
+        elif memory_state == "incompatible":
+            manager.controller.memory_runtime = None
+            manager.controller._memory_implementation_error = MemoryImplementationIncompatibleError("incompatible")
+        elif memory_state == "runtime_raising":
+            manager.controller._memory_admission = Mock(side_effect=RuntimeError("runtime unavailable"))
+        else:
+            admission.admits.return_value = True
+            manager.controller._memory_admission = Mock(return_value=admission)
+    if memory_state == "disabled":
+        manager.controller._memory_admission = Mock(side_effect=AssertionError("disabled Memory must not run"))
+
+    request = DeliveryRequest(
+        session_id="ses_fsm",
+        priority=priority,
+        content="memory-independent delivery" if priority != "p0" else "replacement",
+    )
+    result = await manager.deliver(request, context=_context())
+
+    assert result.state == ("accepted" if priority == "p1" else "claimed")
+    if priority == "p1":
+        manager._steer.assert_awaited_once()
+    manager.controller._memory_admission.assert_not_called()
 
 
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
