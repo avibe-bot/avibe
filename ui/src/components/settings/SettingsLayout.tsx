@@ -299,7 +299,7 @@ export const SettingsLayout: React.FC = () => {
     [capabilities.can_manage_instance, channelSettingsVisible, modelHubVisible],
   );
 
-  const activeTrail = useMemo(() => {
+  const activeTrail = (() => {
     // Route hierarchy must stay stable while capability/config projections load;
     // otherwise a mobile deep link can briefly point its Back action at the
     // wrong parent before its rail item becomes visible.
@@ -311,7 +311,7 @@ export const SettingsLayout: React.FC = () => {
       }
     }
     return [];
-  }, [location.pathname]);
+  })();
 
   const mobileBackTarget = useMemo(() => {
     if (atRoot || setupOrigin) return '/';
