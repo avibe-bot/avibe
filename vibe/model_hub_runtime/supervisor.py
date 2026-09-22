@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import signal
 import socket
@@ -12,7 +13,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 from config import paths
-from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from config.atomic_io import write_atomic
+from core.process_isolation import (
+    KILL_SIGNAL,
+    PROCESS_IDENTITY_ENV,
+    capture_spawned_process_identity,
+    isolated_subprocess_kwargs,
+    new_process_identity_marker,
+    process_identity_from_payload,
+    reap_orphaned_process_tree,
+    serialize_process_identity,
+    signal_process_tree,
+)
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
@@ -24,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
+# Durable identity of the engine this state root last spawned. A service that
+# dies without running ``atexit`` (SIGKILL, crash, forced restart) leaves its
+# isolated engine group running; the next start reaps it by identity.
+_ENGINE_PROCESS_RECORD = "engine-process.json"
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
 
 
@@ -169,6 +185,10 @@ class EngineSupervisor:
 
     def _start_locked(self) -> EngineConnection:
         self._start_attempted = True
+        if not self._reap_recorded_engine_locked():
+            # Every start binds a fresh port, so an unverifiable survivor cannot
+            # collide with the new engine; refusing would wedge Model Hub forever.
+            logger.warning("Could not confirm the previous Model Hub engine exited; starting anyway")
         managed = self.installer.status()
         binary = self.installer.resolve_engine_path()
         if binary is None:
@@ -195,11 +215,14 @@ class EngineSupervisor:
             management_key=runtime_secrets.management_key,
             gateway_token=runtime_secrets.gateway_token,
         )
+        marker = new_process_identity_marker()
+        environment = engine_subprocess_environment()
+        environment[PROCESS_IDENTITY_ENV] = marker
         try:
             process = self._process_factory(
                 [str(binary), "-config", str(config_path)],
                 cwd=instance_dir,
-                env=engine_subprocess_environment(),
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -210,6 +233,7 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
+        self._record_engine_locked(process, marker)
         started_at = time.monotonic()
         deadline = started_at + self.startup_timeout
         exit_code: int | None = None
@@ -281,14 +305,61 @@ class EngineSupervisor:
         self._process = None
         self._connection = None
         self._health_failure_signature = None
-        if process is None or process.poll() is not None:
+        if process is None:
             return
-        signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
+        if process.poll() is None:
+            signal_process_tree(process, signal.SIGTERM, logger, "Model Hub engine")
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
+                process.wait(timeout=3)
+        # The leader is gone; the record retires only once its group is too.
+        self._reap_recorded_engine_locked()
+
+    @property
+    def _engine_record_path(self) -> Path:
+        return self.state_store.root / _ENGINE_PROCESS_RECORD
+
+    def _record_engine_locked(self, process: Any, marker: str) -> None:
+        pid = getattr(process, "pid", None)
+        identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
+        if identity is None:
+            return
         try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            signal_process_tree(process, KILL_SIGNAL, logger, "Model Hub engine")
-            process.wait(timeout=3)
+            self._engine_record_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            write_atomic(
+                self._engine_record_path,
+                json.dumps(serialize_process_identity(identity), sort_keys=True) + "\n",
+            )
+        except OSError:
+            logger.warning("Model Hub engine process record could not be written", exc_info=True)
+
+    def _reap_recorded_engine_locked(self) -> bool:
+        """Stop the recorded engine tree; return whether no recorded tree remains."""
+
+        path = self._engine_record_path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return True
+        except (OSError, ValueError):
+            payload = None
+        pid = payload.get("pid") if isinstance(payload, dict) else None
+        identity = process_identity_from_payload(payload, pid) if isinstance(pid, int) else None
+        if identity is not None:
+            outcome = reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=identity)
+            if outcome == "unconfirmed":
+                return False
+            if outcome == "reaped":
+                logger.warning("Reaped a Model Hub engine left running by an earlier service")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Model Hub engine process record could not be retired", exc_info=True)
+        return True
 
 
 def _allocate_loopback_port() -> int:

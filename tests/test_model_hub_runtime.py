@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
+import psutil
 import yaml
 from jsonschema import Draft7Validator
 
@@ -2606,6 +2607,7 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import psutil
 import yaml
 
 config_path = sys.argv[sys.argv.index('-config') + 1]
@@ -2951,6 +2953,73 @@ def test_supervisor_keeps_installing_state_unverified_until_settlement(
     assert status["verified"] is False
 
 
+def test_supervisor_reaps_an_engine_left_running_by_a_dead_service(tmp_path: Path) -> None:
+    # A SIGKILLed service never runs atexit; its isolated engine group survives.
+    first, store = _fixture_supervisor(tmp_path)
+    first.ensure_running()
+    orphan = first._process
+    assert orphan is not None
+    record = store.root / "engine-process.json"
+    assert json.loads(record.read_text(encoding="utf-8"))["pid"] == orphan.pid
+    first._process = None
+    first._connection = None
+    # The dead service's orphan is re-parented to init, which reaps it; here it is
+    # still this test's child, so stand in for init.
+    threading.Thread(target=orphan.wait, daemon=True).start()
+
+    second, _store = _fixture_supervisor(tmp_path)
+    second.ensure_running()
+
+    assert orphan.wait(timeout=5) is not None
+    assert second._process is not None and second._process.pid != orphan.pid
+    assert json.loads(record.read_text(encoding="utf-8"))["pid"] == second._process.pid
+    second.stop()
+    assert not record.exists()
+
+
+def test_supervisor_never_signals_a_recycled_pid_from_its_record(tmp_path: Path) -> None:
+    stranger = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    try:
+        supervisor, store = _fixture_supervisor(tmp_path)
+        store.root.mkdir(parents=True, exist_ok=True)
+        (store.root / "engine-process.json").write_text(
+            json.dumps(
+                {
+                    "pid": stranger.pid,
+                    # A recycled pid never shares its predecessor's birth time.
+                    "create_time": psutil.Process(stranger.pid).create_time() - 1000,
+                    "worker_fingerprint": "sha256:" + "0" * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        supervisor.ensure_running()
+
+        assert stranger.poll() is None
+        assert not (store.root / "engine-process.json").read_text(encoding="utf-8").count(
+            str(stranger.pid)
+        )
+        supervisor.stop()
+    finally:
+        stranger.kill()
+        stranger.wait(timeout=5)
+
+
+def test_supervisor_ignores_a_corrupt_engine_record(tmp_path: Path) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "engine-process.json").write_text("{not json", encoding="utf-8")
+
+    supervisor.ensure_running()
+
+    assert supervisor._process is not None
+    supervisor.stop()
+
+
 def test_supervisor_starts_checks_health_and_stops_mock_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2978,6 +3047,8 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert "OPENAI_API_KEY" not in captured_env
     assert "GITHUB_TOKEN" not in captured_env
     assert "HTTP_PROXY" not in captured_env
+    marker = captured_env.pop("AVIBE_PROCESS_IDENTITY")
+    assert len(marker) == 64
     assert captured_env == engine_subprocess_environment()
     assert captured_stdio == {
         "stdout": subprocess.DEVNULL,
