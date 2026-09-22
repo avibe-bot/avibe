@@ -13,6 +13,7 @@ import {
   listDir,
   makeDir,
   pathCrumbs,
+  resolveDirectoryPath,
   searchNames,
   systemFavorites,
   type Favorite,
@@ -58,6 +59,10 @@ function formatMtime(seconds: number | null): string {
   return `${date.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' })} ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
 }
 
+function needsDirectoryResolution(path: string): boolean {
+  return !path.startsWith('~') && !path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path) && !/^\\\\/.test(path);
+}
+
 export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSelect, onClose }) => {
   const { t } = useTranslation();
   const { projects } = useWorkbenchProjectsTree();
@@ -73,6 +78,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [query, setQuery] = useState('');
   const [searchRows, setSearchRows] = useState<FileBrowserRow[] | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
+  const [searchRevision, setSearchRevision] = useState(0);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [searchTruncated, setSearchTruncated] = useState(false);
   const navSeq = useRef(0);
@@ -93,6 +99,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const navigate = useCallback(
     (path: string) => {
       initialPathHandled.current = true;
+      previousShowHidden.current = showHidden;
       const seq = ++navSeq.current;
       changeQuery('');
       setCreatingFolder(false);
@@ -130,26 +137,50 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     const home = sysFavs.find((favorite) => favorite.key === 'home')?.path;
     const start = initialPath || recentProject || (sysFavsLoaded ? home || '~' : undefined);
     if (!start) return;
+    initialPathHandled.current = true;
     let cancelled = false;
     Promise.resolve().then(() => {
-      if (!cancelled) navigate(start);
+      if (cancelled) return undefined;
+      return needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
+    }).then((resolved) => {
+      if (!cancelled && resolved) navigate(resolved);
+    }).catch((cause: unknown) => {
+      if (!cancelled) setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
     });
     return () => {
       cancelled = true;
     };
-  }, [initialPath, navigate, projects, sysFavs, sysFavsLoaded]);
+  }, [initialPath, navigate, projects, sysFavs, sysFavsLoaded, t]);
+
+  const refreshSearch = useCallback(() => {
+    searchAbort.current?.abort();
+    setSearchRows(null);
+    setSearchTruncated(false);
+    setSearchBusy(true);
+    setError(null);
+    setSearchRevision((revision) => revision + 1);
+  }, []);
+
+  const refreshCurrent = useCallback(() => {
+    if (!cwd) return;
+    if (query.trim()) {
+      refreshSearch();
+    } else {
+      navigate(cwd);
+    }
+  }, [cwd, navigate, query, refreshSearch]);
 
   useEffect(() => {
-    if (previousShowHidden.current === showHidden) return;
+    if (previousShowHidden.current === showHidden || !cwd) return;
     previousShowHidden.current = showHidden;
     let cancelled = false;
     Promise.resolve().then(() => {
-      if (!cancelled && cwd) navigate(cwd);
+      if (!cancelled) refreshCurrent();
     });
     return () => {
       cancelled = true;
     };
-  }, [cwd, navigate, showHidden]);
+  }, [cwd, refreshCurrent, showHidden]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -177,7 +208,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       window.clearTimeout(timeout);
       controller.abort();
     };
-  }, [cwd, query, showHidden, t]);
+  }, [cwd, query, searchRevision, showHidden, t]);
 
   const projectFavs = useMemo(
     () => (projects || []).filter((project) => !!project.folder_path).map((project) => ({ label: project.display_name, path: project.folder_path as string })),
@@ -254,7 +285,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           searchBusy={searchBusy}
           query={query}
           onQueryChange={changeQuery}
-          onRefresh={() => cwd && navigate(cwd)}
+          onRefresh={refreshCurrent}
           onNavigate={navigate}
           showHidden={showHidden}
           onShowHiddenChange={setShowHidden}
