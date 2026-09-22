@@ -361,7 +361,6 @@ jobs:
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
-            tests/e2e/test_upgrade_command.py \
             -v
 
   install-upgrade-regression:

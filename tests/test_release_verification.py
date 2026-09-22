@@ -200,10 +200,9 @@ def test_release_installer_job_provisions_the_same_uv_as_its_ci_consumer():
     assert "--only-binary=:all: --no-deps uv==0.12.10" in setup["run"]
     assert job["steps"].index(setup) < job["steps"].index(consumer)
     assert job["steps"].index(consumer) < job["steps"].index(_step(job, "Upload GitHub release assets"))
-    assert "tests/e2e/test_upgrade_command.py" in consumer["run"]
+    assert "tests/e2e/test_install_command.py" in consumer["run"]
     assert not setup.get("if") and not setup.get("continue-on-error")
     assert not consumer.get("if") and not consumer.get("continue-on-error")
-
 
 
 

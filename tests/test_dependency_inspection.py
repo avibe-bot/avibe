@@ -60,7 +60,7 @@ def probes(monkeypatch):
     monkeypatch.setattr(api, "avault_status", probe(GROUPS[1]))
     monkeypatch.setattr(api, "_show_runtime_dependencies_status", probe(GROUPS[2]))
     monkeypatch.setattr(api, "_model_hub_engine_dependency_status", probe(GROUPS[3]))
-    monkeypatch.setattr(tmux_runtime, "tmux_status", probe(GROUPS[5]))
+    monkeypatch.setattr(tmux_runtime, "tmux_status", probe(GROUPS[4]))
     return calls
 
 

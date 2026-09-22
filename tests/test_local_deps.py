@@ -1878,6 +1878,7 @@ def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_
 
 
 def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
+    """MH-RUNTIME-008: startup dependency reconciliation respects its disabled mode."""
     monkeypatch.setenv("VIBE_STARTUP_DEPENDENCY_RECONCILE", "0")
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not reconcile"))
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: pytest.fail("should not reconcile"))

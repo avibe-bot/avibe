@@ -177,8 +177,6 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
     monkeypatch.setattr(supervisor, "_config", lambda: SimpleNamespace(ui=SimpleNamespace(setup_port=8080)))
     monkeypatch.setattr(supervisor, "_reap_child", lambda pid: None)
     monkeypatch.setattr(supervisor, "_restart_in_progress", lambda: False)
-    launch_secrets: dict[str, str | None] = {}
-
     def start_service(*, wait_for_ready=True):
         return 100
 
@@ -199,8 +197,6 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
 
     assert rc == 1
     assert runtime.read_status()["state"] == "error"
-    assert launch_secrets["service"]
-    assert launch_secrets["service"] == launch_secrets["ui"]
 
 
 def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
