@@ -91,6 +91,13 @@ it('waits for the project tree before selecting the initial project', async () =
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/project', false));
 });
 
+it('falls back to home when system favorites fail during initial navigation', async () => {
+  systemFavorites.mockRejectedValueOnce(new Error('offline'));
+  render(<FolderBrowser onSelect={() => {}} onClose={() => {}} />);
+
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('~', false));
+});
+
 it('does not show a false empty state while search is pending', async () => {
   let resolveSearch!: (result: { results: []; truncated: boolean }) => void;
   searchNames.mockReturnValueOnce(
@@ -107,6 +114,21 @@ it('does not show a false empty state while search is pending', async () => {
   expect(screen.queryByText('apps.fileBrowser.noMatches')).toBeNull();
   resolveSearch({ results: [], truncated: false });
   expect(await screen.findByText('apps.fileBrowser.noMatches')).toBeTruthy();
+});
+
+it('cancels folder creation when search starts', async () => {
+  const onClose = vi.fn();
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={onClose} />);
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'apps.fileBrowser.newFolder' }));
+  expect(screen.getByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeTruthy();
+
+  fireEvent.change(screen.getByPlaceholderText('apps.fileBrowser.searchPlaceholder'), { target: { value: 'src' } });
+  expect(screen.queryByPlaceholderText('apps.fileBrowser.newFolderPlaceholder')).toBeNull();
+
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledOnce();
 });
 
 it('keeps selection enabled after a new-folder operation fails', async () => {

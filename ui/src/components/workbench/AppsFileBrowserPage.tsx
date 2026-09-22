@@ -1306,6 +1306,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   return (
     <>
+      <div className={clsx('relative', fullBleed && 'h-full w-full')}>
       <FileBrowser
         fullBleed={fullBleed}
         mobileRoute={mobileRoute}
@@ -1662,6 +1663,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </div>
         </div>
       )}
+      </div>
 
       {movePickerItems && (
         <FilePicker

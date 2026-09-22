@@ -69,6 +69,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [listingError, setListingError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
+  const [sysFavsLoaded, setSysFavsLoaded] = useState(false);
   const [query, setQuery] = useState('');
   const [searchRows, setSearchRows] = useState<FileBrowserRow[] | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
@@ -82,6 +83,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const changeQuery = useCallback((value: string) => {
     searchAbort.current?.abort();
     setQuery(value);
+    if (value.trim()) setCreatingFolder(false);
     setSearchRows(null);
     setSearchTruncated(false);
     setSearchBusy(value.trim().length > 0);
@@ -115,13 +117,18 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   );
 
   useEffect(() => {
-    systemFavorites().then(setSysFavs).catch(() => {});
+    systemFavorites()
+      .then(setSysFavs)
+      .catch(() => {})
+      .finally(() => setSysFavsLoaded(true));
   }, []);
 
   useEffect(() => {
     if (initialPathHandled.current) return;
     if (!initialPath && projects === null) return;
-    const start = initialPath || sortProjectsByRecent(projects || [])[0]?.folder_path || sysFavs.find((favorite) => favorite.key === 'home')?.path;
+    const recentProject = sortProjectsByRecent(projects || [])[0]?.folder_path;
+    const home = sysFavs.find((favorite) => favorite.key === 'home')?.path;
+    const start = initialPath || recentProject || (sysFavsLoaded ? home || '~' : undefined);
     if (!start) return;
     let cancelled = false;
     Promise.resolve().then(() => {
@@ -130,7 +137,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     return () => {
       cancelled = true;
     };
-  }, [initialPath, navigate, projects, sysFavs]);
+  }, [initialPath, navigate, projects, sysFavs, sysFavsLoaded]);
 
   useEffect(() => {
     if (previousShowHidden.current === showHidden) return;
