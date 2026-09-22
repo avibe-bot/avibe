@@ -153,9 +153,14 @@ export const RouteCandidatePopover: React.FC<{
           // and these are what turn them on.
           typedSources.length > 0 && "model-hub-route-selector--manual",
           manualOpen && "model-hub-route-selector--manual-open",
+          // Borrowing the trigger's width contains the panel by construction;
+          // a width of its own does not, and this variant hangs off a row
+          // action a panel-width from the right edge. The bound lives in CSS
+          // next to its vertical twin, because it is the same reading of the
+          // same report: what the engine says is on screen for this placement.
           width === "trigger"
             ? "w-[var(--radix-popover-trigger-width)]"
-            : "w-[420px]",
+            : "model-hub-route-selector--width-route",
         )}
         onOpenAutoFocus={(event) => {
           event.preventDefault();

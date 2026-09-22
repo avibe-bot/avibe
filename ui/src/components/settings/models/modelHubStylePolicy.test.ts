@@ -247,6 +247,31 @@ describe('Model Hub visual token policy', () => {
     expect(list).toContain('overflow-y: auto');
   });
 
+  // The same report, read on the other axis. `avoidCollisions={false}` turns off
+  // both of Radix's collision middlewares at once — the side-axis flip this
+  // panel must not do, and the align-axis shift that would have kept it on
+  // screen — and `collisionPadding` is inert once detection is off, so nothing
+  // in the component's own props bounds this panel horizontally. The `size`
+  // middleware is not gated, so the available-width report survives, and for a
+  // bottom/end placement it is the width whose left edge lands on the padding
+  // line. The variant that borrows its trigger's width is contained by
+  // construction; this one hangs off a row action a panel-width from the right
+  // edge, so it has to be bound to the report instead. A literal width here
+  // reads fine and ships a panel with its first column off the screen.
+  it('bounds the row-action picker against the width the popover reports', () => {
+    const route = surfaceCssBody
+      .match(/\.model-hub-route-selector--width-route\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(route).toContain('--radix-popover-content-available-width');
+    expect(route).toMatch(/width:\s*min\(\s*var\(--model-hub-route-selector-inline-max\),\s*var\(--model-hub-route-selector-inline-room\)\s*\)/);
+    // Bounded by shrinking, not by collapsing, and still the width the design
+    // draws wherever the room reaches it.
+    expect(route).toMatch(/--model-hub-route-selector-inline-max:\s*420px/);
+    // The fallback is the design width, so a placement that publishes no report
+    // at all keeps the panel rather than reducing it to nothing.
+    expect(route).toMatch(/--radix-popover-content-available-width,\s*var\(--model-hub-route-selector-inline-max\)/);
+  });
+
   // The panel is one flexible list plus bands that cannot shrink, so the list is
   // the only child a new band can be paid for out of — which is what happened:
   // the manual source/model pair went straight into the column, nothing
