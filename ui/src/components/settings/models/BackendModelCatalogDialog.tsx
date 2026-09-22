@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
+import { useLatestRef } from '@/lib/useLatestRef';
 import type { PendingWrite } from './asyncLifetime';
 import {
   applyBackendCatalogIntent,
@@ -56,6 +57,16 @@ import type {
 } from './types';
 
 type ReadState = 'loading' | 'ready' | 'error';
+
+/**
+ * A model the opener already had on screen, and what it wants done to it.
+ *
+ * The Route dialog names one of its own rows and hands it over rather than
+ * growing an edit or removal path of its own: everything that makes those
+ * writes safe — the removal guard, the refusal replay, the single save — lives
+ * here, and a second implementation of it would be a second protocol.
+ */
+export type CatalogFocus = { modelId: string; action: 'edit' | 'remove' };
 
 /** Same shape the Source order drawer announces with: the key alone would tell a
  *  screen-reader user something moved without telling them where to. */
@@ -200,7 +211,10 @@ export const BackendModelCatalogDialog: React.FC<{
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
-}> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite }) => {
+  /** Open straight onto one row's edit or removal, for an opener that already
+   *  named the model. Applied once the catalog it names has been read. */
+  focus?: CatalogFocus | null;
+}> = ({ open, backend, canReadSources, sourceNames, onClose, onSaved, onObserved, catalogWrite, focus = null }) => {
   const { t } = useTranslation();
   const [baseline, setBaseline] = React.useState<BackendCatalogBaseline | null>(null);
   const baselineRef = React.useRef<BackendCatalogBaseline | null>(null);
@@ -504,6 +518,28 @@ export const BackendModelCatalogDialog: React.FC<{
     }
     dropModel(model.id, plan);
   };
+
+  /**
+   * The opener's named row, opened on once the catalog has been read.
+   *
+   * It runs the same two handlers the row's own buttons run, so a handoff and a
+   * click are the same act — and it runs at most once per `focus`, because the
+   * question it opens (an editor, a removal confirmation) is the user's from
+   * that moment on and a re-read must not re-ask it.
+   */
+  const openFocus = useLatestRef((model: BackendModel) => {
+    if (focus?.action === 'remove') removeModel(model);
+    else setEditing({ model });
+  });
+  const focusOpened = React.useRef<CatalogFocus | null>(null);
+  React.useEffect(() => {
+    if (!open || !focus) { focusOpened.current = null; return; }
+    if (!editable || focusOpened.current === focus) return;
+    focusOpened.current = focus;
+    // A locked row offers neither action in the list, so it offers neither here.
+    const model = draftRef.current.find((entry) => entry.id === focus.modelId);
+    if (model && !model.locked) openFocus.current(model);
+  }, [editable, focus, open, openFocus]);
 
   const commitEdit = (model: BackendModel) => {
     const existing = draft.findIndex((entry) => entry.id === model.id);

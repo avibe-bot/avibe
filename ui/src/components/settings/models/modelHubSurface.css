@@ -545,6 +545,7 @@
 .model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
 .model-hub-route-origin-line { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12px; }
+.model-hub-route-origin-now { flex-shrink: 0; margin-right: -4px; font-weight: 600; color: var(--foreground); }
 .model-hub-route-preview { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 8px; background: var(--model-hub-mint-1a); color: var(--mint-ink); font-size: 12px; }
 .model-hub-route-preview[data-origin="passthrough"] { background: var(--model-hub-gold-1a); color: var(--gold-ink); }
 .model-hub-route-preview[data-origin="unconfigured"] { background: var(--model-hub-wash-08); color: var(--muted); }
@@ -1032,6 +1033,8 @@
   box-shadow: var(--model-hub-dialog-shadow);
 }
 .model-hub-route-head { min-height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
+.model-hub-route-head-action { height: 26px; padding: 0 10px; font-size: 11.5px; }
+.model-hub-route-head-action > svg { width: 13px; height: 13px; }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
 .model-hub-route-title {

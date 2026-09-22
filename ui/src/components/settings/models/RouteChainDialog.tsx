@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Trash2,
   Undo2,
   X,
 } from "lucide-react";
@@ -113,6 +114,10 @@ export const RouteChainDialog: React.FC<{
     attempt: SuspendedRouteAttempt | null,
     observedAgent: AgentSupply | null,
   ) => void;
+  /** Hand this model over to the catalog dialog, which is the one writer of the
+   *  model list — the Route dialog only names the model and the intent, so the
+   *  edit and removal protocols (guard, refusal, save) stay in one place. */
+  onManageModel?: (action: "edit" | "remove") => void;
 }> = ({
   selection,
   sources,
@@ -125,6 +130,7 @@ export const RouteChainDialog: React.FC<{
   readAgents,
   readSources,
   onDirectMode,
+  onManageModel,
 }) => {
   const { t } = useTranslation();
   const [phase, setPhase] = React.useState<Phase>("loading");
@@ -171,6 +177,8 @@ export const RouteChainDialog: React.FC<{
   const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const reseedButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const cancelButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const closeButtonRef = React.useRef<HTMLButtonElement | null>(null);
+  const [originHelp, setOriginHelp] = React.useState(false);
   const saveButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const savingStatusRef = React.useRef<HTMLSpanElement | null>(null);
   const retryButtonRef = React.useRef<HTMLButtonElement | null>(null);
@@ -183,6 +191,10 @@ export const RouteChainDialog: React.FC<{
   const agent = selection?.agent ?? null;
   const modelId = selection?.modelId ?? "";
   const selectionBackend = selection?.agent.backend;
+  // Only an editable catalog row can be handed over: a locked row (Claude Code's
+  // `Default`) offers no actions in the catalog either, and a server that
+  // predates backend catalogs sends no list to answer from.
+  const catalogRow = agent?.catalog_models?.find((model) => model.id === modelId) ?? null;
   const draft = interaction.draft;
   const rovingIndex = interaction.focusIndex;
   const grabbed = interaction.grab?.index ?? null;
@@ -229,12 +241,23 @@ export const RouteChainDialog: React.FC<{
   const unresolvedPreview = restoring && preview === null;
   const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : savedOverride !== null;
   const canDiscardDraft = (phase === "ready" || phase === "rejected") && (dirty || restoring);
+  // A handoff leaves this dialog, so it is offered only on a settled, unedited
+  // route: mid-write phases own an exchange the user must finish, and an unsaved
+  // draft would be discarded without asking.
+  const manageableModel = Boolean(
+    onManageModel && catalogRow && !catalogRow.locked && phase === "ready" && !dirty && !restoring,
+  );
   const draftOrigin = manualDraft ? (draft.length ? 'manual' : null) : (preview ?? chain)?.route_origin ?? null;
   const announce = (key: TranslationKey, params?: Record<string, unknown>) =>
     setAnnouncement({ key, params });
   const focusAfterRender = (ref: React.RefObject<HTMLElement | null>) => {
     requestAnimationFrame(() => ref.current?.focus());
   };
+  // The footer carries a dismiss control only while there is a draft to
+  // discard; otherwise the header close is the dialog's single way out, so
+  // every "return focus to the way out" path resolves through here.
+  const focusDismiss = () =>
+    (cancelButtonRef.current ?? closeButtonRef.current)?.focus();
 
   const readChain = React.useCallback(async () => {
     if (!selectionBackend) return;
@@ -382,7 +405,7 @@ export const RouteChainDialog: React.FC<{
       } else if (reseedButtonRef.current && !reseedButtonRef.current.disabled) {
         reseedButtonRef.current.focus();
       } else {
-        cancelButtonRef.current?.focus();
+        focusDismiss();
       }
     });
     if (nextDraft.length > 0) {
@@ -653,7 +676,7 @@ export const RouteChainDialog: React.FC<{
   const retryUnknown = async () => {
     if (!selectionBackend || !submitted || phase !== "unknown") return;
     const token = ++generation.current;
-    cancelButtonRef.current?.focus();
+    focusDismiss();
     setPhase("reconciling");
     setReconcileFailed(false);
 
@@ -951,7 +974,7 @@ export const RouteChainDialog: React.FC<{
           ref={retryButtonRef}
           type="button"
           onClick={() => {
-            cancelButtonRef.current?.focus();
+            focusDismiss();
             void readChain();
           }}
         >
@@ -1092,7 +1115,10 @@ export const RouteChainDialog: React.FC<{
     ) : (
       <div className="model-hub-route-body flex flex-col">
         {!unresolvedPreview && !(manualDraft && draft.length === 0) && <div className="model-hub-route-origin-line">
-          <RouteOriginBadge origin={draftOrigin} backend={agent!.backend} interactive={false} />
+          {/* The line reads as the route in force unless an unsaved pin is
+              about to replace it, which `manualPending` already says itself. */}
+          {!(manualDraft && dirty) && <span className="model-hub-route-origin-now">{t('settings.models.routing.originNow')}</span>}
+          <RouteOriginBadge origin={draftOrigin} backend={agent!.backend} open={originHelp} onOpenChange={setOriginHelp} />
           <span>{t(manualDraft ? (dirty ? 'settings.models.routing.manualPending' : 'settings.models.routing.frozen') : 'settings.models.routing.follows', { backend })}</span>
         </div>}
         {unresolvedPreview && <div className="model-hub-route-preview" role="status">
@@ -1187,7 +1213,7 @@ export const RouteChainDialog: React.FC<{
           className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
-            cancelButtonRef.current?.focus();
+            focusDismiss();
           }}
           onEscapeKeyDown={(event) => {
             if (phase === "ready" && interactionRef.current.grab) {
@@ -1206,21 +1232,48 @@ export const RouteChainDialog: React.FC<{
                   { menuModel: modelId },
                 )}
               </DialogPrimitive.Title>
-              <DialogPrimitive.Close
-                disabled={phase === "saving"}
-                aria-label={
-                  t(
-                    phase === "guard"
-                      ? "settings.models.guard.cancel"
-                      : phase === "impact" || phase === "refreshing"
-                        ? "settings.models.routeDialog.impact.done"
-                        : "settings.models.routing.close",
-                  ) as string
-                }
-                className="model-hub-route-close grid shrink-0 place-items-center"
-              >
-                <X aria-hidden="true" />
-              </DialogPrimitive.Close>
+              <span className="model-hub-route-head-actions flex shrink-0 items-center gap-1.5">
+                {manageableModel && (
+                  <>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="model-hub-route-head-action"
+                      onClick={() => onManageModel?.("edit")}
+                    >
+                      <Pencil aria-hidden="true" />
+                      {t("settings.models.routeDialog.editModel")}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="model-hub-route-head-action"
+                      onClick={() => onManageModel?.("remove")}
+                    >
+                      <Trash2 aria-hidden="true" />
+                      {t("settings.models.routeDialog.removeModel")}
+                    </Button>
+                  </>
+                )}
+                <DialogPrimitive.Close
+                  ref={closeButtonRef}
+                  disabled={phase === "saving"}
+                  aria-label={
+                    t(
+                      phase === "guard"
+                        ? "settings.models.guard.cancel"
+                        : phase === "impact" || phase === "refreshing"
+                          ? "settings.models.routeDialog.impact.done"
+                          : "settings.models.routing.close",
+                    ) as string
+                  }
+                  className="model-hub-route-close grid shrink-0 place-items-center"
+                >
+                  <X aria-hidden="true" />
+                </DialogPrimitive.Close>
+              </span>
             </span>
             <DialogPrimitive.Description className="model-hub-route-subtitle font-mono text-muted">
               {phase === "guard"
@@ -1280,15 +1333,15 @@ export const RouteChainDialog: React.FC<{
                   disabled={phase !== 'ready' || !valid.valid}
                   onClick={() => setManualDraft(true)}
                 ><Pin aria-hidden />{t('settings.models.routing.pinRoute')}</Button>}
-                <Button
+                {canDiscardDraft && <Button
                   ref={cancelButtonRef}
                   type="button"
                   variant="outline"
                   className="model-hub-dialog-action"
-                  onClick={canDiscardDraft ? cancelChanges : close}
+                  onClick={cancelChanges}
                 >
-                  {t(canDiscardDraft ? 'settings.models.routing.cancelChanges' : 'settings.models.routing.close')}
-                </Button>
+                  {t('settings.models.routing.cancelChanges')}
+                </Button>}
                 <Button
                   ref={saveButtonRef}
                   type="button"

@@ -243,13 +243,57 @@ describe("RouteChainDialog", () => {
         }
       });
       const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
-      const labels = state === 'inherited' ? ['Pin current route', 'Close', 'Save']
-        : [state === 'preview' ? 'Undo restore' : 'Restore automatic', state === 'preview' ? 'Cancel changes' : 'Close', 'Save'];
+      const labels = state === 'inherited' ? ['Pin current route', 'Save']
+        : state === 'preview' ? ['Undo restore', 'Cancel changes', 'Save'] : ['Restore automatic', 'Save'];
       expect(footer.getAllByRole('button').map((button) => button.textContent)).toEqual(labels);
       for (const label of labels) expect(footer.getByRole('button', { name: label }).hasAttribute('hidden')).toBe(false);
       expect(screen.getByRole('dialog').classList.contains('overflow-hidden')).toBe(true);
     },
   );
+
+  it('hands the model to the catalog from the head, only while the route is unedited', async () => {
+    const user = userEvent.setup();
+    const catalogRow = { id: 'opus-5', display_name: null, origin: 'manual' as const, models_dev_id: null, context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true };
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+    const manage = vi.fn();
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog
+      selection={{ agent: { ...agent, catalog_models: [catalogRow] }, modelId: 'opus-5', read: readyRegion(chain) }}
+      sources={sources} onClose={vi.fn()} onManageModel={manage} readAgents={vi.fn()} readSources={vi.fn()}
+    /></I18nextProvider>);
+    const head = within(document.querySelector<HTMLElement>('.model-hub-route-head')!);
+    await user.click(await head.findByRole('button', { name: 'Edit model' }));
+    await user.click(head.getByRole('button', { name: 'Remove model' }));
+    expect(manage.mock.calls).toEqual([['edit'], ['remove']]);
+    // An unsaved draft would be dropped by leaving, so the handoff steps aside.
+    await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
+    expect(head.queryByRole('button', { name: 'Edit model' })).toBeNull();
+    expect(head.queryByRole('button', { name: 'Remove model' })).toBeNull();
+  });
+
+  it('offers no catalog handoff for a locked row', async () => {
+    const lockedRow = { id: 'opus-5', display_name: null, origin: 'builtin' as const, models_dev_id: null, context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: true, routeable: true };
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog
+      selection={{ agent: { ...agent, catalog_models: [lockedRow] }, modelId: 'opus-5', read: readyRegion(chain) }}
+      sources={sources} onClose={vi.fn()} onManageModel={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
+    /></I18nextProvider>);
+    await screen.findAllByRole('button', { name: 'Remove hop' });
+    expect(screen.queryByRole('button', { name: 'Edit model' })).toBeNull();
+  });
+
+  it('labels the origin line as the current route and explains the origin on hover', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog
+      selection={{ agent, modelId: 'opus-5', read: readyRegion(chain) }}
+      sources={sources} onClose={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
+    /></I18nextProvider>);
+    await screen.findAllByRole('button', { name: 'Remove hop' });
+    const line = document.querySelector<HTMLElement>('.model-hub-route-origin-line')!;
+    expect(within(line).getByText('Current')).toBeTruthy();
+    await user.hover(within(line).getByRole('button', { name: 'Manual' }));
+    expect((await screen.findByText(/This model has a saved, fixed route/)).closest('.model-hub-origin-help')).toBeTruthy();
+  });
 
   it('closes an unchanged inherited editor without creating manual intent', async () => {
     const user = userEvent.setup();
@@ -265,8 +309,10 @@ describe("RouteChainDialog", () => {
 
     await screen.findAllByRole('button', { name: 'Edit hop' });
     const footer = within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
-    const dismiss = footer.getByRole('button', { name: 'Close' });
-    expect(dismiss.textContent).toBe('Close');
+    // The header close is the only dismiss control while there is nothing to discard.
+    const dismiss = screen.getByRole('button', { name: 'Close' });
+    expect(dismiss.classList.contains('model-hub-route-close')).toBe(true);
+    expect(footer.queryByRole('button', { name: 'Close' })).toBeNull();
     expect(footer.queryByRole('button', { name: 'Cancel' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Cancel changes' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Add a hop' })).toBeTruthy();

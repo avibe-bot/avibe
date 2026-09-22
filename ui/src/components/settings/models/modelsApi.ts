@@ -130,6 +130,7 @@ export type ModelsApi = {
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   getAgentProvenance(backend: AgentBackend, model: string): Promise<TurnProvenance | null>;
+  getTurnProvenance(turnId: string): Promise<TurnProvenance>;
   /** Complete overview chain projection for one Hub backend. */
   getAgentChains(backend: AgentBackend): Promise<AgentChain[]>;
   /** Total replacement of the exact stored chain. */
@@ -605,6 +606,7 @@ export const modelsApi: ModelsApi = {
     jsonInit('POST', order === undefined ? undefined : { order }),
   ).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  getTurnProvenance: (turnId) => call<{ provenance: TurnProvenance }>(`/api/models/turns/${encodeURIComponent(turnId)}/provenance`).then((r) => r.provenance),
   getAgentProvenance: (backend, model) => call<{ provenance: TurnProvenance | null }>(`/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`).then((r) => r.provenance),
   getAgentChains: (backend) => call<{ chains: AgentChain[] }>(`/api/models/agents/${backend}/chains`).then((r) => r.chains),
   putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),

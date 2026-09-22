@@ -904,7 +904,7 @@
           "summary_other": "{{count}} Agents need attention",
           "modelMissing": "No model selected",
           "routeMissing": "{{model}} is not a known model name. Change this Agent's model, or add a route for {{model}}.",
-          "degraded": "Model supply degraded",
+          "degraded": "Some sources are unavailable; requests fall back to the next one",
           "waiting": "Waiting for a source to recover",
           "interrupted": "No source is available for this model"
         },
@@ -1171,6 +1171,7 @@
           "passthrough": "Passthrough",
           "unconfigured": "Unconfigured"
         },
+        "originNow": "Current",
         "help": {
           "automatic": "Matched by model name.\nSource order follows {{backend}} default routing.",
           "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
@@ -1387,6 +1388,8 @@
           "confirm": "Replace",
           "replaced": "Hop {{position}} replaced."
         },
+        "editModel": "Edit model",
+        "removeModel": "Remove model",
         "sourceMissing": "Source missing",
         "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Replace or remove it before saving.",
         "reorder": {
@@ -4354,6 +4357,49 @@
         "more": "+{{count}}",
         "showMore": "Show {{count}} more attachments",
         "collapse": "Collapse attachments"
+      }
+    },
+    "failureDetails": {
+      "show": "Show details",
+      "hide": "Hide details",
+      "loading": "Loading what happened upstream…",
+      "failed": "Couldn't load the details.",
+      "unavailable": {
+        "not_found": "No gateway record exists for this turn, so there are no upstream details to show.",
+        "direct_mode": "This turn didn't go through the model gateway, so there's no upstream record.",
+        "attribution_ambiguous": "This turn's gateway record couldn't be matched reliably, so it isn't shown."
+      },
+      "outcome": {
+        "served": "{{model}} was eventually served.",
+        "exhausted": "Every source for {{model}} failed upstream.",
+        "failed_terminal": "The upstream API rejected the request for {{model}}.",
+        "no_candidate": "No source could serve {{model}} when the request was made.",
+        "canceled": "The request for {{model}} was canceled."
+      },
+      "httpStatus": "HTTP status",
+      "errorCode": "Error code",
+      "reasonLabel": "Reason",
+      "blockers": "Sources that were unavailable",
+      "upstreamNote": "These codes come from the upstream provider's API. Avibe keeps the status and error code but never stores the provider's raw response text, because it can echo credentials.",
+      "copyRecord": "Copy record",
+      "reason": {
+        "quota_exhausted": "Quota exhausted",
+        "rate_limited": "Rate limited",
+        "server_error": "Upstream server error",
+        "network": "Network error",
+        "recovery": "Recovering",
+        "manual": "Switched manually",
+        "credential_expired": "Credential expired",
+        "credential_revoked": "Credential revoked",
+        "balance_exhausted": "Balance exhausted",
+        "account_banned": "Account suspended",
+        "permission_denied": "Permission denied",
+        "unclassified_error": "Unclassified upstream error",
+        "no_enabled_source": "No source is enabled",
+        "no_eligible_source": "No source can serve this model",
+        "route_unconfigured": "No route configured",
+        "source_missing": "Source no longer exists",
+        "model_unsupported": "Model not offered by this source"
       }
     }
   },

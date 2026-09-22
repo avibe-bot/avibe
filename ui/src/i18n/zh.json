@@ -851,7 +851,7 @@
           "refreshAgents": "重新检测 Agent 后端"
         },
         "benefits": {
-          "title": "切换到模型网关，你会多出三件事",
+          "title": "切换到模型网关，有三大益处",
           "1": "额度用尽不断线",
           "1.detail": "Claude 订阅用满时，自动切换到下一个供应商，对话继续。",
           "2": "一个 Key 用于多个后端",
@@ -904,7 +904,7 @@
           "summary_other": "{{count}} 个 Agent 需关注",
           "modelMissing": "未选择模型",
           "routeMissing": "{{model}} 模型名不存在，请修改此 agent 的模型名或添加 {{model}} 模型的路由",
-          "degraded": "模型供应已降级",
+          "degraded": "部分供应商不可用，请求已自动切换到其他供应商",
           "waiting": "等待供应商恢复",
           "interrupted": "此模型没有可用供应商"
         },
@@ -1171,6 +1171,7 @@
           "passthrough": "透传",
           "unconfigured": "未配置"
         },
+        "originNow": "当前",
         "help": {
           "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
           "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
@@ -1387,6 +1388,8 @@
           "confirm": "替换",
           "replaced": "已替换第 {{position}} 个路由项。"
         },
+        "editModel": "编辑模型",
+        "removeModel": "删除模型",
         "sourceMissing": "供应商不存在",
         "invalidAfterRefresh": "这个路由项在刷新后的供应商中不可用。替换或移除后再保存。",
         "reorder": {
@@ -4354,6 +4357,49 @@
         "more": "+{{count}}",
         "showMore": "显示其余 {{count}} 个附件",
         "collapse": "收起附件"
+      }
+    },
+    "failureDetails": {
+      "show": "查看详情",
+      "hide": "收起详情",
+      "loading": "正在读取上游返回的情况…",
+      "failed": "详情读取失败。",
+      "unavailable": {
+        "not_found": "这一轮没有模型网关记录，暂无上游详情可看。",
+        "direct_mode": "这一轮没有经过模型网关，所以没有上游记录。",
+        "attribution_ambiguous": "这一轮的网关记录无法准确对应，因此不予显示。"
+      },
+      "outcome": {
+        "served": "{{model}} 最终已成功响应。",
+        "exhausted": "{{model}} 的所有供应商在上游都失败了。",
+        "failed_terminal": "上游 API 拒绝了 {{model}} 的请求。",
+        "no_candidate": "请求时没有可以提供 {{model}} 的供应商。",
+        "canceled": "{{model}} 的请求已取消。"
+      },
+      "httpStatus": "HTTP 状态码",
+      "errorCode": "错误码",
+      "reasonLabel": "原因",
+      "blockers": "当时不可用的供应商",
+      "upstreamNote": "以上状态码与错误码均由上游供应商的 API 返回。Avibe 会保留状态码和错误码，但不会保存供应商返回的原始报文，因为其中可能包含凭据。",
+      "copyRecord": "复制记录",
+      "reason": {
+        "quota_exhausted": "额度用尽",
+        "rate_limited": "触发限流",
+        "server_error": "上游服务器错误",
+        "network": "网络错误",
+        "recovery": "恢复中",
+        "manual": "手动切换",
+        "credential_expired": "凭据已过期",
+        "credential_revoked": "凭据已吊销",
+        "balance_exhausted": "余额不足",
+        "account_banned": "账号被封禁",
+        "permission_denied": "无权限",
+        "unclassified_error": "未分类的上游错误",
+        "no_enabled_source": "没有已启用的供应商",
+        "no_eligible_source": "没有能提供该模型的供应商",
+        "route_unconfigured": "尚未配置路由",
+        "source_missing": "供应商已不存在",
+        "model_unsupported": "该供应商不提供此模型"
       }
     }
   },

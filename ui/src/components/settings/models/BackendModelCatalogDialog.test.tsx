@@ -137,6 +137,30 @@ describe('BackendModelCatalogDialog', () => {
     expect(screen.getByText('2 models')).toBeTruthy();
   });
 
+  it('opens straight onto the named row\'s editor once, never on a locked row', async () => {
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    expect(await screen.findByRole('button', { name: 'Save model' })).toBeTruthy();
+    cleanup();
+
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([locked, model('alpha')]));
+    renderDialog({ focus: { modelId: 'claude-default', action: 'edit' } });
+    await screen.findByText('claude-default');
+    expect(screen.queryByRole('button', { name: 'Save model' })).toBeNull();
+  });
+
+  it('opens a routed row\'s removal on the same confirmation its own button asks', async () => {
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')], {
+      routes: { beta: { hops: [{ source_id: 'src_a', model_id: 'beta-air' }] } },
+    }));
+    const write = vi.spyOn(modelsApi, 'putAgentModels');
+    renderDialog({ focus: { modelId: 'beta', action: 'remove' } });
+    const asked = await screen.findByRole('alert');
+    expect(asked.textContent).toContain('beta-air');
+    expect(screen.getByText('2 models')).toBeTruthy();
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('renders Claude models without inventing a native default choice', async () => {
     await i18n.changeLanguage('zh');
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([

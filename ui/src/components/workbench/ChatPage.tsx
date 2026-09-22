@@ -60,6 +60,7 @@ import {
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
+import { FailureDetails } from './FailureDetails';
 import { FailureRetry } from './FailureRetry';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
@@ -4842,6 +4843,7 @@ export const MessageRow = memo(function MessageRow({
               onRetry={onFailureRetry}
             />
           )}
+          <FailureDetails message={message} />
           {time}
         </div>
       </div>
