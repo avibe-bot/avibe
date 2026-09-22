@@ -362,3 +362,76 @@ unit and a test can assert the effect sequence.
   byte-identical, which is why the guard test lives in its own file rather than
   in `tests/test_desktop_release.py`. Tag `gh-v3.1.1rc5` stays spent. Push is
   held pending explicit candidate clearance.
+
+## H8 — packaging observability after the second TEST prerelease
+
+`gh-v3.1.1rc6` ran the desktop packaging matrix from `902c447141df` and failed on
+two of three targets, so nothing was published. Desktop packaging has never run
+outside this PR — neither `.github/workflows/desktop-package.yml` nor
+`desktop/scripts/build-runtime-bundle.py` exists on master — so these are first
+exposures rather than regressions, and more should be expected.
+
+### What the Windows job showed, and what it did not
+
+The private-Runtime probe failed because the service process exited before
+acquiring the service lock, about 28 seconds after `vibe start` spawned it. Why
+it exited is **not** in the job log, and cannot be: the probe runs with its
+entire HOME inside a `TemporaryDirectory`, so `runtime/service_stderr.log` and
+`logs/vibe_remote.log` are written and deleted without ever being read. The job
+instead reported a `PermissionError` on a payload DLL — the last of four stacked
+exceptions and the least informative.
+
+Four separate defects turned one failure into an unreadable one, and each is
+fixed here:
+
+- **The probe's own logs were discarded.** `verify_payload` now reports every
+  diagnostic file under the probe HOME to stderr before the directory is
+  removed, naming the files that are absent as well as the ones that exist.
+- **The failure path orphaned processes.** Nothing killed the spawned service or
+  UI. `vibe/runtime.py` returns the UI pid even when its health checks fail —
+  pre-existing behaviour, deliberately left alone in a release round — so a live
+  UI kept holding the log handles that made the temporary directory's removal
+  fail. The probe now terminates whatever its pid files still name.
+- **The `finally` replaced the real exception.** `vibe stop` ran with a 60s
+  timeout raised straight out of `finally`, superseding the `CalledProcessError`
+  that carried the actual failure, with both streams at DEVNULL so the stop's own
+  account was discarded too. `stop_private_runtime` now reports its outcome
+  instead of raising it, and prints what it captured.
+- **Cleanup noise masked the result.** Both `TemporaryDirectory` uses now pass
+  `ignore_cleanup_errors=True`, so a leftover Windows handle leaves a stale
+  directory rather than becoming the exception the job reports.
+
+The authoritative proof is the next CI run. That is the point: this round buys
+legibility for an unknown number of remaining first-exposure failures rather
+than guessing at this one. The one added test covers the real seam —
+`collect_probe_diagnostics` — and is mutation-checked against dropping the tail
+slice and against skipping absent files silently. The subprocess orchestration
+is deliberately not harnessed.
+
+### macOS DMG
+
+`hdiutil create` failed with "Resource busy" on `aarch64-apple-darwin` while the
+identical script succeeded on `x86_64-apple-darwin` in the same run, so this is
+imaging flake, not a code defect. It now retries up to three times with a pause,
+and the final failure is still a build failure.
+
+The signature detection beside it was broken: `sed -n 's/^Signature=adhoc$/p'`
+has no replacement field, so sed errored on every invocation and `adhoc` was
+always empty, leaving the branch to be decided by `-z "$identity"` alone. The
+expression is now `sed -n '/^Signature=adhoc$/p'`.
+
+**No case changes behaviour.** `Signature=adhoc` and `Authority=` are mutually
+exclusive in `codesign` output — an ad-hoc signature has no certificate chain and
+prints no Authority line — so a correctly detected ad-hoc bundle was already
+taking the ad-hoc branch through the empty-identity test. Checked against all
+three real output shapes: ad-hoc, Developer ID, and unsigned each select the same
+branch before and after. It is a correctness and noise fix that finally makes the
+code do what the comment above it has always claimed.
+
+The same broken expression also appears in `.github/workflows/desktop-package.yml`
+at the "Verify macOS app signature matches the signing path" step. That file is
+in the frozen release-implementation set and is **not** touched here. The same
+analysis applies — its `adhoc` is always empty, the identity branch still turns
+on `-z "$authority"`, and the TEST branch uses `grep -q` directly rather than the
+sed — so it is noise with no behavioural consequence, reported to the
+orchestrator rather than fixed under the freeze.

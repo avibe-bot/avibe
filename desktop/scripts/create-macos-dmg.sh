@@ -27,7 +27,7 @@ fi
 # covers self-signed identities without a team. verbose=4 is required for
 # Authority output.
 identity=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)
-adhoc=$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)
+adhoc=$(codesign -dv "$app" 2>&1 | sed -n '/^Signature=adhoc$/p' || true)
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/avibe-dmg.XXXXXX")
 trap 'rm -rf "$staging"' EXIT HUP INT TERM
@@ -53,12 +53,30 @@ fi
 # Tauri's decorated DMG helper drives Finder through AppleScript, which is
 # brittle on headless CI and hardened developer machines. A plain compressed
 # image has the same install semantics and no GUI dependency.
-hdiutil create \
-  -volname Avibe \
-  -srcfolder "$staging" \
-  -format UDZO \
-  -imagekey zlib-level=9 \
-  -ov \
-  "$output"
+#
+# `hdiutil create` intermittently fails with "Resource busy" on CI while the
+# identical call succeeds on another runner in the same job matrix: the imaging
+# helper contends with whatever still holds the freshly written staging tree.
+# Retry a bounded number of times with a pause, and let the last attempt's
+# failure through unchanged so a real defect is still a build failure.
+attempt=1
+while :; do
+  if hdiutil create \
+    -volname Avibe \
+    -srcfolder "$staging" \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -ov \
+    "$output"; then
+    break
+  fi
+  if [ "$attempt" -ge 3 ]; then
+    echo "hdiutil create failed after $attempt attempts" >&2
+    exit 1
+  fi
+  echo "hdiutil create failed (attempt $attempt); retrying" >&2
+  attempt=$((attempt + 1))
+  sleep 5
+done
 
 hdiutil verify "$output"

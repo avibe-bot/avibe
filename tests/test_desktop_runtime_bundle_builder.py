@@ -205,3 +205,28 @@ def test_runtime_zip_is_byte_for_byte_deterministic(tmp_path):
 
     assert first_metadata == second_metadata
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_probe_diagnostics_report_every_log_including_the_ones_that_are_missing(tmp_path):
+    probe_home = tmp_path / "avibe-probe-xyz"
+    (probe_home / "runtime").mkdir(parents=True)
+    (probe_home / "logs").mkdir()
+    (probe_home / "runtime" / "service_stderr.log").write_text(
+        "ModuleNotFoundError: No module named 'win32api'\n", encoding="utf-8"
+    )
+    (probe_home / "runtime" / "ui_stdout.log").write_text("", encoding="utf-8")
+    (probe_home / "logs" / "vibe_remote.log").write_bytes(b"head\n" + b"pad\n" * 64 + b"tail line\n")
+
+    report = builder.collect_probe_diagnostics(probe_home, tail_bytes=64)
+
+    # The reason the probe failed has to survive into the job log.
+    assert "ModuleNotFoundError: No module named 'win32api'" in report
+    # A log that was never written is itself evidence, so it is named rather
+    # than silently skipped.
+    assert "runtime/service_stdout.log: absent" in report
+    assert "runtime/ui_stdout.log (0 bytes)" in report
+    assert "(empty)" in report
+    # Truncation keeps the tail: a crash is at the end of a log, not the start.
+    assert "tail line" in report
+    assert "head" not in report
+    assert "last 64 of 271 bytes" in report

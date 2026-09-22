@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -29,6 +30,24 @@ DEFAULT_OUTPUT = DESKTOP_DIR / "src-tauri" / "resources" / "runtime"
 COPY_CHUNK = 1024 * 1024
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 TREE_HASH_DOMAIN = b"avibe-runtime-tree-v1\0"
+
+# Everything the probe Runtime records about its own startup, relative to the
+# probe HOME. The process logs are the runtime directory's sink files; the
+# application log is the service's own structured output.
+PROBE_DIAGNOSTIC_FILES = (
+    "runtime/service_stderr.log",
+    "runtime/service_stdout.log",
+    "runtime/ui_stderr.log",
+    "runtime/ui_stdout.log",
+    "runtime/status.json",
+    "logs/vibe_remote.log",
+)
+PROBE_PID_FILES = (
+    "runtime/vibe.pid",
+    "runtime/vibe-ui.pid",
+    "runtime/remote-access-cloudflared.pid",
+)
+PROBE_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 
 
 def sha256(path: Path) -> str:
@@ -345,6 +364,82 @@ def reserve_loopback_port() -> int:
         return int(listener.getsockname()[1])
 
 
+def collect_probe_diagnostics(
+    probe_home: Path,
+    *,
+    tail_bytes: int = PROBE_DIAGNOSTIC_TAIL_BYTES,
+) -> str:
+    """Render what the probe Runtime recorded about itself, for the job log.
+
+    The probe runs with its whole HOME inside a temporary directory, so the
+    service and UI logs that explain a startup failure are written and then
+    deleted without ever reaching the job output. Whoever reads the job is left
+    holding an exception about the probe rather than about the process that
+    died. Every file is optional: the point is to report whatever exists.
+    """
+    sections = [f"--- Private Runtime probe diagnostics: {probe_home} ---"]
+    for relative in PROBE_DIAGNOSTIC_FILES:
+        path = probe_home.joinpath(*relative.split("/"))
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            sections.append(f"--- {relative}: absent ---")
+            continue
+        except OSError as error:
+            sections.append(f"--- {relative}: unreadable: {error} ---")
+            continue
+        kept = f"last {tail_bytes} of {len(raw)} bytes" if len(raw) > tail_bytes else f"{len(raw)} bytes"
+        sections.append(f"--- {relative} ({kept}) ---")
+        sections.append(raw[-tail_bytes:].decode("utf-8", "replace").strip() or "(empty)")
+    return "\n".join(sections)
+
+
+def terminate_probe_processes(probe_home: Path) -> None:
+    """Take down whatever the probe's pid files still name.
+
+    `vibe stop` is the supported path and has already run; this covers only what
+    it could not. A UI process that failed its health checks is still recorded
+    and left running, and the log handles it holds make the temporary
+    directory's removal fail on Windows, so a cleanup error ends up replacing
+    the real one. A survivor would also still hold the reserved port.
+    """
+    for relative in PROBE_PID_FILES:
+        path = probe_home.joinpath(*relative.split("/"))
+        try:
+            pid = int(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        print(f"--- terminating leftover probe process {relative} pid={pid} ---", file=sys.stderr, flush=True)
+        if os.name == "nt":
+            # /T carries the inherited log sinks with it, and without /F a
+            # process already wedged enough to reach here will not go.
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False,
+                capture_output=True,
+                timeout=30,
+            )
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            continue
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
 def verify_payload(
     target_config: dict[str, Any],
     payload: Path,
@@ -354,14 +449,32 @@ def verify_payload(
     # Keep AVIBE_HOME short on macOS: its absolute state path is embedded in the
     # AF_UNIX dispatch address, whose platform limit is much smaller than a
     # typical CI checkout path.
-    with tempfile.TemporaryDirectory(prefix="avibe-probe-") as probe_home:
-        _verify_payload_with_home(
-            target_config,
-            payload,
-            work_dir,
-            Path(probe_home),
-            expected_npm_version,
-        )
+    #
+    # Cleanup errors are ignored because a process that outlived the failure
+    # path holds handles here on Windows, and the resulting PermissionError
+    # would be the exception the job reports instead of the one that matters.
+    with tempfile.TemporaryDirectory(prefix="avibe-probe-", ignore_cleanup_errors=True) as probe_home:
+        home = Path(probe_home)
+        try:
+            _verify_payload_with_home(
+                target_config,
+                payload,
+                work_dir,
+                home,
+                expected_npm_version,
+            )
+        except BaseException:
+            # SystemExit is how this script reports verification failures, so
+            # this has to catch BaseException to see them at all. The probe HOME
+            # is about to be removed and takes the only account of the failure
+            # with it, so report it here, and leave nothing running.
+            terminate_probe_processes(home)
+            # The log sinks are separate processes that exit once the pipe they
+            # hold closes; give them a moment to drain before reading.
+            time.sleep(1.0)
+            sys.stdout.flush()
+            print(collect_probe_diagnostics(home), file=sys.stderr, flush=True)
+            raise
 
 
 def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> dict[str, str]:
@@ -412,6 +525,41 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path) -> di
         "VIBE_MODEL_HUB_ENABLED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+
+
+def _stop_report(outcome: str, stdout: str | None, stderr: str | None) -> str:
+    lines = [f"--- vibe stop ({outcome}) ---"]
+    for name, stream in (("stdout", stdout), ("stderr", stderr)):
+        text = (stream or "").strip()
+        if text:
+            lines.append(f"--- vibe stop {name} ---")
+            lines.append(text)
+    return "\n".join(lines)
+
+
+def stop_private_runtime(command: list[str], work_dir: Path, env: dict[str, str]) -> tuple[bool, str]:
+    """Stop the probe Runtime, reporting the outcome instead of raising it.
+
+    This is called from a `finally`, where a timeout raised here would replace
+    the exception that explains why the probe failed; sending the streams to
+    DEVNULL would discard the stop's own account of what it found, which is the
+    other half of the same problem. Both are captured and handed back.
+    """
+    try:
+        result = subprocess.run(
+            [*command, "stop"],
+            cwd=work_dir,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as error:
+        return False, _stop_report("timed out after 60s", error.stdout, error.stderr)
+    except OSError as error:
+        return False, _stop_report(f"could not run: {error}", None, None)
+    return result.returncode == 0, _stop_report(f"exit {result.returncode}", result.stdout, result.stderr)
 
 
 def _verify_payload_with_home(
@@ -480,7 +628,6 @@ def _verify_payload_with_home(
         raise SystemExit("Private Runtime npm version does not match runtime-sources.json")
 
     ready_url = f"http://127.0.0.1:{port}/ready"
-    stop_result: subprocess.CompletedProcess[str] | None = None
     try:
         run([*command, "start", "--no-open-browser"], cwd=work_dir, env=env)
         deadline = time.monotonic() + 90
@@ -502,16 +649,9 @@ def _verify_payload_with_home(
         else:
             raise SystemExit(f"Private Runtime did not become ready: {last_error}")
     finally:
-        stop_result = subprocess.run(
-            [*command, "stop"],
-            cwd=work_dir,
-            env=env,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=60,
-        )
-    if stop_result.returncode != 0:
+        stopped, stop_report = stop_private_runtime(command, work_dir, env)
+        print(stop_report, file=sys.stderr, flush=True)
+    if not stopped:
         raise SystemExit("Private Runtime failed to stop cleanly")
 
     deadline = time.monotonic() + 15
@@ -553,7 +693,14 @@ def main() -> int:
 
     work_parent = DESKTOP_DIR / "target"
     work_parent.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f"runtime-{args.target}-", dir=work_parent) as temporary:
+    # Same reason as the probe HOME: a leftover Windows handle on the payload's
+    # own DLLs must not turn into the exception the job reports. The stale
+    # directory under desktop/target/ is the cheaper of the two outcomes.
+    with tempfile.TemporaryDirectory(
+        prefix=f"runtime-{args.target}-",
+        dir=work_parent,
+        ignore_cleanup_errors=True,
+    ) as temporary:
         work_dir = Path(temporary)
         payload = work_dir / "payload"
         python_root = extract_source(python_archive, payload)
