@@ -44,6 +44,7 @@ write to ``~/.avibe/`` or legacy ``~/.vibe_remote/``).
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 import shutil
 import sqlite3
@@ -457,3 +458,57 @@ def _reset_show_runtime_manager():
         show_runtime.set_show_runtime_manager_for_tests(None)
     except Exception:
         pass
+
+
+def _async_items_missing_plugin(items) -> list:
+    """Return the selected items that need pytest-asyncio but would not get it.
+
+    ``anyio``-marked coroutines are excluded: anyio is a runtime dependency, so
+    its pytest plugin is present wherever the package installs, and it drives
+    those tests itself.
+    """
+    offenders = []
+    for item in items:
+        if item.get_closest_marker("anyio") is not None:
+            continue
+        try:
+            func = item.obj
+        except Exception:
+            # Exotic collectors (doctests, custom items) have no test function.
+            continue
+        if inspect.iscoroutinefunction(func):
+            offenders.append(item)
+    return offenders
+
+
+def pytest_collection_modifyitems(config, items):
+    """Fail once, up front, when async tests are selected without pytest-asyncio.
+
+    ``asyncio_mode = "auto"`` only takes effect when the plugin is installed.
+    Without it each of the suite's ~1670 ``async def`` tests fails on its own
+    with "async def functions are not natively supported", while the mode
+    setting is reported merely as an unknown-config warning. That names the
+    tests instead of the one missing dev dependency, so a suite run in an
+    environment that never installed the dev group reads as a broad product
+    regression -- measured as 10 failures across 2 files after 146s in a
+    container whose runtime venv installs only the wheel.
+
+    This is a collection-time check rather than a ``required_plugins`` entry in
+    pyproject because that key is a rootdir-wide prerequisite enforced *before*
+    collection: it also aborts the packaged-test job (.github/workflows/lint.yml,
+    which installs ``dist/*.whl pytest``) and the publish finalizer
+    (.github/workflows/publish.yml, ``pip install -e . build pytest``), both of
+    which select synchronous tests only and legitimately have no async plugin.
+    Keying off the selected items puts the guard on exactly the runs it is for.
+    """
+    if config.pluginmanager.hasplugin("asyncio"):
+        return
+    offenders = _async_items_missing_plugin(items)
+    if not offenders:
+        return
+    raise pytest.UsageError(
+        f"{len(offenders)} selected tests are 'async def' but pytest-asyncio is "
+        'not installed, so asyncio_mode="auto" is inactive and every one of them '
+        "would fail as 'async def functions are not natively supported'. "
+        "Install the dev dependency group (uv sync --group dev)."
+    )
