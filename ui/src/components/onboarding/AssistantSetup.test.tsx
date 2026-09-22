@@ -14,8 +14,13 @@ import type { SetupAction } from './setupFlow';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
-} }));
+  listVibeAgents: vi.fn(), getVibeAgent: vi.fn(),
+}, models: { getAgentChain: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
+vi.mock('../settings/models/modelsApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
+  return { ...actual, modelsApi: { ...actual.modelsApi, ...mock.models } };
+});
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
 vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => ({ permissionAllowed: true, statusLoaded: true }) }));
@@ -43,6 +48,10 @@ beforeEach(() => {
   mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [] });
   mock.api.detectCli.mockResolvedValue({ found: true, path: '/isolated/bin/assistant' });
   mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: false });
+  mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [], default_agent_name: null });
+  mock.api.getVibeAgent.mockResolvedValue({ ok: false, agent: null });
+  mock.models.listSources.mockResolvedValue([]);
+  mock.models.getAgentChain.mockRejectedValue(new Error('chain unread'));
 });
 afterEach(cleanup);
 
@@ -127,7 +136,7 @@ describe('assistant installation presentation', () => {
     expect(await row('Claude Code').findByRole('button', { name: 'API Key connected' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
   });
-  it('opens Model Hub directly when the backend is already Hub-owned', async () => {
+  it('opens the setup route editor when the backend is already Hub-owned', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true,
@@ -140,12 +149,36 @@ describe('assistant installation presentation', () => {
       entry_eligible: false,
       supply_mode: 'hub',
     }));
-    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    const action = await row('Claude Code').findByRole('button', { name: en.settings.backends.openModelHub });
+    const agent = {
+      id: 'claude-claude', name: 'claude', display_name: 'claude', description: null, backend: 'claude',
+      model: 'opus-5', reasoning_effort: null, enabled: true, archived: false, archived_at: null, source: 'file',
+      updated_at: '', system_prompt: null, created_at: '', metadata: { builtin_default: true },
+    };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [agent], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
+    mock.models.listSources.mockResolvedValue([]);
+    mock.models.getAgentChain.mockResolvedValue({
+      contract_version: 10, backend: 'claude', model_id: 'opus-5',
+      manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }] },
+      route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
+      chain: [{ source_id: 'src_a', model_id: 'opus-5', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
+      supply_state: 'ok',
+    });
+    const flowState = { providerSelection: { scan: null, selectedBackends: [] }, importedCount: 0, addedThroughMore: [], routeOrder: [], routeOrderDirty: false };
+    const agentReads = {
+      read: async () => ({ kind: 'current' as const, value: [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }] }),
+      refresh: async () => ({ kind: 'current' as const, value: [] }),
+      readValue: async () => [],
+      invalidate: () => undefined,
+    };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={flowState} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={agentReads} />));
+    const action = await row('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute });
+    const enter = screen.getByRole('button', { name: 'Enter workspace' });
+    expect(enter.hasAttribute('disabled')).toBe(true);
     fireEvent.click(action);
-    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/models'));
-    expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
+    expect(await screen.findByRole('dialog', { name: en.onboarding.route.title })).toBeTruthy();
+    expect(screen.getByTestId('location').textContent).toBe('/');
+    expect(enter.hasAttribute('disabled')).toBe(true);
   });
   it('an available update keeps Continue and configuration usable', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
@@ -586,6 +619,40 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     await waitFor(() => expect(cardAlert()).toContain('fixture persist failure'));
     expect(row('Claude Code').getAllByRole('alert')).toHaveLength(1);
     expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+  });
+  // The presence read is the last thing a queued enable does, and the only one that can
+  // reject. A rejection used to settle the serial queue itself rejected, so every later
+  // toggle chained onto a continuation that never ran: the next enable wrote nothing,
+  // and nothing on the card said why. The write and the read after it answer separately.
+  it('a presence read that failed is reported and still leaves the next toggle able to run', async () => {
+    const saved = data(); saved.agents.claude.status = 'ok';
+    let backendEnabled = true;
+    mock.api.mutateConfig.mockImplementation(async () => { backendEnabled = !backendEnabled; return {}; });
+    mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name, name === 'claude' ? backendEnabled : true));
+    let presenceFails = true;
+    const refresh = vi.fn(async () => {
+      if (presenceFails) { presenceFails = false; throw new Error('fixture presence failure'); }
+      return { kind: 'current' as const, value: [] };
+    });
+    const agentReads = { read: async () => ({ kind: 'current' as const, value: [] }), refresh, readValue: async () => [], invalidate: () => undefined };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} agentReads={agentReads} />));
+    const checkbox = row('Claude Code').getByRole('switch') as HTMLElement;
+    const enter = screen.getByRole('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+
+    fireEvent.click(checkbox);
+    expect((await row('Claude Code').findByRole('alert')).textContent).toContain('fixture presence failure');
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
+    expect(enter.hasAttribute('disabled')).toBe(true);
+
+    // Still a queue. The next toggle writes, and the connection read it carries settles
+    // the card — which only happens once the finished write released its pending enable.
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
+    expect(cardAlert()).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(checkedOf(checkbox)).toBe(true);
   });
   it('delayed modal config cannot undo a newer authoritative enablement result', async () => {
     const checkbox = mountReady(); await row('Claude Code').findByRole('button', { name: 'API Key connected' });

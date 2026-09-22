@@ -36,10 +36,14 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it('derives the interim and complete journey from a static registry alone', () => {
-  expect(SETUP_REGISTERED_SCREENS).toEqual(['intro', 'assistants']);
-  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'assistants')).toBe('intro');
-  expect(registeredSetupSequence({ intro: true, providers: true, assistants: true })).toEqual(SETUP_SCREENS);
+it('derives the journey from a static registry alone, in the contract order', () => {
+  expect(SETUP_REGISTERED_SCREENS).toEqual(SETUP_SCREENS);
+  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'assistants')).toBe('providers');
+  expect(setupBackTarget(SETUP_REGISTERED_SCREENS, 'intro')).toBeNull();
+  // Registration is build-time membership, not order: a registry written in any order
+  // still yields the one journey C2 declares, and an unregistered screen leaves no slot.
+  expect(registeredSetupSequence({ assistants: true, providers: true, intro: true })).toEqual(SETUP_SCREENS);
+  expect(registeredSetupSequence({ intro: true, assistants: true })).toEqual(['intro', 'assistants']);
 });
 it.each(['pending', 'disabled', 'enabled'] as const)('policy %s never removes a registered screen', (capability) => {
   const { container } = render(show(capability, false));

@@ -22,6 +22,13 @@
 //    would race the recovery that is still finishing.
 import type { AgentBackend, RuntimeDependency } from '@/components/settings/models/types';
 import type { BackendConnectionState } from '@/context/ApiContext';
+import {
+  errorDetail,
+  hasError,
+  parseJson,
+  readSetupConfig,
+  type SetupConfigSnapshot,
+} from '../setupConfig';
 
 /**
  * Why bootstrap could not finish, in the terms the caller has to act in.
@@ -55,84 +62,8 @@ export class GatewayBootstrapError extends Error {
   }
 }
 
-/**
- * The fields of `/api/config` this flow is allowed to read.
- *
- * Narrow on purpose: validating the whole config would couple setup to every future
- * field, and an absent or malformed one of these is unread state rather than an
- * opt-out — which is a distinction the caller has to be able to make.
- */
-export type SetupConfigSnapshot = {
-  version: 'v2';
-  setup_completed: boolean;
-  capabilityEnabled: boolean;
-  savedIntentEnabled: boolean;
-  primaryPlatform: string;
-  enabledPlatforms: string[];
-  /** The validated body, for the shell's existing server-config state. */
-  raw: Record<string, unknown>;
-};
-
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
-
-/** The server's error shape is a string on some handlers and an object on others. */
-function errorDetail(body: unknown): string | undefined {
-  if (!isRecord(body)) return undefined;
-  const error = body.error;
-  if (typeof error === 'string') return error;
-  if (isRecord(error) && typeof error.message === 'string') return error.message;
-  if (body.ok === false && typeof body.message === 'string') return body.message;
-  return undefined;
-}
-
-const hasError = (body: unknown): boolean =>
-  isRecord(body) && (body.ok === false || body.error !== undefined);
-
-async function parseJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Validate a config body, or explain what was missing.
- *
- * Returns `null` rather than throwing so both callers — the POST acknowledgement and
- * the GET readback — can decide for themselves what an invalid body means at their
- * own step.
- */
-export function readSetupConfig(body: unknown): SetupConfigSnapshot | null {
-  if (!isRecord(body) || hasError(body)) return null;
-  if (body.version !== 'v2') return null;
-  if (typeof body.setup_completed !== 'boolean') return null;
-
-  const platforms = body.platforms;
-  if (!isRecord(platforms)) return null;
-  if (typeof platforms.primary !== 'string') return null;
-  const enabled = platforms.enabled;
-  if (!Array.isArray(enabled) || enabled.some((entry) => typeof entry !== 'string')) return null;
-
-  if (!isRecord(body.runtime) || !isRecord(body.agents)) return null;
-
-  const capabilities = body.capabilities;
-  const capability = isRecord(capabilities) ? capabilities.model_hub : undefined;
-  const saved = body.model_hub;
-  if (!isRecord(capability) || typeof capability.enabled !== 'boolean') return null;
-  if (!isRecord(saved) || typeof saved.enabled !== 'boolean') return null;
-
-  return {
-    version: 'v2',
-    setup_completed: body.setup_completed,
-    capabilityEnabled: capability.enabled,
-    savedIntentEnabled: saved.enabled,
-    primaryPlatform: platforms.primary,
-    enabledPlatforms: enabled as string[],
-    raw: body,
-  };
-}
 
 export type GatewayBootstrapDeps = {
   /** The CSRF-aware `apiFetch`, injected so the sequence is testable as itself. */
@@ -219,17 +150,35 @@ export async function bootstrapGateway(
 
   // 6. Observe. Controller startup has already run its own recovery with the
   //    installer admission the server owns; this reads what came of it.
+  const runtime = await readRuntimeObservation(deps);
+
+  return { config, runtime };
+}
+
+/**
+ * The runtime read the sequence ends on, on its own.
+ *
+ * Once bootstrap has run for a mount, a later refresh has nothing left to establish:
+ * the config exists, the controller is up, and re-seeding or re-starting would act on
+ * state that is already proven. So the caller's refresh path is this step alone, and
+ * it is this step — the same validation, the same classified failure — rather than a
+ * second call policy that could drift from it.
+ */
+export async function readRuntimeObservation(
+  deps: Pick<GatewayBootstrapDeps, 'getRuntimeStatus'>,
+): Promise<RuntimeDependency> {
   let runtime: RuntimeDependency;
   try {
     runtime = await deps.getRuntimeStatus();
   } catch {
     throw new GatewayBootstrapError('unread', 'runtime');
   }
+  // A body without a status is a body that did not answer: every consumer of this
+  // reads `status.health`, and inventing one would report an unknown engine as fine.
   if (!isRecord(runtime) || !isRecord((runtime as unknown as Record<string, unknown>).status)) {
     throw new GatewayBootstrapError('unread', 'runtime');
   }
-
-  return { config, runtime };
+  return runtime;
 }
 
 /**
