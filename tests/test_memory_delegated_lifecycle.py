@@ -288,19 +288,18 @@ def test_written_state_sets_partition_every_steer_state():
     }
 
 
-def test_unanswerable_authority_check_fails_closed_without_revoking(active_delegated, monkeypatch):
+def test_unanswerable_authority_check_fails_closed_without_revoking(active_delegated):
     """The Memory boundary denies the call, and only the call, when isolation cannot be evaluated."""
     manager, _, engine, controller, task, active, tmp = active_delegated
     scope = asyncio.run(_search(controller))
-    from storage import message_deliveries
+    from unittest.mock import patch
 
     def boom(_session_id):
         raise RuntimeError("storage unavailable")
 
-    monkeypatch.setattr(message_deliveries, "current_turn_memory_authority_conflict", boom)
-    asyncio.run(_search(controller, status=403))
-    assert "ses_fsm" in controller._memory_scopes_by_session
-    monkeypatch.undo()
+    with patch("storage.message_deliveries.current_turn_memory_authority_conflict", boom):
+        asyncio.run(_search(controller, status=403))
+        assert "ses_fsm" in controller._memory_scopes_by_session
     assert asyncio.run(_search(controller)) == scope
 
 

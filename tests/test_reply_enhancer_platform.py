@@ -500,6 +500,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(configure_memory_cli_access(controller, workbench))
 
     def test_memory_cli_access_associates_and_revokes_session_scope(self):
+        from unittest.mock import patch
+
+        # This controller owns no delivery store; the Turn-authority check is not under test here.
+        with patch("storage.message_deliveries.current_turn_memory_authority_conflict", lambda _sid: False):
+            self._assert_memory_cli_access_associates_and_revokes_session_scope()
+
+    def _assert_memory_cli_access_associates_and_revokes_session_scope(self):
         principal_id = "u-11111111111111111111111111111111"
         project_id = "p-22222222222222222222222222222222"
         binding_enabled = True
