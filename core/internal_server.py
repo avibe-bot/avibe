@@ -49,15 +49,9 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from config.atomic_io import write_atomic
 from core.delivery_target import normalize_message_kind
-from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
-from vibe.memory_contract import (
-    MemoryImplementationIncompatibleError,
-    MemoryImplementationUnavailableError,
-    MemoryStoreUnavailableError,
-)
 from vibe.message_identity import HARNESS_TYPE, is_input_turn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -66,12 +60,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 
 
-def _memory_implementation_error_code(error: BaseException) -> str:
-    return (
-        "memory_implementation_incompatible"
-        if isinstance(error, MemoryImplementationIncompatibleError)
-        else "memory_implementation_unavailable"
-    )
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
 _CHECK_POSIX_SOCKET_MODE = os.name != "nt"
@@ -86,54 +74,6 @@ _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
 )
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
-
-
-def _processing_record_list_query(
-    request: Request,
-) -> tuple[str | None, int, str | None]:
-    items = list(request.query_params.multi_items())
-    keys = [key for key, _value in items]
-    if any(key not in {"cursor", "limit", "project"} for key in keys) or len(
-        keys
-    ) != len(set(keys)):
-        raise ValueError("invalid Processing Record query")
-    values = dict(items)
-    cursor = values.get("cursor")
-    if cursor is not None and _PROCESSING_RECORD_CURSOR_RE.fullmatch(cursor) is None:
-        raise ValueError("invalid Processing Record cursor")
-    raw_limit = values.get("limit", "20")
-    if not raw_limit.isascii() or not raw_limit.isdecimal():
-        raise ValueError("invalid Processing Record limit")
-    limit = int(raw_limit)
-    if not 1 <= limit <= 50:
-        raise ValueError("invalid Processing Record limit")
-    project = values.get("project")
-    if project is not None:
-        from vibe.memory_project_ids import parse_agent_search_project
-
-        project = parse_agent_search_project(project)
-    return cursor, limit, project
-
-
-def _processing_record_entry_query(request: Request) -> tuple[str, str | None]:
-    items = list(request.query_params.multi_items())
-    keys = [key for key, _value in items]
-    if (
-        any(key not in {"memcell_id", "project"} for key in keys)
-        or len(keys) != len(set(keys))
-        or "memcell_id" not in keys
-    ):
-        raise ValueError("invalid Processing Record entry query")
-    values = dict(items)
-    memcell_id = values["memcell_id"]
-    if _PROCESSING_RECORD_ENTRY_ID_RE.fullmatch(memcell_id) is None:
-        raise ValueError("invalid Processing Record entry id")
-    project = values.get("project")
-    if project is not None:
-        from vibe.memory_project_ids import parse_agent_search_project
-
-        project = parse_agent_search_project(project)
-    return memcell_id, project
 
 
 def _create_controller_loop_server(config: Any) -> Any:
@@ -169,11 +109,7 @@ def default_socket_path() -> Path:
     return paths.get_state_dir() / "dispatch.sock"
 
 
-def create_app(
-    controller: "Controller",
-    *,
-    memory_ui_secret: str | None = None,
-) -> FastAPI:
+def create_app(controller: "Controller") -> FastAPI:
     """Build the minimal FastAPI app the internal server exposes.
 
     Factored out so tests can mount the same routes against a fake
@@ -182,10 +118,6 @@ def create_app(
     from core.inbox_events import mark_controller_process
 
     mark_controller_process()
-    if memory_ui_secret is None:
-        from vibe.memory_ui_access import process_ui_read_secret
-
-        memory_ui_secret = process_ui_read_secret()
     app = FastAPI(
         title="avibe internal dispatch",
         docs_url=None,
