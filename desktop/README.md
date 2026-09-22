@@ -110,6 +110,31 @@ binaries inside the embedded `runtime.zip` before archiving. Windows
 signing is likewise not yet implemented; NSIS artifacts remain unsigned
 acceptance builds. Windows ARM64 stays outside the current product gate.
 
+### Initial test distribution
+
+The initial test build uses the existing manually triggered
+`desktop-self-contained-package` workflow. Choose a SemVer version and the
+source ref in GitHub Actions; the workflow builds that ref and produces
+artifact-only DMG and NSIS installers. It does not publish a public GitHub
+Release or enable the auto-updater.
+
+Without Apple signing secrets, the app copy inside the macOS DMG is ad-hoc
+signed so macOS can verify the bundle structure, while the outer DMG remains
+unsigned and unnotarized. Windows NSIS installers are unsigned. Test machines
+may therefore show Gatekeeper or SmartScreen warnings; keep the operating
+system protections enabled and use the package's documented verification
+evidence rather than bypassing them globally. Each artifact set includes
+`SHA256SUMS` and `SIGNATURE` files, and GitHub retains these workflow artifacts
+for 14 days.
+
+The package contains its runtime and does not require Python, `uv`, Node, or
+`npm` on the test machine. Upgrades during this test phase are manual:
+download the replacement installer, verify its recorded hashes and signature
+state, and install it over or in place of the existing application according
+to the platform's normal installer flow. The optional Developer ID signing,
+notarization, and other trusted-signing path remains available when its
+repository secrets are configured.
+
 ### Uninstalling a product package
 
 Choose **Uninstall Avibe…** from the first application menu before removing the

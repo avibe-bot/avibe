@@ -386,3 +386,39 @@ The remote desktop was still `c7b749838181d443b19af4faa270f829f13c04fc`,
 and the three findings-bearing review heads remain H1 `92c600aa78`, H2
 `007f631613`, and H3 `c7b749838`, with the H3 thread still open until the
 pushed fix is evidenced.
+
+### Resumption for the 2026-09-22 integration cycle
+
+- 2026-09-22: The owner reopened PR #2062 for conflict resolution. The clean
+  desktop head is `8440cf81737be5db46a16992ecce41fe29beb866`; the actual remote
+  `master` source is `16bf1be3f93cd3cb855da2dd1b7133932acc0363`. GitHub's PR
+  base ref remains stale at the earlier `3994d18d`, so this cycle uses explicit
+  remote refspecs and the SHA returned by `git ls-remote`.
+- The new cycle has one lane-owned combined PR/lint/desktop-shell Watch,
+  `54efbc6d5cec`, with cursor
+  `pr-2062-sesy9cb4ht9nq-20260922.json`. Both the supervisor and bundled waiter
+  use `timeout 0`; the cursor is new for this cycle and will not be reseeded.
+  The prior 2026-09-20 cursor and retired Watch remain untouched.
+- The merge probe reports one textual conflict in
+  `tests/test_ui_server_install.py`. Resolution must retain the desktop
+  three-backend parameterization of
+  `test_install_job_fails_when_runtime_refresh_fails`, master's hermetic
+  `_agent_runtime_fingerprint -> None` fixture stub, and all newer measured
+  runtime refresh tests. Automatically merged changes at the shared controller,
+  Codex agent, API/CLI/UI server, UI API context/backend lifecycle, i18n, and
+  related test boundaries require semantic audit; no redesign or unrelated
+  behavior change is authorized.
+- This cycle remains a real merge into the existing desktop ancestry. The first
+  push is held until the orchestrator independently spot-checks a concrete
+  candidate SHA/diff and a consuming test. Required evidence is focused
+  hermetic Python installation/runtime/IPC/backend coverage, relevant UI tests
+  and build, desktop Rust lifecycle tests/format/lint, and changed-Python Ruff.
+- 2026-09-22: The owner approved the initial test distribution path: use the
+  existing manually triggered package workflow with a selected SemVer and
+  source ref, macOS ad-hoc app signing inside an unsigned/unnotarized DMG, and
+  unsigned Windows NSIS installers. The README records Gatekeeper/SmartScreen
+  prompts, `SHA256SUMS`/`SIGNATURE` evidence, 14-day artifact retention, the
+  self-contained runtime/no Python or Node prerequisite, and manual replacement
+  upgrades. The optional trusted-signing path remains unchanged; this decision
+  does not authorize public Release publishing, updater work, new certificates,
+  or OS-protection bypasses.
