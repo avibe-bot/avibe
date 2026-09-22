@@ -1558,6 +1558,32 @@ describe('SettingsModelsPage surface branches', () => {
     });
   }
 
+  it('MH-ROUTING-007 keeps the previous retry fallback when another route opens', async () => {
+    const { opener } = await saveRouteForFocusTest();
+    const agentsRead = deferred<AgentSupply[]>();
+    vi.mocked(modelsApi.listAgents)
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockReturnValueOnce(agentsRead.promise);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await flushRouteFocus();
+    const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+
+    // Opening a second route must not erase the first commit's page-owned
+    // landing target while its read-only Retry remains active.
+    await userEvent.click(opener);
+    await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i });
+    await userEvent.click(screen.getByRole('button', { name: /^Close$|^关闭$/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    await flushRouteFocus();
+
+    await userEvent.click(retry);
+    await act(async () => { agentsRead.resolve([takeoverAgent]); });
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    await flushRouteFocus();
+    expect(document.activeElement).toBe(opener);
+  });
+
   it('keeps the source projection intact after a lost Direct-mode response', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
     const staleSource = {

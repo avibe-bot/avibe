@@ -401,7 +401,10 @@ export const SettingsModelsPage: React.FC = () => {
   const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
   const pendingRouteFocusRef = React.useRef<RouteTarget | null>(null);
   const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
-  const [routeCommitBackend, setRouteCommitBackend] = React.useState<AgentBackend | null>(null);
+  const routeCommitBackend = routeCommitStatus
+    && (routeCommitStatus.pending || routeCommitStatus.failed.size > 0)
+    ? routeCommitStatus.report.chain.backend
+    : null;
   const [suspendedRouteAttempts, setSuspendedRouteAttempts] = React.useState(
     emptySuspendedRouteAttempts,
   );
@@ -1090,15 +1093,9 @@ export const SettingsModelsPage: React.FC = () => {
     suspendedHubFrontiersRef.current.delete(result.chain.backend);
     suspendedSourceBaselinesRef.current.delete(result.chain.backend);
     suspendedChainBaselinesRef.current.delete(result.chain.backend);
-    setRouteCommitBackend(result.chain.backend);
-    routeProjectionReconciler.start(result.chain.backend);
+    routeProjectionReconciler.start(result);
     showToast(t('common.saved'), 'success');
   }, [chainReadAuthority, routeObserved, routeProjectionReconciler, routeTarget, showToast, t]);
-  React.useEffect(() => {
-    if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
-      setRouteCommitBackend(null);
-    }
-  }, [routeCommitStatus]);
   React.useEffect(() => {
     if (!routeCommitStatus || routeCommitStatus.pending || !pendingRouteFocusRef.current) return;
     const target = pendingRouteFocusRef.current;
@@ -1446,7 +1443,7 @@ export const SettingsModelsPage: React.FC = () => {
                           </PopoverContent>
                         </Popover>
                         <div className="hidden xl:block" aria-hidden="true" />
-                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => { pendingRouteFocusRef.current = null; setRouteTarget({ agent, modelId, opener }); }} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={switchToGateway} onSwitchDirect={switchToDirect} onOpenModels={(agent) => setMenuBackend(agent.backend)} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />

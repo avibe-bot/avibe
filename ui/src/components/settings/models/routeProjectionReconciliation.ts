@@ -1,10 +1,10 @@
-import type { RouteCollectionObservation } from "./RouteChainDialog";
+import type { RouteCollectionObservation, RouteReport } from "./RouteChainDialog";
 import type { AgentSupply, Source } from "./types";
-import type { AgentBackend } from "./types";
 
 export type RouteProjectionMember = "agents" | "sources";
 
 export type RouteProjectionStatus = {
+  report: RouteReport;
   failed: ReadonlySet<RouteProjectionMember>;
   pending: boolean;
 };
@@ -26,10 +26,11 @@ export const createRouteProjectionReconciler = ({
 }: RouteProjectionReaders) => {
   let generation = 0;
   let failed = new Set<RouteProjectionMember>();
-  let activeBackend: AgentBackend | null = null;
+  let report: RouteReport | null = null;
 
-  const publish = (pending: boolean) =>
-    onStatus({ pending, failed: new Set(failed) });
+  const publish = (pending: boolean) => {
+    if (report) onStatus({ report, pending, failed: new Set(failed) });
+  };
 
   const settle = async (
     token: number,
@@ -67,13 +68,15 @@ export const createRouteProjectionReconciler = ({
   };
 
   return {
-    start: (backend: AgentBackend) => {
-      activeBackend = backend;
+    start: (committed: RouteReport) => {
+      // The page owns the complete received/inferred evidence before the editor
+      // closes. Retry changes only projection status, never the response tails.
+      report = committed;
       const token = ++generation;
       void settle(token, new Set(["agents"]));
     },
     retry: () => {
-      if (failed.size === 0 || !activeBackend) return;
+      if (failed.size === 0 || !report) return;
       const token = ++generation;
       void settle(token, failed);
     },
