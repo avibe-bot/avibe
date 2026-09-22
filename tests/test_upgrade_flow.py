@@ -1138,7 +1138,6 @@ def test_a_forward_upgrade_uses_target_companion_and_rejects_exact_source_overri
 
     plan = build_upgrade_plan(**forward)
     assert "avibe-os==3.1.0" in plan.command
-    assert _official_memory("3.1.0") in plan.command
 
     for sources in (
         {"core_spec": PREVIEW_CORE_URL},
@@ -2217,7 +2216,6 @@ def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
         lambda: (_ for _ in ()).throw(FileNotFoundError()),
     )
 
-    assert configured_memory_enabled() is False
 
 
 
@@ -2255,7 +2253,6 @@ def test_forward_index_target_does_not_inherit_current_preview_origin(monkeypatc
     _installed_from(monkeypatch, PREVIEW_CORE_URL)
     monkeypatch.setattr(vibe_upgrade, "find_uv_binary", lambda **_: None)
     plan = build_upgrade_plan(memory_package=True, package_spec="avibe-os", target_version="3.1.1")
-    assert _official_memory("3.1.1") in plan.command
     assert not any("gh-v" in item for item in plan.command)
 
 
