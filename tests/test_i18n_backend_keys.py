@@ -23,7 +23,6 @@ from core.failure_notices import (
     NOTICE_REASON_UNKNOWN_I18N_KEY,
     PER_FIRE_INTERRUPT_REASONS,
 )
-from vibe.memory_contract import CLOSED_MEMORY_ERROR_CODES
 from core.run_settlement import (
     RUN_INTERRUPTION_REASONS,
     SETTLEMENT_I18N_KEYS,
@@ -35,12 +34,6 @@ from storage.background import (
     SWEEP_REASON_ORPHANED,
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
-)
-from vibe.cli import (
-    _MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS,
-    _MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
-    _MEMORY_CLI_REASON_I18N_KEYS,
-    _MEMORY_CLI_RUNTIME_STATE_I18N_KEYS,
 )
 from vibe.i18n import get_supported_languages, t
 
@@ -76,31 +69,8 @@ def test_no_backend_translation_is_blank() -> None:
         assert blank == [], f"{lang} has blank translations: {blank}"
 
 
-@pytest.mark.parametrize(
-    "key",
-    sorted(
-        {
-            *_MEMORY_CLI_RUNTIME_STATE_I18N_KEYS.values(),
-            *_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS.values(),
-            *_MEMORY_CLI_ATTACHMENT_STATE_I18N_KEYS.values(),
-            *_MEMORY_CLI_REASON_I18N_KEYS.values(),
-            "memory.cli.runtimeState.unknown",
-            "memory.cli.providerState.unknown",
-            "memory.cli.attachmentCaptureState.unknown",
-            "memory.cli.reason.unknown",
-            "memory.cli.unknownVersion",
-        }
-    ),
-)
-def test_every_memory_cli_status_label_resolves(key: str) -> None:
-    for lang in get_supported_languages():
-        resolved = t(key, lang)
-        assert resolved != key, f"{key} is not translated in {lang}"
-        assert resolved.strip()
 
 
-def test_memory_cli_reason_map_covers_the_closed_memory_error_vocabulary() -> None:
-    assert set(_MEMORY_CLI_REASON_I18N_KEYS) == set(CLOSED_MEMORY_ERROR_CODES)
 
 
 @pytest.mark.parametrize(

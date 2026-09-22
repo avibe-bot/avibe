@@ -29,7 +29,6 @@ from modules.agents.opencode.agent import OpenCodeAgent  # noqa: E402
 ATTEMPT_ID = "atm_1234567890abcdef1234567890abcdef"
 NATIVE_PART_ID = "prt_1234567890abcdef1234567890abcdef"
 
-from tests.test_memory_delegated_reads import memory_owner_turn  # noqa: F401 -- durable owner fixture
 from tests.test_session_delivery_fsm import managers, _fsm_schema_template  # noqa: F401 -- fixture dependencies
 
 
@@ -160,7 +159,6 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
 
 def _enable_memory_restoration(agent, managers):
-    from tests.test_memory_delegated_reads import _memory_controller
     from tests.test_session_delivery_fsm import _context
 
     controller = _memory_controller()

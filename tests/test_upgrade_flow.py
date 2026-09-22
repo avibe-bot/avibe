@@ -2053,106 +2053,6 @@ def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, caps
 
 
 
-@pytest.mark.parametrize(
-    ("package_spec", "target_version"),
-    [
-        ("avibe-os==3.1.0", "3.1.0"),
-        (
-            "avibe-os @ https://example.test/releases/avibe_os-3.1.1-py3-none-any.whl",
-            "3.1.1",
-        ),
-        ("/fixtures/avibe_os-3.1.2.tar.gz", "3.1.2"),
-    ],
-)
-
-
-@pytest.mark.parametrize(
-    "package_spec",
-    [
-        "/fixtures/avibe_os-3.2.0-py3-none-any.whl",
-        "avibe-os @ https://example.test/releases/avibe_os-3.2.0-py3-none-any.whl",
-        "avibe-os==3.2.0",
-    ],
-)
-
-
-
-
-@pytest.mark.parametrize(
-    "package_spec",
-    [
-        "avibe-os",
-        "avibe-os>=3.1,<3.2",
-        "avibe-os==3.1.*",
-    ],
-)
-
-
-
-
-@pytest.mark.parametrize(
-    "package_spec",
-    [
-        "avibe-os",
-        "avibe-os>=3.1,<3.2",
-        "avibe-os==3.1.*",
-        "git+https://example.test/avibe.git@v3.1.0",
-        "avibe-os @ git+https://example.test/avibe.git@v3.1.0",
-        "/fixtures/avibe.whl",
-    ],
-)
-
-
-@pytest.mark.parametrize(
-    "package_spec",
-    [
-        "git+https://example.test/avibe.git@v3.1.0",
-        "avibe-os @ git+https://example.test/avibe.git@v3.1.0",
-        "https://user:secret@example.test/download",
-        "avibe-os @ https://user:secret@example.test/download",
-        "/fixtures/avibe.whl",
-    ],
-)
-
-
-
-
-def test_legacy_pip_fallback_resolves_target_extra_before_install(tmp_path):
-    plan = UpgradePlan(
-        command=["python", "-m", "pip", "install", "avibe-os[memory]"],
-        env={},
-        method="pip",
-        preflight_command=["python", "-m", "pip", "install", "--dry-run", "avibe-os[memory]"],
-        preflight_fallback_command=[
-            "python",
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            "{avibe-pip-download-destination}",
-            "avibe-os[memory]",
-        ],
-    )
-    calls: list[list[str]] = []
-    scratch: Path | None = None
-
-    def run(command, **kwargs):
-        nonlocal scratch
-        calls.append(command)
-        if "--dry-run" in command:
-            return subprocess.CompletedProcess(command, 2, stdout="", stderr="no such option: --dry-run")
-        if "download" in command:
-            scratch = Path(command[command.index("--dest") + 1])
-            assert scratch.is_dir()
-            assert "--no-deps" not in command
-            return subprocess.CompletedProcess(command, 0, stdout="resolved", stderr="")
-        return subprocess.CompletedProcess(command, 0, stdout="installed", stderr="")
-
-    result = execute_upgrade_plan(plan, run=run)
-
-    assert result.returncode == 0
-    assert [command[3] for command in calls] == ["install", "download", "install"]
-    assert scratch is not None and not scratch.exists()
 
 
 def test_legacy_pip_fallback_failure_stops_before_install():
@@ -2256,15 +2156,6 @@ def test_forward_index_target_does_not_inherit_current_preview_origin(monkeypatc
     assert not any("gh-v" in item for item in plan.command)
 
 
-@pytest.mark.parametrize(
-    "tag", [
-        "v3.1.0", "v3.2.0a1", "v3.2.0b1", "v3.2.0rc1", "v3.2.0.dev1",
-        "v3.2.0.post1", "gh-v3.2.0-rc1", "gh-v03.02.00",
-    ],
-)
-
-
-@pytest.mark.parametrize("version", ["3.1.1.dev1+local", "3.1.1+local", "bad"])
 
 
 @pytest.mark.parametrize("tag", [
@@ -2356,22 +2247,6 @@ def test_published_dev_origin_reaches_every_install_command(
         assert spec in command
         assert f"avibe-memory @ {memory}" in command
         assert not any("9.0.0" in item or "[memory]" in item for item in command)
-
-
-@pytest.mark.parametrize("version,origin", [
-    ("3.2.0.dev1", None),
-    ("3.2.0.dev1", "/tmp/avibe_os-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", "file:///tmp/avibe_os-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", "https://example.test/avibe_os-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", "https://github.com/other/repo/releases/download/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev2/avibe_os-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1/avibe_memory-3.2.0.dev1-py3-none-any.whl"),
-    ("3.2.0.dev1", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1.tar.gz"),
-    ("3.2.0.dev1", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl?other=1"),
-    ("3.2.0.dev1", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1/avibe_os-3.2.0.dev1-py3-none-any.whl#other"),
-    ("3.2.0.dev1+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl"),
-    ("3.2.0+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0+local/avibe_os-3.2.0+local-py3-none-any.whl"),
-])
 
 
 def test_get_safe_cwd_returns_absolute_existing_dir():

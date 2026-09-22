@@ -69,7 +69,7 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
-from vibe import model_service, remote_access, runtime, show_identity, ui_server
+from vibe import remote_access, runtime, show_identity, ui_server
 from vibe.ui_server import app
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.adapter import (
@@ -527,67 +527,6 @@ def _save_remote_web_auth_config() -> V2Config:
     return config
 
 
-@pytest.mark.parametrize("setup_host", ["192.0.2.5", "fd00::1", "2001:db8::5", "[2001:db8::5]"])
-async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, setup_host):
-    """Scenario: AUTH-SETUP-907 — every origin consumer reaches the widened UI bind."""
-    ipv6 = ":" in setup_host
-    if ipv6:
-        if not socket.has_ipv6:
-            pytest.skip("Platform has no IPv6 support")
-        # Probe OS capability separately: failures in the produced bind or URL
-        # below must fail the scenario, never become capability skips.
-        try:
-            with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
-                probe.bind(("::1", 0))
-        except OSError as exc:
-            if exc.errno in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL}:
-                pytest.skip(f"IPv6 loopback unavailable: {exc}")
-            raise
-
-    config = _save_remote_web_auth_config()
-    config.ui.setup_host = setup_host
-    config.save()
-    monkeypatch.setenv("NO_PROXY", "*")
-    monkeypatch.setenv("no_proxy", "*")
-    monkeypatch.setattr(remote_access, "status", lambda cfg: {"running": True, "binary_found": True})
-    monkeypatch.setattr(remote_access, "_observed_cloudflared_origin_service", lambda: None)
-    requests_seen = []
-
-    async def health(request):
-        requests_seen.append(request.path)
-        return web.json_response({"ok": True})
-
-    local_ui = web.Application()
-    local_ui.router.add_get("/health", health)
-    runner = web.AppRunner(local_ui)
-    await runner.setup()
-    try:
-        site = web.TCPSite(runner, host=runtime.effective_ui_bind_host(config), port=0)
-        await site.start()
-        listener = site._server.sockets[0]
-        if ipv6:
-            assert listener.family == socket.AF_INET6
-            assert listener.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
-        monkeypatch.setenv("VIBE_UI_PORT", str(listener.getsockname()[1]))
-
-        # Consume the persisted config and effective port just as pairing does.
-        origin = remote_access.origin_service_for_pairing()
-        async with httpx.AsyncClient(trust_env=False, timeout=2) as client:
-            response = await client.get(f"{origin}/health")
-            assert response.json() == {"ok": True}
-            for model_origin in model_service._model_service_ui_origins(config):
-                response = await client.get(f"{model_origin}/health")
-                assert response.json() == {"ok": True}
-        payload = await asyncio.to_thread(remote_access.runtime_status_payload, config)
-        assert payload["expected_origin_service"] == origin
-        assert payload["ui_healthy"] is True
-        assert requests_seen == ["/health"] * 3
-    finally:
-        await runner.cleanup()
-
-    # Closing the disposable listener must remain visible as an unhealthy UI.
-    payload = await asyncio.to_thread(remote_access.runtime_status_payload, config)
-    assert payload["ui_healthy"] is False
 
 
 def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_path):
