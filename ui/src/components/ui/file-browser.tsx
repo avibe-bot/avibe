@@ -59,12 +59,14 @@ export interface FileBrowserProps {
   onRefresh?: () => void;
   onNavigate: (path: string) => void;
   onClearQuery?: () => void;
+  navigationControl?: ReactNode;
   showHidden: boolean;
   onShowHiddenChange: (showHidden: boolean) => void;
   error?: string | null;
   toolbarActions?: ReactNode;
   listHeader?: ReactNode;
   listContent: ReactNode;
+  paneProps?: HTMLAttributes<HTMLDivElement>;
   listProps?: HTMLAttributes<HTMLDivElement>;
   dropOverlay?: ReactNode;
   footerContent?: ReactNode;
@@ -101,12 +103,14 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   onRefresh,
   onNavigate,
   onClearQuery,
+  navigationControl,
   showHidden,
   onShowHiddenChange,
   error,
   toolbarActions,
   listHeader,
   listContent,
+  paneProps,
   listProps,
   dropOverlay,
   footerContent,
@@ -177,6 +181,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
               </span>
             ))}
           </div>
+
+          {navigationControl && (mobileRoute ? <div className="order-2 w-full">{navigationControl}</div> : navigationControl)}
 
           {hasSearch && (
             <label
@@ -300,7 +306,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
             ))}
           </aside>
 
-          <div className="relative flex min-w-0 flex-1 flex-col">
+          <div {...paneProps} className={clsx('relative flex min-w-0 flex-1 flex-col', paneProps?.className)}>
             {listHeader}
             <div className="min-h-0 flex-1 overflow-y-auto py-1" {...listProps}>
               {listContent}

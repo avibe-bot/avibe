@@ -1403,12 +1403,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               </button>
           </div>
         }
-        listProps={{
-          onContextMenu: (event) => openMenu(event, null),
+        paneProps={{
           onDragOver: onListingDragOver,
           onDragLeave: onListingDragLeave,
           onDrop: onListingDrop,
         }}
+        listProps={{ onContextMenu: (event) => openMenu(event, null) }}
         listContent={
           <>
               {showInitialSpinner && (

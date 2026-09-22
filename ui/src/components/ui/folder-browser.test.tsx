@@ -52,6 +52,7 @@ afterEach(() => {
 beforeEach(() => {
   projects.value = [];
   projects.error = null;
+  resolveDirectoryPath.mockImplementation(async (path: string) => path);
   listDir.mockReset().mockImplementation(async (path: string) => ({
     ok: true as const,
     path,
@@ -139,6 +140,28 @@ it('resolves relative configured paths before using the Files API', async () => 
   await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('./workspace'));
   resolvePath('/resolved/workspace');
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('/resolved/workspace', false));
+});
+
+it('resolves absolute configured paths before using the Files API', async () => {
+  resolveDirectoryPath.mockResolvedValueOnce('/real/workspace');
+  render(<FolderBrowser initialPath="/workspace-link" onSelect={() => {}} onClose={() => {}} />);
+
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/workspace-link'));
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('/real/workspace', false));
+});
+
+it('navigates to an arbitrary path entered in the picker', async () => {
+  resolveDirectoryPath.mockImplementation(async (path: string) => (path === '\\\\server\\share' ? '/server/share' : path));
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+
+  await screen.findByText('src');
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.editPath' }));
+  const input = screen.getByRole('textbox', { name: 'directoryBrowser.editPath' });
+  fireEvent.change(input, { target: { value: '\\\\server\\share' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('\\\\server\\share'));
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/server/share', false));
 });
 
 it('does not override explicit navigation when initial path resolution finishes later', async () => {

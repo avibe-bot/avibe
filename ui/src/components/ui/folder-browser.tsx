@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Folder, FolderPlus, File as FileIcon, FolderOpen, Loader2 } from 'lucide-react';
+import { Folder, FolderPlus, File as FileIcon, FolderOpen, Keyboard, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -82,11 +82,15 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [searchTruncated, setSearchTruncated] = useState(false);
+  const [pathEditing, setPathEditing] = useState(false);
+  const [pathInput, setPathInput] = useState('');
+  const [pathError, setPathError] = useState<string | null>(null);
   const navSeq = useRef(0);
   const pendingNavigation = useRef<string | null>(null);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
   const initialPathResolving = useRef<string | null>(null);
+  const pathInputRef = useRef<HTMLInputElement | null>(null);
   const mounted = useRef(true);
   const previousShowHidden = useRef(showHidden);
 
@@ -108,6 +112,15 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     setSearchTruncated(false);
     setSearchBusy(value.trim().length > 0);
     setError(null);
+  }, []);
+
+  useEffect(() => {
+    if (pathEditing) pathInputRef.current?.focus();
+  }, [pathEditing]);
+
+  const cancelPathEdit = useCallback(() => {
+    setPathEditing(false);
+    setPathError(null);
   }, []);
 
   const navigate = useCallback(
@@ -146,6 +159,21 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     [changeQuery, showHidden, t],
   );
 
+  const submitPath = useCallback(async () => {
+    const target = pathInput.trim();
+    if (!target) return;
+    setPathError(null);
+    try {
+      const resolved = await resolveDirectoryPath(target);
+      if (resolved) {
+        setPathEditing(false);
+        navigate(resolved);
+      }
+    } catch (cause: unknown) {
+      setPathError(fileBrowserErrorMessage(cause, t, t('directoryBrowser.pathNotFound')));
+    }
+  }, [navigate, pathInput, t]);
+
   useEffect(() => {
     systemFavorites()
       .then(setSysFavs)
@@ -163,7 +191,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     if (initialPathResolving.current === start) return;
     initialPathResolving.current = start;
     Promise.resolve().then(() => {
-      return needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
+      return initialPath || needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
     }).then((resolved) => {
       if (mounted.current && !initialPathHandled.current && resolved) navigate(resolved);
     }).catch((cause: unknown) => {
@@ -289,6 +317,9 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           if (creatingFolder) {
             event.preventDefault();
             cancelCreateFolder();
+          } else if (pathEditing) {
+            event.preventDefault();
+            cancelPathEdit();
           }
         }}
       >
@@ -311,6 +342,56 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           onQueryChange={changeQuery}
           onRefresh={refreshCurrent}
           onNavigate={navigate}
+          navigationControl={
+            pathEditing ? (
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="flex min-w-0 items-center gap-1.5 rounded-lg border border-cyan/40 bg-cyan/[0.06] px-2 py-1">
+                  <input
+                    ref={pathInputRef}
+                    type="text"
+                    value={pathInput}
+                    aria-label={t('directoryBrowser.editPath')}
+                    onChange={(event) => {
+                      setPathInput(event.target.value);
+                      setPathError(null);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault();
+                        void submitPath();
+                      }
+                    }}
+                    placeholder={t('directoryBrowser.editPathPlaceholder')}
+                    className="min-w-0 flex-1 bg-transparent font-mono text-[11px] text-foreground outline-none placeholder:text-muted"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void submitPath()}
+                    className="shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold text-cyan-ink hover:bg-foreground/[0.04]"
+                  >
+                    {t('directoryBrowser.editPathDone')}
+                  </button>
+                </div>
+                {pathError && <div className="px-1 text-[10.5px] text-destructive-ink">{pathError}</div>}
+              </div>
+            ) : (
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-7 shrink-0 text-muted"
+                aria-label={t('directoryBrowser.editPath')}
+                title={t('directoryBrowser.editPath')}
+                onClick={() => {
+                  setPathInput(cwd);
+                  setPathError(null);
+                  setPathEditing(true);
+                }}
+              >
+                <Keyboard className="size-3.5" />
+              </Button>
+            )
+          }
           showHidden={showHidden}
           onShowHiddenChange={setShowHidden}
           error={listingError || error}
