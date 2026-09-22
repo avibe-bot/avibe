@@ -69,7 +69,13 @@ def record_activation(launcher: Path, target: Path) -> None:
     except Exception:
         # This is an explicit post-commit boundary: no bookkeeping error may
         # escape to callers that discard candidates on activation failure.
-        logger.warning("Install activation succeeded; retention receipt unavailable", exc_info=True)
+        # Without durable positive ownership, later collection cannot distinguish
+        # this generation from pre-protocol history. It must remain unowned.
+        logger.warning(
+            "Install activation succeeded; retention receipt unavailable, "
+            "unowned generation will be retained",
+            exc_info=True,
+        )
 
 
 def _installer_is_live(generation: Path) -> bool:
@@ -146,7 +152,8 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
     The caller holds the shared install lock. Collection precedes the launcher
     switch, so the previous selected generation survives this operation. With
     one launcher and no extra references, subsequent operations retain two
-    generations regardless of whether shell, CLI, or API created them.
+    receipt-owned generations regardless of whether shell, CLI, or API created
+    them. Unowned history, including failed new receipts, is never adopted.
     """
     from vibe import upgrade
 
@@ -173,9 +180,20 @@ def collect_before_activation(activation: AtomicActivation) -> list[Path]:
         try:
             restart = json.loads(restart_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            restart = None
-        if restart is not None:
-            if not isinstance(restart, dict) or upgrade.restart_record_is_pending(restart, restart_path):
+            pass
+        else:
+            try:
+                state = upgrade.RestartState(restart.get("state")) if isinstance(restart, dict) else None
+            except (TypeError, ValueError):
+                state = None
+            # The ordinary restart admission policy treats unknown states as
+            # stale. Destructive collection needs positive terminal/pending
+            # interpretation; a future writer's state cannot authorize deletion.
+            if (
+                state is None
+                or state is upgrade.RestartState.UNKNOWN
+                or upgrade.restart_record_is_pending(restart, restart_path)
+            ):
                 logger.info("Install generation collection deferred: restart ownership")
                 return []
         candidate = upgrade._generation_for_path(activation.candidate_launcher, root)

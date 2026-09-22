@@ -19,19 +19,22 @@ generations with a successful-activation receipt, not arbitrary old directories.
   generations that no recorded stable launcher, live user process, current
   candidate, or source handoff references. The immediately previous target
   remains intact until a later operation.
-- Pending or unreadable restart ownership, concurrent installer staging, and
-  incomplete process/receipt visibility defer collection. Both bootstrap scripts
-  publish an installer PID marker before taking their source snapshot; another
-  installer's live marker protects its entire handoff.
-- Each successful activation records its stable launcher in its generation.
-  All recorded launchers participate in collection, including symlink, hardlink,
-  and copy fallback identities. Missing copy markers cannot authorize deletion.
+- Pending, unknown, or unreadable restart ownership, concurrent installer staging,
+  and incomplete process/receipt visibility defer collection. Both bootstrap
+  scripts publish an installer PID marker before taking their source snapshot;
+  another installer's live marker protects its entire handoff.
+- Each successful activation attempts to record its stable launcher in its
+  generation. All recorded launchers participate in collection, including symlink,
+  hardlink, and copy fallback identities. Missing copy markers cannot authorize deletion.
 - Failed candidates keep the existing discard path. Cleanup and receipt failures
   are logged and cannot turn a committed activation into failure.
+  A failed new ownership receipt leaves that generation permanently unowned and
+  excluded from automatic collection; it is not adopted on the next activation.
 - With one stable launcher and no extra live references, repeated operations
   retain at most the selected and immediately previous managed generations.
   Extra live processes/launchers retain exactly the generations they need.
-  A later successful operation retries deferred cleanup.
+  A later successful operation retries deferred cleanup of owned generations
+  only. The bound assumes their activation receipts were written successfully.
 
 ## Migration limitation (orchestrator approved)
 
@@ -54,14 +57,24 @@ normal PR CI and exact-head Codex review gates. No production cleanup or restart
 
 ## Local evidence
 
-- Upgrade, installer, retention, and restart suites: 373 passed before the final
-  cross-user process case; all 32 retention cases pass with that case included.
-- Retention, dependency repair, and integrity suites: 255 passed; the Docker
-  install test is skipped locally because Docker is unavailable.
-- CI pipeline contracts: 71 passed. Changed-file Ruff, shell syntax, and diff
-  whitespace checks pass.
+- Upgrade, installer, retention, and restart suites after the review correction:
+  380 passed, including all 38 retention cases.
+- First-head retention, dependency repair, and integrity suites: 255 passed;
+  the Docker install test is skipped locally because Docker is unavailable.
+- First-head CI pipeline contracts: 71 passed. Changed-file Ruff, shell syntax,
+  and diff whitespace checks pass after the correction.
 - Real temporary Python processes prove logical interpreter/source-argument
   discovery and collection after process exit. A read-only macOS process probe
   exposed `KERN_PROCARGS2` denial for `login`; the existing command-reader
   fallback makes the complete inventory readable without omitting that process.
-- Packaged Linux and Windows repeated-install bounds are enforced in PR CI.
+- Packaged Linux and Windows repeated-install bounds passed in first-head CI;
+  every new head still requires fresh exact-head CI and Codex review.
+
+## Review correction
+
+The orchestrator found two gaps on `4bdcfe4d3`: collector restart parsing
+accepted unknown future states, and the retry claim obscured permanent retention
+after a failed receipt write. Retention now fails closed for unknown/missing/null
+restart state without changing shared restart admission. A follow-up activation
+test proves a failed-receipt generation stays unowned while subsequent successfully
+receipted generations return to the ordinary two-generation bound.

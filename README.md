@@ -326,7 +326,9 @@ Automatic updates, `vibe upgrade`, and installer reruns reclaim superseded
 installation environments on later successful activations. Normally, the current
 and previous managed generations remain; running processes, other managed
 launchers, pending restarts, and concurrent installers keep the environments they
-still need. Cleanup failures defer reclamation without failing the upgrade.
+still need. Cleanup failures defer reclamation of owned generations without
+failing the upgrade. If writing a new generation's ownership receipt fails, that
+generation remains unowned and is permanently excluded from automatic collection.
 
 Generations created before activation receipts were introduced are retained:
 their ownership cannot be established safely. They require separate verified

@@ -215,7 +215,10 @@ def test_recorded_service_and_ui_are_checked_even_for_a_different_user(monkeypat
     assert live_python in retention._running_paths()
 
 
-@pytest.mark.parametrize("payload", [{"state": "scheduled"}, {"state": "running"}, [], "malformed"])
+@pytest.mark.parametrize("payload", [
+    {"state": "scheduled"}, {"state": "running"}, [], None, "malformed",
+    {"state": "future-handoff"}, {"state": "unknown"}, {"state": None}, {},
+])
 def test_pending_or_unreadable_restart_defers_collection(installation, payload):
     root, launcher = installation
     first = _activate(root, launcher, "first")
@@ -365,6 +368,32 @@ def test_cleanup_failure_never_invalidates_successful_activation(installation, m
     assert candidate.exists()
     if failure != "receipt":
         assert first.exists()
+
+
+def test_failed_receipt_stays_unowned_while_later_owned_generations_are_bounded(
+    installation, monkeypatch, caplog,
+):
+    root, launcher = installation
+    _activate(root, launcher, "first")
+    original_write = retention.write_atomic
+
+    def fail(*args, **kwargs):
+        raise PermissionError("test-owned receipt denial")
+
+    monkeypatch.setattr(retention, "write_atomic", fail)
+    unowned = _activate(root, launcher, "receipt-failed")
+    assert launcher.resolve() == unowned
+    assert "unowned generation will be retained" in caplog.text
+    assert not (unowned.parent.parent / retention.RECEIPT).exists()
+
+    monkeypatch.setattr(retention, "write_atomic", original_write)
+    for index in range(4):
+        current = _activate(root, launcher, f"next-{index}")
+        assert current.exists()
+        assert unowned.exists()
+        assert not (unowned.parent.parent / retention.RECEIPT).exists()
+    assert _owned(root) == {"next-2", "next-3"}
+    assert {generation.name for generation in root.iterdir()} == {"receipt-failed", "next-2", "next-3"}
 
 
 @pytest.mark.parametrize("surface", ["manual", "automatic"])
