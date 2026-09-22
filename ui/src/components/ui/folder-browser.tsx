@@ -88,8 +88,11 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const mounted = useRef(true);
   const previousShowHidden = useRef(showHidden);
 
-  useEffect(() => () => {
-    mounted.current = false;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   const changeQuery = useCallback((value: string) => {

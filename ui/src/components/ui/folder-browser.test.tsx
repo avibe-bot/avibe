@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { StrictMode } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -71,6 +72,16 @@ it('uses the shared dialog close behavior', async () => {
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
 
   expect(onClose).toHaveBeenCalledOnce();
+});
+
+it('completes initial navigation after a StrictMode effect replay', async () => {
+  render(
+    <StrictMode>
+      <FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />
+    </StrictMode>,
+  );
+
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith('/workspace', false));
 });
 
 it('waits for the project tree before selecting the initial project', async () => {
