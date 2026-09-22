@@ -1056,6 +1056,20 @@
       "oauth_time_mismatch_body": "Avibe Cloud 已完成登录,但这台机器因为本地时间不同步而拒绝了安全令牌。请校准系统时间后重试。",
       "invalid_oauth_nonce_title": "无法验证此次登录",
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
+    },
+    "cli": {
+      "localWriteUnavailableTitle": "远程访问设置已在联系 Avibe Cloud 前停止。",
+      "localWriteUnavailableBody": "本地配置无法可靠保存配对信息，因此没有消耗配对密钥。",
+      "saveFailedAfterRedeemTitle": "云端已完成配对，但本地保存失败。",
+      "orphanedBinding": "孤立绑定：实例 {instance_id}（设备 {device_name}）。",
+      "recoveryRetained": "已兑换的凭据仍保存在本机，不需要新的配对密钥。",
+      "retryAfterLocalFix": "修复本地配置问题后运行：",
+      "recoveryInvalid": "已保存的配对恢复记录无效，无法重放。",
+      "recoveryUnavailable": "本地配对恢复无法启动，没有消耗新的配对密钥。",
+      "recoveryNotReady": "配对操作已准备好，但还没有可恢复的兑换结果。",
+      "recoveryRevoked": "已保存的配对恢复记录已被本地解绑操作作废。",
+      "recoveryIndeterminate": "配对结果已无法安全自动应用；不要重复使用已消耗的密钥。",
+      "retirementFailed": "配对已应用，但恢复记录未能清理。请不要更换密钥并重试。"
     }
   },
   "turn": {

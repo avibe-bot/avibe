@@ -1056,6 +1056,20 @@
       "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
+    },
+    "cli": {
+      "localWriteUnavailableTitle": "Remote access setup stopped before contacting Avibe Cloud.",
+      "localWriteUnavailableBody": "The local config cannot durably accept a pairing, so no pairing key was consumed.",
+      "saveFailedAfterRedeemTitle": "The pairing was redeemed cloud-side but could not be saved locally.",
+      "orphanedBinding": "Orphaned binding: instance {instance_id} (device {device_name}).",
+      "recoveryRetained": "The redeemed credentials are kept on this host, so no new pairing key is needed.",
+      "retryAfterLocalFix": "Fix the local config problem, then run:",
+      "recoveryInvalid": "The saved pairing recovery record is invalid and cannot be replayed.",
+      "recoveryUnavailable": "Local pairing recovery could not start. No new pairing key was consumed.",
+      "recoveryNotReady": "A pairing operation is prepared but has no recoverable redeemed response.",
+      "recoveryRevoked": "The saved pairing recovery was invalidated by a local unpair operation.",
+      "recoveryIndeterminate": "The pairing result is no longer safe to apply automatically; do not reuse the consumed key.",
+      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key."
     }
   },
   "turn": {
