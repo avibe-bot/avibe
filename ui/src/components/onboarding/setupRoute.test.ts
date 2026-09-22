@@ -18,6 +18,7 @@ import {
   saveSetupRoutes,
   selectSetupRouteTarget,
   targetChanged,
+  targetKey,
   unionRouteOrder,
   type SetupRouteTargetSnapshot,
 } from './setupRoute';
@@ -264,6 +265,50 @@ describe('saveSetupRoutes', () => {
     expect(retried.api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [B, A] });
     expect(second[0]?.kind).toBe('confirmed');
     expect(second[1]?.kind).toBe('confirmed');
+  });
+
+  // A retry is separated from the hydration it was built on by however long the
+  // person spent looking at the failure, so the identity behind the target is the
+  // most likely thing to have moved — and the write it is about to repeat is the
+  // one thing that cannot be taken back afterwards.
+  describe('a target whose identity moved while the failure was on screen', () => {
+    const outstanding = (chain: AgentChain) => {
+      const claude = target('claude', 'opus-5', [A, B], ['claude']);
+      const fixture = writes({ 'claude:opus-5': chain });
+      return { claude, ...fixture };
+    };
+    const failedBefore = [{ key: targetKey('claude', 'opus-5'), kind: 'failed' as const, error: 'boom' }];
+
+    it('writes nothing when the backend has left hub', async () => {
+      const { claude, api } = outstanding(target('claude', 'opus-5', [A, B], ['claude']).chain);
+      api.getVibeAgent = vi.fn(async () => ({ ok: true, agent: full(brief('claude', 'claude', 'opus-5')) }));
+      api.listAgents = vi.fn(async () => [
+        { ...supply('claude', [{ name: 'claude', model: 'opus-5' }]), mode: 'direct' as const },
+      ]);
+      const results = await retrySetupRoutes([B, A], [claude], failedBefore, api);
+      expect(results).toEqual([expect.objectContaining({ kind: 'reconcile' })]);
+      expect(api.previewAgentChain).not.toHaveBeenCalled();
+      expect(api.putAgentChain).not.toHaveBeenCalled();
+      expect(api.putAgentModels).not.toHaveBeenCalled();
+    });
+
+    it('writes nothing when the Agent now names another model', async () => {
+      const { claude, api } = outstanding(target('claude', 'opus-5', [A, B], ['claude']).chain);
+      api.getVibeAgent = vi.fn(async () => ({ ok: true, agent: full(brief('claude', 'claude', 'sonnet-4')) }));
+      const results = await retrySetupRoutes([B, A], [claude], failedBefore, api);
+      expect(results).toEqual([expect.objectContaining({ kind: 'reconcile' })]);
+      expect(api.previewAgentChain).not.toHaveBeenCalled();
+      expect(api.putAgentChain).not.toHaveBeenCalled();
+      expect(api.putAgentModels).not.toHaveBeenCalled();
+    });
+
+    it('reports a failed identity read as failed, and still writes nothing', async () => {
+      const { claude, api } = outstanding(target('claude', 'opus-5', [A, B], ['claude']).chain);
+      api.listAgents = vi.fn(async () => { throw new Error('agents unreachable'); });
+      const results = await retrySetupRoutes([B, A], [claude], failedBefore, api);
+      expect(results).toEqual([expect.objectContaining({ kind: 'failed', error: 'agents unreachable' })]);
+      expect(api.putAgentChain).not.toHaveBeenCalled();
+    });
   });
 
   it('classifies a confirmed desired override as skip on retry', () => {

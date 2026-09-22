@@ -321,9 +321,9 @@ const precheckTarget = async (
 const adoptTargetModel = async (
   target: SetupRouteTargetSnapshot,
   api: SetupRouteWriteApi,
-  supply: AgentSupply | undefined,
+  supply: AgentSupply,
 ): Promise<void> => {
-  if (!supply || supply.menu_kind !== 'open') return;
+  if (supply.menu_kind !== 'open') return;
   const catalog = catalogModels(supply);
   if (!catalog || catalog.some((model) => model.id === target.modelId)) return;
   const offered = offeredCandidates(await api.getAgentModelCandidates(target.backend));
@@ -338,11 +338,19 @@ const adoptTargetModel = async (
   });
 };
 
+/**
+ * The write, and nothing that decides whether it may happen.
+ *
+ * `supply` is required rather than re-read here because the contract wants the
+ * Agent, the mode and the chain checked against the baseline before EVERY write,
+ * and a parameter this function cannot invent is what makes 「its caller checked」
+ * true by construction instead of by each caller remembering to.
+ */
 const writeTarget = async (
   target: SetupRouteTargetSnapshot,
   desired: RouteHop[],
   api: SetupRouteWriteApi,
-  supply?: AgentSupply,
+  supply: AgentSupply,
 ): Promise<TargetSaveResult> => {
   const key = targetKey(target.backend, target.modelId);
   try {
@@ -367,11 +375,7 @@ const writeTarget = async (
     // Still ahead of the preview, which is what needs it: the backend validates
     // an override against its catalog, so the model has to be in there before
     // anything asks to route it.
-    //
-    // The save path already read the supply to decide this target was writable;
-    // a retry arrives without one and reads it here rather than skipping a step
-    // whose absence is exactly what it may be retrying.
-    await adoptTargetModel(target, api, supply ?? (await api.listAgents()).find((row) => row.backend === target.backend));
+    await adoptTargetModel(target, api, supply);
     await api.previewAgentChain(target.backend, target.modelId, { manual_override: { hops: desired } });
     await api.putAgentChain(target.backend, target.modelId, { hops: desired });
     const readback = await api.getAgentChain(target.backend, target.modelId);
@@ -460,7 +464,24 @@ export async function retrySetupRoutes(
       results.push({ key, kind: 'reconcile', chain: current });
       continue;
     }
-    results.push(await writeTarget(target, desired, api));
+    // The chain above is only one of the three things the contract re-reads
+    // before a write. A retry needs the other two more than the first attempt
+    // did, not less: it is separated from the hydration it was built on by
+    // however long the person spent looking at the failure, so the backend may
+    // have left hub and the Agent may now name a different model — and writing
+    // a route for a target that no longer exists is what asking afterwards
+    // cannot undo. Same question, same owner, so the two paths cannot answer it
+    // differently.
+    const precheck = await precheckTarget(target, api);
+    if (precheck === 'reconcile') {
+      results.push({ key, kind: 'reconcile', chain: current });
+      continue;
+    }
+    if (precheck.kind === 'failed') {
+      results.push({ key, kind: 'failed', error: precheck.error });
+      continue;
+    }
+    results.push(await writeTarget(target, desired, api, precheck.supply));
   }
   return results;
 }
