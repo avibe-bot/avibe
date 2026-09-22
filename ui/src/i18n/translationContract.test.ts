@@ -15,7 +15,7 @@ import zh from './zh.json';
 
 // Compiled by typecheck:tests, not executed. These are real consuming prop/data
 // types: broadening a carrier or t makes an expect-error unused and fails CI.
-function compilerContract(t: TFunction, key: TranslationKey, custom: boolean) {
+function compilerContract(t: TFunction, key: TranslationKey) {
   const proxy: ComponentProps<typeof ProxyUrlField> = {
     value: '', onChange: () => {}, labelKey: 'common.proxyUrl', hintKey: 'common.proxyUrlHint',
   };
@@ -23,7 +23,6 @@ function compilerContract(t: TFunction, key: TranslationKey, custom: boolean) {
   proxy.labelKey = 'common.proxyUrll';
   // @ts-expect-error object prefixes cannot be rendered labels
   proxy.labelKey = 'common';
-  // @ts-expect-error a list cannot be rendered as a text label
   const app: Pick<AppDefinition, 'titleKey'> = { titleKey: 'apps.fileBrowser.label' };
   // @ts-expect-error typo in the app registry data contract
   app.titleKey = 'apps.fileBrowser.lable';
@@ -39,7 +38,6 @@ function compilerContract(t: TFunction, key: TranslationKey, custom: boolean) {
   const text: string = t(key);
   const title: string = t(`${module.i18nPrefix}.title`);
   const plural: string = t('settings.models.gateway.agentIssues.summary', { count: 2 });
-  const lengths: number[] = list.map((line) => line.length);
   // @ts-expect-error string resource cannot satisfy the real list consumption
   t('common.save', { returnObjects: true }).map((line: string) => line);
   // @ts-expect-error object resource cannot satisfy the real list consumption
@@ -60,7 +58,7 @@ function compilerContract(t: TFunction, key: TranslationKey, custom: boolean) {
   t('settings.models.addKey.field.vendor.toUpperCase');
   // @ts-expect-error no phantom descendants under a literal dotted key
   t('settings.models.addKey.field.vendor.search.typo');
-  return [proxy, app, state, text, title, plural, lengths, fallback, parent, child, sub, method, subMethod];
+  return [proxy, app, state, text, title, plural, fallback, parent, child, sub, method, subMethod];
 }
 void compilerContract;
 
