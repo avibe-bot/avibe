@@ -15288,9 +15288,6 @@ def cmd_upgrade():
             vibe_path=current_vibe_path,
             target_version=info.get("latest"),
         )
-    except MemoryRequirementUnreadableError:
-        print(f"\033[31m{i18n_t('update.memoryRequirementUnreadable')}\033[0m")
-        return 1
     except ValueError as exc:
         print(f"\033[31mUpgrade failed: {exc}\033[0m")
         return 1
