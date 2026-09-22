@@ -87,13 +87,15 @@ class EngineSupervisor:
             return self._start_locked()
 
     def stop(self) -> None:
+        """Shutdown stop: an unconfirmed survivor stays recorded for the next start."""
         with self._lock:
-            self._stop_locked()
+            if not self._stop_locked():
+                logger.warning("Model Hub engine exit unconfirmed at shutdown; left recorded")
 
     def disable(self) -> None:
         """Stop the managed engine and restore explicit lazy-start idleness."""
         with self._lock:
-            self._stop_locked()
+            self._require_stopped_locked()
             self._start_attempted = False
 
     def restart_if_running(self) -> None:
@@ -114,8 +116,9 @@ class EngineSupervisor:
         with self._lock:
             should_restart = self._is_running_locked() and self._healthy_locked()
             # Always stop: with no local handle this still reaps a recorded engine a
-            # previous service left running with the credential being revoked.
-            self._stop_locked()
+            # previous service left running with the credential being revoked, and
+            # revocation must not proceed while that engine may still hold it.
+            self._require_stopped_locked()
             self.state_store.clear_runtime_configs()
             if should_restart:
                 try:
@@ -187,9 +190,11 @@ class EngineSupervisor:
 
     def _start_locked(self) -> EngineConnection:
         self._start_attempted = True
-        # Every start binds a fresh port, so an unverifiable survivor cannot collide
-        # with the new engine; it stays in the record beside it instead of blocking.
-        survivors = self._reap_recorded_engines_locked()
+        # A survivor shares the watched OAuth auth dir, whose grants the engine
+        # rotates in place; a second engine beside it is never safe. Each later
+        # start retries the reap, so this clears once the survivor is confirmed gone.
+        if not self._reap_recorded_engines_locked():
+            raise EngineUnavailableError("models.engine.start_failed", reason="previous_engine_alive")
         managed = self.installer.status()
         binary = self.installer.resolve_engine_path()
         if binary is None:
@@ -234,7 +239,7 @@ class EngineSupervisor:
             raise EngineUnavailableError("models.engine.start_failed") from exc
         self._process = process
         self._connection = connection
-        if not self._record_engine_locked(process, marker, survivors):
+        if not self._record_engine_locked(process, marker):
             # An engine no record names would become a permanent orphan if this
             # service died, so it never runs untracked.
             self._stop_locked()
@@ -305,7 +310,13 @@ class EngineSupervisor:
     def _is_running_locked(self) -> bool:
         return self._process is not None and self._process.poll() is None
 
-    def _stop_locked(self) -> None:
+    def _require_stopped_locked(self) -> None:
+        if not self._stop_locked():
+            raise EngineUnavailableError("models.engine.stop_unconfirmed", reason="previous_engine_alive")
+
+    def _stop_locked(self) -> bool:
+        """Stop the engine; return whether no engine it may have started remains."""
+
         process = self._process
         self._process = None
         self._connection = None
@@ -319,7 +330,7 @@ class EngineSupervisor:
                 process.wait(timeout=3)
         # Also reached with no local handle (a restarted service): the record may
         # still name an engine the previous service left running.
-        self._reap_recorded_engines_locked()
+        return self._reap_recorded_engines_locked()
 
     @property
     def _engine_record_path(self) -> Path:
@@ -368,32 +379,25 @@ class EngineSupervisor:
             return False
         return True
 
-    def _record_engine_locked(
-        self,
-        process: Any,
-        marker: str,
-        survivors: list[PersistedProcessIdentity] | None,
-    ) -> bool:
+    def _record_engine_locked(self, process: Any, marker: str) -> bool:
         """Durably name the new engine; return whether it is tracked."""
 
-        if survivors is None:
-            # Rewriting a record we could not read would drop identities it may hold.
-            return False
         pid = getattr(process, "pid", None)
         identity = capture_spawned_process_identity(pid, marker) if isinstance(pid, int) else None
         if identity is None:
             return False
-        return self._store_engine_records_locked([*survivors, identity])
+        return self._store_engine_records_locked([identity])
 
-    def _reap_recorded_engines_locked(self) -> list[PersistedProcessIdentity] | None:
-        """Stop every recorded engine tree; return those still unconfirmed.
+    def _reap_recorded_engines_locked(self) -> bool:
+        """Stop every recorded engine tree; return whether all are confirmed gone.
 
-        ``None`` means the record could not be read and was left untouched.
+        An unreadable record is left untouched and counts as unconfirmed; the
+        identities of unconfirmed trees stay recorded for the next attempt.
         """
 
         records = self._load_engine_records_locked()
         if records is None:
-            return None
+            return False
         survivors: list[PersistedProcessIdentity] = []
         for identity in records:
             outcome = reap_orphaned_process_tree(logger, "Model Hub engine", expected_identity=identity)
@@ -406,8 +410,7 @@ class EngineSupervisor:
                 "Could not confirm %d earlier Model Hub engine(s) exited; keeping them tracked",
                 len(survivors),
             )
-        self._store_engine_records_locked(survivors)
-        return survivors
+        return self._store_engine_records_locked(survivors) and not survivors
 
 
 def _allocate_loopback_port() -> int:

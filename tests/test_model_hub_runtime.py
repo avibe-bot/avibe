@@ -2989,46 +2989,91 @@ def test_supervisor_stop_without_a_handle_reaps_the_recorded_engine(tmp_path: Pa
     assert not (store.root / "engine-process.json").exists()
 
 
-def test_supervisor_keeps_an_unconfirmed_engine_tracked_beside_the_new_one(
+def test_supervisor_refuses_to_start_beside_an_unconfirmed_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A survivor shares the watched OAuth auth dir; a second engine must not join it.
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    real_reap = supervisor_module.reap_orphaned_process_tree
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    spawned: list[object] = []
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        process_factory=lambda *a, **k: spawned.append(a) or subprocess.Popen(*a, **k),
+    )
+    record = store.root / "engine-process.json"
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        supervisor.ensure_running()
+
+    assert raised.value.reason == "previous_engine_alive"
+    assert spawned == []
+    assert _recorded_engine_pids(record) == [orphan.pid]
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", real_reap)
+    supervisor.ensure_running()
+    _wait_for(lambda: orphan.poll() is not None)
+    assert _recorded_engine_pids(record) == [supervisor._process.pid]
+    supervisor.stop()
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("operation", ["disable", "invalidate_configs"])
+def test_supervisor_does_not_report_stopped_while_an_engine_is_unconfirmed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    orphan = _orphan_engine(tmp_path)
+    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
+    supervisor, store = _fixture_supervisor(tmp_path)
+    cleared: list[bool] = []
+    monkeypatch.setattr(store, "clear_runtime_configs", lambda: cleared.append(True))
+
+    with pytest.raises(EngineUnavailableError) as raised:
+        getattr(supervisor, operation)()
+
+    assert raised.value.reason == "previous_engine_alive"
+    # Revocation callers run only after invalidation returns.
+    assert cleared == []
+    assert _recorded_engine_pids(store.root / "engine-process.json") == [orphan.pid]
+    orphan.kill()
+
+
+def test_supervisor_shutdown_stop_keeps_an_unconfirmed_engine_recorded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vibe.model_hub_runtime import supervisor as supervisor_module
 
     orphan = _orphan_engine(tmp_path)
-    real_reap = supervisor_module.reap_orphaned_process_tree
     monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", lambda *a, **k: "unconfirmed")
     supervisor, store = _fixture_supervisor(tmp_path)
-    record = store.root / "engine-process.json"
 
-    supervisor.ensure_running()
-
-    assert supervisor._process is not None
-    assert _recorded_engine_pids(record) == [orphan.pid, supervisor._process.pid]
-    monkeypatch.setattr(supervisor_module, "reap_orphaned_process_tree", real_reap)
     supervisor.stop()
-    _wait_for(lambda: orphan.poll() is not None)
-    assert not record.exists()
+
+    assert _recorded_engine_pids(store.root / "engine-process.json") == [orphan.pid]
+    orphan.kill()
 
 
-def test_supervisor_refuses_to_run_an_engine_it_cannot_record(tmp_path: Path) -> None:
-    spawned: list[subprocess.Popen] = []
-
-    def spawn(*args, **kwargs):
-        spawned.append(subprocess.Popen(*args, **kwargs))
-        return spawned[-1]
-
-    supervisor, store = _fixture_supervisor(tmp_path, process_factory=spawn)
-    # An unreadable record is left untouched, so the new engine could not be named.
+def test_supervisor_refuses_to_start_over_an_unreadable_engine_record(tmp_path: Path) -> None:
+    spawned: list[object] = []
+    supervisor, store = _fixture_supervisor(
+        tmp_path,
+        process_factory=lambda *a, **k: spawned.append(a) or subprocess.Popen(*a, **k),
+    )
     record = store.root / "engine-process.json"
     record.mkdir(parents=True)
 
     with pytest.raises(EngineUnavailableError) as raised:
         supervisor.ensure_running()
 
-    assert raised.value.reason == "engine_untracked"
-    assert spawned and spawned[0].poll() is not None
-    assert supervisor._process is None
+    assert raised.value.reason == "previous_engine_alive"
+    assert spawned == []
     assert record.is_dir()
 
 
