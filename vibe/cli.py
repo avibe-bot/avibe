@@ -12899,15 +12899,6 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
-    from vibe.memory_ui_access import generate_ui_read_secret
-
-    # This repair stopped the old service and starts a replacement, so it is the
-    # same shape ``cmd_start`` handles when it starts a service beside a
-    # surviving UI: the Memory UI read proof reaches a child only over stdin and
-    # is never persisted, so a bare CLI holds no secret to pass on and the new
-    # controller would verify with None while the live UI keeps signing with the
-    # old one. Mint a secret for the process being started and realign the UI.
-    memory_ui_secret = generate_ui_read_secret()
     live_ui_pid = _live_ui_server_pid()
     language = _configured_cli_language()
     try:
@@ -12929,7 +12920,6 @@ def _start_service_after_repair(
             ui_pid = runtime.start_ui(
                 runtime.effective_ui_bind_host(config),
                 config.ui.setup_port,
-                memory_ui_secret=memory_ui_secret,
             )
         except Exception:
             # The service repair itself succeeded; report it rather than failing
@@ -13464,20 +13454,10 @@ def cmd_start():
     else:
         _write_status("starting")
 
-    from vibe.memory_ui_access import generate_ui_read_secret
-
-    # The Memory UI read proof is a per-launch secret: it reaches a child only
-    # over stdin and is deliberately never persisted, so this launcher can only
-    # align a pair it starts itself. It cannot read the copy a surviving process
-    # already holds. Minting a fresh secret while reusing one live process is
-    # what left Memory profile/search/clear answering memory_access_denied after
-    # a partial restart, so track which side actually started here.
-    memory_ui_secret = generate_ui_read_secret()
     live_service_pid = runtime.resolve_service_owner_pid(include_starting=True)
     live_ui_pid = _live_ui_server_pid()
     service_pid = runtime.start_service(
         wait_for_ready=False,
-        memory_ui_secret=memory_ui_secret,
     )
     service_reused = live_service_pid is not None and service_pid == live_service_pid
     if service_reused:
@@ -13486,7 +13466,6 @@ def cmd_start():
         # rejects, so leave the surviving pair's own secret authoritative.
         ui_memory_secret = None
     else:
-        ui_memory_secret = memory_ui_secret
         if live_ui_pid is not None:
             # A surviving UI signs with the previous secret, which the service
             # started just now cannot verify. Restart it so the pair shares one
@@ -13497,7 +13476,7 @@ def cmd_start():
     ui_pid = runtime.start_ui(
         bind_host,
         config.ui.setup_port,
-        memory_ui_secret=ui_memory_secret,
+
     )
     if service_reused and ui_pid != live_ui_pid:
         logger.warning(

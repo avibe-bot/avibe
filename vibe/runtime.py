@@ -1034,10 +1034,6 @@ def independent_process_env(
 
     child_env = environment_without_caller_context(env)
     return child_env
-    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
-
-    child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
-    return child_env
 
 
 def spawn_background(
