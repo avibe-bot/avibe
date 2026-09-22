@@ -1333,6 +1333,15 @@ def save_config(
                 ),
             )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
+        from vibe import remote_access
+
+        # Admit the pairing clear before publishing the separate settings
+        # store: an unreadable journal or failed fence must reject this
+        # request without already changing its Discord guild scope.
+        pairing_revocation_operation_id = remote_access.prepare_pairing_revocation(
+            base_config,
+            config,
+        )
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update, user_context=context)
         elif base_config is not None:
@@ -1341,12 +1350,6 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
-        from vibe import remote_access
-
-        pairing_revocation_operation_id = remote_access.prepare_pairing_revocation(
-            base_config,
-            config,
-        )
         config.save()
         if not remote_access.complete_pairing_revocation(pairing_revocation_operation_id):
             logger.error(

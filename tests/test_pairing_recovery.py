@@ -650,6 +650,130 @@ def test_new_backend_is_validated_before_pending_selection(pairing_host, monkeyp
     assert remote_access.pair("", "")["ok"]
 
 
+def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_host, monkeypatch):
+    ctx = _fork_context()
+    root, _ = pairing_host
+    entered = root / "duplicate-redeem-entered"
+    release = root / "duplicate-redeem-release"
+    result_path = root / "duplicate-first-result.json"
+    attempts = root / "duplicate-network-attempts"
+
+    def redeem(url, payload, **kwargs):
+        with attempts.open("a", encoding="utf-8") as stream:
+            stream.write("redeem\n")
+        if entered.exists():
+            raise remote_access.BackendRequestError(400, {"error": "pairing_key_used"})
+        entered.touch()
+        _wait_for_marker(release)
+        return _response("inst_A")
+
+    monkeypatch.setattr(remote_access, "_json_request", redeem)
+    worker = ctx.Process(
+        target=_child_pair, args=("key_A", "https://backend.test", result_path),
+    )
+    worker.start()
+    try:
+        _wait_for_marker(entered)
+        journal = root / "state/pending-pairing.json"
+        claimed = journal.read_bytes()
+        duplicate = remote_access.pair(" key_A ", "https://backend.test", device_name="another tab")
+        assert duplicate["error"] == "pairing_recovery_not_ready"
+        assert journal.read_bytes() == claimed
+        assert "key_A" not in claimed.decode()
+    finally:
+        release.touch()
+        worker.join(timeout=15)
+    assert not worker.is_alive()
+    assert worker.exitcode == 0
+    assert json.loads(result_path.read_text())["ok"]
+    assert attempts.read_text().splitlines() == ["redeem"]
+    saved = V2Config.load().remote_access.vibe_cloud
+    binding = remote_access_authorization_service.load_instance_binding_state(ensure=False)
+    assert saved.instance_id == binding["instance_id"] == "inst_A"
+    assert not journal.exists()
+
+
+def test_duplicate_key_recovers_the_same_durable_response(pairing_host, monkeypatch):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == (
+        "pairing_save_failed_after_redeem"
+    )
+    original = json.loads((root / "state/pending-pairing.json").read_text())
+
+    def reject_consumed_key(*args, **kwargs):
+        pytest.fail("a duplicate of the durable request must not redeem again")
+
+    monkeypatch.setattr(remote_access, "_json_request", reject_consumed_key)
+    assert remote_access.pair("key_A", "https://backend.test")["ok"]
+    saved = V2Config.load().remote_access.vibe_cloud
+    assert saved.session_secret == original["session_secret"]
+    assert saved.instance_secret == original["pairing"]["instance_secret"]
+    assert len(calls) == 1
+
+
+def test_same_key_at_different_backend_is_a_new_operation(pairing_host, monkeypatch):
+    _, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert not remote_access.pair("key_A", "https://backend.test")["ok"]
+    assert remote_access.pair("key_A", "https://other-backend.test")["ok"]
+    assert len(calls) == 2
+    assert V2Config.load().remote_access.vibe_cloud.backend_url == "https://other-backend.test"
+
+
+def test_uncertain_duplicate_does_not_redeem_or_discard_prepared_evidence(pairing_host, monkeypatch):
+    root, calls = pairing_host
+
+    def uncertain(url, payload, **kwargs):
+        calls.append((url, payload["pairing_key"]))
+        raise remote_access.BackendRequestError(503, {"error": "backend_http_error"})
+
+    monkeypatch.setattr(remote_access, "_json_request", uncertain)
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == "pairing_redeem_indeterminate"
+    journal = root / "state/pending-pairing.json"
+    before = journal.read_bytes()
+    assert remote_access.pair("key_A", "https://backend.test")["error"] == "pairing_recovery_not_ready"
+    assert journal.read_bytes() == before
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("fingerprint", [None, [], 123, "not-a-fingerprint"])
+def test_malformed_request_fingerprint_fails_closed(pairing_host, monkeypatch, fingerprint):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert not remote_access.pair("key_A", "https://backend.test")["ok"]
+    journal = root / "state/pending-pairing.json"
+    record = json.loads(journal.read_text())
+    record["request_fingerprint"] = fingerprint
+    journal.write_text(json.dumps(record))
+    assert remote_access.pair("", "")["error"] == "pairing_recovery_invalid"
+    assert remote_access.pair("key_B", "https://backend.test")["ok"]
+    assert len(calls) == 2
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_B"
+
+
+def test_duplicate_selection_cannot_resume_a_superseding_operation(pairing_host, monkeypatch):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert not remote_access.pair("key_A", "https://backend.test")["ok"]
+    persist = remote_access._persist_pairing
+    later_record = []
+
+    def supersede_before_duplicate_resume(result, *, device_name, operation_id=None):
+        if result is None and operation_id:
+            _fail_config_publication_once(monkeypatch)
+            assert not remote_access.pair("key_B", "https://backend.test")["ok"]
+            later_record.append((root / "state/pending-pairing.json").read_bytes())
+        return persist(result, device_name=device_name, operation_id=operation_id)
+
+    monkeypatch.setattr(remote_access, "_persist_pairing", supersede_before_duplicate_resume)
+    result = remote_access.pair("key_A", "https://backend.test")
+    assert result["error"] == "pairing_superseded_after_redeem"
+    assert (root / "state/pending-pairing.json").read_bytes() == later_record[0]
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == ""
+    assert [key for _, key in calls] == ["key_A", "key_B"]
+
+
 @pytest.mark.parametrize("instance_id", ["../../unrelated", "absolute", "实例/测试"])
 def test_remote_id_never_addresses_a_local_file(pairing_host, monkeypatch, instance_id):
     root, calls = pairing_host
@@ -953,6 +1077,91 @@ def test_paired_to_unpaired_save_fails_closed_on_unreadable_record(
         )
     assert V2Config.load().remote_access.vibe_cloud.is_runtime_paired()
     assert journal.exists()
+
+
+@pytest.mark.parametrize("mutation", ["empty", "disabled", "identity", "readback"])
+def test_unchanged_unpaired_save_preserves_durable_recovery(pairing_host, monkeypatch, mutation):
+    root, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert not remote_access.pair("key_A", "https://backend.test")["ok"]
+    journal = root / "state/pending-pairing.json"
+    before = journal.read_bytes()
+    payload = {
+        "empty": {},
+        "disabled": {"remote_access": {"vibe_cloud": {"enabled": False}}},
+        "identity": {"remote_access": {"vibe_cloud": remote_access._pairing_identity_from_cloud(
+            V2Config.load().remote_access.vibe_cloud
+        )}},
+        "readback": api.config_to_payload(V2Config.load()),
+    }[mutation]
+    saved = api.save_config(payload, validate_remote_access_network=False)
+    assert not saved.remote_access.vibe_cloud.is_runtime_paired()
+    assert journal.read_bytes() == before
+    assert remote_access.pair("", "")["ok"]
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
+    assert len(calls) == 1
+
+
+def test_changed_unpaired_source_does_not_allow_pending_replay(pairing_host, monkeypatch):
+    _, calls = pairing_host
+    _fail_config_publication_once(monkeypatch)
+    assert not remote_access.pair("key_A", "https://backend.test")["ok"]
+    # Unlike enabled=false -> false, clearing the default backend actually
+    # changes the source identity and must not authorize the old response.
+    api.save_config(
+        {"remote_access": {"vibe_cloud": _clear_identity()}},
+        validate_remote_access_network=False,
+    )
+    assert remote_access.pair("", "")["error"] == "pairing_superseded_after_redeem"
+    assert not V2Config.load().remote_access.vibe_cloud.is_runtime_paired()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "fence_write"])
+def test_revocation_admission_precedes_discord_scope_publication(pairing_host, monkeypatch, failure):
+    root, _ = pairing_host
+    config = _save_paired_identity()
+    api.save_config({"discord": {"guild_allowlist": ["before"]}})
+    with remote_access.config_file_lock():
+        remote_access._write_pending_pairing_record(
+            remote_access._new_pairing_claim(config, "https://backend.test", "fixture")
+        )
+    journal = root / "state/pending-pairing.json"
+    valid_record = journal.read_bytes()
+    config_before = paths.get_config_path().read_bytes()
+    write = remote_access._write_pending_pairing_record
+    if failure == "unreadable":
+        journal.write_text("{", encoding="utf-8")
+    else:
+        def reject_fence(record):
+            if record["phase"] == "revoked":
+                raise OSError("fixture fence admission failed")
+            return write(record)
+
+        monkeypatch.setattr(remote_access, "_write_pending_pairing_record", reject_fence)
+
+    payload = {
+        "discord": {"guild_allowlist": ["after"]},
+        "remote_access": {"vibe_cloud": _clear_identity()},
+    }
+    with pytest.raises(remote_access._PairingRevocationUnavailable):
+        api.save_config(payload, validate_remote_access_network=False)
+    assert paths.get_config_path().read_bytes() == config_before
+    store = api.SettingsStore()
+    try:
+        assert set(store.get_guilds_for_platform("discord")) == {"before"}
+    finally:
+        store.close()
+    journal.write_bytes(valid_record)
+    monkeypatch.setattr(remote_access, "_write_pending_pairing_record", write)
+    api.save_config(payload, validate_remote_access_network=False)
+    store = api.SettingsStore()
+    try:
+        assert set(store.get_guilds_for_platform("discord")) == {"after"}
+    finally:
+        store.close()
+    assert not V2Config.load().remote_access.vibe_cloud.is_runtime_paired()
+    assert not journal.exists()
 
 
 def test_clear_fences_an_applied_record_after_retirement_failure(pairing_host, monkeypatch):

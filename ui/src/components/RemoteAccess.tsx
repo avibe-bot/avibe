@@ -1,5 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -76,6 +76,9 @@ export const RemoteAccess: React.FC = () => {
   const [diagnosing, setDiagnosing] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TunnelConnectivityDiagnostics | null>(null);
   const [actionMessage, setActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const statusRequest = useRef(0);
+  const mounted = useRef(true);
+  const pairingInFlight = useRef(false);
 
   const describeError = (payload: unknown) => {
     const code = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
@@ -88,31 +91,38 @@ export const RemoteAccess: React.FC = () => {
   };
 
   const refresh = useCallback(async (silent = false) => {
+    const requestId = ++statusRequest.current;
+    const isCurrent = () => mounted.current && requestId === statusRequest.current;
     if (!silent) setLoading(true);
     try {
       const remoteStatus = await api.remoteAccessStatus();
+      if (!isCurrent() || pairingInFlight.current) return;
       setStatus(remoteStatus);
       setPairingStatusKnown(true);
       if (remoteStatus.paired) {
         try {
           const result = await api.getRemoteAccessNetworkInterfaces();
-          setNetworkInterfaces(result.interfaces || []);
+          if (isCurrent()) setNetworkInterfaces(result.interfaces || []);
         } catch {
-          setNetworkInterfaces([]);
+          if (isCurrent()) setNetworkInterfaces([]);
         }
       } else {
         setNetworkInterfaces([]);
       }
     } catch (error) {
+      if (!isCurrent() || pairingInFlight.current) return;
       setPairingStatusKnown(false);
       throw error;
     } finally {
-      if (!silent) setLoading(false);
+      // A newer silent refresh can supersede a foreground one. It also owns
+      // completing that spinner; the obsolete request cannot clear it later.
+      if (isCurrent()) setLoading(false);
     }
   }, [api]);
 
   useEffect(() => {
-    refresh().catch(() => setLoading(false));
+    mounted.current = true;
+    refresh().catch(() => undefined);
     const disconnect = api.connectWorkbenchEvents({
       onRemoteAccessQuality: (quality) => {
         setStatus((current) => current ? { ...current, tunnel_quality: quality } : current);
@@ -124,6 +134,8 @@ export const RemoteAccess: React.FC = () => {
     const interval = window.setInterval(refreshVisible, 30_000);
     const stopReactivation = onPageReactivated(refreshVisible);
     return () => {
+      mounted.current = false;
+      statusRequest.current += 1;
       disconnect();
       window.clearInterval(interval);
       stopReactivation();
@@ -137,9 +149,11 @@ export const RemoteAccess: React.FC = () => {
   }, [settingsDirty, status?.settings]);
 
   const pair = async (resume = false) => {
-    if (!canPair || pairing || !pairingStatusKnown) return;
+    if (!canPair || pairing || pairingInFlight.current || !pairingStatusKnown) return;
     const key = resume ? '' : pairingKey.trim();
     if (!resume && !key) return;
+    pairingInFlight.current = true;
+    statusRequest.current += 1;
     setPairing(true);
     setActionMessage(null);
     // A failed response does not mean the one-time key was not consumed.
@@ -152,6 +166,7 @@ export const RemoteAccess: React.FC = () => {
         pairing_key: key,
         device_name: 'avibe',
       });
+      if (!mounted.current) return;
       setStatus(result);
       if (result?.start?.ok === false) {
         const message = describeError(result.start);
@@ -164,12 +179,16 @@ export const RemoteAccess: React.FC = () => {
         showToast(message, 'success');
       }
     } catch (error) {
+      if (!mounted.current) return;
       const message = error instanceof Error ? error.message : t('errors.remote_access_unknown');
       setActionMessage({ type: 'error', text: message });
     } finally {
       // Recover from the durable owner, including HTTP failures and page reloads.
-      await refresh(true).catch(() => undefined);
-      setPairing(false);
+      pairingInFlight.current = false;
+      if (mounted.current) {
+        await refresh(true).catch(() => undefined);
+        if (mounted.current) setPairing(false);
+      }
     }
   };
 

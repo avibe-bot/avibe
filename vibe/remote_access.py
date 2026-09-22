@@ -4699,6 +4699,15 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
     source_instance_id = payload.get("source_instance_id")
     if not isinstance(source_instance_id, str):
         return None, "pending pairing record source instance is invalid"
+    if "request_fingerprint" in payload:
+        fingerprint = payload["request_fingerprint"]
+        if (
+            not isinstance(fingerprint, str)
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+            or not isinstance(payload.get("session_secret"), str)
+            or not payload["session_secret"]
+        ):
+            return None, "pending pairing request fingerprint is invalid"
     if phase in {"redeemed", "applied"}:
         pairing = payload.get("pairing")
         target_identity = payload.get("target_identity")
@@ -4895,9 +4904,31 @@ def pending_pairing_status() -> dict[str, Any] | None:
     }
 
 
-def _new_pairing_claim(config: V2Config, backend_url: str, device_name: str) -> dict[str, Any]:
+def _pairing_request_fingerprint(backend_url: str, pairing_key: str, session_secret: str) -> str:
+    # Operation-local comparison only: never persist the submitted one-time key
+    # or expose this fingerprint in the owner-facing status projection.
+    message = json.dumps([backend_url, pairing_key], separators=(",", ":"))
+    return hmac.new(session_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def _same_pairing_request(record: Mapping[str, Any], backend_url: str, pairing_key: str) -> bool:
+    fingerprint = record.get("request_fingerprint")
+    session_secret = record.get("session_secret")
+    return (
+        isinstance(fingerprint, str)
+        and isinstance(session_secret, str)
+        and bool(session_secret)
+        and hmac.compare_digest(
+            fingerprint, _pairing_request_fingerprint(backend_url, pairing_key, session_secret)
+        )
+    )
+
+
+def _new_pairing_claim(
+    config: V2Config, backend_url: str, device_name: str, *, pairing_key: str = "",
+) -> dict[str, Any]:
     source_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
-    return {
+    claim = {
         "schema_version": _PENDING_PAIRING_SCHEMA_VERSION,
         "operation_id": secrets.token_hex(16),
         "phase": "prepared",
@@ -4909,6 +4940,11 @@ def _new_pairing_claim(config: V2Config, backend_url: str, device_name: str) -> 
         "session_secret": secrets.token_urlsafe(32),
         "prepared_at": time.time(),
     }
+    if pairing_key:
+        claim["request_fingerprint"] = _pairing_request_fingerprint(
+            backend_url, pairing_key, claim["session_secret"]
+        )
+    return claim
 
 
 def _config_for_pairing_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -5051,6 +5087,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         }
     from storage.importer import ensure_sqlite_state
 
+    duplicate_operation_id = None
     try:
         ensure_sqlite_state()
         with config_file_lock():
@@ -5058,8 +5095,14 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
                 current_config = V2Config.load()
             except FileNotFoundError:
                 current_config = V2Config.default()
-            claim = _new_pairing_claim(current_config, backend.base_url, device_name)
-            _write_pending_pairing_record(claim)
+            pending, _ = _read_pending_pairing_record()
+            if pending is not None and _same_pairing_request(pending, backend.base_url, pairing_key):
+                duplicate_operation_id = str(pending["operation_id"])
+            else:
+                claim = _new_pairing_claim(
+                    current_config, backend.base_url, device_name, pairing_key=pairing_key,
+                )
+                _write_pending_pairing_record(claim)
     except Exception as exc:
         return {
             "ok": False,
@@ -5067,6 +5110,13 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
             "detail": str(exc),
             "pairing": {"ok": False},
         }
+    if duplicate_operation_id is not None:
+        # Preserve an in-flight owner, or resume its durable response. The
+        # selected ID must be revalidated: a new key may claim the record
+        # between this short transaction and the recovery transaction.
+        return _persist_pairing(
+            None, device_name=device_name, operation_id=duplicate_operation_id,
+        )
     try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
@@ -5169,6 +5219,15 @@ def _persist_pairing_impl(
                     "pairing": {"ok": False, "recoverable": False},
                 }
             return {"ok": False, "error": "pairing_recovery_invalid", "detail": record_error}
+        if result is None and operation_id is not None and (
+            record is None or record.get("operation_id") != operation_id
+        ):
+            return {
+                "ok": False,
+                "error": "pairing_superseded_after_redeem",
+                "detail": "the selected duplicate operation no longer owns recovery",
+                "pairing": {"ok": False, "recoverable": False},
+            }
         if record is None:
             if result is not None:
                 return {

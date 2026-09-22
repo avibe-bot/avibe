@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { RemoteAccess } from './RemoteAccess';
 import type { RemoteAccessStatus } from '../context/ApiContext';
@@ -20,6 +20,21 @@ const api = vi.hoisted(() => ({
   stopRemoteAccess: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
+const reactivate = vi.hoisted(() => ({ callback: () => {} }));
+
+vi.mock('../lib/pageActivity', () => ({
+  onPageReactivated: (callback: () => void) => {
+    reactivate.callback = callback;
+    return () => {};
+  },
+}));
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
 
 vi.mock('../context/ApiContext', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('../context/ApiContext')>();
@@ -254,5 +269,100 @@ describe('RemoteAccess', () => {
     expect(screen.queryByRole('button', { name: 'remoteAccess.replacePairing' })).toBeNull();
     expect(api.pairVibeCloudRemoteAccess).not.toHaveBeenCalled();
   });
+
+  it.each(['success', 'failure'] as const)(
+    'ignores an older status %s after post-pair recovery is current',
+    async (outcome) => {
+      const unpaired = runningStatus({ paired: false, running: false });
+      const oldStatus = deferred<RemoteAccessStatus>();
+      api.remoteAccessStatus.mockResolvedValue(unpaired);
+      api.pairVibeCloudRemoteAccess.mockImplementationOnce(async () => {
+        api.remoteAccessStatus.mockResolvedValue({
+          ...unpaired, pending_pairing: { phase: 'redeemed', can_resume: true },
+        });
+        throw new Error('pairing_save_failed_after_redeem');
+      });
+      renderPage();
+      const input = await screen.findByLabelText('remoteAccess.pairingKey');
+      api.remoteAccessStatus.mockReturnValueOnce(oldStatus.promise);
+      act(() => reactivate.callback());
+      fireEvent.change(input, { target: { value: 'one-time-key' } });
+      fireEvent.click(screen.getByRole('button', { name: 'remoteAccess.pair' }));
+      const resume = await screen.findByRole('button', { name: 'remoteAccess.resumePairing' });
+      await waitFor(() => expect((resume as HTMLButtonElement).disabled).toBe(false));
+      await act(async () => {
+        if (outcome === 'success') oldStatus.resolve(unpaired);
+        else oldStatus.reject(new Error('old GET failed'));
+      });
+      expect(screen.queryByLabelText('remoteAccess.pairingKey')).toBeNull();
+      expect(screen.queryByText('remoteAccess.pairingStatusUnavailable')).toBeNull();
+      expect((screen.getByRole('button', { name: 'remoteAccess.resumePairing' }) as HTMLButtonElement).disabled).toBe(false);
+      expect(api.pairVibeCloudRemoteAccess).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not let an older successful status override a newer refresh failure', async () => {
+    const oldStatus = deferred<RemoteAccessStatus>();
+    api.remoteAccessStatus.mockResolvedValue(runningStatus({ paired: false, running: false }));
+    renderPage();
+    await screen.findByLabelText('remoteAccess.pairingKey');
+    api.remoteAccessStatus.mockReturnValueOnce(oldStatus.promise);
+    act(() => reactivate.callback());
+    api.remoteAccessStatus.mockRejectedValueOnce(new Error('current GET failed'));
+    act(() => reactivate.callback());
+    await screen.findByText('remoteAccess.pairingStatusUnavailable');
+    await act(async () => oldStatus.resolve(runningStatus({ paired: false, running: false })));
+    expect(screen.getByText('remoteAccess.pairingStatusUnavailable')).toBeTruthy();
+    expect((screen.getByLabelText('remoteAccess.pairingKey') as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it('invalidates status reads when pairing starts, before its final refresh', async () => {
+    const unpaired = runningStatus({ paired: false, running: false });
+    const oldStatus = deferred<RemoteAccessStatus>();
+    const pairingResult = deferred<RemoteAccessStatus>();
+    api.remoteAccessStatus.mockResolvedValue(unpaired);
+    api.pairVibeCloudRemoteAccess.mockReturnValueOnce(pairingResult.promise);
+    renderPage();
+    const input = await screen.findByLabelText('remoteAccess.pairingKey');
+    api.remoteAccessStatus.mockReturnValueOnce(oldStatus.promise);
+    act(() => reactivate.callback());
+    fireEvent.change(input, { target: { value: 'one-time-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'remoteAccess.pair' }));
+    await act(async () => oldStatus.resolve(runningStatus()));
+    expect(screen.queryByRole('button', { name: 'remoteAccess.repair' })).toBeNull();
+    expect(api.getRemoteAccessNetworkInterfaces).not.toHaveBeenCalled();
+    await act(async () => pairingResult.reject(new Error('fixture pairing failure')));
+  });
+
+  it('does not follow an obsolete status with network-interface reads after unmount', async () => {
+    const oldStatus = deferred<RemoteAccessStatus>();
+    api.remoteAccessStatus.mockReturnValueOnce(oldStatus.promise);
+    const page = renderPage();
+    page.unmount();
+    await act(async () => oldStatus.resolve(runningStatus()));
+    expect(api.getRemoteAccessNetworkInterfaces).not.toHaveBeenCalled();
+  });
+
+  it.each(['success', 'failure'] as const)(
+    'ignores obsolete network-interface %s after a newer refresh',
+    async (outcome) => {
+      const oldInterfaces = deferred<{ ok: boolean; interfaces: [] }>();
+      api.getRemoteAccessNetworkInterfaces.mockReturnValueOnce(oldInterfaces.promise);
+      renderPage();
+      await screen.findByText('remoteAccess.controls');
+      api.getRemoteAccessNetworkInterfaces.mockResolvedValue({
+        ok: true,
+        interfaces: [{ id: 'new', name: 'new-interface', address: '192.0.2.11', ip_version: '4' }],
+      });
+      act(() => reactivate.callback());
+      await screen.findByText('new-interface · 192.0.2.11');
+      await act(async () => {
+        if (outcome === 'success') oldInterfaces.resolve({ ok: true, interfaces: [] });
+        else oldInterfaces.reject(new Error('obsolete interface failure'));
+      });
+      expect(screen.getByText('new-interface · 192.0.2.11')).toBeTruthy();
+      expect((screen.getByRole('button', { name: 'common.refresh' }) as HTMLButtonElement).disabled).toBe(false);
+    },
+  );
 
 });

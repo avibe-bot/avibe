@@ -16,9 +16,12 @@ durable and never promises recovery across an unrecorded crash.
 - SQLite migration runs before the existing configuration lock. The lock is
   held only for local claim, validation, publication, binding, and retirement.
   Network redeem runs outside it.
-- An explicit key and valid backend URL always create a new operation and
-  supersede an older pending operation before redeem. Invalid new backend input
-  leaves the older operation untouched.
+- A different explicit key/backend creates a new operation and supersedes an
+  older pending operation before redeem. Duplicate submissions of the same
+  normalized backend/key preserve the pending owner, using an operation-local
+  keyed fingerprint, not a stored plaintext key. Durable duplicate recovery
+  revalidates the selected operation ID; it cannot resume a newer operation.
+  Invalid new backend input leaves the older operation untouched.
 - A no-key retry can only resume a validated redeemed or applied record. A
   prepared, malformed, revoked, or superseded record never silently redeems
   again or prompts for a replacement key through the retry command.
@@ -33,7 +36,8 @@ durable and never promises recovery across an unrecorded crash.
 - `api.save_config` revocation detection invalidates pending replay authority
   before publishing a real enabled/credential-bearing to disabled/incomplete
   identity transition. Unrelated settings and unchanged empty writes do not
-  revoke recovery.
+  revoke recovery. The fence precedes the existing Discord settings-store
+  publication so its rejection cannot partially publish that side effect.
 - The CLI treats any existing fixed record as an owned pending operation. It
   never prompts for a replacement key when the record is prepared, malformed,
   revoked, or otherwise not recoverable; `pair()` reports the state instead.
@@ -55,6 +59,9 @@ durable and never promises recovery across an unrecorded crash.
   record offers local recovery after failure or page reload, including when
   config is already paired. Replacing it requires a separate new-key action.
   A failed status refresh disables pairing until status can be checked again.
+  Only the latest status request may publish its result or failure; pairing
+  starts and component teardown invalidate older reads. A late response must
+  not hide a newer recovery action or make failed status verification current.
 - Transport and server failures retain an uncertain prepared claim and report
   an indeterminate result. CLI instructions show explicit new-key replacement
   with the intended backend; they never promise that keyless retry can recover
@@ -66,6 +73,14 @@ Local preflight protects predictable local publication failures before redeem.
 It cannot eliminate every remote/local crash window. If the cloud has consumed
 a key and no redeemed response was durably recorded, the result is reported as
 indeterminate rather than presented as recoverable.
+
+An unchanged generic config write is not a pending-operation cancellation
+command. In particular, writing `enabled: false` when the saved identity is
+already disabled, or round-tripping that identity from `GET /api/config`,
+preserves recovery. Field presence alone cannot distinguish those no-op saves
+from an intended cancellation without a separate explicit intent contract.
+Actual identity revocation fences replay, and changed source identity fails
+recovery validation. A new cancellation surface is outside this change.
 
 ## Validation
 
