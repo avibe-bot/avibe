@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import {
   beginRegionRead,
+  loadingRegion,
   readyRegion,
   unreadRegion,
   type RegionRead,
@@ -873,6 +874,44 @@ describe('ProvidersScreen — the action the shell renders', () => {
     // Opening the takeover is not continuing: the report of what landed would be
     // lost behind a navigation.
     expect(navigated).toEqual([]);
+  });
+
+  // The invariant rather than the symptom: the shell draws the action this screen
+  // published, and a press is made against the one drawn. So an action that became
+  // pressable may only stop being pressable because something new arrived — someone
+  // asking for a read again, a write going out, an engine going down. A retraction
+  // nobody caused is a press that reaches nothing: `activate` sees the state the
+  // screen is really in and drops it, and the person is given no reason to press a
+  // second time.
+  //
+  // Judged over the published SEQUENCE, not over a rendered frame, because the frame
+  // a retraction leaves behind is identical to the settled one — the action comes
+  // back to exactly what it was a commit later. Only the order the shell was told
+  // about tells the two apart.
+  it('never takes a pressable action back on its own once a new observation lands', async () => {
+    serve({ sources: [source({ id: 'src_zhipu', vendor: 'zhipu' })] });
+    // Arriving before the runtime read has landed is the ordinary way in: the supply
+    // read answers first, so the action already names the way on while the engine is
+    // still unknown — stated, and not yet pressable.
+    const { show } = renderScreen({ runtimeRead: loadingRegion<RuntimeDependency>() });
+    await settled();
+    await waitFor(() => expect(lastAction().labelKey).toBe('onboarding.providers.actionContinue'));
+    expect(lastAction().disabled).toBe(true);
+
+    // The only new input in this case, and the last one: the engine is observed
+    // serving. It admits the press AND is a new observation for the supply read, which
+    // is exactly why the retraction it used to cause was invisible — the same input
+    // produced both halves.
+    await show({ runtimeRead: readyRegion(runtimeOf('ok')) });
+    await waitFor(() => expect(lastAction().disabled).toBe(false));
+    // The refresh that observation starts has to have been made and settled before the
+    // sequence means anything; otherwise this passes on a read that never happened.
+    await waitFor(() => expect(modelsApi.listSources).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(cards()[0].dataset.state).toBe('connected'));
+
+    const pressable = actions.findIndex((action) => !action.disabled && !action.busy);
+    expect(pressable).toBeGreaterThanOrEqual(0);
+    expect(actions.slice(pressable).every((action) => !action.disabled && !action.busy)).toBe(true);
   });
 });
 

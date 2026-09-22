@@ -241,6 +241,26 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     // spent on purpose and must not come back ticked.
     const seededSelectionRef = React.useRef(false);
     /**
+     * Which request the answer on screen belongs to, or `null` while none does.
+     *
+     * A read with no answer yet, and a retry someone asked for, both mean the screen
+     * is back to not knowing — that is what `reading` says and both have to say it. A
+     * refresh a NEW OBSERVATION started is neither: the inventory it describes has not
+     * been contradicted, so the answer in hand is still the best thing known about it,
+     * and retracting it would take the action away for exactly as long as that refresh
+     * runs. The same reason the shell holds a stale runtime region through a refresh
+     * rather than falling back to `loading`.
+     *
+     * The window that costs is not a matter of patience. The observation that starts
+     * the refresh is the same one that makes the action pressable — `hubAdmitted` needs
+     * the runtime read this screen is re-reading against — so the two land one commit
+     * apart: Continue turns pressable, and the effect that runs straight after takes it
+     * back. A press that arrives in between reaches `activate` with the screen already
+     * 「checking」 and is dropped, and nothing re-issues it. Holding the answer through
+     * the refresh is what stops that commit from existing, rather than narrowing it.
+     */
+    const answeredRef = React.useRef<number | null>(null);
+    /**
      * The runtime observation this screen's supply read is taken against.
      *
      * A supply read is answered by the controller, and D11 is what makes the controller
@@ -266,9 +286,11 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
-      // A re-read is a read: while it is in flight the screen is back to not knowing,
-      // which is what a retry means and what the action should say.
-      setSourceRead('reading');
+      // A read with no answer behind it is a read: while it is in flight the screen is
+      // back to not knowing, which is what a retry means and what the action should
+      // say. A refresh of an answer this screen already holds is not — see
+      // `answeredRef`.
+      if (answeredRef.current !== supplyToken) setSourceRead('reading');
       void (async () => {
         // Settled independently, because they answer different questions. A scan that
         // fails says nothing about the sources, and discarding a source list that did
@@ -281,10 +303,15 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
         if (cancelled) return;
         // A stale source read is neither an answer nor a failure: a newer generation
         // superseded it, and that newer one is what will settle this.
-        if (read.status === 'rejected') setSourceRead('unreadable');
-        else if (read.value.kind === 'current') {
+        if (read.status === 'rejected') {
+          // Nothing is held now, so the next refresh is a read with no answer behind
+          // it again and says so.
+          answeredRef.current = null;
+          setSourceRead('unreadable');
+        } else if (read.value.kind === 'current') {
           setSources(read.value.value);
           setSourceRead('read');
+          answeredRef.current = supplyToken;
         }
         // Either failure is still a failure for the sentence: what the screen cannot
         // report is exactly what it and its retry exist to say.
