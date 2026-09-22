@@ -26,10 +26,13 @@ export const createRouteProjectionReconciler = ({
 }: RouteProjectionReaders) => {
   let generation = 0;
   let failed = new Set<RouteProjectionMember>();
-  let report: RouteReport | null = null;
+  let activeReport: RouteReport | null = null;
+  const pendingReports: RouteReport[] = [];
 
   const publish = (pending: boolean) => {
-    if (report) onStatus({ report, pending, failed: new Set(failed) });
+    if (activeReport) {
+      onStatus({ report: activeReport, pending, failed: new Set(failed) });
+    }
   };
 
   const settle = async (
@@ -67,18 +70,34 @@ export const createRouteProjectionReconciler = ({
     if (token === generation) publish(false);
   };
 
+  const beginNext = () => {
+    if (activeReport || pendingReports.length === 0) return;
+    activeReport = pendingReports.shift() ?? null;
+    if (!activeReport) return;
+    const token = ++generation;
+    void settle(token, new Set(["agents"])).then(() => {
+      if (token !== generation || failed.size > 0) return;
+      activeReport = null;
+      beginNext();
+    });
+  };
+
   return {
     start: (committed: RouteReport) => {
-      // The page owns the complete received/inferred evidence before the editor
-      // closes. Retry changes only projection status, never the response tails.
-      report = committed;
-      const token = ++generation;
-      void settle(token, new Set(["agents"]));
+      // The page owns each complete received/inferred response before the editor
+      // closes. Queue later commits so an in-flight reconciliation never drops
+      // an earlier report or cancels its projection settlement.
+      pendingReports.push(committed);
+      beginNext();
     },
     retry: () => {
-      if (failed.size === 0 || !report) return;
+      if (failed.size === 0 || !activeReport) return;
       const token = ++generation;
-      void settle(token, failed);
+      void settle(token, failed).then(() => {
+        if (token !== generation || failed.size > 0) return;
+        activeReport = null;
+        beginNext();
+      });
     },
     invalidate: () => {
       generation += 1;

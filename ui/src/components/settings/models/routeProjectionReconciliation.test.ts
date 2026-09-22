@@ -161,6 +161,68 @@ describe("route projection reconciliation", () => {
     expect(readAgents).toHaveBeenCalledTimes(1);
   });
 
+  it("queues a later commit until the earlier report settles", async () => {
+    const firstAgents = deferred<{ value: AgentSupply[]; install: () => void }>();
+    const firstSources = deferred<{ value: Source[]; install: () => void }>();
+    const secondAgents = deferred<{ value: AgentSupply[]; install: () => void }>();
+    const secondSources = deferred<{ value: Source[]; install: () => void }>();
+    const firstReport = { ...report, chain: { ...report.chain, model_id: "first" } };
+    const secondReport = { ...report, chain: { ...report.chain, model_id: "second" } };
+    const statuses = vi.fn();
+    const readAgents = vi.fn()
+      .mockReturnValueOnce(firstAgents.promise)
+      .mockReturnValueOnce(secondAgents.promise);
+    const readSources = vi.fn()
+      .mockReturnValueOnce(firstSources.promise)
+      .mockReturnValueOnce(secondSources.promise);
+    const reconciler = createRouteProjectionReconciler({
+      readAgents,
+      readSources,
+      onFailure: vi.fn(),
+      onStatus: statuses,
+    });
+
+    reconciler.start(firstReport);
+    reconciler.start(secondReport);
+    expect(readAgents).toHaveBeenCalledTimes(1);
+    expect(statuses).toHaveBeenLastCalledWith({
+      report: firstReport,
+      pending: true,
+      failed: new Set(),
+    });
+
+    firstAgents.resolve({ value: [agent], install: vi.fn() });
+    await vi.waitFor(() => expect(readSources).toHaveBeenCalledTimes(1));
+    expect(statuses).toHaveBeenLastCalledWith({
+      report: firstReport,
+      pending: true,
+      failed: new Set(),
+    });
+
+    firstSources.resolve({ value: [source], install: vi.fn() });
+    await vi.waitFor(() => expect(readAgents).toHaveBeenCalledTimes(2));
+    expect(statuses).toHaveBeenLastCalledWith({
+      report: secondReport,
+      pending: true,
+      failed: new Set(),
+    });
+
+    secondAgents.resolve({ value: [agent], install: vi.fn() });
+    await vi.waitFor(() => expect(readSources).toHaveBeenCalledTimes(2));
+    secondSources.resolve({ value: [source], install: vi.fn() });
+    await vi.waitFor(() => expect(statuses).toHaveBeenLastCalledWith({
+      report: secondReport,
+      pending: false,
+      failed: new Set(),
+    }));
+    expect(statuses.mock.calls.map(([status]) => status.report)).toEqual([
+      firstReport,
+      firstReport,
+      secondReport,
+      secondReport,
+    ]);
+  });
+
   it.each(["nonempty", "empty", "unavailable"] as const)(
     "retains exact %s commit tails through pending, failure, Retry and settlement",
     async (tail) => {

@@ -399,7 +399,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [menuBackend, setMenuBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<RouteTarget | null>(null);
-  const pendingRouteFocusRef = React.useRef<RouteTarget | null>(null);
+  const pendingRouteFocusRef = React.useRef(new Map<RouteReport, RouteTarget>());
+  const routeCommitStatusRef = React.useRef<RouteProjectionStatus | null>(null);
   const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
   const routeCommitBackend = routeCommitStatus
     && (routeCommitStatus.pending || routeCommitStatus.failed.size > 0)
@@ -1037,7 +1038,10 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, []);
   const refocusPendingRouteDestination = React.useCallback(() => {
-    const target = pendingRouteFocusRef.current;
+    const report = routeCommitStatusRef.current?.report;
+    const target = report
+      ? pendingRouteFocusRef.current.get(report)
+      : undefined;
     if (target) focusRouteDestination(target, true);
   }, [focusRouteDestination]);
   const routeObserved = React.useCallback((next: RouteReport['chain']) => {
@@ -1081,10 +1085,20 @@ export const SettingsModelsPage: React.FC = () => {
       if (member === 'agents') setSupplyRead(failRegionRead);
       else setSourcesRead(failRegionRead);
     },
-    onStatus: setRouteCommitStatus,
-  }), [readRouteAgents, readRouteSources]);
+    onStatus: (status) => {
+      routeCommitStatusRef.current = status;
+      setRouteCommitStatus(status);
+      if (!status.pending) {
+        const target = pendingRouteFocusRef.current.get(status.report);
+        if (target) focusRouteDestination(target, true);
+        if (status.failed.size === 0) {
+          pendingRouteFocusRef.current.delete(status.report);
+        }
+      }
+    },
+  }), [focusRouteDestination, readRouteAgents, readRouteSources]);
   const routeCommitted = React.useCallback((result: RouteReport) => {
-    if (routeTarget) pendingRouteFocusRef.current = routeTarget;
+    if (routeTarget) pendingRouteFocusRef.current.set(result, routeTarget);
     chainReadAuthority.invalidate(result.chain.backend);
     routeObserved(result.chain);
     setSuspendedRouteAttempts((attempts) =>
@@ -1096,12 +1110,6 @@ export const SettingsModelsPage: React.FC = () => {
     routeProjectionReconciler.start(result);
     showToast(t('common.saved'), 'success');
   }, [chainReadAuthority, routeObserved, routeProjectionReconciler, routeTarget, showToast, t]);
-  React.useEffect(() => {
-    if (!routeCommitStatus || routeCommitStatus.pending || !pendingRouteFocusRef.current) return;
-    const target = pendingRouteFocusRef.current;
-    focusRouteDestination(target, true);
-    if (routeCommitStatus.failed.size === 0) pendingRouteFocusRef.current = null;
-  }, [focusRouteDestination, routeCommitStatus]);
   const retryRouteCommit = React.useCallback(() => {
     if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
     routeProjectionReconciler.retry();

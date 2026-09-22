@@ -1573,7 +1573,10 @@ describe('SettingsModelsPage surface branches', () => {
     // landing target while its read-only Retry remains active.
     await userEvent.click(opener);
     await screen.findAllByRole('button', { name: /^Remove hop$|^移除这个路由项$/i });
-    await userEvent.click(screen.getByRole('button', { name: /^Close$|^关闭$/i }));
+    await userEvent.click(
+      screen.getAllByRole('button', { name: /^Close$|^关闭$/i })
+        .find((button) => button.classList.contains('model-hub-dialog-action'))!,
+    );
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await flushRouteFocus();
 
