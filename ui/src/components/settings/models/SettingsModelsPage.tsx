@@ -20,7 +20,6 @@ import { RecentSwitchesCard } from './RecentSwitchesCard';
 import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
 import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
-import { SourceMutationReport } from './SourceMutationReport';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
@@ -63,7 +62,6 @@ import {
 } from './regionRead';
 import { freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, runtimeCanAttemptInstall, runtimeIsRunning } from './runtimeLifecycle';
 import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
-import { useSourceMutationReport } from './useSourceMutationReport';
 import { handOffProviderTab } from './providerTab';
 import { resumeGatewayAdoption } from './gatewayAdoption';
 import { SUBSCRIPTION_MENU_ROWS, hasNativeSubscriptionCustody } from './subscriptionOptions';
@@ -414,7 +412,6 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const [presenceRefreshing, setPresenceRefreshing] = React.useState(false);
-  const sourceMutationReport = useSourceMutationReport();
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const pageRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
@@ -995,11 +992,26 @@ export const SettingsModelsPage: React.FC = () => {
    * `sourceDetail.gone` stays for the case a close cannot cover: the source
    * disappeared out of band — removed from another surface, or found missing by
    * an edit or a refetch — with no delete of ours to close the dialog.
+   *
+   * The commit reports itself in one toast and the surface read runs behind it.
+   * A post-commit modal would only repeat the impact the guard already made the
+   * user confirm before the write, and it turned an ordinary superseded or
+   * failed read into a second decision about a change that already landed. The
+   * write is done; what a failed read owes the user is the page's own stale
+   * projection and Retry, which every region already carries.
    */
   const presentSourceMutation = React.useCallback<PresentSourceMutationCommit>(async (commit) => {
     if (commit.action === 'delete') selectSource(null);
-    await sourceMutationReport.present(commit);
-  }, [selectSource, sourceMutationReport.present]);
+    showToast(t(commit.action === 'delete'
+      ? 'settings.models.sourceDetail.remove.settlement.title'
+      : 'settings.models.sourceDetail.edit.settlement.title') as string, 'success');
+    try {
+      await commit.settle();
+    } catch {
+      // `refresh` already owns the read verdict: a failed projection keeps its
+      // own stale treatment and Retry, and raises the page's refresh toast.
+    }
+  }, [selectSource, showToast, t]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
@@ -1465,11 +1477,6 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
-      <SourceMutationReport
-        report={sourceMutationReport.report}
-        onComplete={() => { void sourceMutationReport.complete(); }}
-        onDismiss={sourceMutationReport.dismiss}
-      />
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
       {subscriptionVendor && (
         <OAuthConnectDialog

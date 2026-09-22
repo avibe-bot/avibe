@@ -13,7 +13,6 @@ import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
-import { SOURCE_MUTATION_REPORT_PROJECTIONS } from './mutationSettlement';
 import { SettingsModelsPage } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type Source, type UsageSummary } from './types';
@@ -1170,8 +1169,14 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it.each(MANAGE_COMMIT_ACTIONS)(
-    '[MH-SRC-DELETE-001] keeps the page-owned $action impact readable until every referenced projection lands',
+    '[MH-SRC-DELETE-001] announces a committed $action once and reconciles every referenced projection with no second decision',
     async (action) => {
+      // The guard already made the user confirm this exact impact before the
+      // write, so repeating it afterwards asked them to decide something that
+      // had already happened. What the commit still owes is the announcement
+      // and the surface read: the toast lands immediately, the read runs behind
+      // it, and the page settles on its own once every referenced projection —
+      // including the impact-scoped chain — comes back.
       const modelId = 'claude-opus-4-6';
       const updatedSource = { ...retainedSource, display_name: 'Updated source' };
       const hubAgent: AgentSupply = {
@@ -1236,6 +1241,10 @@ describe('SettingsModelsPage surface branches', () => {
       expect(within(sourceDialog).getByRole('textbox', { name: /Search model IDs|搜索模型 ID/i })).toBeTruthy();
       await waitFor(() => expect(overviewRead).toHaveBeenCalledOnce());
 
+      const chainLanding = deferred<AgentChain>();
+      chainRead.mockImplementationOnce(() => chainLanding.promise);
+      sourceRead.mockResolvedValue(action === 'edit' ? [updatedSource] : []);
+
       await userEvent.click(screen.getByRole('button', { name: /Manage Retained source|管理 Retained source/i }));
       if (action === 'edit') {
         await userEvent.click(screen.getByRole('menuitem', { name: /^Edit source$|^编辑供应商$/i }));
@@ -1248,40 +1257,27 @@ describe('SettingsModelsPage surface branches', () => {
         await userEvent.click(screen.getByRole('button', { name: /^Remove source$|^移除供应商$/i }));
       }
 
-      const report = await screen.findByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      });
-      expect(report.dataset.reportProjections?.split(' ')).toEqual(
-        Object.keys(SOURCE_MUTATION_REPORT_PROJECTIONS),
+      const settled = await screen.findByText(
+        action === 'edit' ? /^The source was updated$|^供应商已更新$/ : /^The source was removed$|^供应商已移除$/,
       );
-      expect(report.textContent).toContain(modelId);
-      expect(report.textContent).toContain('Release bot');
+      expect(settled.closest('[role="dialog"]')).toBeNull();
+      expect(screen.queryByRole('dialog', {
+        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
+      })).toBeNull();
+      // The impact evidence still decides which chains the commit must re-read;
+      // only the modal that used to gate that read is gone.
+      await waitFor(() => expect(chainRead).toHaveBeenLastCalledWith('claude', modelId));
 
-      const chainLanding = deferred<AgentChain>();
-      chainRead.mockImplementationOnce(() => chainLanding.promise);
-      sourceRead.mockResolvedValue(action === 'edit' ? [updatedSource] : []);
-      const done = within(report).getAllByRole('button', { name: /^Done$|^完成$/i })
-        .find((button) => button.classList.contains('model-hub-guard-action'));
-      await userEvent.click(done!);
-
+      await act(async () => {
+        chainLanding.resolve(affectedChain);
+        await chainLanding.promise;
+      });
       if (action === 'edit') {
         await waitFor(() => expect(document.querySelector('.model-hub-source-title')?.textContent)
           .toBe(updatedSource.display_name));
       } else {
         await waitFor(() => expect(document.querySelector('.model-hub-source-title')).toBeNull());
       }
-      expect(screen.getByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      })).toBeTruthy();
-      expect(chainRead).toHaveBeenLastCalledWith('claude', modelId);
-
-      await act(async () => {
-        chainLanding.resolve(affectedChain);
-        await chainLanding.promise;
-      });
-      await waitFor(() => expect(screen.queryByRole('dialog', {
-        name: action === 'edit' ? /source was updated|供应商已更新/i : /source was removed|供应商已移除/i,
-      })).toBeNull());
     },
   );
 

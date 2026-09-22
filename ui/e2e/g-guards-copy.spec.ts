@@ -14,7 +14,7 @@ import {
   requireRuntimeRunning,
 } from './support/fixtures';
 import { expect, test } from './support/gateway';
-import { fillApiKeyForm, labelledButton } from './support/hub';
+import { fillApiKeyForm } from './support/hub';
 import { captureAgentChain, restoreAgentChain } from './support/restore';
 
 test.describe('G · supply guards and failure copy', () => {
@@ -82,15 +82,12 @@ test.describe('G · supply guards and failure copy', () => {
       // 3 · confirm again, which re-sends the delete echoing that plan back.
       await confirm.click();
 
-      // 4 · the impact report. Not a toast: the same facts restated in the past
-      // tense, so a user who confirmed too fast can still read what they did.
-      const report = hub.mutationReport('delete');
-      await expect(report).toBeVisible({ timeout: 30_000 });
-      await expect(report).toContainText(copy('sourceDetail.remove.impact.title'));
-      await expect(report).toContainText(copy('guard.result.label'));
-      await expect(report).toContainText(copy('guard.result.gapLabel'));
-      await labelledButton(report, copy('sourceDetail.remove.impact.done')).click();
-      await expect(report).toHaveCount(0);
+      // 4 · the removal announces itself once, in the toast layer. Step 2 is
+      // where the facts were put to the user and step 3 is where they accepted
+      // them, so restating the same plan in a modal would only ask again.
+      await expect(hub.toasts.filter({ hasText: copy('sourceDetail.remove.settlement.title') }))
+        .toBeVisible({ timeout: 30_000 });
+      await expect(hub.guardDialog).toHaveCount(0);
 
       await expect
         .poll(async () => (await api.sources()).some((s) => s.id === source.id), { timeout: 15_000 })
