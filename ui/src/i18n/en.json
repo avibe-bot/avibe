@@ -1755,27 +1755,14 @@
             "displayNameCredential": "A display name cannot contain a credential",
             "baseUrlCredential": "Remove credentials and credential-shaped query parameters from the Base URL"
           },
-          "impact": {
-            "title": "The source was updated, and some supply was affected",
-            "detail": "These routes or models were removed or interrupted.",
-            "done": "Done"
-          },
           "settlement": {
             "title": "The source was updated"
           }
         },
         "remove": {
-          "impact": {
-            "title": "The source was removed, and some supply was affected",
-            "detail": "These are the routes and models actually affected by this removal.",
-            "done": "Done"
-          },
           "settlement": {
             "title": "The source was removed"
           }
-        },
-        "impact": {
-          "refreshFail": "The change committed, but the model surface could not be refreshed. Try the reconciliation again."
         },
         "refetch": {
           "added": "New",
