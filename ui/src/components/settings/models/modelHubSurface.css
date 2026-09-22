@@ -1298,6 +1298,12 @@
   z-index: 1;
   grid-area: 1 / 1 / 2 / 2;
   align-self: start;
+  /* It is drawn over the top visible row, and it is that row's sibling, not its
+     child — so without this the source half of the row the user is most likely
+     to aim at swallows the click and the hover, and the one row nearest the
+     pointer is the one that does not answer it. The name is a label; nothing in
+     it is aimed at. */
+  pointer-events: none;
   /* Aligned with the rows it labels: the row's own inline padding, and the
      block padding that centers one line in the 28px row beside it. */
   padding: 6px 8px;

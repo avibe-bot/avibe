@@ -320,13 +320,30 @@ for (const [label, width] of [['small', 390], ['large', 430]] as const) {
 // which element the fix draws it in, and not the accessibility tree, where a
 // screen-reader-only label would answer correctly while the column beside the
 // models sat empty.
+//
+// Read off the painted boxes rather than by hit-testing the point: the name is
+// `pointer-events: none` so that it does not take the clicks of the row it
+// covers, and a question asked with `elementsFromPoint` would be answered by
+// whatever is underneath it. Everything with text of its own that covers the
+// point is returned, so a column that is somehow saying two things at once is
+// not quietly reported as saying the first of them.
 const sourceColumnAtTop = (list: Locator) => list.evaluate((element: HTMLElement) => {
   const edge = element.getBoundingClientRect();
-  return document
-    .elementsFromPoint(edge.left + edge.width * 0.25, edge.top + 8)
-    .filter((node) => element.contains(node))
-    .map((node) => node.textContent?.trim() ?? '')
-    .find((text) => text.length > 0) ?? '';
+  const x = edge.left + edge.width * 0.25;
+  const y = edge.top + 8;
+  return [...element.querySelectorAll<HTMLElement>('*')]
+    .filter((node) => {
+      const own = [...node.childNodes]
+        .filter((child) => child.nodeType === Node.TEXT_NODE)
+        .map((child) => child.textContent?.trim() ?? '')
+        .join('');
+      if (!own) return false;
+      const style = getComputedStyle(node);
+      if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.left <= x && x <= rect.right && rect.top <= y && y <= rect.bottom;
+    })
+    .map((node) => node.textContent?.trim() ?? '');
 });
 
 test('MH-ROUTING-007: the picker keeps each source beside its own models', async ({ page }) => {
@@ -344,7 +361,7 @@ test('MH-ROUTING-007: the picker keeps each source beside its own models', async
     .locator('.model-hub-route-candidate').first();
   const box = (await list.boundingBox())!;
   const restingRow = (await firstRow.boundingBox())!;
-  expect(await sourceColumnAtTop(list)).toBe('Provider A');
+  expect(await sourceColumnAtTop(list)).toEqual(['Provider A']);
 
   const scrolled = await list.evaluate((element: HTMLElement) => {
     const own = [...element.querySelector('.model-hub-route-selector-group')!
@@ -378,7 +395,46 @@ test('MH-ROUTING-007: the picker keeps each source beside its own models', async
       }).length;
   });
   expect(showing).toBeGreaterThan(0);
-  expect(await sourceColumnAtTop(list)).toBe('Provider A');
+  expect(await sourceColumnAtTop(list)).toEqual(['Provider A']);
+});
+
+// The pinned name is drawn over the top visible row and is that row's sibling,
+// not its child, so the half of the row nearest the pointer is the half a click
+// would land on the label instead — and that row would be the one that does not
+// answer. Aimed at the source column of the row the name is covering, which is
+// the row a reader reaches for first.
+test('MH-ROUTING-007: the pinned source does not take the row\'s clicks', async ({ page }) => {
+  const copy = (key: string) => hub(key, {}, 'zh');
+  await page.goto('/e2e/model-catalog/fixture.html?view=route&backend=codex&lang=zh&stocked=1');
+  await page.getByRole('button', { name: 'Open route', exact: true }).click();
+  const dialog = page.locator('.model-hub-route-dialog');
+  await dialog.getByRole('button', { name: copy('routeDialog.editHop'), exact: true }).first().click();
+  const selector = page.locator('.model-hub-route-selector');
+  await expect(selector).toBeVisible();
+  await settled(selector);
+
+  const list = selector.locator('.model-hub-route-selector-list');
+  const group = list.locator('.model-hub-route-selector-group').first();
+  const row = group.locator('.model-hub-route-candidate').first();
+  // The row the name is on top of, and the quarter of its width the name covers.
+  const heading = (await group.locator('[cmdk-group-heading]').boundingBox())!;
+  const box = (await row.boundingBox())!;
+  const aim = { x: box.x + box.width * 0.25, y: box.y + box.height / 2 };
+  expect(aim.x).toBeGreaterThan(heading.x);
+  expect(aim.x).toBeLessThan(heading.x + heading.width);
+  expect(aim.y).toBeGreaterThan(heading.y);
+  expect(aim.y).toBeLessThan(heading.y + heading.height);
+
+  // What the pointer would reach there, before asking what happens when it does:
+  // a label that answers here is the whole defect, and it answers silently.
+  expect(await page.evaluate(({ x, y }) => {
+    const hit = document.elementFromPoint(x, y);
+    return hit?.closest('.model-hub-route-candidate') ? 'row' : (hit?.tagName ?? 'none');
+  }, aim)).toBe('row');
+
+  await expect(row).toHaveAttribute('data-selected', 'false');
+  await page.mouse.click(aim.x, aim.y);
+  await expect(row).toHaveAttribute('data-selected', 'true');
 });
 
 // A row you can click says so under the pointer. The global rule in `index.css`

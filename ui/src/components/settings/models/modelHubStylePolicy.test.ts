@@ -308,6 +308,10 @@ describe('Model Hub visual token policy', () => {
     // named at length reads across the models it is there to label otherwise.
     expect(heading).toMatch(/text-overflow:\s*ellipsis/);
     expect(heading).toMatch(/white-space:\s*nowrap/);
+    // Drawn over the top visible row and a sibling of it, so it would otherwise
+    // take that row's clicks and hovers itself — the row the pointer is nearest
+    // being the one that stops answering. A label is not aimed at.
+    expect(heading).toMatch(/pointer-events:\s*none/);
   });
 
   // The panel is one flexible list plus bands that cannot shrink, so the list is
