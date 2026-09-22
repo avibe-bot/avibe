@@ -21,11 +21,9 @@ from vibe import upgrade as vibe_upgrade
 from vibe.runtime import ServiceLauncher
 from vibe.upgrade import (
     AtomicActivation,
-    MemoryRequirementUnreadableError,
     PIP_DOWNLOAD_DEST_PLACEHOLDER,
     UpgradePlan,
     build_upgrade_plan,
-    configured_memory_enabled,
     has_newer_version,
     get_current_vibe_bin_dir,
     get_current_uv_tool_dir,
@@ -54,8 +52,7 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     """
 
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
-    monkeypatch.setattr("vibe.upgrade.memory_package_installed", lambda: False)
-
+    
 
 
 def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
@@ -958,79 +955,8 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
         assert FORCES_THE_INSTALL[plan.method] in plan.command
 
 
-def _official_memory(version):
-    return (
-        "avibe-memory @ https://github.com/avibe-bot/avibe/releases/download/"
-        f"v{version}/avibe_memory-{version}-py3-none-any.whl"
-    )
 
 
-def test_an_exact_memory_plan_uses_the_official_companion_without_a_source(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
-    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
-
-    uv_plan = build_upgrade_plan(
-        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
-        uv_path="/usr/local/bin/uv",
-        vibe_path="/custom/bin/vibe",
-        base_env={"PATH": "/usr/bin"},
-        version="3.0.10",
-        package_name="avibe-os",
-        memory_package=True,
-        memory_version="3.0.10",
-    )
-    assert uv_plan.command == [
-        "/usr/local/bin/uv",
-        "tool",
-        "install",
-        "avibe-os==3.0.10",
-        "--with",
-        _official_memory("3.0.10"),
-        "--force",
-    ]
-    assert uv_plan.preflight_command == [
-        "/usr/local/bin/uv",
-        "pip",
-        "install",
-        "--dry-run",
-        "--python",
-        "/tmp/.local/share/uv/tools/avibe-os/bin/python",
-        "avibe-os==3.0.10",
-        _official_memory("3.0.10"),
-    ]
-    assert uv_plan.activation is not None
-    assert uv_plan.env["UV_TOOL_DIR"] != "/tmp/.local/share/uv/tools"
-    assert uv_plan.env["UV_TOOL_BIN_DIR"] != "/custom/bin"
-
-    pip_plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        uv_path=None,
-        base_env={"PATH": "/usr/bin"},
-        version="3.0.10",
-        package_name="avibe-os",
-        memory_package=True,
-        memory_version="3.0.10",
-    )
-    assert pip_plan.command == [
-        "/usr/bin/python3",
-        "-m",
-        "pip",
-        "install",
-        "--force-reinstall",
-        "avibe-os==3.0.10",
-        _official_memory("3.0.10"),
-    ]
-    assert pip_plan.preflight_command == [
-        "/usr/bin/python3",
-        "-m",
-        "pip",
-        "download",
-        "--dest",
-        PIP_DOWNLOAD_DEST_PLACEHOLDER,
-        "--no-deps",
-        "avibe-os==3.0.10",
-        _official_memory("3.0.10"),
-    ]
 
 
 PREVIEW_VERSION = "3.0.16rc1"
@@ -1720,83 +1646,7 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     }
 
 
-def test_memory_indep_025_failed_upgrade_is_terminal_and_retryable(monkeypatch):
-    plan = UpgradePlan(
-        command=["/usr/bin/python3", "-m", "pip", "install", "--upgrade", "avibe-os"],
-        env=None,
-        method="pip",
-    )
-    restart = Mock(return_value={"job_id": "retry-restart"})
-    install = Mock(
-        side_effect=[
-            subprocess.CompletedProcess(
-                plan.command,
-                1,
-                stdout="",
-                stderr="resolver rejected the release",
-            ),
-            subprocess.CompletedProcess(
-                plan.command,
-                0,
-                stdout="installed on retry",
-                stderr="",
-            ),
-        ]
-    )
 
-    monkeypatch.setattr(api, "configured_memory_enabled", lambda: False)
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15"})
-    monkeypatch.setattr(api, "build_upgrade_plan", lambda **kwargs: plan)
-    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(api, "restart_is_pending", lambda: False)
-    monkeypatch.setattr(
-        api,
-        "verify_python_environment",
-        lambda _python: SimpleNamespace(ok=True, detail=""),
-    )
-    monkeypatch.setattr(api, "schedule_restart", restart)
-    monkeypatch.setattr(api.subprocess, "run", install)
-
-    failed = api.do_upgrade(auto_restart=True)
-    succeeded = api.do_upgrade(auto_restart=True)
-
-    assert failed == {
-        "ok": False,
-        "message": "Upgrade failed",
-        "output": "resolver rejected the release",
-        "restarting": False,
-    }
-    assert succeeded == {
-        "ok": True,
-        "message": "Upgrade successful. Restarting...",
-        "output": "installed on retry",
-        "restarting": True,
-    }
-    assert [call.args[0] for call in install.call_args_list] == [
-        plan.command,
-        plan.command,
-    ]
-    restart.assert_called_once()
-
-def test_do_upgrade_blocks_mutation_when_memory_requirement_is_unreadable(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        api,
-        "configured_memory_enabled",
-        Mock(side_effect=MemoryRequirementUnreadableError()),
-    )
-    plan = Mock(side_effect=AssertionError("unreadable requirement built a plan"))
-    monkeypatch.setattr(api, "build_upgrade_plan", plan)
-    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
-
-    result = api.do_upgrade()
-
-    assert result["ok"] is False
-    assert result["reason"] == "memory_requirement_unreadable"
-    assert result["restarting"] is False
-    plan.assert_not_called()
 
 
 def test_do_upgrade_auto_restart_does_not_block_on_runtime_prepare(monkeypatch):
@@ -2168,81 +2018,10 @@ def test_cmd_upgrade_skips_install_when_already_latest(monkeypatch):
     assert cli.cmd_upgrade() == 0
 
 
-def test_cmd_upgrade_blocks_mutation_when_memory_requirement_is_unreadable(
-    monkeypatch,
-    capsys,
-) -> None:
-    monkeypatch.setattr(
-        cli,
-        "get_latest_version",
-        lambda: {"error": "metadata unavailable", "has_update": False, "latest": None},
-    )
-    monkeypatch.setattr(
-        cli,
-        "configured_memory_enabled",
-        Mock(side_effect=MemoryRequirementUnreadableError()),
-    )
-    plan = Mock(side_effect=AssertionError("unreadable requirement built a plan"))
-    monkeypatch.setattr(cli, "build_upgrade_plan", plan)
-    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-
-    assert cli.cmd_upgrade() == 1
-    assert "persisted Memory requirement" in capsys.readouterr().out
-    plan.assert_not_called()
 
 
-@pytest.mark.parametrize("source", ["local", "direct"])
-def test_cmd_upgrade_metadata_failure_uses_exact_memory_artifact(monkeypatch, tmp_path, capsys, source):
-    artifact = tmp_path / "avibe_os-3.1.0-py3-none-any.whl"
-    package_spec = (
-        str(artifact)
-        if source == "local"
-        else "avibe-os @ https://example.test/releases/avibe_os-3.1.0-py3-none-any.whl"
-    )
-    calls: dict[str, Any] = {}
-
-    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", package_spec)
-    monkeypatch.setattr(
-        cli,
-        "get_latest_version",
-        lambda: {"error": "metadata unavailable", "has_update": False, "latest": None},
-    )
-    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: True)
-    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
-    monkeypatch.setattr(cli, "schedule_restart", lambda **kwargs: {"job_id": "restart"})
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    def execute(plan, **kwargs):
-        calls["plan"] = plan
-        return subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr="")
-
-    monkeypatch.setattr(cli, "execute_upgrade_plan", execute)
-
-    assert cli.cmd_upgrade() == 0
-    assert "Attempting upgrade anyway..." in capsys.readouterr().out
-    assert _official_memory("3.1.0") in calls["plan"].command
 
 
-def test_cmd_upgrade_metadata_failure_refuses_unversioned_memory_source(monkeypatch, capsys):
-    monkeypatch.setenv("VIBE_UPGRADE_PACKAGE_SPEC", "avibe-os")
-    monkeypatch.setattr(
-        cli,
-        "get_latest_version",
-        lambda: {"error": "metadata unavailable", "has_update": False, "latest": None},
-    )
-    monkeypatch.setattr(cli, "configured_memory_enabled", lambda: True)
-    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
-    monkeypatch.setattr(
-        cli,
-        "execute_upgrade_plan",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("upgrade must not execute")),
-    )
-
-    assert cli.cmd_upgrade() == 1
-    output = capsys.readouterr().out
-    assert "Attempting upgrade anyway..." not in output
-    assert "Upgrade failed" in output
 
 
 def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, capsys):
@@ -2271,57 +2050,8 @@ def test_cmd_upgrade_metadata_failure_keeps_core_only_fallback(monkeypatch, caps
     assert calls["plan"].command[-1] == "avibe-os"
 
 
-def test_memory_enabled_forward_plan_locks_memory_to_target_release(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-    monkeypatch.setattr("vibe.upgrade.installed_metadata_describes_running_code", lambda: True)
-
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        memory_package=True,
-        memory_version="3.0.14",
-        target_version="3.1.0",
-        package_spec="avibe-os>=3.1,<3.2",
-    )
-
-    target = "avibe-os>=3.1,<3.2"
-    memory = _official_memory("3.1.0")
-    assert plan.command == ["/usr/bin/python3", "-m", "pip", "install", "--upgrade", target, memory]
-    assert plan.preflight_command == [
-        "/usr/bin/python3",
-        "-m",
-        "pip",
-        "install",
-        "--dry-run",
-        "--upgrade",
-        target,
-        memory,
-    ]
-    assert plan.preflight_fallback_command == [
-        "/usr/bin/python3",
-        "-m",
-        "pip",
-        "download",
-        "--dest",
-        "{avibe-pip-download-destination}",
-        target,
-        memory,
-    ]
-    assert "<3.1" not in " ".join(plan.command + plan.preflight_command)
 
 
-def test_memory_enabled_forward_plan_requires_target_release(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    with pytest.raises(ValueError, match="target release version"):
-        build_upgrade_plan(
-            python_executable="/usr/bin/python3",
-            base_env={"PATH": "/usr/bin"},
-            memory_enabled=True,
-            memory_package=True,
-            package_spec="avibe-os",
-        )
 
 
 @pytest.mark.parametrize(
@@ -2335,22 +2065,6 @@ def test_memory_enabled_forward_plan_requires_target_release(monkeypatch):
         ("/fixtures/avibe_os-3.1.2.tar.gz", "3.1.2"),
     ],
 )
-def test_memory_enabled_forward_plan_derives_target_from_versioned_spec(
-    monkeypatch, package_spec, target_version
-):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        package_spec=package_spec,
-    )
-
-    memory_pin = _official_memory(target_version)
-    assert memory_pin in plan.command
-    assert plan.preflight_command is not None and memory_pin in plan.preflight_command
-    assert plan.preflight_fallback_command is not None and memory_pin in plan.preflight_fallback_command
 
 
 @pytest.mark.parametrize(
@@ -2361,42 +2075,8 @@ def test_memory_enabled_forward_plan_derives_target_from_versioned_spec(
         "avibe-os==3.2.0",
     ],
 )
-def test_exact_package_spec_overrides_conflicting_memory_target(monkeypatch, package_spec):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        target_version="3.1.0",
-        package_spec=package_spec,
-    )
-
-    for command in (plan.command, plan.preflight_command, plan.preflight_fallback_command):
-        assert command is not None
-        assert _official_memory("3.2.0") in command
-        assert _official_memory("3.1.0") not in command
 
 
-def test_uv_exact_artifact_overrides_conflicting_memory_target(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.is_uv_tool_install", lambda executable: True)
-    monkeypatch.setattr("vibe.upgrade.is_legacy_uv_tool_install", lambda executable: False)
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: "/usr/bin/uv")
-    monkeypatch.setattr("vibe.upgrade.get_current_vibe_bin_dir", lambda vibe_path: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/tools/avibe/bin/python",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        target_version="3.1.0",
-        package_spec="/fixtures/avibe_os-3.2.0-py3-none-any.whl",
-    )
-
-    assert _official_memory("3.2.0") in plan.command
-    assert _official_memory("3.1.0") not in plan.command
-    assert plan.preflight_command is not None
-    assert _official_memory("3.2.0") in plan.preflight_command
-    assert _official_memory("3.1.0") not in plan.preflight_command
 
 
 @pytest.mark.parametrize(
@@ -2407,31 +2087,8 @@ def test_uv_exact_artifact_overrides_conflicting_memory_target(monkeypatch):
         "avibe-os==3.1.*",
     ],
 )
-def test_named_package_spec_accepts_compatible_memory_target(monkeypatch, package_spec):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        target_version="3.1.4",
-        package_spec=package_spec,
-    )
-
-    assert _official_memory("3.1.4") in plan.command
 
 
-def test_named_package_spec_rejects_incompatible_memory_target(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    with pytest.raises(ValueError, match="target release version"):
-        build_upgrade_plan(
-            python_executable="/usr/bin/python3",
-            base_env={"PATH": "/usr/bin"},
-            memory_enabled=True,
-            target_version="3.2.0",
-            package_spec="avibe-os>=3.1,<3.2",
-        )
 
 
 @pytest.mark.parametrize(
@@ -2445,16 +2102,6 @@ def test_named_package_spec_rejects_incompatible_memory_target(monkeypatch):
         "/fixtures/avibe.whl",
     ],
 )
-def test_memory_enabled_forward_plan_rejects_unversioned_fallback_specs(monkeypatch, package_spec):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    with pytest.raises(ValueError, match="target release version"):
-        build_upgrade_plan(
-            python_executable="/usr/bin/python3",
-            base_env={"PATH": "/usr/bin"},
-            memory_enabled=True,
-            package_spec=package_spec,
-        )
 
 
 @pytest.mark.parametrize(
@@ -2467,47 +2114,8 @@ def test_memory_enabled_forward_plan_rejects_unversioned_fallback_specs(monkeypa
         "/fixtures/avibe.whl",
     ],
 )
-def test_opaque_memory_source_rejects_metadata_without_exposing_spec(monkeypatch, package_spec):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    with pytest.raises(ValueError) as refusal:
-        build_upgrade_plan(
-            python_executable="/usr/bin/python3",
-            base_env={"PATH": "/usr/bin"},
-            memory_enabled=True,
-            target_version="3.1.0",
-            package_spec=package_spec,
-        )
-
-    assert str(refusal.value) == "A Memory-preserving upgrade requires a target release version"
 
 
-def test_memory_preflight_failure_does_not_mutate_package(monkeypatch):
-    plan = UpgradePlan(
-        command=["python", "-m", "pip", "install", "avibe-os[memory]"],
-        env={},
-        method="pip",
-        preflight_command=["python", "-m", "pip", "install", "--dry-run", "avibe-os[memory]"],
-        preflight_fallback_command=[
-            "python",
-            "-m",
-            "pip",
-            "download",
-            "--dest",
-            "{avibe-pip-download-destination}",
-            "avibe-os[memory]",
-        ],
-    )
-    calls: list[list[str]] = []
-
-    def run(command, **kwargs):
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="missing memory")
-
-    result = execute_upgrade_plan(plan, run=run)
-
-    assert result.returncode == 1
-    assert calls == [plan.preflight_command]
 
 
 def test_legacy_pip_fallback_resolves_target_extra_before_install(tmp_path):
@@ -2601,11 +2209,6 @@ def test_pip_preflight_does_not_fallback_on_resolver_failure():
     assert calls == [plan.preflight_command]
 
 
-def test_unreadable_memory_config_blocks_package_plan(monkeypatch):
-    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: (_ for _ in ()).throw(ValueError("bad config")))
-
-    with pytest.raises(MemoryRequirementUnreadableError):
-        configured_memory_enabled()
 
 
 def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
@@ -2617,63 +2220,8 @@ def test_missing_first_run_config_does_not_block_package_plan(monkeypatch):
     assert configured_memory_enabled() is False
 
 
-def test_uv_forward_plan_locks_memory_to_target_release(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.is_uv_tool_install", lambda executable: True)
-    monkeypatch.setattr("vibe.upgrade.is_legacy_uv_tool_install", lambda executable: False)
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: "/usr/bin/uv")
-    monkeypatch.setattr("vibe.upgrade.get_current_vibe_bin_dir", lambda vibe_path: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/tools/avibe/bin/python",
-        base_env={"PATH": "/usr/bin"},
-        memory_enabled=True,
-        memory_package=True,
-        target_version="3.1.0",
-        package_spec="avibe-os>=3.1,<3.2",
-    )
-
-    target = "avibe-os>=3.1,<3.2"
-    memory = _official_memory("3.1.0")
-    assert plan.command == [
-        "/usr/bin/uv",
-        "tool",
-        "install",
-        target,
-        "--with",
-        memory,
-        "--upgrade",
-        "--force",
-    ]
-    assert plan.preflight_command == [
-        "/usr/bin/uv",
-        "pip",
-        "install",
-        "--dry-run",
-        "--python",
-        "/tools/avibe/bin/python",
-        "--upgrade",
-        target,
-        memory,
-    ]
 
 
-def test_explicit_memory_install_keeps_exact_package_version(monkeypatch):
-    monkeypatch.setattr("vibe.upgrade.find_uv_binary", lambda **kwargs: None)
-
-    plan = build_upgrade_plan(
-        python_executable="/usr/bin/python3",
-        base_env={"PATH": "/usr/bin"},
-        version="3.0.14",
-        package_name="avibe-os",
-        memory_package=True,
-        memory_version="3.0.14",
-    )
-
-    assert "avibe-os==3.0.14" in plan.command
-    assert "avibe-os[memory]" not in " ".join(plan.command)
-    assert _official_memory("3.0.14") in plan.command
-    assert plan.preflight_command is not None
-    assert _official_memory("3.0.14") in plan.preflight_command
 
 
 @pytest.mark.parametrize("launcher", (None, "/tmp/uv/tools/avibe-os/bin/vibe"))
@@ -2717,24 +2265,9 @@ def test_forward_index_target_does_not_inherit_current_preview_origin(monkeypatc
         "v3.2.0.post1", "gh-v3.2.0-rc1", "gh-v03.02.00",
     ],
 )
-def test_publication_tag_producer_and_installed_memory_consumer_select_same_directory(tag):
-    from scripts.release_package_version import package_version_from_release_tag
-
-    version = package_version_from_release_tag(tag)
-    base = "https://github.com/avibe-bot/avibe/releases/download"
-    core = (
-        f"{base}/{tag}/avibe_os-{version}-py3-none-any.whl"
-        if tag.startswith("gh-v") else f"avibe-os=={version}"
-    )
-    assert vibe_upgrade.memory_release_spec(version, core) == (
-        f"{base}/{tag}/avibe_memory-{version}-py3-none-any.whl"
-    )
 
 
 @pytest.mark.parametrize("version", ["3.1.1.dev1+local", "3.1.1+local", "bad"])
-def test_memory_asset_source_rejects_unpublished_versions(version):
-    with pytest.raises(ValueError, match="published target"):
-        vibe_upgrade.memory_release_spec(version, "avibe-os")
 
 
 @pytest.mark.parametrize("tag", [
@@ -2842,24 +2375,6 @@ def test_published_dev_origin_reaches_every_install_command(
     ("3.2.0.dev1+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0.dev1+local/avibe_os-3.2.0.dev1+local-py3-none-any.whl"),
     ("3.2.0+local", f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/gh-v3.2.0+local/avibe_os-3.2.0+local-py3-none-any.whl"),
 ])
-def test_unrecognized_origin_cannot_redirect_the_memory_companion(monkeypatch, version, origin):
-    _installed_from(monkeypatch, origin)
-    assert release_asset_specs(version) is None
-    for spec in ([origin, f"avibe-os @ {origin}"] if origin else ["avibe-os", f"avibe-os=={version}"]):
-        if "+local" in version:
-            with pytest.raises(ValueError, match="published target"):
-                vibe_upgrade.memory_release_spec(version, spec)
-            with pytest.raises(ValueError, match="target release version"):
-                build_upgrade_plan(memory_package=True, package_spec=spec, target_version=version)
-        else:
-            # Public dev versions have the same canonical fallback as stable
-            # releases. A false origin never supplies a preview tag or host.
-            assert vibe_upgrade.memory_release_spec(version, spec) == (
-                f"{vibe_upgrade.RELEASE_DOWNLOAD_BASE_URL}/v{version}/"
-                f"avibe_memory-{version}-py3-none-any.whl"
-            )
-            plan = build_upgrade_plan(memory_package=True, package_spec=spec, target_version=version)
-            assert _official_memory(version) in plan.command
 
 
 def test_get_safe_cwd_returns_absolute_existing_dir():
