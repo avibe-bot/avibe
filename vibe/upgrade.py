@@ -1215,6 +1215,12 @@ def _recorded_install_origin(package_name: str) -> str | None:
     return url if isinstance(url, str) else None
 
 
+def pinned_package_spec(version: str | None, *, package_name: str) -> str:
+    if not version:
+        return package_name
+    return f"{package_name}=={version}"
+
+
 def release_asset_specs(version: str) -> None:
     return None
 
