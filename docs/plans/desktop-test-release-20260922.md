@@ -238,3 +238,62 @@ lint and desktop-shell gates remain required before push and TEST publication.
   `desktop-shell` at the pushed head remain the authoritative gates.
 - Push is held pending explicit orchestrator candidate clearance. Replies to the
   three H5 threads follow the pushed head, not this commit.
+
+### H6: the Windows-only path-separator defect the first TEST release exposed
+
+The first real prerelease attempt found a defect no existing gate could have
+caught. Tag `gh-v3.1.1rc5` at the reviewed head started `Release (AI Notes)` run
+`35776410677`, and `desktop-packages / x86_64-pc-windows-msvc` failed at **Build
+Workbench**, so no Windows installer could be produced and the release could not
+complete.
+
+- **Cause.** `ui/scripts/validate-out-of-tree-imports.mjs` guards the Docker
+  `ui-builder` stage: every import that escapes `ui/` must be placed at the
+  repository-relative path the import expects, or `npm run build` cannot resolve
+  it in that image. The guard produced its targets with
+  `path.relative(REPO_ROOT, resolved)`, which answers in the *host* separator.
+  Everything the target is then compared against is POSIX: the Dockerfile's
+  `COPY` sources, the ``target.startsWith(`${source}/`)`` prefix test, and the
+  `path.posix` joins. On Windows the target became
+  `vibe\data\api_key_vendors.json`, which equals no `COPY` source and prefixes
+  none, so `imagePathOf` returned nothing and the guard reported that the file is
+  put "at no path at all" — against a Dockerfile that is correct.
+- **Why every other job was green.** The guard only runs inside `npm run build`,
+  and `ui-checks` runs on Linux only. The desktop Windows package job is the one
+  place in the pipeline where `npm run build` executes on Windows, so the first
+  Windows packaging attempt was the first execution that could fail.
+- **Fix.** The repository-relative path is normalized to POSIX at the single
+  place it is produced, so the whole comparison chain stays POSIX.
+  `repoRelativePosix` lives in `ui/scripts/repoRelativePosix.mjs` and takes the
+  path flavour as a defaulted argument; `escapingImports` calls it instead of
+  `path.relative`. The validator is not restructured, the check is not weakened
+  or skipped on Windows, and the Dockerfile is untouched.
+- **Why a separate module rather than an export from the validator.** The
+  validator runs its validation at import time and calls `process.exit(0)` when
+  no Dockerfile is present — a state its own comment anticipates inside the
+  `ui-builder` stage. Importing it from a test would make that a silent
+  green-exit hazard for the whole suite. The repository's dominant script idiom
+  is already a pure module beside its entry point, as `scenarioCatalog.mjs` is to
+  `validate-scenario-catalog.mjs`. A `main`-module guard was rejected for the
+  opposite reason: a guard that compares `process.argv[1]` to
+  `import.meta.url` can disagree on Windows drive-letter casing, which would
+  silently stop running the guard on the one platform it now has to protect.
+- **Consuming test.** `ui/scripts/repoRelativePosix.test.mjs` drives
+  `path.win32` explicitly, which is the only way to reach Windows' separator from
+  Linux CI, where the test actually runs. Six cases pin the normalization, the
+  POSIX no-op, the host default, and the failure itself: for each of the two real
+  catalogs the Dockerfile copies, the un-normalized Windows target matches its
+  `COPY` source by neither equality nor prefix while the normalized one matches,
+  and the expected image path is `/app/vibe\data\api_key_vendors.json` before the
+  fix against `/app/vibe/data/api_key_vendors.json` after. Removing the
+  normalization fails four of the six, with exactly the string the Windows job
+  reported.
+- **Local validation.** The full UI suite passes at 348 files and 5295 tests, up
+  by one file and six tests. `npm run build` succeeds, which runs the repaired
+  guard as its first step. `npm run lint` reports no drift in any (file, rule)
+  pair, and ESLint is clean on all three changed files. No Python changed, so
+  Ruff does not apply. The seven release implementation files from
+  `13082a8501ce5d1e771f56395a72fc062859cf8b` were re-verified identical.
+- **Release state.** Tag `gh-v3.1.1rc5` stays as it is and is never reused; the
+  orchestrator cuts a new rc after this fix passes review and CI. Push is held
+  pending explicit candidate clearance.
