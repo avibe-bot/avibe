@@ -61,6 +61,7 @@ import {
   workbenchUploadErrorTranslationKey,
 } from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
+import { useImageViewer } from '../ui/image-viewer-context';
 import { inForegroundSurface } from './chatShortcuts';
 import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import {
@@ -105,6 +106,55 @@ const newLocalId = () => (
   globalThis.crypto?.randomUUID?.()
   ?? `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
 );
+
+// The leading slot of a staged-attachment chip: the spinner while the file
+// uploads, the paperclip for anything that is not a rendered image, and the
+// thumbnail once an image upload has its media URL.
+//
+// That last case is also the preview trigger (#2100): a screenshot has to be
+// inspectable at full size BEFORE it is sent, and the thumbnail is the thing on
+// screen that means "this image". It is a real button so the keyboard reaches
+// it, named after the file so two staged screenshots are told apart, and it
+// opens the shared lightbox over the staged images alone — the composer's own
+// set, never the transcript's.
+//
+// Only a ``ready`` chip previews. ``uploading`` and ``error`` have no media URL
+// to show, and the home composer's ``staged`` chips carry a local blob URL the
+// viewer's download action cannot serve — they keep the plain thumbnail they
+// render today. Where no lightbox is mounted at all the trigger is not rendered
+// either, rather than a focusable control that would do nothing.
+const AttachmentThumbnail = ({ att, gallery }: { att: ComposerAttachment; gallery: string[] }) => {
+  const { t } = useTranslation();
+  const imageViewer = useImageViewer();
+  if (att.status === 'uploading') {
+    return (
+      <span className="grid size-7 place-items-center rounded text-muted">
+        <Loader2 className="size-4 animate-spin" />
+      </span>
+    );
+  }
+  if (att.kind !== 'image' || !att.url) {
+    return (
+      <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan-ink">
+        <Paperclip className="size-3.5" />
+      </span>
+    );
+  }
+  const thumbnail = <img src={att.url} alt="" className="size-7 rounded object-cover" />;
+  if (att.status !== 'ready' || !imageViewer) return thumbnail;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={() => imageViewer.open(att.url, { gallery })}
+      aria-label={t('chat.compose.previewAttachment', { name: att.name })}
+      className="size-7 shrink-0 cursor-zoom-in overflow-hidden rounded p-0 hover:bg-transparent"
+    >
+      {thumbnail}
+    </Button>
+  );
+};
 
 type VoiceSegment = VoiceTranscriptionSegment & {
   task: Promise<void>;
@@ -1236,6 +1286,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const trimmed = value.trim();
   const readyAttachments = attachments.filter((a) => a.status === 'ready' || a.status === 'staged');
   const uploading = attachments.some((a) => a.status === 'uploading');
+  // What a thumbnail preview pages through: the uploaded images staged right
+  // here, in attachment order. Derived from the same list the chips render, so
+  // the viewer's order is the row's order by construction.
+  const stagedImageUrls = attachments
+    .filter((a) => a.status === 'ready' && a.kind === 'image' && a.url)
+    .map((a) => a.url);
   // The mention path doesn't mirror its text into ``value`` (see onChange), so
   // its "is there text?" signal comes from ``hasText``; the textarea path reads
   // ``value`` directly.
@@ -1788,17 +1844,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               key={att.localId}
               className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 py-1 pl-1.5 pr-1 text-[12px]"
             >
-              {att.status === 'uploading' ? (
-                <span className="grid size-7 place-items-center rounded text-muted">
-                  <Loader2 className="size-4 animate-spin" />
-                </span>
-              ) : att.kind === 'image' && att.url ? (
-                <img src={att.url} alt="" className="size-7 rounded object-cover" />
-              ) : (
-                <span className="grid size-7 place-items-center rounded bg-cyan/15 text-cyan-ink">
-                  <Paperclip className="size-3.5" />
-                </span>
-              )}
+              <AttachmentThumbnail att={att} gallery={stagedImageUrls} />
               <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink-ink' : 'text-foreground')}>
                 {att.name}
               </span>
