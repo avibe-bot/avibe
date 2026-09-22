@@ -78,3 +78,8 @@ and scenario harness cover the redeem → local failure → fresh consumer retry
 → durable config/binding loop through both HTTP and CLI. Rendered Web controls
 cover failed submission, reload, local resume, explicit replacement, status
 refresh failure, paired cleanup and owner authorization.
+The HTTP error surface also runs through the real API provider, translator and
+page in both locales. Its recovery-code inventory comes from the backend so
+omissions in both catalogs cannot pass a parity-only check. Shared retirement
+errors must not promise applied credentials or a recoverable response when
+their structured outcome does not guarantee either.
