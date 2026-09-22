@@ -58,6 +58,7 @@ export interface FileBrowserProps {
   onSearchModeChange?: (mode: 'name' | 'content') => void;
   onRefresh?: () => void;
   onNavigate: (path: string) => void;
+  onFavoriteNavigate?: (path: string) => void;
   onClearQuery?: () => void;
   navigationControl?: ReactNode;
   showHidden: boolean;
@@ -102,6 +103,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   onSearchModeChange,
   onRefresh,
   onNavigate,
+  onFavoriteNavigate,
   onClearQuery,
   navigationControl,
   showHidden,
@@ -124,6 +126,10 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   const navigateTo = (path: string) => {
     onClearQuery?.();
     onNavigate(path);
+  };
+  const navigateFavoriteTo = (path: string) => {
+    onClearQuery?.();
+    (onFavoriteNavigate || onNavigate)(path);
   };
   const railDropProps = (path: string) => getDropProps?.(path);
 
@@ -241,7 +247,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   key={favorite.path}
                   type="button"
                   aria-current={active ? 'true' : undefined}
-                  onClick={() => navigateTo(favorite.path)}
+                  onClick={() => navigateFavoriteTo(favorite.path)}
                   className={clsx(
                     'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
                     active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
@@ -259,7 +265,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   key={project.path}
                   type="button"
                   aria-current={active ? 'true' : undefined}
-                  onClick={() => navigateTo(project.path)}
+                  onClick={() => navigateFavoriteTo(project.path)}
                   className={clsx(
                     'flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-[12.5px] font-medium transition',
                     active ? 'border-cyan/40 bg-cyan-soft text-foreground' : 'border-border-strong text-muted',
@@ -288,7 +294,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                   active={cwd === favorite.path}
                   dropActive={dropTarget === favorite.path}
                   dropProps={railDropProps(favorite.path)}
-                  onClick={() => navigateTo(favorite.path)}
+                  onClick={() => navigateFavoriteTo(favorite.path)}
                 />
               );
             })}
@@ -301,7 +307,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
                 active={cwd === project.path}
                 dropActive={dropTarget === project.path}
                 dropProps={railDropProps(project.path)}
-                onClick={() => navigateTo(project.path)}
+                onClick={() => navigateFavoriteTo(project.path)}
               />
             ))}
           </aside>

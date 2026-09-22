@@ -60,10 +60,6 @@ function formatMtime(seconds: number | null): string {
   return `${date.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' })} ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
 }
 
-function needsDirectoryResolution(path: string): boolean {
-  return !path.startsWith('~') && !path.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(path) && !/^\\\\/.test(path);
-}
-
 export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSelect, onClose }) => {
   const { t } = useTranslation();
   const { projects, projectsError } = useWorkbenchProjectsTree();
@@ -89,6 +85,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const [pathError, setPathError] = useState<string | null>(null);
   const navSeq = useRef(0);
   const pendingNavigation = useRef<string | null>(null);
+  const pendingPathResolution = useRef<string | null>(null);
   const searchAbort = useRef<AbortController | null>(null);
   const initialPathHandled = useRef(false);
   const initialPathResolving = useRef<string | null>(null);
@@ -96,6 +93,11 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const pathRequestSeq = useRef(0);
   const mounted = useRef(true);
   const previousShowHidden = useRef(showHidden);
+  const showHiddenRef = useRef(showHidden);
+
+  useEffect(() => {
+    showHiddenRef.current = showHidden;
+  }, [showHidden]);
 
   useEffect(() => {
     mounted.current = true;
@@ -130,10 +132,11 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   const navigate = useCallback(
     (path: string, options: { preserveQuery?: boolean } = {}) => {
       pathRequestSeq.current += 1;
+      pendingPathResolution.current = null;
       setPathEditing(false);
       setPathError(null);
       initialPathHandled.current = true;
-      previousShowHidden.current = showHidden;
+      previousShowHidden.current = showHiddenRef.current;
       const seq = ++navSeq.current;
       pendingNavigation.current = path;
       if (options.preserveQuery) {
@@ -145,7 +148,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       setNewFolderName('');
       setListingError(null);
       setLoading(true);
-      listDir(path, showHidden)
+      listDir(path, showHiddenRef.current)
         .then((result) => {
           if (seq !== navSeq.current) return;
           setCwd(result.path);
@@ -163,7 +166,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           }
         });
     },
-    [changeQuery, showHidden, t],
+    [changeQuery, t],
   );
 
   const submitPath = useCallback(async () => {
@@ -201,7 +204,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
     if (initialPathResolving.current === start) return;
     initialPathResolving.current = start;
     Promise.resolve().then(() => {
-      return initialPath || needsDirectoryResolution(start) ? resolveDirectoryPath(start) : start;
+      return resolveDirectoryPath(start);
     }).then((resolved) => {
       if (mounted.current && !initialPathHandled.current && resolved) navigate(resolved);
     }).catch((cause: unknown) => {
@@ -223,9 +226,10 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
   }, []);
 
   const refreshCurrent = useCallback(() => {
+    if (pendingPathResolution.current) return;
     const target = pendingNavigation.current || cwd;
     if (!target) return;
-    if (query.trim() && !pendingNavigation.current) {
+    if (query.trim()) {
       navigate(target, { preserveQuery: true });
       refreshSearch();
     } else {
@@ -244,6 +248,41 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
       cancelled = true;
     };
   }, [cwd, refreshCurrent, showHidden]);
+
+  const navigateFavorite = useCallback((path: string) => {
+    const requestSeq = ++pathRequestSeq.current;
+    initialPathHandled.current = true;
+    setPathEditing(false);
+    setPathError(null);
+    changeQuery('');
+    setCreatingFolder(false);
+    setNewFolderName('');
+    setListingError(null);
+    pendingNavigation.current = path;
+    pendingPathResolution.current = path;
+    setLoading(true);
+    resolveDirectoryPath(path)
+      .then((resolved) => {
+        if (mounted.current && requestSeq === pathRequestSeq.current && resolved) {
+          pendingPathResolution.current = null;
+          navigate(resolved);
+        }
+      })
+      .catch((cause: unknown) => {
+        if (mounted.current && requestSeq === pathRequestSeq.current) {
+          pendingNavigation.current = null;
+          pendingPathResolution.current = null;
+          setLoading(false);
+          setListingError(fileBrowserErrorMessage(cause, t, t('apps.fileBrowser.errors.listFailed')));
+        }
+      })
+      .finally(() => {
+        if (requestSeq === pathRequestSeq.current && pendingNavigation.current === path) {
+          pendingNavigation.current = null;
+          setLoading(false);
+        }
+      });
+  }, [changeQuery, navigate, t]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -414,6 +453,7 @@ export const FolderBrowser: React.FC<FolderBrowserProps> = ({ initialPath, onSel
           }
           showHidden={showHidden}
           onShowHiddenChange={setShowHidden}
+          onFavoriteNavigate={navigateFavorite}
           error={listingError || error}
           toolbarActions={
             <Button

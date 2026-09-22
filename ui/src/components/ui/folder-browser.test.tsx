@@ -5,10 +5,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
+import type { FsListing } from '../../lib/filesApi';
 
 const projects = vi.hoisted(() => ({ value: [] as unknown[] | null, error: null as string | null }));
 const listDir = vi.hoisted(() =>
-  vi.fn(async (path: string) => ({
+  vi.fn(async (path: string): Promise<FsListing> => ({
     ok: true as const,
     path,
     parent: path === '/workspace' ? '/' : '/workspace',
@@ -44,6 +45,16 @@ vi.mock('../../lib/filesApi', () => ({
 
 import { FolderBrowser } from './folder-browser';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -52,6 +63,7 @@ afterEach(() => {
 beforeEach(() => {
   projects.value = [];
   projects.error = null;
+  systemFavorites.mockReset().mockResolvedValue([{ key: 'home', path: '/workspace' }]);
   resolveDirectoryPath.mockImplementation(async (path: string) => path);
   listDir.mockReset().mockImplementation(async (path: string) => ({
     ok: true as const,
@@ -126,6 +138,58 @@ it('falls back to home when system favorites fail during initial navigation', as
   render(<FolderBrowser onSelect={() => {}} onClose={() => {}} />);
 
   await waitFor(() => expect(listDir).toHaveBeenCalledWith('~', false));
+});
+
+it.each(['home', 'project'] as const)('canonicalizes the symlinked %s fallback', async (source) => {
+  const canonicalPath = '/real/项目';
+  if (source === 'home') {
+    systemFavorites.mockResolvedValue([{ key: 'home', path: '/folder-link' }]);
+  } else {
+    projects.value = [{ id: 'project', display_name: 'Project', folder_path: '/folder-link' }];
+  }
+  resolveDirectoryPath.mockResolvedValue(canonicalPath);
+  const onSelect = vi.fn();
+  render(<FolderBrowser onSelect={onSelect} onClose={() => {}} />);
+
+  await waitFor(() => expect(listDir).toHaveBeenCalledWith(canonicalPath, false));
+  expect(listDir).not.toHaveBeenCalledWith('/folder-link', expect.anything());
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.select' }));
+  expect(onSelect).toHaveBeenCalledWith(canonicalPath);
+});
+
+it.each(['favorite', 'project'] as const)('canonicalizes a selected %s before listing', async (source) => {
+  const canonicalPath = '/real/项目';
+  if (source === 'favorite') {
+    systemFavorites.mockResolvedValue([{ key: 'home', path: '/folder-link' }]);
+  } else {
+    projects.value = [{ id: 'project', display_name: 'folder-link', folder_path: '/folder-link' }];
+  }
+  resolveDirectoryPath.mockImplementation(async (path: string) => path === '/folder-link' ? canonicalPath : path);
+  const onSelect = vi.fn();
+  render(<FolderBrowser initialPath="/workspace" onSelect={onSelect} onClose={() => {}} />);
+  await screen.findByText('src');
+
+  fireEvent.click(screen.getAllByRole('button', { name: 'folder-link' })[0]);
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith(canonicalPath, false));
+  expect(listDir).not.toHaveBeenCalledWith('/folder-link', expect.anything());
+  fireEvent.click(screen.getByRole('button', { name: 'directoryBrowser.select' }));
+  expect(onSelect).toHaveBeenCalledWith(canonicalPath);
+});
+
+it('waits for favorite canonicalization before refreshing with the new hidden-file state', async () => {
+  const resolved = deferred<string>();
+  systemFavorites.mockResolvedValue([{ key: 'home', path: '/folder-link' }]);
+  resolveDirectoryPath.mockImplementation((path: string) => path === '/folder-link' ? resolved.promise : Promise.resolve(path));
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+
+  fireEvent.click(screen.getAllByRole('button', { name: 'folder-link' })[0]);
+  await waitFor(() => expect(resolveDirectoryPath).toHaveBeenCalledWith('/folder-link'));
+  fireEvent.click(screen.getByRole('checkbox'));
+  expect(listDir).not.toHaveBeenCalledWith('/folder-link', true);
+
+  await act(async () => resolved.resolve('/real/项目'));
+  await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/real/项目', true));
 });
 
 it('resolves relative configured paths before using the Files API', async () => {
@@ -401,6 +465,37 @@ it('refreshes the directory listing when hidden files change during search', asy
   fireEvent.click(screen.getByRole('checkbox'));
   expect((search as HTMLInputElement).value).toBe('src');
   await waitFor(() => expect(listDir).toHaveBeenLastCalledWith('/workspace', true));
+});
+
+it.each(['hidden-files toggle', 'refresh'] as const)('preserves search across repeated %s with listings pending', async (action) => {
+  searchNames.mockResolvedValue({ results: [], truncated: false });
+  render(<FolderBrowser initialPath="/workspace" onSelect={() => {}} onClose={() => {}} />);
+  await screen.findByText('src');
+  const search = screen.getByPlaceholderText('apps.fileBrowser.searchPlaceholder') as HTMLInputElement;
+  fireEvent.change(search, { target: { value: 'src' } });
+  await waitFor(() => expect(searchNames).toHaveBeenCalledTimes(1));
+  const first = deferred<FsListing>();
+  const second = deferred<FsListing>();
+  listDir.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+  const trigger = action === 'refresh'
+    ? screen.getByRole('button', { name: 'apps.fileBrowser.refresh' })
+    : screen.getByRole('checkbox');
+  fireEvent.click(trigger);
+  await waitFor(() => expect(listDir).toHaveBeenCalledTimes(2));
+  fireEvent.click(trigger);
+  await waitFor(() => expect(listDir).toHaveBeenCalledTimes(3));
+
+  expect(search.value).toBe('src');
+  await waitFor(() => expect(searchNames).toHaveBeenLastCalledWith('/workspace', 'src', false, expect.any(AbortSignal)));
+  await act(async () => second.resolve({
+    ok: true, path: '/workspace', parent: '/',
+    entries: [{ name: 'fresh-dir', kind: 'dir', size: null, mtime: 1, ext: '' }],
+  }));
+  await act(async () => first.reject(new Error('stale listing failed')));
+  expect(search.value).toBe('src');
+  expect(screen.queryByText('apps.fileBrowser.errors.listFailed')).toBeNull();
+  fireEvent.change(search, { target: { value: '' } });
+  expect(await screen.findByText('fresh-dir')).toBeTruthy();
 });
 
 it('does not show a false empty state while search is pending', async () => {
