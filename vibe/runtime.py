@@ -17,7 +17,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import psutil
 
@@ -1129,20 +1129,69 @@ def independent_process_env(
     return child_env
 
 
-def spawn_background(
+#: How long a child that was killed because its spawn failed is waited for.
+#: SIGKILL and TerminateProcess are not refusable, so this only bounds a kernel
+#: that is slow to deliver them.
+SPAWN_DISCARD_REAP_TIMEOUT_SECONDS = 5.0
+
+
+def discard_spawned_child(process: subprocess.Popen) -> None:
+    """Kill and reap a child whose handover to its caller failed.
+
+    Called from inside an ``except`` that re-raises, so it must not replace the
+    failure it is cleaning up after: anything it cannot do is logged instead.
+    """
+
+    if process.stdin is not None:
+        try:
+            process.stdin.close()
+        except OSError:
+            # A secret write that failed on a broken pipe leaves buffered bytes
+            # the close tries to flush again. The child is being killed anyway.
+            pass
+    try:
+        process.kill()
+    except OSError:
+        logger.error("Failed to kill pid=%s after its spawn failed", process.pid, exc_info=True)
+        return
+    try:
+        process.wait(timeout=SPAWN_DISCARD_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        logger.error(
+            "Killed pid=%s after its spawn failed, but it had not exited after %.0fs",
+            process.pid,
+            SPAWN_DISCARD_REAP_TIMEOUT_SECONDS,
+        )
+
+
+def _spawn_owned_process(
     args,
-    pid_path,
     stdout_name: str,
     stderr_name: str,
-    env: dict[str, str] | None = None,
+    env: dict[str, str] | None,
     *,
-    memory_ui_secret: str | None = None,
-):
+    memory_ui_secret: str | None,
+    record: Callable[[int], None] | None = None,
+) -> subprocess.Popen:
+    """Start a process the caller owns, or leave no process at all.
+
+    A caller can only undo what it knows about, and it knows about a child only
+    once this returns. Every step between ``Popen`` and that return -- the
+    secret written to the child's stdin, the pid record that lets any other
+    process find it -- used to be able to raise with the child already running,
+    and then no caller could see it: `cmd_start`'s rollback looked for a UI it
+    had created and found none, and the orphan kept the listener every later
+    start then failed to bind. So a failure anywhere in that span kills and
+    reaps the child before it propagates, and every caller inherits the rule
+    instead of each rolling back a window it cannot observe.
+    """
+
     stdout_path = _log_path(stdout_name)
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
     stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
+    process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
             args,
@@ -1155,13 +1204,39 @@ def spawn_background(
             **isolated_subprocess_kwargs(),
         )
         _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
+        if record is not None:
+            record(process.pid)
+    except BaseException:
+        if process is not None:
+            discard_spawned_child(process)
+        raise
     finally:
         if stdin is not subprocess.PIPE:
             stdin.close()
         stdout_sink.stdin.close()
         stderr_sink.stdin.close()
-    pid_path.write_text(str(process.pid), encoding="utf-8")
-    return process.pid
+    return process
+
+
+def spawn_background(
+    args,
+    pid_path,
+    stdout_name: str,
+    stderr_name: str,
+    env: dict[str, str] | None = None,
+    *,
+    memory_ui_secret: str | None = None,
+):
+    """Start a process recorded in ``pid_path``; the record exists iff the child does."""
+
+    return _spawn_owned_process(
+        args,
+        stdout_name,
+        stderr_name,
+        env,
+        memory_ui_secret=memory_ui_secret,
+        record=lambda pid: pid_path.write_text(str(pid), encoding="utf-8"),
+    ).pid
 
 
 def spawn_service_background_process(
@@ -1172,29 +1247,7 @@ def spawn_service_background_process(
     *,
     memory_ui_secret: str | None = None,
 ) -> subprocess.Popen:
-    stdout_path = _log_path(stdout_name)
-    stderr_path = _log_path(stderr_name)
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
-    stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
-    try:
-        process = subprocess.Popen(
-            args,
-            stdin=stdin,
-            stdout=stdout_sink.stdin,
-            stderr=stderr_sink.stdin,
-            cwd=str(get_working_dir()),
-            close_fds=True,
-            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
-            **isolated_subprocess_kwargs(),
-        )
-        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
-    finally:
-        if stdin is not subprocess.PIPE:
-            stdin.close()
-        stdout_sink.stdin.close()
-        stderr_sink.stdin.close()
-    return process
+    return _spawn_owned_process(args, stdout_name, stderr_name, env, memory_ui_secret=memory_ui_secret)
 
 
 def spawn_service_background(args, stdout_name: str, stderr_name: str, env: dict[str, str] | None = None) -> int:
@@ -2021,9 +2074,20 @@ def _resolve_service_pid(
             **spawn_kwargs,
         )
         pid = process.pid
+        # The reservation is how anything outside this frame finds a service that
+        # has not taken the lock yet -- `stop_service()` included, and so every
+        # rollback. A child it could not be written for is one nothing else can
+        # ever stop, so it is killed here, the same rule the spawn primitive
+        # applies to its own steps. Only a child that is findable is recorded as
+        # created: whoever reads `start_info` may rely on the reservation too.
+        try:
+            _SERVICE_START_PROCESSES[pid] = process
+            _record_service_pid_reservation(pid)
+        except BaseException:
+            _SERVICE_START_PROCESSES.pop(pid, None)
+            discard_spawned_child(process)
+            raise
         result(pid, reused=False)
-        _SERVICE_START_PROCESSES[pid] = process
-        _record_service_pid_reservation(pid)
         if scope_prefix:
             # Scoped launches resolve their pid via the authoritative lock holder
             # (poll-and-adopt), never by trusting the spawn pid alone.

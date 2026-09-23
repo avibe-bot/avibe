@@ -13858,12 +13858,6 @@ def cmd_start(*, open_browser: bool | None = None):
     live_ui_pid = _live_ui_server_pid()
     service_start = runtime.ProcessStartInfo()
     ui_start = runtime.ProcessStartInfo()
-    service_pid = runtime.start_service(
-        wait_for_ready=False,
-        memory_ui_secret=memory_ui_secret,
-        start_info=service_start,
-    )
-    service_reused = service_start.reused
     # Everything from here to the receipt line is one region under one invariant:
     # nothing THIS invocation created may survive a start that never printed a
     # receipt. Both processes count. An unreceipted service is adopted as
@@ -13884,7 +13878,17 @@ def cmd_start(*, open_browser: bool | None = None):
     # purpose, and an exit before the receipt is indistinguishable, to the next
     # launch, from any other start that never finished. The bare `raise` keeps
     # the original failure and its traceback unchanged.
+    #
+    # The region opens before `start_service`, not after it: that call spawns
+    # the service and then waits for it to take the lock, and a Ctrl-C in that
+    # wait left a live, reserved service that no rollback had been asked about.
     try:
+        service_pid = runtime.start_service(
+            wait_for_ready=False,
+            memory_ui_secret=memory_ui_secret,
+            start_info=service_start,
+        )
+        service_reused = service_start.reused
         if service_reused:
             # The reused service still verifies proofs with the secret it was started
             # with. Signing with a different one would only produce requests it
@@ -14004,6 +14008,13 @@ def cmd_start(*, open_browser: bool | None = None):
         # invocation create" is exactly `pid is not None and not reused`, and
         # the undo runs in reverse order of creation -- the UI, then the service
         # it was pointed at.
+        #
+        # Both undos find their process through its pid record rather than the
+        # captured pid, and that is sound by construction, not by luck: the
+        # spawn primitives write the record before they hand a child back and
+        # kill the child if they cannot, and `start_service` captures a created
+        # service only after its reservation is written. So a created process
+        # this sees always has a record naming it.
         if ui_start.pid is not None and not ui_start.reused:
             # `stop_remote_access=False`, the same distinction the stale-UI
             # restart above makes, and for the same reason: `vibe start` never
@@ -14014,7 +14025,7 @@ def cmd_start(*, open_browser: bool | None = None):
             # invocation did not create -- the one irreversible mistake
             # available to a rollback.
             runtime.stop_ui(stop_remote_access=False)
-        if not service_reused:
+        if service_start.pid is not None and not service_start.reused:
             # A service that was already running is not ours to stop, and against
             # one this command has then changed nothing to undo. stop_service()
             # logs any pid it could not stop, so a rollback that itself fails

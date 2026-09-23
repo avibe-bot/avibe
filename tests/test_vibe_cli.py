@@ -962,6 +962,11 @@ def _no_live_runtime_processes(monkeypatch):
     monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
 
 
+#: Captured at import, before any test replaces it, for the tests that drive
+#: the real UI start underneath an otherwise stubbed `cmd_start`.
+_REAL_START_UI = runtime.start_ui
+
+
 def _fake_start_result(pid, kwargs, *, reused=False):
     start_info = kwargs.get("start_info")
     if start_info is not None:
@@ -1641,6 +1646,92 @@ def test_cmd_start_rolls_both_back_when_the_receipt_builder_fails(monkeypatch, c
         f"a failed receipt left the service this command started running: {started.calls}"
     )
     assert "@avibe-start-receipt:" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("captured", "reused", "expected"),
+    [
+        # Spawned and reserved, then interrupted while waiting for the lock.
+        (True, False, ["start_service", "stop_service"]),
+        # Adopted from a previous launch, then interrupted: not ours to stop.
+        (True, True, ["start_service"]),
+        # Refused before it identified any process, e.g. another holder.
+        (False, False, ["start_service"]),
+    ],
+)
+def test_cmd_start_undoes_a_service_it_created_even_when_start_service_itself_raises(
+    monkeypatch, capsys, captured, reused, expected
+):
+    """`start_service` spawns and then waits, and the wait can be interrupted.
+
+    The call used to sit in front of the region the rollback guards, so a Ctrl-C
+    during the lock wait left a live, reserved service that the next `vibe
+    start` adopted as `reused` -- the orphan the region exists to prevent.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=reused)
+
+    def interrupted_start(**kwargs):
+        started.calls.append("start_service")
+        if captured:
+            _fake_start_result(1234, kwargs, reused=reused)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.runtime, "start_service", interrupted_start)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_start()
+
+    assert started.calls == expected
+    assert "@avibe-start-receipt:" not in capsys.readouterr().out
+
+
+def test_cmd_start_leaves_no_ui_running_when_the_ui_pid_record_cannot_be_written(monkeypatch, tmp_path):
+    """The reviewed failure, end to end, with a real UI child.
+
+    `spawn_background` started the UI and then failed writing `vibe-ui.pid`, so
+    `start_ui` never captured it and the rollback -- which only undoes what it
+    was told it created -- had nothing to undo. The orphan kept the listener.
+    Here the real `start_ui` and the real spawn run against a stand-in
+    interpreter that just sleeps, and the pid record's directory is missing.
+    """
+
+    started = _ui_refuses_to_start(monkeypatch, reused=False)
+    fake_python = tmp_path / "avibe-ui-probe-python"
+    fake_python.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(cli.runtime, "start_ui", _REAL_START_UI)
+    monkeypatch.setattr(
+        runtime,
+        "current_service_launcher",
+        lambda: runtime.ServiceLauncher(python=str(fake_python), main="unused"),
+    )
+    monkeypatch.setattr(runtime.paths, "get_runtime_ui_pid_path", lambda: tmp_path / "missing" / "vibe-ui.pid")
+    children = []
+    real_popen = runtime.subprocess.Popen
+
+    class SpyPopen(real_popen):
+        def __init__(self, args, *rest, **kwargs):
+            super().__init__(args, *rest, **kwargs)
+            if args and args[0] == str(fake_python):
+                children.append(self)
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", SpyPopen)
+
+    try:
+        with pytest.raises(FileNotFoundError):
+            cli.cmd_start()
+
+        assert len(children) == 1, children
+        assert children[0].returncode is not None, "the UI this start spawned was left running"
+        assert not runtime.pid_alive(children[0].pid)
+        # The service this start created is still undone.
+        assert started.calls.count("stop_service") == 1, started.calls
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
 
 
 def test_cmd_start_keeps_the_service_it_started_once_the_receipt_is_out(monkeypatch, capsys):
