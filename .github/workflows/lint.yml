@@ -509,3 +509,12 @@ jobs:
 
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
+
+      # Windows byte-range locks are mandatory and per-handle, so a lock taken
+      # over the bytes of a record makes that record unreadable to every other
+      # handle -- including this process's own. Nothing on Linux can observe
+      # that: POSIX file locks are advisory and never deny a read. This is the
+      # one place in CI where the service lock's readability can be tested at
+      # all, and it needs neither a packaged Runtime nor an installer.
+      - name: Verify the Windows service lock keeps its record readable
+        run: python -m pytest tests/test_service_lock_record.py -q
