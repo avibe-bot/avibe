@@ -115,9 +115,12 @@ def test_changed_limits_reconfigure_same_group_without_losing_pressure(
     base = root / "service"
     group = base / "avibe-agents"
     group.mkdir(parents=True)
+    (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
     for name, value in (
         ("cgroup.procs", ""),
         ("cpu.weight", "50"),
+        ("memory.high", "max"),
+        ("memory.max", "max"),
         ("pids.current", "1"),
         ("pids.max", "4096"),
         ("pids.events", "max 4\n"),

@@ -992,6 +992,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             pid = getattr(process, "pid", None)
         else:
             pid = getattr(server, "_last_start_failure_pid", None)
+            if pid is None and server is not None:
+                observed_exit = getattr(server, "observed_runtime_exit_pid", None)
+                if callable(observed_exit):
+                    pid = observed_exit()
         if not isinstance(pid, int) or pid <= 0:
             return None
         failure = observe_agent_resource_pressure(self.controller)

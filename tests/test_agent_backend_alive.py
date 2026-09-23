@@ -19,6 +19,8 @@ from modules.agents.base import AGENT_RUNTIME_TURN_KEY
 from modules.agents.service import AgentService
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.codex.agent import CodexAgent
+from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.server import OpenCodeServerManager
 from core.resource_governance import AgentResourceFailure
 from modules.im import MessageContext
 
@@ -156,13 +158,35 @@ class CodexBackendAliveTests(unittest.TestCase):
 
         with patch(
             "modules.agents.codex.agent.observe_agent_resource_pressure",
-            return_value=pressure,
+            side_effect=[pressure, None],
         ) as observe:
             diagnostic, visible = diagnose()
+            self.assertEqual(diagnose(), (diagnostic, visible))
 
         observe.assert_called_once_with(agent.controller)
         self.assertIn("Resource diagnosis: shared cgroup limit event", diagnostic)
         self.assertIn("(0/4096)", visible)
+
+
+class OpenCodeResourceExitTests(unittest.TestCase):
+    def test_adopted_exit_consumes_pressure_only_after_original_generation_exits(self):
+        agent = OpenCodeAgent.__new__(OpenCodeAgent)
+        agent.controller = types.SimpleNamespace()
+        server = OpenCodeServerManager(binary="opencode", port=4096)
+        pressure = AgentResourceFailure(kind="pids", message="shared cgroup limit event")
+
+        with patch(
+            "modules.agents.opencode.server.runtime.process_create_time",
+            side_effect=[1000.0, 1000.0, 2000.0],
+        ), patch(
+            "modules.agents.opencode.agent.observe_agent_resource_pressure",
+            return_value=pressure,
+        ) as observe:
+            server._observe_runtime_generation({"pid": 654, "started_at": 1.0})
+            self.assertIsNone(agent._resource_failure_for_server(server))
+            observe.assert_not_called()
+            self.assertIs(agent._resource_failure_for_server(server), pressure)
+            observe.assert_called_once_with(agent.controller)
 
 
 class AgentServiceBackendAliveTests(unittest.TestCase):

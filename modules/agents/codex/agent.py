@@ -279,7 +279,12 @@ class CodexAgent(BaseAgent):
         if transport is None:
             return None
 
+        cached_diagnosis: tuple[str, str] | None = None
+
         def diagnose() -> tuple[str, str] | None:
+            nonlocal cached_diagnosis
+            if cached_diagnosis is not None:
+                return cached_diagnosis
             failure = self._resource_failure_for_transport(transport)
             if failure is None:
                 return None
@@ -297,10 +302,11 @@ class CodexAgent(BaseAgent):
                 visible = i18n_t("error.agentMemoryLimit", language)
             else:
                 return None
-            return (
+            cached_diagnosis = (
                 f"backend_runtime_exited_before_terminal\nResource diagnosis: {failure.message}",
                 f"❌ {visible}",
             )
+            return cached_diagnosis
 
         return diagnose
 

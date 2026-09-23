@@ -945,6 +945,18 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             payload = json.loads(manager._pid_file.read_text(encoding="utf-8"))
             self.assertEqual(payload["active_run_sessions"], [])
 
+    def test_pid_file_records_birth_only_when_supplied_by_spawn(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager._pid_file = Path(tmp_dir) / "opencode_server.json"
+            manager._write_pid_file(123)
+            legacy = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertNotIn("process_created_at", legacy)
+
+            manager._write_pid_file(123, process_created_at=1000.0)
+            spawned = json.loads(manager._pid_file.read_text(encoding="utf-8"))
+            self.assertEqual(spawned["process_created_at"], 1000.0)
+
     async def test_mark_run_inactive_preserves_active_state_when_pid_write_fails(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2335,13 +2347,14 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retire_adopted_server_requires_command_or_port_proof(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
-        manager._read_pid_file = Mock(return_value={"pid": 654, "port": 4096})  # type: ignore[method-assign]
-        manager._pid_exists = Mock(side_effect=[True, False])  # type: ignore[method-assign]
+        manager._read_pid_file = Mock(return_value={"pid": 654, "port": 4096, "process_created_at": 1000.0})  # type: ignore[method-assign]
+        manager._pid_exists = Mock(side_effect=[True, True, False])  # type: ignore[method-assign]
         manager._get_pid_command = Mock(return_value="opencode serve --port=4096")  # type: ignore[method-assign]
         manager._terminate_pid_tree_sync = Mock(return_value=True)  # type: ignore[method-assign]
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
 
-        await manager.retire_for_native_migration()
+        with patch.object(SERVER_MODULE.runtime, "process_create_time", return_value=1000.0):
+            await manager.retire_for_native_migration()
 
         manager._terminate_pid_tree_sync.assert_called_once_with(654)
         manager._clear_pid_file.assert_called_once()
@@ -2364,17 +2377,74 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retire_adopted_server_uses_port_owner_when_command_unavailable(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
-        manager._read_pid_file = Mock(return_value={"pid": 654, "port": 4096})  # type: ignore[method-assign]
-        manager._pid_exists = Mock(side_effect=[True, False])  # type: ignore[method-assign]
+        manager._read_pid_file = Mock(return_value={"pid": 654, "port": 4096, "process_created_at": 1000.0})  # type: ignore[method-assign]
+        manager._pid_exists = Mock(side_effect=[True, True, False])  # type: ignore[method-assign]
         manager._get_pid_command = Mock(return_value=None)  # type: ignore[method-assign]
         manager._pid_owns_listening_port = Mock(return_value=True)  # type: ignore[method-assign]
         manager._terminate_pid_tree_sync = Mock(return_value=True)  # type: ignore[method-assign]
         manager._clear_pid_file = Mock()  # type: ignore[method-assign]
 
-        await manager.retire_for_native_migration()
+        with patch.object(SERVER_MODULE.runtime, "process_create_time", return_value=1000.0):
+            await manager.retire_for_native_migration()
 
-        manager._pid_owns_listening_port.assert_called_once_with(654, 4096)
+        self.assertEqual(manager._pid_owns_listening_port.call_count, 2)
+        manager._pid_owns_listening_port.assert_called_with(654, 4096)
         manager._terminate_pid_tree_sync.assert_called_once_with(654)
+
+    async def test_retire_adopted_server_refuses_reused_pid_even_when_command_matches(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._read_pid_file = Mock(return_value={
+            "pid": 654, "port": 4096, "process_created_at": 1000.0
+        })  # type: ignore[method-assign]
+        manager._pid_exists = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._get_pid_command = Mock(return_value="opencode serve --port=4096")  # type: ignore[method-assign]
+        manager._terminate_pid_tree_sync = Mock()  # type: ignore[method-assign]
+        retire = Mock(return_value=True)
+        manager.set_runtime_activation_retire(retire)
+
+        with patch.object(SERVER_MODULE.runtime, "process_create_time", return_value=2000.0):
+            with self.assertRaisesRegex(RuntimeError, "ownership cannot be proven"):
+                await manager.retire_for_native_migration()
+
+        manager._terminate_pid_tree_sync.assert_not_called()
+        retire.assert_not_called()
+
+    async def test_retire_adopted_server_refuses_legacy_pid_file_without_birth_identity(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._read_pid_file = Mock(return_value={"pid": 654, "port": 4096})  # type: ignore[method-assign]
+        manager._pid_exists = Mock(return_value=True)  # type: ignore[method-assign]
+        manager._get_pid_command = Mock(return_value="opencode serve --port=4096")  # type: ignore[method-assign]
+        manager._terminate_pid_tree_sync = Mock()  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "ownership cannot be proven"):
+            await manager.retire_for_native_migration()
+
+        manager._terminate_pid_tree_sync.assert_not_called()
+
+    async def test_retire_adopted_server_refuses_identity_change_before_signal(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._read_pid_file = Mock(return_value={
+            "pid": 654, "port": 4096, "process_created_at": 1000.0
+        })  # type: ignore[method-assign]
+        manager._pid_exists = Mock(side_effect=[True, True])  # type: ignore[method-assign]
+        manager._get_pid_command = Mock(return_value="opencode serve --port=4096")  # type: ignore[method-assign]
+        manager._terminate_pid_tree_sync = Mock()  # type: ignore[method-assign]
+
+        with patch.object(SERVER_MODULE.runtime, "process_create_time", side_effect=[1000.0, 2000.0]):
+            with self.assertRaisesRegex(RuntimeError, "ownership cannot be proven"):
+                await manager.retire_for_native_migration()
+
+        manager._terminate_pid_tree_sync.assert_not_called()
+
+    def test_observed_adopted_server_reports_only_the_original_generation_exit(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        info = {"pid": 654, "port": 4096, "started_at": 1.0}
+        manager._pid_exists = Mock(return_value=True)  # type: ignore[method-assign]
+
+        with patch.object(SERVER_MODULE.runtime, "process_create_time", side_effect=[1000.0, 1000.0, 2000.0]):
+            manager._observe_runtime_generation(info)
+            self.assertIsNone(manager.observed_runtime_exit_pid())
+            self.assertEqual(manager.observed_runtime_exit_pid(), 654)
 
     async def test_request_scope_does_not_restart_pending_auth_refresh_while_run_active(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
