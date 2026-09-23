@@ -182,12 +182,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.setup-provider-check {
+.setup-provider-check,
+.setup-provider-add-mark {
   flex-shrink: 0;
   width: var(--obp-check);
   height: var(--obp-check);
-  color: var(--mint-ink);
 }
+.setup-provider-check { color: var(--mint-ink); }
+/* The plus states an offer, not a decision, so it is drawn in the same quiet ink the
+   third card's plus wears rather than in the mint the check owns. */
+.setup-provider-add-mark { color: var(--muted-foreground); }
 /* The count of what was added through Add more rides the card it describes. */
 .setup-provider-badge {
   flex-shrink: 0;

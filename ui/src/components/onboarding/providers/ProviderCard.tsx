@@ -39,19 +39,19 @@ export const ProviderCard: FC<{
   const blocked = slot.reasons.length > 0;
 
   // The second line says where the card's knowledge came from. A connected
-  // subscription has no key to mask, so it names the sign-in instead; only a card
-  // with nothing behind it describes the offer, which is the one thing a connected
-  // or detected card must never do — neither can be pressed into adding one, so an
-  // invitation there is an invitation to press something that does nothing. A
-  // detected row the server named no provider for has no second line at all: its
-  // masked detail is already the name above.
+  // subscription has no key to mask, so it names the sign-in instead. A card with
+  // nothing behind it states that — 「待添加」 beside the plus — rather than
+  // describing what pressing it would offer: the offer is the whole card, and a
+  // sentence restating it took the line that says whether this provider is there
+  // yet. A detected row the server named no provider for has no second line at all:
+  // its masked detail is already the name above.
   const written = slot.mask
     ? t(connected ? 'onboarding.providers.cardKeyAdded' : 'onboarding.providers.cardKeyDetected', { mask: slot.mask })
     : slot.supply
       ? [t(SUPPLY_KIND_COPY[slot.supply.kind]), slot.supply.account].filter(Boolean).join(' · ')
       : detected
         ? ''
-        : t('onboarding.providers.cardAddKeyNamed', { name: slot.label });
+        : t('onboarding.providers.cardNotAdded');
 
   // The migration feature's own words for the same group, so the card and the
   // review it opens from give one answer.
@@ -107,6 +107,12 @@ export const ProviderCard: FC<{
           beside it, and the card's accessible name already carries the meaning. */}
       {(connected || selected) && (
         <Check className="setup-provider-check" strokeWidth={2.2} aria-hidden="true" />
+      )}
+      {/* An empty slot is the one card here that is an offer, and it says so the way
+          the third card does: the plus. The accessible name already carries what
+          pressing it opens, so the mark is decoration. */}
+      {slot.kind === 'empty' && (
+        <Plus className="setup-provider-add-mark" strokeWidth={2} aria-hidden="true" />
       )}
     </button>
   );
