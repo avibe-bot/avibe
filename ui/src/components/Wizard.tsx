@@ -28,8 +28,6 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
-import { SetupPlatformRecovery, type SavedPlatformRecovery } from './onboarding/SetupPlatformRecovery';
-import { getEnabledPlatforms, getPlatformCatalog, platformHasRunnableConfig } from '../lib/platforms';
 import { ASSISTANT_ORDER } from './onboarding/collaborationTimeline';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
@@ -258,7 +256,6 @@ const ProvidersEntry = forwardRef<SetupScreenHandle, ProvidersScreenProps & { on
 export function Wizard() {
   const api = useApi(); const { t } = useTranslation(); const navigate = useNavigate();
   const { control } = useStatus();
-  const [platformRecovery, setPlatformRecovery] = useState<SavedPlatformRecovery | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
   const [loading, setLoading] = useState(true);
@@ -443,12 +440,6 @@ export function Wizard() {
       // Writes already issued cannot be recalled; the lease is what stops the next one.
       let lease = entry.lease;
       const holds = () => lease === configGeneration.current;
-      const enabledPlatforms = getEnabledPlatforms(entry.config.raw);
-      const missing = getPlatformCatalog(entry.config.raw).find((platform) => enabledPlatforms.includes(platform.id) && !platformHasRunnableConfig(entry.config.raw, platform.id));
-      if (missing) {
-        setPlatformRecovery({ config: entry.config.raw, descriptor: missing });
-        return;
-      }
       // C4. The gate is correlated over ONE assistant, so the reads that feed it are
       // taken together and judged together; what the browser must not do is assemble a
       // verdict out of three facts about three different machines.
@@ -542,14 +533,13 @@ export function Wizard() {
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}
         runtimeRead={runtimeRead} loading={loading} error={error} onRetrySetup={retrySetup}
-        navigationLocked={Boolean(platformRecovery)} renderScreen={(id, props, ref) => id === 'intro'
+        renderScreen={(id, props, ref) => id === 'intro'
           ? <Welcome ref={ref} data={data ?? undefined} active={props.active} onActionChange={props.onActionChange}
               onNext={(next) => { setData((previous) => ({ ...previous, ...Object(next) })); props.onNavigate(SETUP_REGISTERED_SCREENS[1]); }} />
           : id === 'providers'
           ? <ProvidersEntry ref={ref} {...props} agentReads={setupAgentReads} onEnter={enterProviders} />
           : <AgentDetection ref={ref} data={data ?? {}} active={props.active} onActionChange={props.onActionChange}
               flowState={props.flowState} setFlowState={props.setFlowState} onNavigate={props.onNavigate} agentReads={setupAgentReads}
-              completionRecovery={platformRecovery ? <SetupPlatformRecovery key={platformRecovery.descriptor.id} saved={platformRecovery} onRepaired={complete} onCancel={() => setPlatformRecovery(null)} /> : undefined}
               onNext={complete} />}
       />
     </main>

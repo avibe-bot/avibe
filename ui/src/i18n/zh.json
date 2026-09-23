@@ -5395,9 +5395,7 @@
       "modelUnavailable": "没有可用 Agent 的模型路由。请检查连接后重试。",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
-      "authTokenLabel": "Auth Token",
-      "platformRepair": "修复已保存的消息配置",
-      "platformRepairHint": "已保存的 {{platform}} 配置不完整。请修复必填凭据后进入工作区。"
+      "authTokenLabel": "Auth Token"
     },
     "brand": {
       "name": "Avibe",

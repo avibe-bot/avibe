@@ -3759,7 +3759,7 @@ def test_manual_provider_connection_reaches_controller_confirmed_readiness(monke
 
 
 def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(monkeypatch, tmp_path):
-    """AUTH-SETUP-120: no mandatory IM; saved invalid IM remains actionable."""
+    """AUTH-SETUP-120: no mandatory IM; a saved invalid IM neither gates nor is lost."""
     from config.v2_config import DiscordConfig
     from tests.ui_server_test_helpers import csrf_headers
     from vibe import internal_client
@@ -3782,15 +3782,19 @@ def test_setup_completion_preserves_canonical_and_legacy_platform_configuration(
     config.platforms.enabled = ["slack"]
     config.slack.bot_token = ""
     config.save()
+    # A saved messaging platform is not a gate on the workspace. Completion goes
+    # through on the config it was given, and the incomplete platform stays saved,
+    # enabled and repairable from settings rather than blocking the way in.
     result = client.post('/api/config', json={"setup_completed": True}, headers=csrf_headers(client))
-    assert result.status_code == 400
-    assert "slack" in json.dumps(result.get_json()).lower()
+    assert result.status_code == 200, result.get_json()
+    assert V2Config.load().setup_completed
     assert V2Config.load().platforms.enabled == ["slack"]
-    assert not V2Config.load().setup_completed
+    assert V2Config.load().slack.bot_token == ""
 
     # The actual embedded form sends only changed credential leaves. Another
     # actor's unrelated update between read and repair must survive.
     config = V2Config.load()
+    config.setup_completed = False
     config.runtime.default_cwd = str(tmp_path / "并发工作目录")
     config.slack.app_token = "xapp-test-app-token"
     config.save()

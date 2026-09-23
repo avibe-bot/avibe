@@ -5395,9 +5395,7 @@
       "modelUnavailable": "No available Agent has a usable model route. Check your connections and try again.",
       "credentialType": "Credential type",
       "apiKeyLabel": "API Key",
-      "authTokenLabel": "Auth Token",
-      "platformRepair": "Repair saved messaging configuration",
-      "platformRepairHint": "Your saved {{platform}} configuration is incomplete. Repair its required credentials before entering the workspace."
+      "authTokenLabel": "Auth Token"
     },
     "brand": {
       "name": "Avibe",

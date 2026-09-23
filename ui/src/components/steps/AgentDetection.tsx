@@ -49,7 +49,6 @@ interface AgentDetectionProps {
   onNext: (data: any) => void | Promise<void>;
   onBack?: (data?: { agents: Record<string, AgentState> }) => void;
   isPage?: boolean;
-  completionRecovery?: React.ReactNode;
   onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
   flowState?: SetupFlowState;
   setFlowState?: React.Dispatch<React.SetStateAction<SetupFlowState>>;
@@ -115,7 +114,7 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 // description, status pill, enable switch) and an action row (configure
 // provider / set up Allow / install). Detection runs automatically on mount —
 // the user enables what they have and installs anything missing.
-export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, completionRecovery, active = true, ref, onActionChange, flowState, setFlowState, onNavigate, agentReads }) => {
+export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave, active = true, ref, onActionChange, flowState, setFlowState, onNavigate, agentReads }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -503,25 +502,21 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
 
 
   const actionBusy = syncing || entering || isAnyInstalling || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
-  // The recovery node is fresh JSX on every shell render, so the publication depends on
-  // whether one exists, never on its identity — an identity dependency would republish
-  // against itself forever.
-  const recoveryOpen = Boolean(completionRecovery);
-  useImperativeHandle(ref, () => ({ activate: () => { if (canContinue && !actionBusy && !recoveryOpen) void handlePrimaryAction(); } }));
+  useImperativeHandle(ref, () => ({ activate: () => { if (canContinue && !actionBusy) void handlePrimaryAction(); } }));
   // A layout effect, so the shell's action label lands in the same commit as the state
   // it describes: a passive publish would leave one render where the screen already
   // shows a settled state while the shared button still carries the previous label.
   useLayoutEffect(() => {
     if (active) onActionChange?.({ labelKey: entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter',
-      disabled: !canContinue || actionBusy || recoveryOpen, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
-  }, [active, onActionChange, entering, canContinue, actionBusy, recoveryOpen]);
+      disabled: !canContinue || actionBusy, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
+  }, [active, onActionChange, entering, canContinue, actionBusy]);
 
-  // What sits under the shared pair in the shell: the readiness caption, the OpenCode
-  // permission callout and the completion recovery. All three are ancillary to the
-  // action and all three grow — a permission error carries a full diagnostic, a
-  // recovery is a form. Kept inside the screen they push the anchor the two steps
-  // share; lifted out of flow they cover the very buttons they explain. So the shell
-  // reserves a slot after the pair and the active screen portals them into it.
+  // What sits under the shared pair in the shell: the readiness caption and the
+  // OpenCode permission callout. Both are ancillary to the action and both grow — a
+  // permission error carries a full diagnostic. Kept inside the screen they push the
+  // anchor the two steps share; lifted out of flow they cover the very buttons they
+  // explain. So the shell reserves a slot after the pair and the active screen portals
+  // them into it.
   const setupRoot = useRef<HTMLDivElement>(null);
   const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
   useEffect(() => {
@@ -556,17 +551,16 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     ? (active && routeSurfaceActive && actionAside ? createPortal(<>
         <div className="onboarding-setup-hint">{hintInner}</div>
         {permissionNode}
-        {completionRecovery}
       </>, actionAside) : null)
     : (
       <div className="onboarding-setup-footer">
         <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
-          disabled={!canContinue || syncing || entering || Boolean(completionRecovery)}>
+          disabled={!canContinue || syncing || entering}>
           {t(entering ? 'onboarding.connection.connecting' : 'onboarding.connection.enter')}
           <ArrowRight size={16} className="motion-safe:transition-transform motion-safe:duration-180 motion-safe:group-hover:translate-x-1" />
         </Button>
         {hintInner}
-        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering || Boolean(completionRecovery)} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
+        {onBack && <Button type="button" variant="ghost" className="onboarding-action-w onboarding-back-action" disabled={syncing || entering} onClick={() => onBack({ agents })}><ArrowLeft size={14} />{t('common.back')}</Button>}
       </div>
     );
   // Page mode keeps the existing settings shell — render the inner content only
@@ -872,7 +866,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           onSaved={onRoutesSaved}
         />
       )}
-      {!onActionChange && completionRecovery}
       {asideNode}
     </div>
   );

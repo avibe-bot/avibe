@@ -1084,11 +1084,6 @@ def _platforms_requiring_runtime_credential_validation(
     previous_enabled = set(base_config.platforms.enabled) if base_config is not None else set()
     platforms = enabled - previous_enabled if "platforms" in payload or "platform" in payload else set()
 
-    # Finishing setup promotes the saved config to a runnable runtime config, so
-    # every enabled adapter must be bootable at that boundary.
-    if payload.get("setup_completed") is True:
-        platforms.update(enabled)
-
     # If a save edits credential fields for an already-enabled platform, reject
     # partial clears or mismatched edits before they are persisted.
     for platform in enabled:

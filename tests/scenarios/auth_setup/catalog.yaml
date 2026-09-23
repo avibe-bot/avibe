@@ -335,7 +335,7 @@ scenarios:
     backend: opencode
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_manual_provider_connection_reaches_controller_confirmed_readiness
   - id: AUTH-SETUP-120
-    name: Explicit completion preserves canonical no-IM setup and invalid legacy IM recovery
+    name: Explicit completion preserves canonical no-IM setup and never gates on saved legacy IM
     status: covered
     kind: historical_regression
     layer: scenario
