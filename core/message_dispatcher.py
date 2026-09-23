@@ -10,11 +10,12 @@ import asyncio
 import hashlib
 import logging
 import re
+import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
@@ -23,6 +24,7 @@ from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
 from core.delivery_target import routed_delivery_context
+from core.citations import CitationBundle, materialize_citations
 from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
@@ -35,9 +37,17 @@ from core.message_output import (
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
     communication_type_for_output,
+    neutralize_mentions,
     output_for_message,
 )
-from core.reply_enhancer import process_reply, strip_file_links, strip_silent_blocks
+from core.reply_enhancer import (
+    FileLink,
+    QuickReplyButton,
+    inline_links,
+    process_reply,
+    strip_file_links,
+    strip_silent_blocks,
+)
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
     SETTLED_BY_STOPPED,
@@ -73,19 +83,6 @@ HARNESS_PROMPT_ECHO_TRIGGER_KINDS = HARNESS_TRIGGER_KINDS - {"activity_recovery"
 # (``harness_display_prompt``) and stays silent when none can be resolved; the
 # Workbench transcript still renders the full prompt for the operator.
 HARNESS_PROMPT_ECHO_INSTRUCTION_ONLY_KINDS = frozenset({"watch", "webhook", "hook"})
-# Mention neutralizers for the echoed prompt. The echo repeats text an operator wrote
-# for an agent, into a channel: quoting it does not stop a renderer from resolving a
-# broadcast, a username, or an id mention, and the Discord adapter sends without
-# ``allowed_mentions``, so an echoed ``@everyone`` would really ping the channel
-# (Codex P2). A zero-width space after the sigil keeps the text readable while
-# leaving nothing for any renderer to resolve. Deliberately platform-agnostic: every
-# adapter renders the same body, so ``@`` before a word character covers the
-# Slack/Discord broadcasts AND a bare Telegram ``@username`` (which
-# ``TelegramFormatter.render`` HTML-escapes without defusing), and a new adapter
-# inherits the guard instead of needing its own.
-_HARNESS_ECHO_MENTION_SIGIL_PATTERN = re.compile(r"@(?=\w)")
-_HARNESS_ECHO_ID_MENTION_PATTERN = re.compile(r"<(?=[@!#&])")
-_HARNESS_ECHO_MENTION_BREAK = "\u200b"
 # Cap for the definition name in the echo label. The prompt has its own cap, but the
 # label is appended after it and task/watch names are never length-validated at
 # creation, so an unbounded name could push the body past Discord's 2,000-char or
@@ -101,20 +98,42 @@ _HARNESS_PROMPT_ECHO_I18N_KEYS = {
 }
 
 
-def _neutralize_mentions(text: str) -> str:
-    """Make every mention in *text* inert without changing how it reads.
+def _written_buttons(
+    buttons: Sequence[QuickReplyButton],
+    citations: Optional[CitationBundle],
+) -> Sequence[QuickReplyButton]:
+    """Quick-reply buttons with their citations written as bare attribution.
 
-    Used for the Harness prompt echo, which republishes text an operator wrote for an
-    agent into a shared channel. Covers every ``@`` sigil — the broadcast words
-    (``@everyone`` / ``@here`` / ``@channel``) and a bare ``@username``, which Telegram
-    resolves into a real notification — plus the bracketed id forms both Slack
-    (``<@U…>``, ``<!here>``, ``<#C…>``) and Discord (``<@id>``, ``<@&role>``) resolve.
+    A label is lifted out of the body into a structured field no surface parses
+    as Markdown, so a link written here would show the reader its syntax. The
+    domain on its own still says who is being cited - and an internal token must
+    never survive into a field nothing else will rewrite.
     """
+    if not citations or not buttons:
+        return buttons
+    return [
+        replace(
+            button,
+            text=materialize_citations(button.text, citations, as_markdown=False) or "",
+        )
+        for button in buttons
+    ]
 
-    neutralized = _HARNESS_ECHO_MENTION_SIGIL_PATTERN.sub(
-        "@" + _HARNESS_ECHO_MENTION_BREAK, text or ""
-    )
-    return _HARNESS_ECHO_ID_MENTION_PATTERN.sub("<" + _HARNESS_ECHO_MENTION_BREAK, neutralized)
+
+def _written_files(
+    files: Sequence[FileLink],
+    citations: Optional[CitationBundle],
+) -> Sequence[FileLink]:
+    """The same for an extracted file link's label, which is uploaded as text."""
+    if not citations or not files:
+        return files
+    return [
+        replace(
+            link,
+            label=materialize_citations(link.label, citations, as_markdown=False) or "",
+        )
+        for link in files
+    ]
 
 
 class ActivityOutputDeliveryError(RuntimeError):
@@ -256,6 +275,25 @@ _WECHAT_CONSOLIDATED_SPLIT_THRESHOLD = 1700
 # normal fast step stays a clean label. This is the always-moving "still running"
 # signal that the heartbeat keeps ticking even when no new emit arrives.
 _ACTION_TIME_HINT_S = 10.0
+# Name the result attachment gets when a platform has no native Markdown upload
+# and the full text has to ride its ordinary file path instead.
+_RESULT_DOCUMENT_NAME = "result.md"
+
+
+@dataclass(frozen=True)
+class _ResultSplit:
+    """A proposed split, and whether every link in it survived.
+
+    ``links_whole`` is False when a link unit is longer than one message can
+    carry, so no boundary keeps it intact. The chunks are still the best split
+    available, but a caller that can deliver the whole text another way should
+    take that route BEFORE sending any of them: a half link sends fine, which
+    would make the delivery look successful while the reader is shown broken
+    Markdown and no way to reach the source.
+    """
+
+    chunks: list[str]
+    links_whole: bool
 
 
 class ConsolidatedMessageDispatcher:
@@ -1800,8 +1838,14 @@ class ConsolidatedMessageDispatcher:
         return f"{prefix}{text[:keep]}{suffix}"
 
     @staticmethod
-    def _find_result_split_index(text: str, max_chars: int) -> int:
-        minimum_boundary = max_chars // 2
+    def _find_result_split_index(text: str, max_chars: int, floor: int = 0) -> int:
+        """The preferred boundary at or before ``max_chars``, above ``floor``.
+
+        ``floor`` is a position the chunk has already committed to keeping -
+        the end of a link that fits - so whitespace behind it is no longer a
+        candidate. With the default it is the boundary search this always did.
+        """
+        minimum_boundary = max(max_chars // 2, floor)
         for separator in ("\n\n", "\n", " "):
             index = text.rfind(separator, 0, max_chars + 1)
             if index >= minimum_boundary:
@@ -1809,56 +1853,181 @@ class ConsolidatedMessageDispatcher:
                 return candidate if candidate <= max_chars else index
         return max_chars
 
-    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
-        if len(text) <= max_chars:
-            return [text]
+    @staticmethod
+    def _link_units(text: str) -> Optional[list[tuple[int, int]]]:
+        """Where each Markdown link unit starts and ends in ``text``.
 
+        A link is one unit - a label a reader taps and an address the tap goes
+        to - and a boundary drawn through it delivers neither: both halves send
+        successfully, so nothing falls back, and the reader is shown raw
+        Markdown where the source should have been. The enumeration is the
+        shared one every platform pass already holds a link with, so splitting
+        and spelling agree on where a link is.
+
+        Returns ``None`` when the scan could not run. That is not the same
+        answer as "there are no links": nothing here knows where a link is
+        without it, so the plan may still split on text boundaries but may not
+        certify that those boundaries kept anything whole.
+        """
+        try:
+            return [(link.start, link.end) for link in inline_links(text)]
+        except Exception:
+            logger.warning(
+                "Link scan failed while planning a split; the plan cannot certify a whole link",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _straddling_link(
+        split_at: int, links: Sequence[tuple[int, int]], consumed: int
+    ) -> Optional[tuple[int, int]]:
+        """The chunk-relative link a boundary at ``split_at`` would cut, if any.
+
+        ``links`` are offsets into the whole text and ``consumed`` is how much
+        of it earlier chunks already took.
+        """
+        for start, end in links:
+            start -= consumed
+            end -= consumed
+            if end <= split_at:
+                continue
+            if start >= split_at:
+                return None
+            return max(start, 0), end
+        return None
+
+    def _boundary_keeping_links_whole(
+        self,
+        links: Sequence[tuple[int, int]],
+        consumed: int,
+        capacity: int,
+        preferred: Callable[[int], int],
+    ) -> tuple[int, bool]:
+        """Choose a boundary in ``(0, capacity]`` that no link straddles.
+
+        ``capacity`` is what one message actually holds, measured in the same
+        characters ``preferred`` proposes a cut in; ``preferred(floor)`` is the
+        platform's own boundary search above a position already committed to.
+
+        The decision is the link's size against that capacity, never against
+        the preferred cut. A link the cut lands inside can be kept three ways:
+        cut before it, so it rides the next message whole; or, when it starts
+        the chunk, cut after it if it fits, because a chunk that is nothing but
+        the link is still a legal message. Only a link that outruns a whole
+        message on its own has no boundary left, and that is the one case this
+        reports as unwhole. Reading "the preferred whitespace is inside the
+        link" as that case rejected links half the size of the message.
+
+        Returns ``(split_at, links_whole)``.
+        """
+        floor = 0
+        while True:
+            split_at = preferred(floor)
+            if split_at <= floor:
+                # The preferred cut is behind what this chunk already keeps;
+                # the whole capacity is the boundary to try instead.
+                split_at = capacity
+            straddling = self._straddling_link(split_at, links, consumed)
+            if straddling is None:
+                return split_at, True
+            start, end = straddling
+            if start > 0:
+                return start, True
+            if end <= capacity:
+                # The link begins the chunk and fits in one message: keep it
+                # and look for the boundary again beyond its end. ``floor``
+                # strictly increases, so this settles.
+                floor = end
+                continue
+            return capacity, False
+
+    def _plan_result_split(self, text: str, max_chars: int) -> _ResultSplit:
+        if len(text) <= max_chars:
+            return _ResultSplit(chunks=[text], links_whole=True)
+
+        scanned = self._link_units(text)
+        links = scanned or []
+        # A scan that could not run has not found zero links; it has found
+        # nothing at all, and a plan that cannot see a link cannot promise one
+        # survived. Splitting still proceeds on text boundaries - the message
+        # is too long either way - but the promise is withheld.
+        links_whole = scanned is not None
         chunks: list[str] = []
         remaining = text
+        consumed = 0
 
         while len(remaining) > max_chars:
-            split_at = self._find_result_split_index(remaining, max_chars)
-            if split_at <= 0:
-                split_at = max_chars
+            chunk = remaining
+            split_at, whole = self._boundary_keeping_links_whole(
+                links,
+                consumed,
+                max_chars,
+                lambda floor: self._find_result_split_index(chunk, max_chars, floor),
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+    def _split_result_text(self, text: str, max_chars: int) -> list[str]:
+        return self._plan_result_split(text, max_chars).chunks
+
+    def _plan_result_split_by_bytes(self, text: str, max_bytes: int) -> _ResultSplit:
         if self._get_text_byte_length(text) <= max_bytes:
-            return [text]
+            return _ResultSplit(chunks=[text], links_whole=True)
 
+        scanned = self._link_units(text)
+        links = scanned or []
+        links_whole = scanned is not None
         chunks: list[str] = []
         remaining = text
+        consumed = 0
 
         while self._get_text_byte_length(remaining) > max_bytes:
+            # The longest prefix this budget holds, decoded: its length is the
+            # capacity in the same characters the boundary search counts, so a
+            # link that ends at or before it is a link the message can carry.
             prefix = remaining.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
-            minimum_boundary = max(1, len(prefix) // 2)
-            split_at = len(prefix)
-            for separator in ("\n\n", "\n", " "):
-                index = prefix.rfind(separator)
-                if index >= minimum_boundary:
-                    candidate = index + len(separator)
-                    if self._get_text_byte_length(remaining[:candidate]) <= max_bytes:
-                        split_at = candidate
-                        break
+            capacity = len(prefix)
+
+            def preferred(floor: int, prefix: str = prefix, capacity: int = capacity) -> int:
+                minimum_boundary = max(1, capacity // 2, floor)
+                for separator in ("\n\n", "\n", " "):
+                    index = prefix.rfind(separator)
+                    if index >= minimum_boundary:
+                        return index + len(separator)
+                return capacity
+
+            split_at, whole = self._boundary_keeping_links_whole(
+                links, consumed, capacity, preferred
+            )
+            links_whole = links_whole and whole
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:]
+            consumed += split_at
 
         if remaining:
             chunks.append(remaining)
 
-        return chunks
+        return _ResultSplit(chunks=chunks, links_whole=links_whole)
 
-    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+    def _split_result_text_by_bytes(self, text: str, max_bytes: int) -> list[str]:
+        return self._plan_result_split_by_bytes(text, max_bytes).chunks
+
+    def _plan_result_split_for_context(self, context: MessageContext, text: str) -> _ResultSplit:
         max_bytes = self._get_result_max_bytes(context)
         if max_bytes is not None:
-            return self._split_result_text_by_bytes(text, max_bytes)
-        return self._split_result_text(text, self._get_result_max_chars(context))
+            return self._plan_result_split_by_bytes(text, max_bytes)
+        return self._plan_result_split(text, self._get_result_max_chars(context))
+
+    def _split_result_text_for_context(self, context: MessageContext, text: str) -> list[str]:
+        return self._plan_result_split_for_context(context, text).chunks
 
     def _truncate_consolidated(self, text: str, max_bytes: int) -> str:
         if self._get_text_byte_length(text) <= max_bytes:
@@ -1875,12 +2044,32 @@ class ConsolidatedMessageDispatcher:
         context: MessageContext,
         text: str,
     ) -> Optional[str]:
+        """Send an intermediate message on a platform that cannot edit one.
+
+        This is the second consumer of the shared split plan. It stays an
+        intermediate message throughout - it settles no turn, signals no
+        result lifecycle, and writes no transcript row of its own - so the
+        only thing it takes from the result path is the narrow whole-document
+        upload, and only for a body no boundary can keep whole.
+        """
         target_context = self._get_target_context(context)
         max_bytes = self._get_consolidated_max_bytes(context)
-        chunks = self._split_result_text_by_bytes(text, max_bytes)
+        plan = self._plan_result_split_by_bytes(text, max_bytes)
+        if not plan.links_whole:
+            # The same answer the result path acts on, honoured by the plan's
+            # other consumer. A boundary drawn through a link delivers neither
+            # half and both halves send successfully, so nothing after this
+            # would notice - the whole body goes out as one document instead,
+            # BEFORE any fragment, and an upload that did not happen is
+            # reported as no delivery rather than as a partial one.
+            logger.warning(
+                "Log message split would break a link unit; delivering the whole body as a document"
+            )
+            return await self._upload_result_document(im_client, target_context, text)
+
         first_message_id: Optional[str] = None
 
-        for chunk in chunks:
+        for chunk in plan.chunks:
             try:
                 message_id = await im_client.send_message(target_context, chunk, parse_mode="markdown")
             except Exception as err:
@@ -2054,7 +2243,7 @@ class ConsolidatedMessageDispatcher:
         quoted = "\n".join(f"> {line}" for line in prompt.splitlines())
         # Both halves are neutralized: the label carries the definition NAME, which a
         # user typed too and can hold a mention just as easily as the prompt.
-        return _neutralize_mentions(f"{label}\n{quoted}")
+        return neutralize_mentions(f"{label}\n{quoted}")
 
     def _refresh_runtime_config(self) -> None:
         """Best-effort, mtime-guarded reload of ``controller.config`` from disk.
@@ -2090,6 +2279,7 @@ class ConsolidatedMessageDispatcher:
         output: MessageOutput | None = None,
         terminal_error: Optional[str] = None,
         delivery: DeliveryEvidence | None = None,
+        citations: Optional[CitationBundle] = None,
     ) -> Optional[str]:
         """Centralized dispatch for agent messages.
 
@@ -2130,6 +2320,16 @@ class ConsolidatedMessageDispatcher:
         compatibility default remains one terminal result. Explicit nonterminal
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
+
+        ``citations`` is the registered source bundle for a message whose text
+        still carries an opaque token where each cited marker was (see
+        ``core.citations``). Every copy this method produces writes those tokens
+        out for itself, because the copies are not the same text: file links are
+        stripped for IM, media links are rewritten for the workbench, footers are
+        folded, long results are truncated or split. The persisted row is the one
+        that also gets the sidecar, bound to the body it was measured in, so the
+        Web transcript can render compact badges while every other surface keeps
+        the plain Markdown links.
         """
         settings_manager = self.controller.get_settings_manager_for_context(context)
         im_client = self._get_im_client(context)
@@ -2222,6 +2422,12 @@ class ConsolidatedMessageDispatcher:
         # without guessing from transcript order or requiring a live sink.
         if mutates_turn_lifecycle:
             terminal_body = enhanced.text if enhanced and enhanced.text.strip() else text
+            # A Turn snapshot is text and nothing else - no sidecar rides with it -
+            # so the citations are written into it here. It does not reach
+            # ``persist_agent_message``, which is where every other copy is
+            # finalized, and an internal token must never be what a later steer
+            # reads back as the turn's result.
+            terminal_body = materialize_citations(terminal_body, citations)
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
@@ -2289,7 +2495,7 @@ class ConsolidatedMessageDispatcher:
                     # settle its origin Run without touching the current Turn.
                     self._record_agent_run_terminal_result(
                         context,
-                        text,
+                        materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2420,7 +2626,7 @@ class ConsolidatedMessageDispatcher:
                     )
                     duplicate_result_text = self._accepted_message_result_text(
                         accepted_message,
-                        persist_text,
+                        materialize_citations(persist_text, citations),
                         result_footer if mutates_turn_lifecycle else None,
                     )
                     self._record_agent_run_terminal_result(
@@ -2511,10 +2717,17 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             background_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in background_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(
+                                    background_enhanced.buttons, citations
+                                )
+                            ]
+                            or None,
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2524,6 +2737,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=result_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -2532,6 +2746,7 @@ class ConsolidatedMessageDispatcher:
                         recorded_text,
                         metadata=output_metadata,
                         native_message_id=native_output_id,
+                        citations=citations,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -2544,10 +2759,14 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
+                # A run record carries text alone, so its copy is written here.
+                # The persisted row above keeps its tokens: it is finalized with
+                # a sidecar bound to the body the reader is actually shown.
+                written_recorded_text = materialize_citations(recorded_text, citations)
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_agent_run_terminal_result(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2556,7 +2775,7 @@ class ConsolidatedMessageDispatcher:
                 elif canonical_type == "result" or suppressed_trigger_kind not in HARNESS_TRIGGER_KINDS:
                     self._record_suppressed_run_message(
                         context,
-                        recorded_text,
+                        written_recorded_text,
                         None,
                         terminal_status=terminal_status,
                     )
@@ -2596,8 +2815,14 @@ class ConsolidatedMessageDispatcher:
             # ``_stream_chunk`` failure did the same thing. Whoever owes a durable
             # notice for this message has to be able to tell those apart from a send
             # that genuinely failed, so each stage reports itself.
+            # The outbound copy and the live stream carry text alone; the row
+            # below keeps its tokens so ``persist_agent_message`` can bind the
+            # sidecar to the body it finalizes.
+            notify_text = materialize_citations(text, citations)
             try:
-                message_id = await im_client.send_message(target_context, text, parse_mode=parse_mode)
+                message_id = await im_client.send_message(
+                    target_context, notify_text, parse_mode=parse_mode
+                )
             except Exception as err:
                 logger.error("Failed to send notify message: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2618,6 +2843,7 @@ class ConsolidatedMessageDispatcher:
                     metadata=output_metadata,
                     native_message_id=native_output_id,
                     error_sink=persist_errors,
+                    citations=citations,
                 )
                 if delivery is not None:
                     delivery.persisted_row = persisted_notify
@@ -2628,7 +2854,9 @@ class ConsolidatedMessageDispatcher:
             # this point the message is delivered; a failure here is recorded for
             # diagnosis and must not be read as a delivery failure.
             try:
-                await _stream_chunk(self.controller, context, text=text, message_id=message_id, kind="notify")
+                await _stream_chunk(
+                    self.controller, context, text=notify_text, message_id=message_id, kind="notify"
+                )
             except Exception as err:
                 logger.error("notify stream failed after delivery: %s", err, exc_info=True)
                 if delivery is not None:
@@ -2659,6 +2887,15 @@ class ConsolidatedMessageDispatcher:
                 # ``enhanced`` (extracted file links + quick-reply buttons) was
                 # computed above for persistence; reuse it for delivery.
                 display_text = enhanced.text if enhanced.text.strip() else text
+                # Everything downstream of here is a text-only copy - the IM
+                # sends, the split parts, the summary, the .md attachment, the
+                # status footer and the live stream - so the citations are
+                # written in once, before any of them can truncate or reflow the
+                # body. ``persist_text`` below still holds its tokens.
+                display_text = materialize_citations(display_text, citations)
+                delivery_buttons = _written_buttons(
+                    enhanced.buttons if enhanced else [], citations
+                )
 
                 # The concise done-footer (``✅ done · 248k tok``) is attached to the
                 # fresh result message as platform subtext so the turn's final
@@ -2709,7 +2946,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2732,7 +2969,7 @@ class ConsolidatedMessageDispatcher:
                             im_client,
                             target_context,
                             display_text,
-                            enhanced.buttons if enhanced else [],
+                            delivery_buttons,
                             parse_mode,
                             subtext=done_footer,
                         )
@@ -2781,22 +3018,17 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("All direct result sends failed; attempting fallback delivery")
                     file_uploaded = False
 
-                    # Fallback 1: upload full content as .md file.
-                    if hasattr(im_client, "upload_markdown"):
-                        try:
-                            primary_message_id = await im_client.upload_markdown(
-                                target_context,
-                                title="result.md",
-                                content=display_text,
-                                filetype="markdown",
-                            )
-                            file_uploaded = True
-                            delivered_as_attachment = True
-                            if self._attachment_id_can_anchor_delivery(context):
-                                scheduled_anchor_message_id = primary_message_id
-                            logger.info("Result delivered as .md file attachment (fallback)")
-                        except Exception as upload_err:
-                            logger.warning("upload_markdown fallback failed: %s", upload_err)
+                    # Fallback 1: upload the full content as a .md file, by the
+                    # native markdown upload or by the plain file upload of a
+                    # platform that has only that one.
+                    attachment_id = await self._upload_result_document(im_client, target_context, display_text)
+                    if attachment_id:
+                        primary_message_id = attachment_id
+                        file_uploaded = True
+                        delivered_as_attachment = True
+                        if self._attachment_id_can_anchor_delivery(context):
+                            scheduled_anchor_message_id = primary_message_id
+                        logger.info("Result delivered as .md file attachment (fallback)")
 
                     # Fallback 2: split into multiple messages.
                     if not file_uploaded:
@@ -2805,7 +3037,7 @@ class ConsolidatedMessageDispatcher:
                                 im_client,
                                 target_context,
                                 display_text,
-                                enhanced.buttons if enhanced else [],
+                                delivery_buttons,
                                 parse_mode,
                                 subtext=done_footer,
                             )
@@ -2829,7 +3061,9 @@ class ConsolidatedMessageDispatcher:
 
                 # Upload extracted file attachments
                 if enhanced and enhanced.files:
-                    await self._upload_file_links(im_client, target_context, enhanced.files)
+                    await self._upload_file_links(
+                        im_client, target_context, _written_files(enhanced.files, citations)
+                    )
 
                 if scheduled_anchor_message_id and mutates_turn_lifecycle:
                     try:
@@ -2866,6 +3100,11 @@ class ConsolidatedMessageDispatcher:
                 # platform. The Web message row separately persists a clean body
                 # plus structured footer below.
                 persisted_result_text = self._fold_footer(persist_text, folded_footer)
+                # The agent-run records take text alone, so they take the written
+                # copy; ``persisted_result_text`` itself still carries its tokens
+                # into ``persist_agent_message``, which finalizes the row it
+                # writes and binds the sidecar to it.
+                written_result_text = materialize_citations(persisted_result_text, citations)
                 run_provenance = output_semantics.provenance(context)
                 workbench_run_waits_for_persistence = (
                     target_context.platform == "avibe"
@@ -2885,12 +3124,12 @@ class ConsolidatedMessageDispatcher:
                 durable_output_exists = False
                 activity_was_delivered = False
                 settlement_output_semantics = output_semantics
-                settlement_result_text = persisted_result_text
+                settlement_result_text = written_result_text
 
                 if not settlement_waits_for_persistence:
                     self._record_agent_run_terminal_result(
                         context,
-                        persisted_result_text,
+                        written_result_text,
                         primary_message_id,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -2926,10 +3165,15 @@ class ConsolidatedMessageDispatcher:
                             target_context,
                             communication_type,
                             avibe_enhanced.text or persist_text,
-                            quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                            quick_replies=[
+                                b.text
+                                for b in _written_buttons(avibe_enhanced.buttons, citations)
+                            ]
+                            or None,
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -2939,6 +3183,7 @@ class ConsolidatedMessageDispatcher:
                             result_footer=folded_footer,
                             metadata=output_metadata,
                             native_message_id=native_output_id,
+                            citations=citations,
                         )
 
                 if settlement_waits_for_persistence:
@@ -2957,7 +3202,7 @@ class ConsolidatedMessageDispatcher:
                         )
                         settlement_result_text = self._accepted_message_result_text(
                             accepted_message,
-                            persisted_result_text,
+                            written_result_text,
                             None,
                         )
                     activity_was_delivered = bool(
@@ -3071,7 +3316,13 @@ class ConsolidatedMessageDispatcher:
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
-        persist_agent_message(target_context, canonical_type, persist_text)
+        persist_agent_message(target_context, canonical_type, persist_text, citations=citations)
+
+        # The row above is the only copy of an intermediate message that carries a
+        # sidecar. Everything left below is what the channel is shown - the concise
+        # status line, the consolidated log, the hidden-type log preview - so write
+        # the citations into ``text`` once here rather than at each of them.
+        text = materialize_citations(text, citations)
 
         # Target platform toolcall-delivery gate stays in FRONT of the concise
         # shortcut: when a turn is routed via ``delivery_override`` to a target
@@ -3324,7 +3575,17 @@ class ConsolidatedMessageDispatcher:
         chunk (a mid-stream footer would read wrong); every chunk is a new send so
         the result notifies. Returns the first chunk's id (the delivery anchor).
         """
-        chunks = self._split_result_text_for_context(context, text)
+        plan = self._plan_result_split_for_context(context, text)
+        if not plan.links_whole:
+            # Checked BEFORE the first send: a link that no boundary keeps whole
+            # would go out as two halves that both send successfully, so nothing
+            # downstream would ever fall back, and the reader would be left with
+            # a broken address. Hand the whole result to the caller's fallback
+            # instead of reporting a delivery that lost the source.
+            logger.warning("Split would break a link unit; abandoning the split before sending")
+            return None
+
+        chunks = plan.chunks
         first_message_id: Optional[str] = None
 
         for index, chunk in enumerate(chunks):
@@ -3364,6 +3625,70 @@ class ConsolidatedMessageDispatcher:
                 first_message_id = message_id
 
         return first_message_id
+
+    async def _upload_result_document(
+        self,
+        im_client,
+        context: MessageContext,
+        text: str,
+    ) -> Optional[str]:
+        """Deliver the whole result as a file, by whichever route the client has.
+
+        ``upload_markdown`` is the native route. A platform can inherit it from
+        ``BaseIMClient`` without implementing it and still have an ordinary file
+        upload - WeChat is exactly that shape - so the same content is written
+        to a temporary ``result.md`` and handed to ``upload_file_from_path``,
+        the path its own file links already take.
+
+        Returns the delivered id, or ``None`` when nothing was delivered: an
+        adapter that reports failure by returning an empty id has uploaded
+        nothing, and treating that as an attachment would end the turn claiming
+        a result the user never received.
+        """
+        upload_markdown = getattr(im_client, "upload_markdown", None)
+        if callable(upload_markdown):
+            try:
+                message_id = await upload_markdown(
+                    context,
+                    title=_RESULT_DOCUMENT_NAME,
+                    content=text,
+                    filetype="markdown",
+                )
+                if message_id:
+                    return message_id
+                logger.warning("upload_markdown returned no id; nothing was attached")
+                return None
+            except NotImplementedError:
+                logger.debug("IM client inherits upload_markdown unimplemented; trying its file upload")
+            except Exception as err:
+                logger.warning("upload_markdown fallback failed: %s", err)
+                return None
+
+        upload_file_from_path = getattr(im_client, "upload_file_from_path", None)
+        if not callable(upload_file_from_path):
+            logger.debug("IM client supports no file upload; cannot attach the full result")
+            return None
+
+        with tempfile.TemporaryDirectory(prefix="avibe-result-") as staging_dir:
+            document = Path(staging_dir) / _RESULT_DOCUMENT_NAME
+            try:
+                document.write_text(text, encoding="utf-8")
+                file_id = await upload_file_from_path(
+                    context,
+                    file_path=str(document),
+                    title=_RESULT_DOCUMENT_NAME,
+                )
+            except NotImplementedError:
+                logger.debug("IM client does not implement file uploads; cannot attach the full result")
+                return None
+            except Exception as err:
+                logger.warning("Result file upload fallback failed: %s", err)
+                return None
+
+        if not file_id:
+            logger.warning("Result file upload returned no id; nothing was attached")
+            return None
+        return file_id
 
     async def _upload_file_links(
         self,

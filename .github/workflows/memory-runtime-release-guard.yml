@@ -81,10 +81,47 @@ jobs:
             # Memory wheel exists, it is authoritative and must not fall back.
             if [ "$manifest_status" -eq 4 ]; then
               if [ "$manifest_owner" = "avibe-os" ]; then
+                jq -nc --arg release_tag "$candidate_tag" \
+                  --arg reason "$manifest_owner wheel has no self-pinned historical Runtime manifest" \
+                  '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
+                continue
+              fi
+              # New releases carry an inert three-file compatibility wheel so
+              # old updaters can cross the removal boundary. Verify that exact
+              # shape before excluding it; a malformed companion remains a
+              # visible policy exclusion and can never mask a broken legacy
+              # Runtime manifest.
+              if ! CANDIDATE_DIR="$candidate_dir" CANDIDATE_TAG="$candidate_tag" \
+                WHEEL_PATTERN="$wheel_pattern" python3 - <<'PY'
+          import email
+          import os
+          import zipfile
+          from pathlib import Path
+
+          wheels = sorted(Path(os.environ["CANDIDATE_DIR"]).glob(os.environ["WHEEL_PATTERN"]))
+          if len(wheels) != 1:
+              raise SystemExit(1)
+          expected_version = os.environ["CANDIDATE_TAG"].removeprefix("gh-").removeprefix("v")
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = {entry.filename for entry in wheel.infolist() if not entry.is_dir()}
+              directory = f"avibe_memory-{expected_version}.dist-info"
+              expected = {f"{directory}/METADATA", f"{directory}/WHEEL", f"{directory}/RECORD"}
+              if names != expected:
+                  raise SystemExit(1)
+              metadata = email.message_from_bytes(wheel.read(f"{directory}/METADATA"))
+              if metadata.get("Name") != "avibe-memory" or metadata.get("Version") != expected_version:
+                  raise SystemExit(1)
+              if metadata.get_all("Requires-Dist") or metadata.get_all("Provides-Extra"):
+                  raise SystemExit(1)
+          PY
+              then
+                jq -nc --arg release_tag "$candidate_tag" \
+                  --arg reason "$manifest_owner wheel has no manifest and is not a verified inert bridge" \
+                  '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
                 continue
               fi
               jq -nc --arg release_tag "$candidate_tag" \
-                --arg reason "$manifest_owner wheel does not contain a self-pinned published manifest" \
+                --arg reason "$manifest_owner wheel is a verified inert compatibility bridge; no historical Runtime assets" \
                 '{release_tag: $release_tag, reason: $reason}' >> "$excluded_file"
               continue
             elif [ "$manifest_status" -ne 0 ]; then

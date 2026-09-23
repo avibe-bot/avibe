@@ -26,6 +26,12 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import (
+    CitationSource,
+    body_digest,
+    finalize_citations,
+    register_citations,
+)
 from core.message_mirror import (
     agent_message_exists,
     mirror_harness_inbound,
@@ -174,6 +180,123 @@ def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state)
     content = json.loads(row["content_json"])
     assert content["kind"] == "result"
     assert content["result_footer"] == "✅ ⏱️ 5s · 🪙 1.2k tok"
+
+
+# The wire shape the backend produces, and the source it resolves against —
+# a registered answer rather than a hand-written sidecar, because the rows this
+# test reads back are only ever written from one.
+CITED_MARKER = "\ue200cite\ue202turn0view0\ue201"
+CITED_LINK = "[developers.openai.com](https://developers.openai.com/x)"
+
+
+def _registered(text: str, title: str = "Web search — OpenAI API"):
+    source = CitationSource(
+        ref_id="turn0view0", title=title, url="https://developers.openai.com/x"
+    )
+    return register_citations(
+        text, {source.ref_id: source}, unresolved_label="(source unavailable)"
+    )
+
+
+def test_persist_agent_keeps_citations_as_structured_content(isolated_state):
+    """The sidecar rides the row, so it is not lost when the delivery is."""
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    registered, bundle = _registered(
+        f"Native search exists.{CITED_MARKER}", title="Web search — OpenAI API 中文"
+    )
+    persist_agent_message(ctx, "result", registered, citations=bundle)
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().one()
+
+    content = json.loads(row["content_json"])
+    # The row is written from the finalized body: the text keeps the plain
+    # Markdown links every surface already renders, and the sidecar describes
+    # THAT text - never a version of it the reader cannot see.
+    body = row["content_text"]
+    assert body == f"Native search exists. {CITED_LINK}"
+    assert content["citations"] == [
+        {
+            "index": 1,
+            "ref_id": "turn0view0",
+            "title": "Web search — OpenAI API 中文",
+            "url": "https://developers.openai.com/x",
+            "label": "developers.openai.com",
+            "spans": [[body.index(CITED_LINK), len(body)]],
+            "body_sha256": body_digest(body),
+        }
+    ]
+
+
+def test_persist_agent_without_citations_writes_no_sidecar_key(isolated_state):
+    ctx = _slack_ctx()
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(ctx, "result", "pong", citations=None)
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().one()
+
+    assert "citations" not in json.loads(row["content_json"])
+
+
+def test_citations_survive_reload_on_the_answer_they_belong_to(isolated_state):
+    """Streamed live and re-read after a restart must agree, per message."""
+    from core import inbox_events
+    from storage import messages_service
+
+    registered, bundle = _registered(f"Cited answer.{CITED_MARKER}")
+    cited_body, citations = finalize_citations(registered, bundle)
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id="proj_cite", now=now
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_cite", scope_id=scope_id, agent_backend="codex", agent_variant="default",
+                session_anchor="anchor_ses_cite", native_session_id="", status="active",
+                metadata_json="{}", created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+
+    ctx = MessageContext(
+        user_id="workbench", channel_id="ses_cite", platform="avibe",
+        platform_specific={"agent_session_id": "ses_cite"},
+    )
+
+    async def scenario():
+        sub_id, queue = inbox_events.bus.subscribe()
+        try:
+            persist_agent_message(ctx, "output", "Uncited answer.")
+            first = await _drain_published(queue)
+            persist_agent_message(ctx, "result", registered, citations=bundle)
+            return first, await _drain_published(queue)
+        finally:
+            inbox_events.bus.unsubscribe(sub_id)
+
+    uncited_events, cited_events = asyncio.run(scenario())
+
+    # Live: the open browser gets the sidecar on the event, on that message only.
+    assert cited_events["message.new"]["content"]["citations"] == citations
+    assert "citations" not in (uncited_events["message.new"]["content"] or {})
+
+    # Reload: the same association comes back off disk, unattached to its sibling.
+    with engine.connect() as conn:
+        transcript = messages_service.list_session_messages(conn, session_id="ses_cite")
+    assert [
+        (row["text"], (row["content"] or {}).get("citations")) for row in transcript["messages"]
+    ] == [
+        ("Uncited answer.", None),
+        (cited_body, citations),
+    ]
 
 
 def test_agent_message_receipt_lookup_returns_text_footer_and_batch(isolated_state):

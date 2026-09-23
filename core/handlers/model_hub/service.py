@@ -243,6 +243,10 @@ def project_opencode_public_model(
         if model.supports_reasoning is not False
         else {}
     )
+    # Translate an explicitly declared Off variant, without inventing one or
+    # changing the existing payloads of ordinary/custom effort values.
+    if model.native_protocol == "anthropic" and "none" in variants:
+        variants["none"] = {"thinking": {"type": "disabled"}}
     if variants:
         projected["variants"] = variants
     return projected
@@ -1336,7 +1340,7 @@ class ModelHubService:
         updated_bindings = self._bindings(updated)
         # SourceBinding order is the engine-config serialization order. Agent
         # Route target order is not part of this projection, so a pure chain reorder
-        # compares equal and does not restart a healthy engine.
+        # compares equal and does not touch the engine.
         if previous_bindings == updated_bindings:
             self._save_config(updated)
             return
@@ -4153,12 +4157,52 @@ class ModelHubService:
             "routeable": True,
         }
 
-    @classmethod
     def _catalog_models_payload(
-        cls,
+        self,
         agent: ModelHubAgentSupplyConfig,
     ) -> list[dict]:
-        return [cls._catalog_model_payload(model) for model in agent.models]
+        hidden = self._hidden_retired_model_ids(agent)
+        return [self._catalog_model_payload(model) for model in agent.models if model.id not in hidden]
+
+    def _withdrawn_builtin_model_ids(self, backend: BackendName) -> set[str]:
+        # Either catalog may withdraw a model; the remote one does so without a
+        # release. A stale remote cache schedules the controller-owned refresh,
+        # whose completion reconciles the snapshot, so a new tombstone reaches
+        # the picker without waiting for a restart. A retired id the current
+        # snapshot revives is not withdrawn.
+        from vibe.backend_model_catalog import (
+            load_bundled_catalog,
+            load_cached_remote_catalog,
+            retired_backend_model_ids,
+            unlisted_retired_backend_model_ids,
+        )
+
+        retired = (
+            retired_backend_model_ids(backend, load_bundled_catalog())
+            | retired_backend_model_ids(backend, load_cached_remote_catalog())
+            | unlisted_retired_backend_model_ids(backend)
+        )
+        if not retired:
+            return set()
+        return retired - {item["id"] for item in self._current_builtin_models(backend)}
+
+    def _hidden_retired_model_ids(self, agent: ModelHubAgentSupplyConfig) -> set[str]:
+        # A retired built-in stays persisted and routeable, so any session,
+        # channel, or Agent pin keeps working; it only leaves picker
+        # projections. A row a manual route pins or the backend currently
+        # requests stays visible.
+        withdrawn = self._withdrawn_builtin_model_ids(cast(BackendName, agent.backend))
+        if not withdrawn:
+            return set()
+        requested = self._requested_model(agent)
+        return {
+            model.id
+            for model in agent.models
+            if model.origin == "builtin"
+            and model.id in withdrawn
+            and model.id != requested
+            and normalized_model_hub_override(agent.routes.get(model.id)) is None
+        }
 
     def backend_catalog_models(self, backend: str) -> list[dict]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -4171,8 +4215,9 @@ class ModelHubService:
         *, live_recovery: Mapping[str, SourceRecoveryAnnotation] | None = None,
     ) -> dict:
         backend = cast(BackendName, agent.backend)
+        hidden = self._hidden_retired_model_ids(agent)
         builtin_models = (
-            [model.id for model in agent.models]
+            [model.id for model in agent.models if model.id not in hidden]
             if agent.menu_kind == "fixed"
             else None
         )
@@ -4189,7 +4234,7 @@ class ModelHubService:
             unavailable_source_ids=unavailable_source_ids,
             live_recovery=live_recovery,
         )
-        menu_model_ids = [model.id for model in agent.models]
+        menu_model_ids = [model.id for model in agent.models if model.id not in hidden]
         model_supply = [
             {
                 "model_id": model_id,
@@ -4391,6 +4436,10 @@ class ModelHubService:
             )
 
         provider_ids: list[str] = []
+        # A source inventory (a native subscription lists the full fixed menu)
+        # never re-offers a withdrawn built-in, whether or not a row persists;
+        # a still-visible pinned row is already in the menu.
+        withdrawn = self._withdrawn_builtin_model_ids(agent_backend)
         source_by_id = {source.id: source for source in config.sources}
         for source_id in agent.sources.order:
             source = source_by_id.get(source_id)
@@ -4401,7 +4450,8 @@ class ModelHubService:
                     continue
                 candidate_id = model.id
                 if (
-                    candidate_id in menu_ids
+                    candidate_id in withdrawn
+                    or candidate_id in menu_ids
                     or candidate_id in builtin_ids
                     or candidate_id in provider_ids
                 ):
@@ -5458,6 +5508,7 @@ class ModelHubService:
             cast(BackendName, backend),
         )
         live_recovery = self.recovery.annotations(config)
+        hidden = self._hidden_retired_model_ids(agent) - {requested_model}
         return [
             self._agent_chain(
                 config,
@@ -5467,7 +5518,9 @@ class ModelHubService:
                 unavailable_source_ids=unavailable_source_ids,
                 live_recovery=live_recovery,
             )
+            # The overview is a picker surface; routing keeps every persisted row.
             for model_id in self._agent_model_ids(agent, requested_model)
+            if model_id not in hidden
         ]
 
     def opencode_public_models(self) -> dict[str, dict[str, Any]]:
@@ -6823,7 +6876,10 @@ class ModelHubService:
         if category == "served":
             return produce_turn_outcome("turn.served")
         if category == "request_nonfallback":
-            return produce_turn_outcome("turn.request_nonfallback")
+            return produce_turn_outcome(
+                "turn.request_nonfallback",
+                upstream_detail=outcome.upstream_detail,
+            )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
             # a request-incompatible projection would misclassify the failure.

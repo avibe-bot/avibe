@@ -1259,7 +1259,7 @@ switch, remedy, or message branch absent from it.
 | --- | --- | --- | --- | --- |
 | `turn.served` | `served` | any, including a transparent fallback | the turn completed; any switch is only a pull-surface record | silent: no Error, warning, info notice, or appended action tail |
 | `turn.exhausted` | `exhausted` | final model `supply_state` from the §4.5 taxonomy | fallback walked to the end; no attempt completed | `waiting` renders `models.launch.waiting`; `interrupted` renders `models.launch.interrupted` with the classified blockers |
-| `turn.request_nonfallback` | `failed_terminal` | any non-fallback request-level failure | the attempted Source remains runnable and no switch occurred | `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help |
+| `turn.request_nonfallback` | `failed_terminal` | any non-fallback request-level failure, plus optional `upstream_detail`: the upstream error envelope's `message`, credential-redacted, whitespace-collapsed, and bounded to 400 characters by L1 | the attempted Source remains runnable and no switch occurred | without `upstream_detail`: `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help. With it: `models.launch.request_incompatible_detail`, the same claim followed by the upstream text verbatim so the user can act on the real cause (for example a client-version floor) |
 | `turn.engine_down` | `failed_terminal` | local `engine_down` at any request phase, including after an upstream attempt or streamed output | no Source is blamed or mutated; no replay or next-hop walk occurs | `models.errors.engine_down`; after output began it also states that this turn's output may be incomplete |
 | `turn.streamed_fallback` | `failed_terminal` | streamed fallback-class Source failure, plus `source_transition_persisted: boolean` recording whether its cooldown or `needs_action` transition was committed | replay is forbidden. When `source_transition_persisted=true`, render `models.launch.retry` only when live inspection of the same effective chain makes a different hop current for the next turn; otherwise no switch exists. When `false`, attempt history remains committed, no switch/current change is claimed, and the existing config-recovery warning owns remediation | persisted with a different current hop: “The next turn has switched Sources; retry.” Persisted with no runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted`. Not persisted: `modelHub.errors.stream_interrupted`, with no route-change or new-remedy claim |
 | `turn.no_candidate.unconfigured` | `no_candidate` | configured chain is empty | no Source was attempted because no hop is configured | `models.launch.route_unconfigured`, naming the requested model and pointing to Models |
@@ -1271,6 +1271,10 @@ outcome/discriminator → copy-key relation is closed in the final mirror regist
 checked mechanically against both `vibe/i18n` locale files. A new outcome, discriminator,
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
+
+`upstream_detail` is display-only reply text. It is never read by classification,
+never written to resolution events, probes, or persisted provenance, and lives only on
+the in-memory turn projection that renders this turn's reply.
 
 `source_transition_persisted` is an optional backend projection fact whose presence is
 required only for `turn.streamed_fallback`. UI consumers deliberately do not consume it:

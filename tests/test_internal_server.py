@@ -40,11 +40,6 @@ from core import internal_server, session_turns
 from core.controller import Controller
 from core.message_context import build_context_turn_sink_key, resolve_turn_sink_key
 from core.vibe_agents import VibeAgentStore
-from vibe.memory_contract import (
-    MemoryImplementationIncompatibleError,
-    MemoryImplementationUnavailableError,
-    MemoryStoreUnavailableError,
-)
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -56,12 +51,104 @@ from core.services.dispatch import (
 from modules.im import MessageContext
 from storage import message_deliveries, resource_access_service
 from vibe.authorization import AuthorizationContext
-from config.v2_config import MemoryConfig
 
 
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+
+def _build_controller_double(handler=None):
+    """A MagicMock controller whose ``message_handler.handle_user_message``
+    can be patched to emit chunks via the real ``_stream_chunk`` hook.
+
+    It carries a *real* turn-sink registry (not MagicMock auto-attrs) so
+    ``dispatch_turn`` and ``_stream_chunk`` interoperate exactly as in
+    production: dispatch_turn registers the sink, the handler's emits
+    resolve it by session key, and a result emit releases the dispatch.
+    """
+
+    controller = MagicMock()
+    controller.memory_read_scope_for_cli_session = lambda session_id: controller.memory_scope_for_cli_session(session_id)
+    controller.message_handler = MagicMock()
+
+    async def _handle_user_message(
+        context,
+        text,
+        *,
+        lifecycle_snapshot=None,
+    ):
+        payload = context.platform_specific or {}
+        assert "_turn_lifecycle_admission" not in payload
+        assert "_turn_lifecycle_snapshot" not in payload
+        del lifecycle_snapshot
+        if handler is not None:
+            return await handler(context, text)
+        return None
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
+
+    sinks: dict = {}
+    controller.active_turn_sinks = sinks
+    controller._get_session_key = lambda ctx: f"{getattr(ctx, 'platform', None)}::{getattr(ctx, 'channel_id', None)}"
+    # MUST be set explicitly: a MagicMock would auto-generate this attribute and hand
+    # dispatch_turn a bogus key, so every sink lookup would miss and a refused-turn
+    # test would hang in ``done.wait()`` instead of failing.
+    controller._get_turn_sink_key = lambda ctx: build_context_turn_sink_key(
+        ctx, session_key=controller._get_session_key(ctx)
+    )
+
+    def _register(session_key, *, on_chunk, done_event, turn_token=None, context=None):
+        sinks[session_key] = {"on_chunk": on_chunk, "done_event": done_event, "turn_token": turn_token}
+
+    controller.register_turn_sink = _register
+
+    def _pop(session_key, done_event=None):
+        s = sinks.get(session_key)
+        if s is None:
+            return
+        if done_event is not None and s.get("done_event") is not done_event:
+            return
+        sinks.pop(session_key, None)
+
+    controller.pop_turn_sink = _pop
+    controller.get_turn_sink = lambda session_key: sinks.get(session_key)
+    controller._session_id_from_context = lambda ctx: str(
+        (getattr(ctx, "platform_specific", None) or {}).get("workbench_session_id")
+        or (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id")
+        or ""
+    ) or None
+
+    def _mark_turn_complete(ctx):
+        manager = getattr(controller, "session_turns", None)
+        if manager is not None:
+            spec = getattr(ctx, "platform_specific", None) or {}
+            logical_turn_id = str(spec.get("turn_token") or "")
+            target = spec.get("agent_session_target") or {}
+            backend = str(target.get("agent_backend") or "claude")
+            if logical_turn_id:
+                manager.on_native_start(
+                    ctx,
+                    backend=backend,
+                    runtime_key=f"runtime:{logical_turn_id}",
+                    runtime_turn_id=f"runtime-turn:{logical_turn_id}",
+                )
+        sink = sinks.get(resolve_turn_sink_key(controller, ctx))
+        if sink and sink.get("done_event") is not None:
+            sink["done_event"].set()
+
+    controller.mark_turn_complete = _mark_turn_complete
+
+    # Cancel reuses the IM /stop path to interrupt the backend turn.
+    controller.command_handler = MagicMock()
+    controller.command_handler.handle_stop = AsyncMock(return_value=True)
+
+    # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
+    # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
+    controller._t = lambda key, **kwargs: key
+    controller.config = SimpleNamespace()
+    return controller
 
 
 def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "2026-05-31T00:00:00Z") -> None:
@@ -275,439 +362,6 @@ def _bind_test_native_start(engine, context: MessageContext) -> str:
     return turn_id
 
 
-def _build_controller_double(handler=None):
-    """A MagicMock controller whose ``message_handler.handle_user_message``
-    can be patched to emit chunks via the real ``_stream_chunk`` hook.
-
-    It carries a *real* turn-sink registry (not MagicMock auto-attrs) so
-    ``dispatch_turn`` and ``_stream_chunk`` interoperate exactly as in
-    production: dispatch_turn registers the sink, the handler's emits
-    resolve it by session key, and a result emit releases the dispatch.
-    """
-
-    controller = MagicMock()
-    controller.memory_read_scope_for_cli_session = lambda session_id: controller.memory_scope_for_cli_session(session_id)
-    controller.message_handler = MagicMock()
-
-    async def _handle_user_message(
-        context,
-        text,
-        *,
-        lifecycle_snapshot=None,
-    ):
-        payload = context.platform_specific or {}
-        assert "_turn_lifecycle_admission" not in payload
-        assert "_turn_lifecycle_snapshot" not in payload
-        del lifecycle_snapshot
-        if handler is not None:
-            return await handler(context, text)
-        return None
-
-    controller.message_handler.handle_user_message = AsyncMock(
-        side_effect=_handle_user_message,
-    )
-
-    sinks: dict = {}
-    controller.active_turn_sinks = sinks
-    controller._get_session_key = lambda ctx: f"{getattr(ctx, 'platform', None)}::{getattr(ctx, 'channel_id', None)}"
-    # MUST be set explicitly: a MagicMock would auto-generate this attribute and hand
-    # dispatch_turn a bogus key, so every sink lookup would miss and a refused-turn
-    # test would hang in ``done.wait()`` instead of failing.
-    controller._get_turn_sink_key = lambda ctx: build_context_turn_sink_key(
-        ctx, session_key=controller._get_session_key(ctx)
-    )
-
-    def _register(session_key, *, on_chunk, done_event, turn_token=None, context=None):
-        sinks[session_key] = {"on_chunk": on_chunk, "done_event": done_event, "turn_token": turn_token}
-
-    controller.register_turn_sink = _register
-
-    def _pop(session_key, done_event=None):
-        s = sinks.get(session_key)
-        if s is None:
-            return
-        if done_event is not None and s.get("done_event") is not done_event:
-            return
-        sinks.pop(session_key, None)
-
-    controller.pop_turn_sink = _pop
-    controller.get_turn_sink = lambda session_key: sinks.get(session_key)
-    controller._session_id_from_context = lambda ctx: str(
-        (getattr(ctx, "platform_specific", None) or {}).get("workbench_session_id")
-        or (getattr(ctx, "platform_specific", None) or {}).get("agent_session_id")
-        or ""
-    ) or None
-
-    def _mark_turn_complete(ctx):
-        manager = getattr(controller, "session_turns", None)
-        if manager is not None:
-            spec = getattr(ctx, "platform_specific", None) or {}
-            logical_turn_id = str(spec.get("turn_token") or "")
-            target = spec.get("agent_session_target") or {}
-            backend = str(target.get("agent_backend") or "claude")
-            if logical_turn_id:
-                manager.on_native_start(
-                    ctx,
-                    backend=backend,
-                    runtime_key=f"runtime:{logical_turn_id}",
-                    runtime_turn_id=f"runtime-turn:{logical_turn_id}",
-                )
-        sink = sinks.get(resolve_turn_sink_key(controller, ctx))
-        if sink and sink.get("done_event") is not None:
-            sink["done_event"].set()
-
-    controller.mark_turn_complete = _mark_turn_complete
-
-    # Cancel reuses the IM /stop path to interrupt the backend turn.
-    controller.command_handler = MagicMock()
-    controller.command_handler.handle_stop = AsyncMock(return_value=True)
-
-    # ``_t`` returns the key verbatim so refusal chunks stay JSON-serializable
-    # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
-    controller._t = lambda key, **kwargs: key
-    controller.config = SimpleNamespace(memory=MemoryConfig(enabled=True))
-    controller.memory_adapter = None
-    controller.memory_runtime = None
-    controller.memory_module = None
-    controller._memory_reconcile_task = None
-    controller._memory_disabled_cleanup_task = None
-    controller._memory_disabled_cleanup_unproved = False
-    controller._memory_replacement_gate = None
-    controller.default_memory_project_id.return_value = "default"
-    for method_name in (
-        "_memory_replacement_lock",
-        "_await_disabled_memory_cleanup",
-        "_attach_memory_runtime",
-        "_detach_memory_runtime",
-        "_memory_runtime_for_operation",
-        "_disabled_memory_source_payload",
-        "_disabled_memory_status_payload",
-        "_disabled_memory_status_payload_locked",
-        "_disabled_memory_processing_record_payload",
-        "_disabled_memory_maintenance_payload",
-        "_memory_scope_for_runtime",
-        "_memory_scope_for_project",
-        "wake_memory",
-        "install_memory_runtime",
-        "memory_status_payload",
-        "memory_processing_record_payload",
-        "memory_failure_log_payload",
-        "memory_maintenance_payload",
-        "memory_profile_payload",
-        "memory_processing_record_entries_payload",
-        "memory_processing_record_entry_payload",
-        "memory_projects_payload",
-        "memory_search_payload",
-        "memory_list_payload",
-    ):
-        method = getattr(Controller, method_name)
-        setattr(controller, method_name, method.__get__(controller, Controller))
-    return controller
-
-
-def test_memory_internal_routes_cannot_bypass_controller_lifecycle() -> None:
-    """Wave 0: internal Memory routes must not inspect runtime ownership."""
-
-    tree = ast.parse(inspect.getsource(internal_server.create_app))
-    bypasses = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and node.attr == "memory_runtime"
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "controller"
-    ]
-    private_runtime_helpers = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "_memory_runtime"
-    ]
-    reflective_bypasses = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "getattr"
-        and len(node.args) >= 2
-        and isinstance(node.args[0], ast.Name)
-        and node.args[0].id == "controller"
-        and isinstance(node.args[1], ast.Constant)
-        and node.args[1].value == "memory_runtime"
-    ]
-
-    assert bypasses == []
-    assert private_runtime_helpers == []
-    assert reflective_bypasses == []
-
-
-def test_memory_internal_server_keeps_implementation_imports_out_of_host_boundary() -> None:
-    tree = ast.parse(Path(internal_server.__file__).read_text(encoding="utf-8"))
-    implementation_imports: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module == "avibe_memory" and [alias.name for alias in node.names] != [
-                "CaptureRequest"
-            ]:
-                implementation_imports.append(node.module)
-            elif node.module.startswith("avibe_memory.") and node.module != "core.memory_loader":
-                implementation_imports.append(node.module)
-        elif isinstance(node, ast.Import):
-            implementation_imports.extend(
-                alias.name
-                for alias in node.names
-                if alias.name == "avibe_memory" or alias.name.startswith("avibe_memory.")
-            )
-
-    assert implementation_imports == []
-
-
-def test_disabled_memory_status_route_uses_host_projection_without_runtime() -> None:
-    from core.memory_adapter import DisabledMemoryAdapter
-
-    controller = _build_controller_double()
-    controller.config.memory = MemoryConfig(enabled=False)
-    controller.memory_adapter = DisabledMemoryAdapter()
-    controller._create_memory_runtime = Mock(
-        side_effect=AssertionError("status must not construct Memory")
-    )
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get("/internal/memory/status")
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json()["state"] == "disabled"
-    assert response.json()["source"]["reason"] == "memory_disabled"
-    controller._create_memory_runtime.assert_not_called()
-
-
-def test_memory_status_unknown_failure_uses_stable_envelope() -> None:
-    controller = _build_controller_double()
-    controller.memory_status_payload = AsyncMock(
-        side_effect=RuntimeError("injected lifecycle failure")
-    )
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get("/internal/memory/status")
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {"error": "memory_store_unavailable"}
-
-
-def test_memory_projects_unknown_lifecycle_failure_uses_stable_envelope() -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_projects_payload = AsyncMock(
-        side_effect=RuntimeError("injected lifecycle failure")
-    )
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get(
-                "/internal/memory/projects",
-                headers={CALLER_SESSION_HEADER: "session-1"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_store_unavailable",
-    }
-
-
-@pytest.mark.parametrize(
-    ("error_type", "expected_code"),
-    [
-        ("MemoryImplementationUnavailableError", "memory_implementation_unavailable"),
-        ("MemoryImplementationIncompatibleError", "memory_implementation_incompatible"),
-    ],
-)
-def test_memory_projects_implementation_failure_uses_stable_error_envelope(
-    error_type: str,
-    expected_code: str,
-) -> None:
-    from core import internal_server as server
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-    from vibe.memory_contract import (
-        MemoryImplementationIncompatibleError,
-        MemoryImplementationUnavailableError,
-    )
-
-    error_class = {
-        "MemoryImplementationUnavailableError": MemoryImplementationUnavailableError,
-        "MemoryImplementationIncompatibleError": MemoryImplementationIncompatibleError,
-    }[error_type]
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_projects_payload = AsyncMock(side_effect=error_class("injected"))
-    app = server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.get(
-                "/internal/memory/projects",
-                headers={CALLER_SESSION_HEADER: "session-1"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {"status": "failed", "error": expected_code}
-
-
-def test_memory_projects_implementation_failure_preserves_admitted_cli_session_boundary() -> None:
-    from core import internal_server as server
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-    from vibe.memory_contract import MemoryImplementationUnavailableError
-
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
-    controller._memory_implementation_error = MemoryImplementationUnavailableError("injected")
-    controller._memory_scopes_by_session = {}
-    controller._memory_cli_facts_by_session = {}
-    controller._memory_implementation_cli_sessions = set()
-    controller._memory_admission = lambda: pytest.fail(
-        "implementation failure must be projected before admission imports"
-    )
-    controller._memory_turn_facts = lambda _context: pytest.fail(
-        "implementation failure must be projected before facts imports"
-    )
-    controller.memory_projects_payload = AsyncMock(
-        side_effect=MemoryImplementationUnavailableError("injected")
-    )
-
-    context = SimpleNamespace(
-        platform_specific={
-            "agent_session_target": {"id": "session-1"},
-        },
-        platform="avibe",
-    )
-    assert Controller.configure_memory_cli_session(
-        controller,
-        context,
-        admitted=True,
-    )
-    assert controller._memory_implementation_cli_sessions == {"session-1"}
-    app = server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.get(
-                "/internal/memory/projects",
-                headers={CALLER_SESSION_HEADER: "session-1"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {"status": "failed", "error": "memory_implementation_unavailable"}
-
-
-@pytest.mark.parametrize(
-    ("implementation_error", "expected_error"),
-    [
-        (MemoryImplementationUnavailableError("injected"), "memory_implementation_unavailable"),
-        (MemoryImplementationIncompatibleError("injected"), "memory_implementation_incompatible"),
-    ],
-)
-def test_memory_remember_implementation_failure_uses_stable_error_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-    implementation_error: BaseException,
-    expected_error: str,
-) -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(memory=SimpleNamespace(enabled=True))
-    controller._memory_implementation_error = implementation_error
-    controller.memory_scope_for_cli_session = lambda _session_id: (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.capture_memory = Mock(
-        side_effect=AssertionError(
-            "implementation failure must short-circuit before capture"
-        )
-    )
-    real_import = builtins.__import__
-
-    def fail_memory_type_import(name, *args, **kwargs):
-        if name == "avibe_memory" or name.startswith("avibe_memory."):
-            raise RuntimeError("optional implementation import failed")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fail_memory_type_import)
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/remember",
-                headers={CALLER_SESSION_HEADER: "session-1"},
-                json={"text": "remember this"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {"status": "failed", "error": expected_error}
-
-
-def test_memory_install_route_delegates_to_controller_lifecycle() -> None:
-    controller = _build_controller_double()
-    controller.memory_runtime = None
-    controller.install_memory_runtime = AsyncMock(return_value={"ok": True})
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post("/internal/memory/install-runtime")
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    controller.install_memory_runtime.assert_awaited_once_with()
-
-
 def test_controller_double_omits_retired_turn_lifecycle_admission() -> None:
     async def _exercise() -> None:
         context = MessageContext(
@@ -758,1367 +412,6 @@ def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> Non
     assert oversized.status_code == 400
     assert oversized.json()["error"] == "invalid_run_candidates"
     assert captured == [["run-a", "run-b"]]
-
-
-def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session = Mock(
-        side_effect=AssertionError("the endpoint must not resolve identity")
-    )
-    controller.archive_session = AsyncMock(
-        return_value={"id": "ses-memory", "status": "archived"}
-    )
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post(
-                "/internal/memory/archive-session",
-                json={"session_id": "ses-memory"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "session": {"id": "ses-memory", "status": "archived"},
-    }
-    # The UI transport waits without a reporting deadline so the controller can
-    # finish the terminal archive write. Memory flush is scheduled afterwards.
-    controller.archive_session.assert_awaited_once_with(
-        "ses-memory",
-        deadline_seconds=5.0,
-    )
-    controller.memory_scope_for_cli_session.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {},
-        {"session_id": "   "},
-        {"session_id": " ses-memory"},
-        {"session_id": 123},
-        {"session_id": "ses-memory", "principal_id": "u-untrusted"},
-    ],
-)
-def test_memory_archive_session_rejects_widened_or_invalid_payloads(
-    payload: dict[str, object],
-) -> None:
-    controller = _build_controller_double()
-    controller.archive_session = AsyncMock(return_value={})
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post(
-                "/internal/memory/archive-session",
-                json=payload,
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 400
-    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
-    controller.archive_session.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "error,status_code,error_code",
-    [
-        (LookupError("missing"), 404, "session_not_found"),
-        (RuntimeError("failed"), 503, "session_archive_unavailable"),
-    ],
-)
-def test_memory_archive_session_returns_closed_failure_codes(
-    error: Exception,
-    status_code: int,
-    error_code: str,
-) -> None:
-    controller = _build_controller_double()
-    controller.archive_session = AsyncMock(side_effect=error)
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post(
-                "/internal/memory/archive-session",
-                json={"session_id": "ses-memory"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == status_code
-    assert response.json() == {"ok": False, "error": error_code}
-
-
-def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    calls: list[tuple[str, str | None]] = []
-
-    class Runtime:
-        def principal_for_user_key(self, user_key: str) -> str:
-            return {
-                "avibe:local": "u-local-principal",
-                "avibe:remote:subject-2": "u-remote-principal",
-            }[user_key]
-
-        async def processing_record_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ):
-            calls.append(("processing-record", verified_user_key))
-            return {
-                "status": "ok",
-                "runtime": {"source": {"status": "unavailable"}, "health": None},
-                "sources": {},
-                "anomalies": {"source": {"status": "available"}, "items": []},
-                "maintenance": {"source": {"status": "available"}},
-            }
-
-        async def failure_log_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ):
-            calls.append(("failures", verified_user_key))
-            return {"status": "ok", "items": [], "recovery": None}
-
-        async def maintenance_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ):
-            calls.append(("maintenance", verified_user_key))
-            return {
-                "status": "ok",
-                "data_exists": False,
-                "can_clear": True,
-                "clear_in_progress": None,
-            }
-
-    controller = _build_controller_double()
-    controller.memory_runtime = Runtime()
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-
-    def headers(path: str, user_key: str) -> dict[str, str]:
-        return {
-            MEMORY_USER_KEY_HEADER: user_key,
-            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                secret,
-                method="GET",
-                path=path,
-                user_key=user_key,
-            ),
-        }
-
-    async def _exercise():
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            composite = await client.get(
-                "/internal/memory/processing-record",
-                headers=headers(
-                    "/internal/memory/processing-record",
-                    "avibe:remote:subject-2",
-                ),
-            )
-            local = await client.get(
-                "/internal/memory/failures",
-                headers=headers("/internal/memory/failures", "avibe:local"),
-            )
-            remote = await client.get(
-                "/internal/memory/maintenance",
-                headers=headers(
-                    "/internal/memory/maintenance",
-                    "avibe:remote:subject-2",
-                ),
-            )
-            unsigned = await client.get("/internal/memory/failures")
-            return composite, local, remote, unsigned
-
-    composite, local, remote, unsigned = asyncio.run(_exercise())
-
-    assert composite.status_code == local.status_code == remote.status_code == unsigned.status_code == 200
-    assert "avibe:remote:subject-2" not in composite.text
-    assert "u-remote-principal" not in composite.text
-    assert calls == [
-        ("processing-record", "avibe:remote:subject-2"),
-        ("failures", "avibe:local"),
-        ("maintenance", "avibe:remote:subject-2"),
-        ("failures", None),
-    ]
-
-
-def test_memory_search_accepts_bounded_agentic_policy_from_cli_session() -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    captured: list[tuple] = []
-
-    class Runtime:
-        async def search_payload(
-            self,
-            query,
-            policy,
-            principal_id,
-            project_id,
-            *,
-            current_session_id=None,
-        ):
-            captured.append(
-                (query, policy, principal_id, project_id, current_session_id)
-            )
-            return {"status": "ok", "items": []}
-
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = Runtime()
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/search",
-                headers={CALLER_SESSION_HEADER: "ses-memory"},
-                json={
-                    "query": "connect the clues",
-                    "policy": {
-                        "mode": "agentic",
-                        "max_results": 8,
-                        "include_profile": True,
-                        "include_current_session": False,
-                        "timeout_seconds": 30,
-                        "max_model_calls": 2,
-                        "cost_budget_tokens": 32_000,
-                    },
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "items": []}
-    assert len(captured) == 1
-    query, policy, principal_id, project_id, current_session_id = captured[0]
-    assert query == "connect the clues"
-    assert policy.mode == "agentic"
-    assert policy.timeout_seconds == 30
-    assert principal_id == "u-11111111111111111111111111111111"
-    assert project_id == "default"
-    assert current_session_id == "ses-memory"
-
-
-def test_memory_search_route_does_not_import_memory_types_on_request(monkeypatch) -> None:
-    import builtins
-
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_search_payload = AsyncMock(
-        return_value={"status": "ok", "items": []}
-    )
-    app = internal_server.create_app(controller)
-    real_import = builtins.__import__
-
-    def guarded_import(name, *args, **kwargs):
-        if name == "avibe_memory.types":
-            raise RuntimeError("optional implementation initializer")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/search",
-                headers={CALLER_SESSION_HEADER: "ses-memory"},
-                json={"query": "connect the clues", "policy": {"mode": "keyword"}},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "items": []}
-
-
-def test_memory_list_accepts_everos_maximum_at_controller_boundary() -> None:
-    """MEMORY-LIST-009: the internal socket accepts the EverOS maximum."""
-
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    runtime = SimpleNamespace(
-        list_memory_projects=AsyncMock(return_value=("default", "notes")),
-        list_episodes_payload=AsyncMock(
-            return_value={"status": "ok", "items": [], "page": 2}
-        ),
-    )
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/list",
-                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={"project": "notes", "page": 2, "limit": 100},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "items": [], "page": 2}
-    controller.memory_scope_for_cli_session.assert_called_once_with("ses-memory-list")
-    runtime.list_memory_projects.assert_awaited_once_with(
-        "u-11111111111111111111111111111111"
-    )
-    runtime.list_episodes_payload.assert_awaited_once_with(
-        "u-11111111111111111111111111111111",
-        "notes",
-        page=2,
-        page_size=100,
-    )
-
-
-def test_memory_list_reports_unavailable_store_before_named_project_validation() -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    runtime = SimpleNamespace(
-        available=False,
-        list_memory_projects=AsyncMock(return_value=("default",)),
-        list_episodes_payload=AsyncMock(),
-    )
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/list",
-                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={"project": "notes", "page": 1, "limit": 20},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_store_unavailable",
-    }
-    runtime.list_memory_projects.assert_not_awaited()
-    runtime.list_episodes_payload.assert_not_awaited()
-
-
-def test_memory_list_rejects_all_for_cli_at_controller_boundary() -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    runtime = SimpleNamespace(
-        list_all_episodes_payload=AsyncMock(),
-        list_episodes_payload=AsyncMock(),
-    )
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/list",
-                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={"project": "all", "page": 1, "limit": 20},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 400
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_invalid_input",
-    }
-    runtime.list_all_episodes_payload.assert_not_awaited()
-    runtime.list_episodes_payload.assert_not_awaited()
-
-
-def test_memory_list_all_is_available_only_to_signed_ui_principal() -> None:
-    """MEMORY-LIST-003, MEMORY-LIST-008."""
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(
-            return_value="u-22222222222222222222222222222222"
-        ),
-        list_all_episodes_payload=AsyncMock(
-            return_value={
-                "status": "ok",
-                "items": [],
-                "next_cursor": "next-token",
-            }
-        ),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    user_key = "avibe:remote:subject-list"
-
-    async def _exercise() -> httpx.Response:
-        path = "/internal/memory/list"
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="POST",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-                json={
-                    "project": "all",
-                    "cursor": "cursor-token",
-                    "limit": 7,
-                    "origin": "agent",
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json()["next_cursor"] == "next-token"
-    runtime.resolve_principal_for_user_key.assert_awaited_once_with(user_key)
-    runtime.list_all_episodes_payload.assert_awaited_once_with(
-        "u-22222222222222222222222222222222",
-        cursor="cursor-token",
-        limit=7,
-        origin="agent",
-    )
-
-
-def test_memory_list_rejects_agent_origin_for_cli_callers() -> None:
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    runtime = SimpleNamespace(list_episodes_payload=AsyncMock())
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                "/internal/memory/list",
-                headers={CALLER_SESSION_HEADER: "ses-memory-list"},
-                json={
-                    "project": "default",
-                    "page": 1,
-                    "limit": 20,
-                    "origin": "agent",
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 400
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_invalid_input",
-    }
-    runtime.list_episodes_payload.assert_not_awaited()
-
-
-def test_memory_list_rejects_invalid_aggregate_cursor_at_controller_boundary() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(
-            return_value="u-22222222222222222222222222222222"
-        ),
-        list_all_episodes_payload=AsyncMock(
-            return_value={"status": "failed", "error": "memory_invalid_input"}
-        ),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/list"
-    user_key = "avibe:local"
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="POST",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-                json={"project": "all", "cursor": "malformed", "limit": 20},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 400
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_invalid_input",
-    }
-
-
-def test_memory_list_rejects_surrogate_aggregate_cursor_at_controller_boundary() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(
-            return_value="u-22222222222222222222222222222222"
-        ),
-        list_all_episodes_payload=AsyncMock(),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/list"
-    user_key = "avibe:local"
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                headers={
-                    "content-type": "application/json",
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="POST",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-                content='{"project":"all","cursor":"\\ud800","limit":20}',
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 400
-    assert response.json() == {
-        "status": "failed",
-        "error": "memory_invalid_input",
-    }
-    runtime.list_all_episodes_payload.assert_not_awaited()
-
-
-def test_memory_list_accepts_maximum_aggregate_cursor_transport_bound(monkeypatch) -> None:
-    import builtins
-
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from core.memory_loader import MEMORY_LIST_CURSOR_MAX_BYTES
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    cursor = "a" * MEMORY_LIST_CURSOR_MAX_BYTES
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(
-            return_value="u-22222222222222222222222222222222"
-        ),
-        list_all_episodes_payload=AsyncMock(
-            return_value={"status": "ok", "items": [], "next_cursor": None}
-        ),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/list"
-    user_key = "avibe:local"
-    real_import = builtins.__import__
-
-    def guarded_import(name, *args, **kwargs):
-        if name == "avibe_memory.runtime":
-            raise RuntimeError("optional implementation initializer")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", guarded_import)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="POST",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-                json={"project": "all", "cursor": cursor, "limit": 20},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    runtime.list_all_episodes_payload.assert_awaited_once_with(
-        "u-22222222222222222222222222222222",
-        cursor=cursor,
-        limit=20,
-    )
-
-
-def test_memory_wake_uses_non_destructive_runtime_operation() -> None:
-    runtime = SimpleNamespace(
-        wake=AsyncMock(return_value={"ok": True, "state": "running"})
-    )
-    controller = _build_controller_double()
-    controller.memory_runtime = runtime
-    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post("/internal/memory/wake", json={})
-
-    response = asyncio.run(_exercise())
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "state": "running"}
-    runtime.wake.assert_awaited_once_with()
-
-
-def test_memory_wake_preserves_store_unavailable_outcome() -> None:
-    controller = _build_controller_double()
-    controller.wake_memory = AsyncMock(
-        side_effect=MemoryStoreUnavailableError(
-            "Disabled Memory cleanup is still in progress"
-        )
-    )
-    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post("/internal/memory/wake", json={})
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 503
-    assert response.json() == {
-        "ok": False,
-        "state": "degraded",
-        "error": "memory_store_unavailable",
-    }
-    controller.wake_memory.assert_awaited_once_with()
-
-
-def test_reconcile_memory_hot_applies_the_persisted_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from config.v2_config import MemoryConfig, V2Config
-
-    memory = MemoryConfig(enabled=False)
-    monkeypatch.setattr(
-        V2Config,
-        "load",
-        classmethod(lambda cls: SimpleNamespace(memory=memory)),
-    )
-    controller = _build_controller_double()
-    controller.reconcile_memory = AsyncMock(
-        return_value={"ok": True, "state": "disabled"}
-    )
-    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post("/internal/reconcile-memory", json={})
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "state": "disabled"}
-    controller.reconcile_memory.assert_awaited_once_with(memory)
-
-
-def test_memory_preflight_requires_signed_ui_operator() -> None:
-    controller = _build_controller_double()
-    controller.preflight_memory = AsyncMock()
-    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post("/internal/memory/preflight", json={"memory": {}})
-
-    response = asyncio.run(_exercise())
-    assert response.status_code == 403
-    assert response.json() == {"ok": False, "error": "memory_access_denied"}
-    controller.preflight_memory.assert_not_awaited()
-
-
-def test_memory_preflight_uses_controller_lifecycle_when_runtime_is_disabled() -> None:
-    from config.v2_config import (
-        MemoryConfig,
-        MemoryEndpointConfig,
-        MemoryProcessingConfig,
-        memory_config_to_payload,
-    )
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    path = "/internal/memory/preflight"
-    candidate = MemoryConfig(
-        enabled=True,
-        processing=MemoryProcessingConfig(
-            llm=MemoryEndpointConfig(
-                base_url="https://llm.example/v1",
-                model="chat-model",
-                api_key="llm-secret",
-            ),
-            embedding=MemoryEndpointConfig(
-                base_url="https://embedding.example/v1",
-                model="embedding-model",
-                api_key="embedding-secret",
-            ),
-        ),
-    )
-    controller = _build_controller_double()
-    controller.memory_runtime = None
-    controller.preflight_memory = AsyncMock(return_value={"ok": True})
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    headers = {
-        MEMORY_USER_KEY_HEADER: "avibe:local",
-        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-            secret,
-            method="POST",
-            path=path,
-            user_key="avibe:local",
-        ),
-    }
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                headers=headers,
-                json={"memory": memory_config_to_payload(candidate, include_secrets=True)},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    controller.preflight_memory.assert_awaited_once_with(candidate)
-
-
-@pytest.mark.parametrize(
-    ("path", "method_name", "operation"),
-    [
-        ("/internal/memory/repair", "repair_memory", "repair"),
-        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
-    ],
-)
-def test_memory_data_operations_require_signed_ui_operator(
-    path: str,
-    method_name: str,
-    operation: str,
-) -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER
-
-    secret = "test-memory-ui-secret"
-    controller = _build_controller_double()
-    handler = AsyncMock()
-    setattr(controller, method_name, handler)
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-
-    async def _exercise() -> tuple[httpx.Response, httpx.Response]:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            unsigned = await client.post(
-                path,
-                json={"confirm_loss": True},
-            )
-            invalid = await client.post(
-                path,
-                json={"confirm_loss": True},
-                headers={
-                    MEMORY_USER_KEY_HEADER: "avibe:local",
-                    MEMORY_UI_PROOF_HEADER: "invalid-proof",
-                },
-            )
-        return unsigned, invalid
-
-    unsigned, invalid = asyncio.run(_exercise())
-    assert unsigned.status_code == invalid.status_code == 403
-    assert unsigned.json() == invalid.json() == {
-        "ok": False,
-        "operation": operation,
-        "error": "memory_access_denied",
-    }
-    handler.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    ("path", "method_name", "operation"),
-    [
-        ("/internal/memory/repair", "repair_memory", "repair"),
-        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
-    ],
-)
-def test_memory_data_operations_require_exact_loss_confirmation(
-    path: str,
-    method_name: str,
-    operation: str,
-) -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    controller = _build_controller_double()
-    handler = AsyncMock()
-    setattr(controller, method_name, handler)
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    headers = {
-        MEMORY_USER_KEY_HEADER: "avibe:local",
-        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-            secret,
-            method="POST",
-            path=path,
-            user_key="avibe:local",
-        ),
-    }
-
-    async def _exercise() -> list[httpx.Response]:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return [
-                await client.post(path, json=payload, headers=headers)
-                for payload in (
-                    {},
-                    {"confirm_loss": False},
-                    {"confirm": True},
-                    {"confirm_loss": True, "extra": True},
-                )
-            ]
-
-    responses = asyncio.run(_exercise())
-    for response in responses:
-        assert response.status_code == 400
-        assert response.json() == {
-            "ok": False,
-            "operation": operation,
-            "error": "memory_loss_confirmation_required",
-            "result": "unchanged",
-        }
-    handler.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    ("path", "method_name", "operation"),
-    [
-        ("/internal/memory/repair", "repair_memory", "repair"),
-        ("/internal/memory/delete-data", "delete_memory_data", "delete_data"),
-    ],
-)
-def test_memory_data_operations_return_distinct_final_result(
-    path: str,
-    method_name: str,
-    operation: str,
-) -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    result = {
-        "ok": True,
-        "operation": operation,
-        "result": "completed",
-        "data_deleted": True,
-        "data_remaining": False,
-    }
-    controller = _build_controller_double()
-    handler = AsyncMock(return_value=result)
-    setattr(controller, method_name, handler)
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    headers = {
-        MEMORY_USER_KEY_HEADER: "avibe:local",
-        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-            secret,
-            method="POST",
-            path=path,
-            user_key="avibe:local",
-        ),
-    }
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(path, json={"confirm_loss": True}, headers=headers)
-
-    response = asyncio.run(_exercise())
-    assert response.status_code == 200
-    assert response.json() == result
-    handler.assert_awaited_once_with(confirm_loss=True)
-
-
-def test_memory_reconfigure_forwards_the_cas_snapshot() -> None:
-    from config.v2_config import MemoryConfig, memory_config_to_payload
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    path = "/internal/memory/reconfigure"
-    candidate = MemoryConfig(enabled=False, mode="custom")
-    expected = MemoryConfig(enabled=False)
-    controller = _build_controller_double()
-    controller.reconfigure_memory = AsyncMock(
-        return_value={"ok": True, "operation": "reconfigure"}
-    )
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    headers = {
-        MEMORY_USER_KEY_HEADER: "avibe:local",
-        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-            secret,
-            method="POST",
-            path=path,
-            user_key="avibe:local",
-        ),
-    }
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                headers=headers,
-                json={
-                    "confirm_loss": True,
-                    "memory": memory_config_to_payload(candidate, include_secrets=True),
-                    "expected_memory": memory_config_to_payload(
-                        expected,
-                        include_secrets=True,
-                    ),
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    controller.reconfigure_memory.assert_awaited_once_with(
-        candidate,
-        expected_config=expected,
-        confirm_loss=True,
-    )
-
-
-@pytest.mark.parametrize(
-    ("result", "expected_status"),
-    [
-        ({"ok": True, "result": "completed", "health": {}}, 200),
-        (
-            {
-                "ok": False,
-                "error": "memory_repair_not_required",
-                "result": "unchanged",
-            },
-            409,
-        ),
-        (
-            {
-                "ok": False,
-                "error": "memory_repair_failed",
-                "result": "timed_out",
-            },
-            503,
-        ),
-    ],
-)
-def test_memory_repair_maps_controller_status(result: dict, expected_status: int) -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    path = "/internal/memory/repair"
-    user_key = "avibe:local"
-    controller = _build_controller_double()
-    controller.repair_memory = AsyncMock(return_value=result)
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await client.post(
-                path,
-                json={"confirm_loss": True},
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="POST",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-            )
-
-    response = asyncio.run(_exercise())
-    assert response.status_code == expected_status
-    assert response.json() == result
-
-
-def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    verified_user_keys: list[str | None] = []
-
-    class Runtime:
-        def principal_for_user_key(self, _user_key: str) -> str:
-            raise MemoryStoreUnavailableError("Memory store is unavailable")
-
-        async def processing_record_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ) -> dict[str, object]:
-            verified_user_keys.append(verified_user_key)
-            return {
-                "status": "ok",
-                "runtime": {"source": {"status": "unavailable"}, "health": None},
-                "sources": {},
-                "anomalies": {"source": {"status": "unavailable"}, "items": []},
-                "maintenance": {
-                    "source": {"status": "unavailable"},
-                    "can_clear": False,
-                    "clear_in_progress": None,
-                },
-            }
-
-    controller = _build_controller_double()
-    controller.memory_runtime = Runtime()
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/processing-record"
-    user_key = "avibe:remote:subject-2"
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="GET",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    assert verified_user_keys == [user_key]
-
-
-def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    secret = "test-memory-ui-secret"
-    verified_user_keys: list[str | None] = []
-
-    class Runtime:
-        def principal_for_user_key(self, _user_key: str) -> str:
-            raise AssertionError("the socket route must not resolve Memory operators")
-
-        async def processing_record_payload(
-            self,
-            *,
-            verified_user_key: str | None = None,
-        ) -> dict[str, object]:
-            verified_user_keys.append(verified_user_key)
-            return {
-                "status": "ok",
-                "runtime": {"source": {"status": "unavailable"}, "health": None},
-                "sources": {},
-                "anomalies": {"source": {"status": "available"}, "items": []},
-                "maintenance": {"source": {"status": "available"}},
-            }
-
-    controller = _build_controller_double()
-    controller.memory_runtime = Runtime()
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-    path = "/internal/memory/processing-record"
-    user_key = "avibe:remote:subject-2"
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.get(
-                path,
-                headers={
-                    MEMORY_USER_KEY_HEADER: user_key,
-                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                        secret,
-                        method="GET",
-                        path=path,
-                        user_key=user_key,
-                    ),
-                },
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert verified_user_keys == [user_key]
-
-
-def test_native_processing_record_routes_authorize_the_selected_project() -> None:
-    from vibe.memory_http_headers import MEMORY_USER_KEY_HEADER
-    from vibe.memory_ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
-
-    principal_id = "u-11111111111111111111111111111111"
-    runtime = SimpleNamespace(
-        resolve_principal_for_user_key=AsyncMock(return_value=principal_id),
-        list_memory_projects=AsyncMock(return_value=("default", "notes")),
-        processing_record_entries_payload=AsyncMock(
-            return_value={"status": "ok", "entries": [], "next_cursor": None}
-        ),
-        processing_record_entry_payload=AsyncMock(
-            return_value={"status": "ok", "entry": {"memcell_id": "mc_1"}}
-        ),
-    )
-    controller = _build_controller_double()
-    controller.default_memory_project_id.return_value = "default"
-    controller.memory_runtime = runtime
-    secret = "test-memory-ui-secret"
-    user_key = "avibe:local"
-    app = internal_server.create_app(controller, memory_ui_secret=secret)
-
-    def headers(path: str) -> dict[str, str]:
-        return {
-            MEMORY_USER_KEY_HEADER: user_key,
-            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                secret,
-                method="GET",
-                path=path,
-                user_key=user_key,
-            ),
-        }
-
-    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://test"
-        ) as client:
-            list_path = "/internal/memory/processing-record/entries"
-            detail_path = "/internal/memory/processing-record/entry"
-            listed = await client.get(
-                f"{list_path}?project=notes&limit=17",
-                headers=headers(list_path),
-            )
-            detail = await client.get(
-                f"{detail_path}?memcell_id=mc_1&project=notes",
-                headers=headers(detail_path),
-            )
-            unknown = await client.get(
-                f"{list_path}?project=unknown&limit=17",
-                headers=headers(list_path),
-            )
-            return listed, detail, unknown
-
-    listed, detail, unknown = asyncio.run(_exercise())
-
-    assert listed.status_code == 200
-    assert detail.status_code == 200
-    assert unknown.status_code == 400
-    runtime.processing_record_entries_payload.assert_awaited_once_with(
-        principal_id, "notes", None, 17
-    )
-    runtime.processing_record_entry_payload.assert_awaited_once_with(
-        principal_id, "notes", "mc_1"
-    )
-    assert runtime.list_memory_projects.await_count == 3
-
-
-def test_memory_remember_route_does_not_hold_pointer_lock_during_capture() -> None:
-    """Long capture work runs after the Controller pointer snapshot."""
-
-    from core.controller import Controller
-    from avibe_memory import CaptureAccepted
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    class Module:
-        def __init__(self) -> None:
-            self.calls = 0
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def capture(self, _request):  # noqa: ANN001, ANN202
-            assert controller._memory_replacement_lock().locked() is False
-            self.calls += 1
-            self.started.set()
-            await self.release.wait()
-            return CaptureAccepted()
-
-    module = Module()
-    runtime = SimpleNamespace(available=True, module=module)
-    controller = Controller.__new__(Controller)
-    controller.config = SimpleNamespace(
-        memory=SimpleNamespace(enabled=True),
-    )
-    controller.memory_runtime = runtime
-    controller.memory_scope_for_cli_session = lambda _session_id: (
-        "u-" + "1" * 32,
-        "p-" + "2" * 32,
-    )
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            request = asyncio.create_task(
-                client.post(
-                    "/internal/memory/remember",
-                    json={"text": "remember this"},
-                    headers={CALLER_SESSION_HEADER: "session-1"},
-                )
-            )
-            await module.started.wait()
-            async with asyncio.timeout(0.1):
-                async with controller._memory_replacement_lock():
-                    assert controller.memory_runtime is runtime
-            module.release.set()
-            return await request
-
-    response = asyncio.run(_exercise())
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted"}
-    assert module.calls == 1
-
-
-def test_memory_remember_accepts_text_over_legacy_controller_limit() -> None:
-    """MEMORY-SEARCH-018: the internal socket delegates large remember text."""
-
-    from avibe_memory import CaptureAccepted
-    from vibe.memory_http_headers import CALLER_SESSION_HEADER
-
-    text = "remember this detail " * 300
-    controller = _build_controller_double()
-    controller.memory_scope_for_cli_session.return_value = (
-        "u-11111111111111111111111111111111",
-        "default",
-    )
-    controller.memory_runtime = SimpleNamespace()
-    controller.capture_memory = AsyncMock(return_value=CaptureAccepted())
-    app = internal_server.create_app(controller)
-
-    async def _exercise() -> httpx.Response:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://test",
-        ) as client:
-            return await client.post(
-                "/internal/memory/remember",
-                json={"text": text},
-                headers={CALLER_SESSION_HEADER: "session-1"},
-            )
-
-    response = asyncio.run(_exercise())
-
-    assert len(text) > 4_000
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted"}
-    request = controller.capture_memory.await_args.args[0]
-    assert request.text == text
 
 
 # ---------------------------------------------------------------------
@@ -2625,36 +918,6 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
-
-
-def test_dispatch_context_does_not_restore_memory_admission_from_transient_payload(
-    monkeypatch,
-    tmp_path,
-):
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    _engine, session = _create_test_session(
-        tmp_path,
-        native_id="proj_memory_classification",
-    )
-
-    _text, context = asyncio.run(
-        internal_server._build_dispatch_payload(
-            {
-                "session_id": session["id"],
-                "text": "remember this",
-                "author_id": "remote:authenticated",
-                "user_id": "remote:forged-memory-principal",
-                "message_kind": "original",
-                "memory_cli_admitted": True,
-                "is_ordinary_text": True,
-            }
-        )
-    )
-
-    assert context.user_id == "remote:authenticated"
-    assert context.message_kind == "original"
-    assert context.is_original_human_text is True
-    assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():
@@ -7263,8 +5526,37 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
 
 
-def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
-    """A Run accepted as one Turn participant cannot issue Session-wide Stop."""
+def _cancel_run_through_live_turn(controller, session_id, turn_id, run_id):
+    """Cancel one Run while a live runtime owns the exact durable Turn."""
+
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            return await controller.session_turns.cancel(
+                session_id,
+                agent_run_id=run_id,
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    return asyncio.run(_go()), context
+
+
+def test_hfr_476_run_cancel_stops_a_shared_turn(monkeypatch, tmp_path):
+    """Canceling a Run steered into a live Turn stops that Turn like Session Stop."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7277,17 +5569,27 @@ def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
-    run = request_store.enqueue_agent_run(
-        session_id=session_id,
-        message="steered participant",
-        agent_name="worker",
-        callback_session_id="ses_callback",
+    owner_run, steer_run = (
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        for message in ("initial owner", "steered participant")
     )
-    assert request_store.claim(run.id) is not None
+    assert request_store.claim(owner_run.id) is not None
+    assert request_store.claim(steer_run.id) is not None
 
     with engine.begin() as conn:
         initial = message_deliveries.delivery_for_turn(conn, turn_id)
         assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
         steer_id = message_deliveries.new_delivery_id()
         values = dict(initial)
         values.update(
@@ -7303,53 +5605,48 @@ def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
         conn.execute(delivery_rows.insert().values(**values))
         assert attach_agent_run_delivery_in_connection(
             conn,
-            run.id,
+            steer_run.id,
             session_id=session_id,
             delivery_id=steer_id,
         )
+        for run in (owner_run, steer_run):
+            assert message_deliveries.agent_run_input_reached_turn(
+                conn,
+                run_id=run.id,
+                turn_id=turn_id,
+            ) == (True, "run_input_in_turn")
 
     controller = _build_controller_double()
-    app = internal_server.create_app(controller)
-    transport = httpx.ASGITransport(app=app)
+    internal_server.create_app(controller)
 
-    async def _go():
-        async with httpx.AsyncClient(
-            transport=transport,
-            base_url="http://testserver",
-        ) as client:
-            return await client.post(
-                f"/internal/cancel/{session_id}",
-                params={"run_id": run.id},
-            )
+    result, context = _cancel_run_through_live_turn(
+        controller,
+        session_id,
+        turn_id,
+        steer_run.id,
+    )
 
-    response = asyncio.run(_go())
-
-    assert response.status_code == 200
-    assert response.json() == {
+    assert result == {
         "ok": True,
         "session_id": session_id,
-        "status": "run_detached",
-        "reason": "run_is_steered_participant",
+        "status": "cancel_requested",
     }
-    controller.command_handler.handle_stop.assert_not_awaited()
+    controller.command_handler.handle_stop.assert_awaited_once_with(context)
+    saved = request_store.get_run(steer_run.id)
+    assert saved is not None
+    assert saved["cancel_requested"] is True
     with engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
     assert turn is not None
-    assert turn["state"] == "active"
-    assert turn["control_state"] is None
-    saved = request_store.get_run(run.id)
-    assert saved is not None
-    assert saved["status"] == "canceled"
-    assert saved["callback_status"] == "skipped"
-    assert saved["callback_completed_at"] is not None
-    assert request_store.list_pending_callbacks() == []
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_state"] == "waiting_terminal"
 
 
-def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
+def test_run_cancel_stops_a_turn_with_an_unresolved_steer(
     monkeypatch,
     tmp_path,
 ):
-    """A native steer in flight prevents the initial Run from stopping the Turn."""
+    """A native steer in flight cannot keep the initial Run's cancel from stopping."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7358,6 +5655,191 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
     engine, session, turn_id = _create_active_test_turn(
         tmp_path,
         native_id="proj_unresolved_steer_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run, steer_run = (
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        for message in ("initial owner", "second input already steering")
+    )
+    assert request_store.claim(owner_run.id) is not None
+    assert request_store.claim(steer_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert turn is not None
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+        steer = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="second input already steering",
+        )
+        claimed = message_deliveries.open_steer_attempt(
+            conn,
+            steer["id"],
+            expected_version=int(steer["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+            expected_native_turn_id=str(turn["native_turn_id"]),
+        )
+        assert claimed is not None
+        assert claimed["state"] == "steering"
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            steer_run.id,
+            session_id=session_id,
+            delivery_id=str(claimed["id"]),
+        )
+        # A possibly-written steer is inside the Turn, so its own cancel stops too.
+        assert message_deliveries.agent_run_input_reached_turn(
+            conn,
+            run_id=steer_run.id,
+            turn_id=turn_id,
+        ) == (True, "run_input_in_turn")
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+
+    result, context = _cancel_run_through_live_turn(
+        controller,
+        session_id,
+        turn_id,
+        owner_run.id,
+    )
+
+    assert result == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "cancel_requested",
+    }
+    controller.command_handler.handle_stop.assert_awaited_once_with(context)
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_state"] == "waiting_terminal"
+
+
+def test_run_cancel_joining_a_refused_stop_retries_its_own_stop(
+    monkeypatch,
+    tmp_path,
+):
+    """A Run cancel waits for a joined Stop's receipt and retries when refused."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_run_cancel_joins_refused_stop",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="initial owner",
+        agent_name="worker",
+    )
+    assert request_store.claim(run.id) is not None
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    stop_entered = asyncio.Event()
+    release_stop = asyncio.Event()
+    stop_calls = 0
+
+    async def _refuse_first_stop(stop_context):
+        nonlocal stop_calls
+        stop_calls += 1
+        if stop_calls > 1:
+            return True
+        stop_entered.set()
+        await release_stop.wait()
+        stop_context.platform_specific["stop_failure_reason"] = "refused"
+        return False
+
+    controller.command_handler.handle_stop = AsyncMock(side_effect=_refuse_first_stop)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            session_stop = asyncio.create_task(controller.session_turns.cancel(session_id))
+            await asyncio.wait_for(stop_entered.wait(), timeout=1.0)
+            run_cancel = asyncio.create_task(
+                controller.session_turns.cancel(session_id, agent_run_id=run.id)
+            )
+            await asyncio.sleep(0.1)
+            assert not run_cancel.done()
+            # Nothing is recorded while the joined Stop has no receipt.
+            assert request_store.get_run(run.id)["cancel_requested"] is False
+            release_stop.set()
+            return await run_cancel, await session_stop
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    run_cancel, session_stop = asyncio.run(_go())
+
+    assert session_stop["ok"] is False, session_stop
+    assert run_cancel == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "cancel_requested",
+    }
+    assert controller.command_handler.handle_stop.await_count == 2
+    assert request_store.get_run(run.id)["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None and turn["control_state"] == "waiting_terminal"
+
+
+def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):
+    """Canceling the owner Run cannot supersede an accepted P0 replacement."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_replacement_run_cancel",
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
@@ -7380,23 +5862,50 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
             session_id=session_id,
             delivery_id=initial["id"],
         )
-        steer = _reserve_submission(
+        replacement = _reserve_submission(
             conn,
             scope_id=session["scope_id"],
             session_id=session_id,
-            text="second input already steering",
+            text="replacement from another user",
         )
-        steer_id = str(steer["id"])
-        claimed = message_deliveries.open_steer_attempt(
+        successor_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
             conn,
-            steer["id"],
-            expected_version=int(steer["version"]),
-            turn_id=turn_id,
-            attempt_id=message_deliveries.new_attempt_id(),
-            expected_native_turn_id=str(turn["native_turn_id"]),
+            turn_id=successor_turn_id,
+            session_id=session_id,
+            initial_delivery_id=str(replacement["id"]),
+            state="waiting",
+            backend="claude",
         )
-        assert claimed is not None
-        assert claimed["state"] == "steering"
+        replacement = message_deliveries.cas_delivery(
+            conn,
+            str(replacement["id"]),
+            expected_version=int(replacement["version"]),
+            expected_states=("reserved",),
+            values={
+                "priority": "p0",
+                "state": "interrupt_waiting",
+                "turn_id": successor_turn_id,
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        )
+        assert replacement is not None
+        controlled = message_deliveries.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "waiting_terminal",
+                "control_mode": "replace",
+                "control_attempt_id": message_deliveries.new_attempt_id(),
+                "control_expected_native_turn_id": turn["native_turn_id"],
+                "control_successor_delivery_id": replacement["id"],
+                "control_successor_turn_id": successor_turn_id,
+            },
+        )
+        assert controlled is not None
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -7419,26 +5928,26 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
         "ok": True,
         "session_id": session_id,
         "status": "run_detached",
-        "reason": "turn_has_other_participants",
+        "reason": "turn_has_replacement_successor",
     }
     controller.command_handler.handle_stop.assert_not_awaited()
     saved = request_store.get_run(owner_run.id)
     assert saved is not None
     assert saved["status"] == "canceled"
     assert saved["callback_status"] == "skipped"
-    assert request_store.list_pending_callbacks() == []
     with engine.connect() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
-        steer = message_deliveries.get_delivery(conn, steer_id)
+        successor = message_deliveries.get_turn(conn, successor_turn_id)
+        replacement = message_deliveries.get_delivery(conn, str(replacement["id"]))
     assert turn is not None
-    assert turn["state"] == "active"
-    assert turn["control_state"] is None
-    assert steer is not None
-    assert steer["state"] == "steering"
+    assert turn["control_mode"] == "replace"
+    assert turn["control_successor_turn_id"] == successor_turn_id
+    assert successor is not None and successor["state"] == "waiting"
+    assert replacement is not None and replacement["state"] == "interrupt_waiting"
 
 
-def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):
-    """Canceling the owner Run cannot supersede another input's P0 replacement."""
+def test_run_cancel_waits_for_an_unconfirmed_replacement(monkeypatch, tmp_path):
+    """An owner Run cancel records nothing while a replacement has no receipt."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7446,7 +5955,7 @@ def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_pa
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     engine, session, turn_id = _create_active_test_turn(
         tmp_path,
-        native_id="proj_replacement_run_cancel",
+        native_id="proj_unconfirmed_replacement_run_cancel",
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
@@ -7514,6 +6023,7 @@ def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_pa
         )
         assert controlled is not None
 
+    monkeypatch.setattr(session_turns, "_RUN_CANCEL_JOIN_WAIT_SECONDS", 0.2)
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
@@ -7530,27 +6040,15 @@ def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_pa
 
     response = asyncio.run(_go())
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "session_id": session_id,
-        "status": "run_detached",
-        "reason": "turn_has_replacement_successor",
-    }
+    assert response.status_code == 409
+    assert response.json()["ok"] is False
+    assert response.json()["code"] == "stop_unknown"
+    assert response.json()["reason"] == "joined_unconfirmed_interrupt"
     controller.command_handler.handle_stop.assert_not_awaited()
     saved = request_store.get_run(owner_run.id)
     assert saved is not None
-    assert saved["status"] == "canceled"
-    assert saved["callback_status"] == "skipped"
-    with engine.connect() as conn:
-        turn = message_deliveries.get_turn(conn, turn_id)
-        successor = message_deliveries.get_turn(conn, successor_turn_id)
-        replacement = message_deliveries.get_delivery(conn, str(replacement["id"]))
-    assert turn is not None
-    assert turn["control_mode"] == "replace"
-    assert turn["control_successor_turn_id"] == successor_turn_id
-    assert successor is not None and successor["state"] == "waiting"
-    assert replacement is not None and replacement["state"] == "interrupt_waiting"
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is False
 
 
 def test_run_cancel_retires_its_own_in_flight_replacement(monkeypatch, tmp_path):
@@ -7764,7 +6262,7 @@ def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):
 
 
 def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_path):
-    """Detaching one claimed Run replays every surviving batch participant."""
+    """Stopping an unwritten starting batch replays every surviving participant."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7811,11 +6309,11 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
                 session_id=session["id"],
                 delivery_id=str(delivery["id"]),
             )
-        assert message_deliveries.agent_run_exclusively_owns_turn(
+        assert message_deliveries.agent_run_input_reached_turn(
             conn,
             run_id=runs[0].id,
             turn_id=turn_id,
-        ) == (False, "turn_has_other_participants")
+        ) == (True, "run_input_in_turn")
 
     controller = _build_controller_double()
     app = internal_server.create_app(controller)
@@ -7851,7 +6349,7 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
     response, started_original = asyncio.run(_go())
 
     assert response.status_code == 200
-    assert response.json()["status"] == "run_detached"
+    assert response.json()["status"] == "cancel_requested"
     assert started_original is False
     assert dispatched == ["surviving batch participant"]
     assert request_store.get_run(runs[0].id)["status"] == "canceled"
@@ -7871,6 +6369,150 @@ def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_pa
     assert surviving is not None and surviving["state"] == "claimed"
     assert surviving["turn_id"] != turn_id
 
+
+def _prewrite_batch_with_absorbing_runner(monkeypatch, tmp_path, native_id):
+    """Start a real two-Run pre-write batch whose dispatch absorbs cancellation."""
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services.dispatch import TurnDispatchOutcome
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(tmp_path, native_id=native_id)
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    texts = ("canceled batch participant", "surviving batch participant")
+    runs = [
+        request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=message,
+            agent_name="worker",
+        )
+        for message in texts
+    ]
+    assert all(request_store.claim(run.id) is not None for run in runs)
+    with engine.begin() as conn:
+        deliveries = [
+            _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                text=text,
+            )
+            for text in texts
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="claude",
+            deliveries=deliveries,
+            dispatch_text="\n\n".join(texts),
+        )
+        for run, delivery in zip(runs, claimed["deliveries"], strict=True):
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    manager = controller.session_turns
+    dispatch_entered = asyncio.Event()
+
+    async def absorbing_prewrite_dispatch(_controller, dispatch_context, *_a, **_k):
+        set_dispatch_phase(dispatch_context, DISPATCH_PHASE_PREWRITE)
+        dispatch_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # OpenCode absorbs the inner cancellation after its cleanup.
+            return TurnDispatchOutcome(
+                error=None,
+                settled_by=None,
+                backend_dispatch_attempted=False,
+            )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        absorbing_prewrite_dispatch,
+    )
+    real_run = manager._run
+    successor_starts: list[str] = []
+
+    async def _run(run_session_id, run_context, text, **kwargs):
+        if kwargs.get("logical_turn_id") == turn_id:
+            return await real_run(run_session_id, run_context, text, **kwargs)
+        successor_starts.append(text)
+
+    monkeypatch.setattr(manager, "_run", _run)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+    return SimpleNamespace(
+        engine=engine,
+        session_id=session_id,
+        request_store=request_store,
+        runs=runs,
+        delivery_ids=[str(row["id"]) for row in claimed["deliveries"]],
+        turn_id=turn_id,
+        manager=manager,
+        controller=controller,
+        context=context,
+        dispatch_entered=dispatch_entered,
+        successor_starts=successor_starts,
+    )
+
+
+def test_run_cancel_of_a_prewrite_batch_stops_it_like_session_stop(
+    monkeypatch,
+    tmp_path,
+):
+    """A pre-write Run cancel retires the whole claimed batch, like Stop."""
+
+    batch = _prewrite_batch_with_absorbing_runner(
+        monkeypatch,
+        tmp_path,
+        "proj_absorbing_prewrite_run_cancel",
+    )
+
+    async def _go():
+        assert await batch.manager._start_persisted_turn(
+            batch.turn_id,
+            context=batch.context,
+        )
+        await asyncio.wait_for(batch.dispatch_entered.wait(), timeout=1.0)
+        return await batch.manager.cancel(
+            batch.session_id,
+            agent_run_id=batch.runs[0].id,
+        )
+
+    result = asyncio.run(_go())
+
+    assert result == {
+        "ok": True,
+        "session_id": batch.session_id,
+        "status": "cancel_requested",
+        "reason": "prewrite_canceled",
+    }
+    batch.controller.command_handler.handle_stop.assert_not_awaited()
+    assert batch.successor_starts == []
+    assert batch.request_store.get_run(batch.runs[0].id)["status"] == "canceled"
+    with batch.engine.connect() as conn:
+        original = message_deliveries.get_turn(conn, batch.turn_id)
+        states = [
+            message_deliveries.get_delivery(conn, delivery_id)["state"]
+            for delivery_id in batch.delivery_ids
+        ]
+    assert original is not None and original["terminal_outcome"] == "not_written"
+    assert states == ["retired", "retired"]
 
 def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
     """A stale observed Turn cannot detach a Run that owns the current Turn."""
@@ -7924,7 +6566,7 @@ def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
                     priority="p0",
                     content=None,
                     expected_turn_id="trn_recovered_predecessor",
-                    expected_exclusive_agent_run_id=owner_run.id,
+                    cancel_agent_run_id=owner_run.id,
                 ),
                 context=context,
             )
@@ -8138,11 +6780,11 @@ def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_pat
             session_id=session["id"],
             delivery_id=initial["id"],
         )
-        assert message_deliveries.agent_run_exclusively_owns_turn(
+        assert message_deliveries.agent_run_input_reached_turn(
             conn,
             run_id=run.id,
             turn_id=turn_id,
-        ) == (True, "exclusive_run_owner")
+        ) == (True, "run_input_in_turn")
 
 
 # --- #84: scheduled provenance survives the merge-queue --------------------------

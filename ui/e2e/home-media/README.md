@@ -38,7 +38,7 @@ npx playwright test --config playwright.home-media.config.ts
 ```
 
 The fixture mounts the real Workbench, Composer, AgentRoutePicker,
-DirectoryBrowser, NewProjectDialog, API/project providers and retained Settings
+FolderBrowser, NewProjectDialog, API/project providers and retained Settings
 route boundary under StrictMode. It intercepts all fetches in memory; external
 network traffic is refused. Audio capture uses Chromium's fake microphone with
 the real MediaRecorder/recording pipeline and HTTP transcription boundary.
@@ -74,7 +74,7 @@ finish: the sheet holds its successful result and uses the current navigator
 once on return, or preserves the retry/error/uncertainty state. No automatic
 resubmission and no replay state are introduced.
 
-DirectoryBrowser retains unconfirmed paths, history, manual-path input and
+FolderBrowser retains unconfirmed paths, history, manual-path input and
 new-folder text while withdrawing its modal and global keyboard/focus effects.
 NewProjectDialog retains confirmation state and alone owns deferred project
 completion for all callers. A successful or authorization-fenced null result
@@ -89,3 +89,11 @@ Unicode state, 390/1366px, accepted/rejected/uncertain network completion,
 pre-POST suspension, true close/fresh reopen, project creation success/failure/
 cancel and retained directory inputs. Unexpected requests fail the fixture;
 all external traffic is refused.
+
+The picker fixture models `/api/browse` for canonicalization and the Files
+list/search/mkdir endpoints for actual browsing. Held browse requests block
+the Files listing, not the compatibility resolver. Successful navigations
+commit history; refreshes and stale/failed completions do not. A newer
+unsubmitted path draft survives an admitted navigation, including its caret.
+Escape explicitly cancels a pending manual submission, so reopening the editor
+cannot revive that submission or add it to history.

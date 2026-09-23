@@ -40,6 +40,7 @@ import {
   sourceMutationReadScope,
   type PresentSourceMutationCommit,
   type SourceMutationLanding,
+  type SourceMutationOutcome,
   type SourceMutationReadScope,
   type SourceMutationSettlement,
   type TrackSourceMutation,
@@ -161,7 +162,7 @@ export const SourceDetailPanel: React.FC<{
    * invalidates is wider than the one row this panel owns.
    */
   onReauth: (source: Source) => void;
-  /** Owns every post-commit report and read verdict outside this entity panel. */
+  /** Owns how a committed mutation is announced, and the surface read behind it. */
   onMutationCommitted: PresentSourceMutationCommit;
   /** Stable focus target for callers that navigate into this detail surface. */
   headingRef?: React.Ref<HTMLHeadingElement>;
@@ -372,14 +373,21 @@ export const SourceDetailPanel: React.FC<{
       }
     }).finally(() => setPendingAction(null));
   };
+  /**
+   * `action` is the flow this panel is in and drives its stage machine;
+   * `outcome` is what the write left behind and is the only thing the surface
+   * may announce. They part company on exactly one path: an edit whose Source
+   * turns out to be absent is still the edit flow, but nothing was updated.
+   */
   const commitManagementMutation = async (
     action: ManageCommitAction,
+    outcome: SourceMutationOutcome,
     impact: ManageGuardPlan | null,
     settle: (scope: SourceMutationReadScope) => Promise<SourceMutationLanding>,
   ) => {
     dispatchManageStage({ type: 'commit', action });
     const scope = sourceMutationReadScope(impact);
-    await onMutationCommitted({ action, impact, settle: () => settle(scope) });
+    await onMutationCommitted({ outcome, impact, settle: () => settle(scope) });
     dispatchManageStage({ type: 'settled' });
   };
   const reconcileEditWrite = async (
@@ -409,6 +417,7 @@ export const SourceDetailPanel: React.FC<{
         : null;
       await commitManagementMutation(
         'edit',
+        current ? 'updated' : 'gone',
         current ? plan : null,
         (scope) => applyReconciliation(before.id, reconciliation.value, settlement, scope),
       );
@@ -439,6 +448,7 @@ export const SourceDetailPanel: React.FC<{
     if (reconciliation.kind === 'committed') {
       await commitManagementMutation(
         'delete',
+        'removed',
         plan,
         (scope) => settlement.gone(before.id, reconciliation.value, scope),
       );
@@ -473,6 +483,7 @@ export const SourceDetailPanel: React.FC<{
         const impact = committedPlan(answer.removed_hops, answer.interrupted);
         await commitManagementMutation(
           'edit',
+          'updated',
           impact,
           (scope) => settlement.source(answer.source, scope),
         );
@@ -481,6 +492,7 @@ export const SourceDetailPanel: React.FC<{
         if (failure?.code === 'source_not_found') {
           await commitManagementMutation(
             'edit',
+            'gone',
             null,
             (scope) => settlement.gone(latest.id, undefined, scope),
           );
@@ -521,14 +533,18 @@ export const SourceDetailPanel: React.FC<{
         const impact = committedPlan(answer.removed_hops, answer.interrupted);
         await commitManagementMutation(
           'delete',
+          'removed',
           impact,
           (scope) => settlement.gone(latest.id, undefined, scope),
         );
       } catch (error) {
         const failure = apiFailure(error);
         if (failure?.code === 'source_not_found') {
+          // Already absent is the outcome this flow asked for, so it reports as
+          // a removal rather than as a surprise the user has to interpret.
           await commitManagementMutation(
             'delete',
+            'removed',
             null,
             (scope) => settlement.gone(latest.id, undefined, scope),
           );

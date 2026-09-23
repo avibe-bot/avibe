@@ -29,16 +29,15 @@ def _artifact_build_commands() -> list[list[str]]:
             if line.strip() and not line.lstrip().startswith("#")]
 
 
-def test_artifact_producer_only_installs_the_frontend_and_builds_both_isolated_distributions():
+def test_artifact_producer_only_installs_the_frontend_and_builds_the_core_distribution():
     assert _artifact_build_commands() == [
         ["python", "-m", "pip", "install", "--disable-pip-version-check", "build"],
         ["python", "scripts/prepare_local_show_runtime_manifest.py"],
-        ["python", "-m", "build", "--outdir", "memory-dist", "packaging/avibe-memory"],
         ["python", "-m", "build"],
     ]
 
 
-@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2, 3])
+@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2])
 def test_artifact_build_stops_at_each_failed_boundary(tmp_path, failed_stage):
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -74,14 +73,14 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
         if any(step.get("run", "").startswith("uv ") for step in job["steps"])
     }
     assert set(owners) == {
-        "unit-test-shards", "migration-release-guard", "install-upgrade-shards", "memory-insight-contract",
-        "show-router-integration",
+        "unit-test-shards", "migration-release-guard", "install-upgrade-shards",
+        "show-router-integration", "memory-insight-contract",
     }
     cache_keys = {}
     for name, job in owners.items():
         steps = job["steps"]
         install, = [step for step in steps if step.get("name") == "Install pinned uv"]
-        version = "0.9.18" if name == "memory-insight-contract" else "0.12.10"
+        version = "0.12.10"
         assert shlex.split(install["run"]) == [
             "python", "-m", "pip", "install", "--disable-pip-version-check",
             "--only-binary=:all:", "--no-deps", f"uv=={version}",
@@ -92,18 +91,18 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
         cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache")]
         action = "actions/cache/restore" if name in {
             "unit-test-shards", "migration-release-guard", "show-router-integration",
+            "memory-insight-contract",
         } else "actions/cache"
         assert cache["uses"] == f"{action}@caa296126883cff596d87d8935842f9db880ef25"
         assert cache["with"]["path"] == "~/.cache/uv"
         key = cache["with"]["key"]
         assert "${{ runner.os }}-${{ runner.arch }}" in key and f"uv-{version}-py3.12" in key
-        dependencies = "'scripts/memory_runtime/uv.lock'" if name == "memory-insight-contract" else "'pyproject.toml', 'uv.lock'"
+        dependencies = "'pyproject.toml', 'uv.lock'"
         assert f"hashFiles({dependencies})" in key
         cache_keys[name] = key
         first_consumer = next(step for step in steps if step.get("run", "").startswith("uv "))
         assert steps.index(install) < steps.index(cache) < steps.index(first_consumer)
-    assert len({cache_keys[name] for name in owners if name != "memory-insight-contract"}) == 1
-    assert cache_keys["memory-insight-contract"] != cache_keys["install-upgrade-shards"]
+    assert len({cache_keys[name] for name in owners}) == 1
 
 
 @pytest.mark.parametrize("exit_code", [0, 1, 7])
@@ -483,28 +482,25 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     shards = jobs["install-upgrade-shards"]
     assert shards["strategy"]["fail-fast"] is False
     suites = shards["strategy"]["matrix"]["suite"]
-    assert len(suites) == len(set(suites)) == 2
+    assert len(suites) == len(set(suites)) == 1
     assert not shards.get("if")
     assert not shards.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in shards["steps"])
     steps = {step["name"]: step for step in shards["steps"] if "name" in step}
-    test_steps = [steps["Run packaged Memory package-shape smoke"], steps["Run install and upgrade regressions"]]
+    test_steps = [steps["Run install and upgrade regressions"]]
     for suite in suites:
         selected = [step for step in test_steps if step["if"] == f"matrix.suite == '{suite}'"]
         assert len(selected) == 1, f"Every suite must select exactly one regression command: {suite}"
-    # Both suites build real source wheels, including the released-generation
-    # bridge inside the Docker upgrade test.
+    # The installer consumes the built core wheel.
     prepare = steps["Prepare Show Runtime manifest for fixture wheels"]
     assert not prepare.get("if")
     assert "python scripts/prepare_local_show_runtime_manifest.py" in prepare["run"]
-    assert "tests/test_memory_upgrade_packaged.py -m integration" in test_steps[0]["run"]
-    assert "SKIPPED" in test_steps[0]["run"] and "exit 1" in test_steps[0]["run"]
     for test_file in (
         "tests/test_upgrade_flow.py", "tests/test_install_script.py",
-        "tests/e2e/test_install_command.py", "tests/e2e/test_upgrade_command.py",
+        "tests/e2e/test_install_command.py",
     ):
-        assert test_file in test_steps[1]["run"]
-    assert "docker info" in test_steps[1]["run"]
+        assert test_file in test_steps[0]["run"]
+    assert "docker info" in test_steps[0]["run"]
     assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
 
 
@@ -519,7 +515,7 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     assert uploads["vibe-wheel-linux"]["with"]["path"] == "dist/*.whl"
     companion = uploads["vibe-package-contracts-linux"]
     assert set(companion["with"]["path"].splitlines()) == {
-        "dist/*.tar.gz", "memory-dist/*.whl", "memory-dist/*.tar.gz",
+        "dist/*.tar.gz",
     }
     assert companion["with"]["if-no-files-found"] == "error"
     assert not companion.get("if") and not companion.get("continue-on-error")
@@ -530,11 +526,11 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     download, = downloads
     assert download["uses"].startswith("actions/download-artifact@")
     assert download["if"] == "matrix.suite == 'installer'"
-    assert download["with"] == {"name": "vibe-package-contracts-linux", "path": "."}
+    assert download["with"] == {"name": "vibe-package-contracts-linux", "path": "dist"}
     assert not download.get("continue-on-error")
     owners = [
         (name, step) for name, job in jobs.items() for step in job["steps"]
-        if "tests/test_memory_distribution.py" in step.get("run", "")
+        if "tests/test_distribution_artifacts.py" in step.get("run", "")
     ]
     (owner, contracts), = owners
     assert owner == "install-upgrade-shards"
@@ -544,8 +540,8 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     build_environment = next(step["env"] for step in build["steps"] if step.get("name") == "Build package artifact")
     assert contracts["env"] == {"AVIBE_PACKAGE_CONTRACT_VERSION": build_environment["AVIBE_PACKAGE_CONTRACT_VERSION"]}
     assert 'AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)"' in contracts["run"]
-    assert 'AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)"' in contracts["run"]
-    assert "pytest tests/test_memory_distribution.py -v -ra" in contracts["run"]
+    assert 'AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)"' in contracts["run"]
+    assert "pytest tests/test_distribution_artifacts.py -v -ra" in contracts["run"]
     assert not contracts.get("continue-on-error")
     assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
     assert jobs["windows-install-smoke"]["needs"] == "build-linux-artifacts"
@@ -553,8 +549,8 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
 
 @pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])
 def test_distribution_contract_command_fails_on_errors_and_skips(tmp_path, pytest_exit, summary):
-    for directory, filename in (("dist", "avibe_os-test.whl"), ("memory-dist", "avibe_memory-test.whl")):
-        (tmp_path / directory).mkdir()
+    for directory, filename in (("dist", "avibe_os-test.whl"), ("dist", "avibe_os-test.tar.gz")):
+        (tmp_path / directory).mkdir(exist_ok=True)
         (tmp_path / directory / filename).touch()
     binary = tmp_path / "bin"
     binary.mkdir()

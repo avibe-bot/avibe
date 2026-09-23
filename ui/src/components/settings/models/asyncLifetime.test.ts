@@ -67,7 +67,7 @@ import {
   classifyOAuthFailure,
   createFlowAuthority,
   createLatestAsyncAuthority,
-  createLatestAsyncAuthorityByKey,
+  createLatestAsyncAuthorityByKeySet,
   createLatestEntityAuthorityByKey,
   createPendingWrites,
   failureLanded,
@@ -149,53 +149,85 @@ describe('latest async authority', () => {
     expect(landed).toEqual(['newest']);
   });
 
-  it('orders reads per key without making independent backends supersede each other', async () => {
+  it('orders reads per key without making independent keys supersede each other', async () => {
     const olderClaude = deferred<string>();
     const newerClaude = deferred<string>();
     const codex = deferred<string>();
     const landed: string[] = [];
-    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
+    const authority = createLatestAsyncAuthorityByKeySet<string, string>((value, owned) => landed.push(`${[...owned].join('+')}:${value}`));
 
-    const olderRun = authority.run('claude', () => olderClaude.promise);
-    const codexRun = authority.run('codex', () => codex.promise);
-    const newerRun = authority.run('claude', () => newerClaude.promise);
+    const olderRun = authority.run(['claude'], () => olderClaude.promise);
+    const codexRun = authority.run(['codex'], () => codex.promise);
+    const newerRun = authority.run(['claude'], () => newerClaude.promise);
     newerClaude.resolve('new');
     codex.resolve('independent');
     await Promise.all([newerRun, codexRun]);
     olderClaude.resolve('old');
 
-    expect(await olderRun).toBe('stale');
+    expect([...await olderRun]).toEqual([]);
     expect(landed).toEqual(['claude:new', 'codex:independent']);
+  });
+
+  // The reason ownership is per key and not per read. A read that covers one key
+  // must not take a wider read's other keys away from it: those keys would keep
+  // whatever they had, with the wider read reporting that someone else now owns
+  // them and that someone never touching them.
+  it('leaves a wider read owning every key the narrower one did not claim', async () => {
+    const wider = deferred<string>();
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthorityByKeySet<string, string>((value, owned) => landed.push(`${[...owned].sort().join('+')}:${value}`));
+
+    const widerRun = authority.run(['claude:opus', 'claude:sonnet'], () => wider.promise);
+    await authority.run(['claude:sonnet'], () => Promise.resolve('exact sonnet'));
+    wider.resolve('both models');
+
+    expect([...await widerRun]).toEqual(['claude:opus']);
+    expect(landed).toEqual(['claude:sonnet:exact sonnet', 'claude:opus:both models']);
   });
 
   it('invalidates pending generations whose keys lose active ownership', async () => {
     const claude = deferred<string>();
     const codex = deferred<string>();
     const landed: string[] = [];
-    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
+    const authority = createLatestAsyncAuthorityByKeySet<string, string>((value, owned) => landed.push(`${[...owned].join('+')}:${value}`));
 
-    const claudeRun = authority.run('claude', () => claude.promise);
-    const codexRun = authority.run('codex', () => codex.promise);
-    authority.invalidateExcept(new Set(['codex']));
+    const claudeRun = authority.run(['claude'], () => claude.promise);
+    const codexRun = authority.run(['codex'], () => codex.promise);
+    authority.invalidateExcept((key) => key === 'codex');
     claude.resolve('no longer owned');
     codex.resolve('still active');
 
-    expect(await claudeRun).toBe('stale');
-    expect(await codexRun).toBe('landed');
+    expect([...await claudeRun]).toEqual([]);
+    expect([...await codexRun]).toEqual(['codex']);
     expect(landed).toEqual(['codex:still active']);
   });
 
   it('invalidates one pending generation before a write echo takes ownership', async () => {
     const pending = deferred<string>();
     const landed: string[] = [];
-    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
+    const authority = createLatestAsyncAuthorityByKeySet<string, string>((value, owned) => landed.push(`${[...owned].join('+')}:${value}`));
 
-    const read = authority.run('claude', () => pending.promise);
-    authority.invalidate('claude');
+    const read = authority.run(['claude'], () => pending.promise);
+    authority.invalidate(['claude']);
     pending.resolve('pre-commit chain');
 
-    expect(await read).toBe('stale');
+    expect([...await read]).toEqual([]);
     expect(landed).toEqual([]);
+  });
+
+  it('swallows a failure nobody is waiting on and rethrows one that still owns a key', async () => {
+    const authority = createLatestAsyncAuthorityByKeySet<string, string>(() => undefined);
+    let failSuperseded = () => {};
+    const superseded = new Promise<string>((_resolve, reject) => {
+      failSuperseded = () => reject(new Error('read failed'));
+    });
+
+    const supersededRun = authority.run(['claude'], () => superseded);
+    await authority.run(['claude'], () => Promise.resolve('newer'));
+    failSuperseded();
+
+    expect([...await supersededRun]).toEqual([]);
+    await expect(authority.run(['codex'], () => Promise.reject(new Error('read failed')))).rejects.toThrow('read failed');
   });
 });
 

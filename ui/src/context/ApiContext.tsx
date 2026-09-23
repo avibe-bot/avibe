@@ -540,8 +540,9 @@ export type ApiContextType = {
     deviceLabel?: string,
     deviceId?: string,
     previousEndpoints?: string[],
+    backgroundRotation?: boolean,
   ) => Promise<WebPushSubscriptionResult>;
-  unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
+  unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
   /** Read the session's Show Page without creating it; rejects with
@@ -580,29 +581,6 @@ export type ApiContextType = {
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   installDependency: (dep: string) => Promise<InstallResult>;
-  getMemorySettings: () => Promise<MemorySettingsResult>;
-  saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
-  getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
-  getMemoryProcessingRecordEntries: (project: string, cursor?: string | null, limit?: number) => Promise<MemoryProcessingRecordListResult>;
-  getMemoryProcessingRecordEntry: (project: string, memcellId: string) => Promise<MemoryProcessingRecordDetailResult>;
-  getMemoryStatus: () => Promise<MemoryStatusResult>;
-  getMemoryFailures: () => Promise<MemoryFailureLogResult>;
-  getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
-  getMemoryProfile: () => Promise<MemoryItemsResult>;
-  searchMemory: (query: string, limit?: number, project?: string) => Promise<MemoryRecallResult>;
-  listMemoryEpisodes: (
-    project: string,
-    options?: {
-      page?: number;
-      cursor?: string | null;
-      limit?: number;
-      origin?: MemoryOrigin;
-    },
-  ) => Promise<MemoryListResult>;
-  listMemoryProjects: () => Promise<{ status: 'ok'; projects: Array<{ id: string; kind: 'default' | 'named' | 'all' }> } | { status: 'failed'; error?: string }>;
-  deleteMemoryData: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
-  wakeMemory: () => Promise<MemoryWakeResult>;
-  repairMemory: (confirmLoss: true) => Promise<MemoryDataOperationResult>;
   getBackendConnection: (name: 'claude' | 'codex' | 'opencode') => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
@@ -801,7 +779,7 @@ export type ApiContextType = {
     draft: { text: string; updated_at: string | null },
   ) => Promise<void>;
   recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
-  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
+  listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean; backgroundPush?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
     backend?: string;
@@ -1309,6 +1287,10 @@ export type WorkbenchMessage = {
   source: 'user' | 'agent' | 'harness' | string | null;
   author_id: string | null;
   author_name: string | null;
+  // Read-side display name for a human sender on an Organization instance,
+  // resolved from author_id. Absent on a personal instance and whenever the
+  // sender cannot be resolved; never carries the underlying email address.
+  sender_label?: string | null;
   // Read-side provenance for an agent-callback ("自动触发") harness message (A9a):
   // the session that triggered the run, resolved from the run's source_actor.
   // Present only on agent_run harness messages; enables the source-session chip
@@ -1921,7 +1903,7 @@ export type DependencyItem = {
   latest_version?: string | null;
   has_update?: boolean;
   status: 'ready' | 'not_required' | 'missing' | 'upgrade_required' | 'unsupported' | 'error' | 'unknown';
-  readiness?: 'ready' | 'not_required' | 'not_ready' | 'memory_requirement_unreadable';
+  readiness?: 'ready' | 'not_required' | 'not_ready';
   action_class?: 'none' | 'repairable' | 'operator_only';
   reason?: string | null;
   release_state?: 'published' | 'unavailable' | null;
@@ -1931,334 +1913,6 @@ export type DependencyItem = {
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
 export type DependencyReadOptions = { ids?: readonly string[]; signal?: AbortSignal };
-
-// Current Memory contract: docs/MEMORY.md.
-// Keys are write-only: GET never returns a usable `api_key`, only `has_api_key`.
-export type MemoryRerankProvider = 'deepinfra' | 'vllm' | 'dashscope';
-
-export type MemoryEndpointConfig = {
-  base_url: string | null;
-  model: string | null;
-  // Write-only: the settings GET never returns a usable key, only `has_api_key`.
-  // Typed as `null` so no caller can read a saved key back off the response.
-  api_key: null;
-  has_api_key: boolean;
-  provider?: MemoryRerankProvider | null;
-};
-
-export type MemoryProcessingConfig = {
-  llm: MemoryEndpointConfig;
-  embedding: MemoryEndpointConfig;
-  rerank?: MemoryEndpointConfig;
-  multimodal?: MemoryEndpointConfig;
-};
-
-export type MemorySettings = {
-  status: 'ok';
-  enabled: boolean;
-  profile_enabled: boolean;
-  mode: 'organization' | 'platform' | 'custom';
-  cloud_available?: boolean;
-  managed?: boolean;
-  transition_notice_pending?: boolean;
-  capability_paused?: boolean;
-  im_attachment_capture_available?: boolean;
-  processing: MemoryProcessingConfig;
-};
-
-// Omitting a field keeps its current value; an explicit `api_key: null` clears it.
-// Required keys can clear only while Memory is disabled; optional endpoints can
-// be removed while Memory stays enabled.
-export type MemoryEndpointPatch = {
-  base_url?: string | null;
-  model?: string | null;
-  api_key?: string | null;
-  provider?: MemoryRerankProvider | null;
-};
-
-export type MemorySettingsPatch = {
-  enabled?: boolean;
-  profile_enabled?: boolean;
-  mode?: 'platform' | 'custom';
-  acknowledge_transition?: true;
-  processing?: {
-    llm?: MemoryEndpointPatch;
-    embedding?: MemoryEndpointPatch;
-    rerank?: MemoryEndpointPatch;
-    multimodal?: MemoryEndpointPatch;
-  };
-  confirm_loss?: boolean;
-};
-
-export type MemoryFailureDiagnostic = {
-  side?: 'embedding' | 'llm' | 'rerank' | 'multimodal';
-  http_status?: number | null;
-  provider_error_code?: string | null;
-  message?: string;
-};
-export type MemoryFailure = {
-  status: 'failed';
-  error: string;
-  diagnostic?: MemoryFailureDiagnostic;
-};
-
-export type MemorySettingsResult =
-  | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
-  | MemoryFailure;
-
-export type MemoryStatus = {
-  status: 'ok';
-  state: 'disabled' | 'starting' | 'running' | 'degraded' | 'needs_repair';
-  reason: string | null;
-  source: {
-    status: 'available' | 'stale' | 'unknown' | 'unavailable';
-    observed_at: string | null;
-    reason: string | null;
-  };
-  health: null | {
-    status: string;
-    version: string | null;
-    capabilities: Record<string, unknown>;
-    disabled_features: string[];
-  };
-  attachment_capture?: {
-    status: 'ready' | 'not_configured' | 'unavailable';
-  };
-};
-
-// A dependency-missing failure from the internal handler omits `status` and
-// only carries `error`; normalize both shapes at the call site.
-export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
-
-export type MemoryFailureLogEntry = {
-  affected_count?: number;
-  id: string;
-  kind: string;
-  state: string;
-  operation: string;
-  occurred_at: string;
-  error_code: string | null;
-  attempts: number;
-  generation: number | null;
-  request_id: string | null;
-};
-
-export type MemoryFailureLog = {
-  status: 'ok';
-  source?: MemoryProcessingSourceStatus;
-  items: MemoryFailureLogEntry[];
-};
-
-export type MemoryFailureLogResult =
-  | MemoryFailureLog
-  | MemoryFailure
-  | { error: string };
-
-export type MemoryMaintenance = {
-  status: 'ok';
-  data_exists: boolean;
-  can_delete_data: boolean;
-};
-
-export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
-
-export type MemoryProcessingRecordSummary = {
-  status: 'ok';
-  runtime: {
-    source: MemoryStatus['source'];
-    health: MemoryStatus['health'];
-  };
-  sources: MemoryProcessingRecordSources;
-  anomalies: {
-    source: MemoryProcessingSourceStatus;
-    items: MemoryFailureLogEntry[];
-  };
-  maintenance: {
-    source: MemoryProcessingSourceStatus;
-    data_exists: boolean;
-    can_delete_data: boolean;
-  };
-};
-
-export type MemoryProcessingRecordResult =
-  | MemoryProcessingRecordSummary
-  | MemoryFailure
-  | { error: string };
-
-export type MemoryItemKind = 'profile' | 'episode' | 'fact';
-
-export type MemoryProfileExplicitInfo = {
-  description: string;
-  category: string | null;
-  evidence: string | null;
-};
-
-export type MemoryProfileTrait = {
-  description: string;
-  trait: string | null;
-  basis: string | null;
-  evidence: string | null;
-};
-
-export type MemoryProfile = {
-  summary: string | null;
-  explicit_info: MemoryProfileExplicitInfo[];
-  implicit_traits: MemoryProfileTrait[];
-  updated_at: string | null;
-};
-
-export type MemorySearchWarning = 'memory_search_partial' | 'memory_search_truncated';
-
-export type MemoryItem = {
-  kind: MemoryItemKind;
-  text: string;
-  date: string | null;
-  profile?: MemoryProfile;
-  project?: string;
-  origin?: 'user' | 'agent' | 'both';
-};
-
-export type MemoryItemsResult =
-  | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
-  | MemoryFailure;
-
-export type MemoryRecallResult =
-  | {
-      status: 'ok';
-      items: MemoryItem[];
-      warnings: MemorySearchWarning[];
-      requested_mode: 'auto' | 'keyword' | 'vector' | 'hybrid' | 'agentic';
-      effective_mode: 'keyword' | 'vector' | 'hybrid' | 'agentic';
-      source: 'everos';
-      current_session_overlay: boolean;
-      watermark_ms: number | null;
-      freshness: 'unknown';
-    }
-  | MemoryFailure;
-
-export type MemoryListWarning = 'memory_list_partial' | 'memory_list_truncated';
-export type MemoryOrigin = 'user' | 'agent';
-
-export type MemoryListItem = {
-  id: string;
-  kind: 'episode';
-  subject: string;
-  summary: string;
-  body: string;
-  timestamp: string;
-  project: string;
-  origin?: MemoryOrigin;
-};
-
-export type MemoryListResult =
-  | {
-      status: 'ok';
-      items: MemoryListItem[];
-      count: number;
-      total_count: number | null;
-      warnings: MemoryListWarning[];
-      page?: number;
-      page_size?: number;
-      next_cursor?: string | null;
-    }
-  | MemoryFailure;
-
-export type MemoryProcessingSourceStatus = {
-  status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
-  observed_at: string | null;
-  reason?: string | null;
-};
-
-export type MemoryProcessingRecordSources = {
-  memcells: MemoryProcessingSourceStatus;
-  runs: MemoryProcessingSourceStatus;
-  semantic: MemoryProcessingSourceStatus;
-};
-
-export type MemoryProcessingRecordEntry = {
-  memcell_id: string;
-  project_id: string;
-  session_id: string;
-  owner_id: string;
-  timestamp_ms: number;
-  preview: string;
-  payload: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; item_count: number };
-  runs: { status: 'available' | 'partial' | 'unavailable'; reason: string | null; total: number; statuses: Record<string, number> };
-};
-
-export type MemoryProcessingRecordListResult =
-  | {
-      status: 'ok';
-      entries: MemoryProcessingRecordEntry[];
-      next_cursor: string | null;
-      sections: MemoryProcessingRecordSources;
-    }
-  | MemoryFailure;
-
-export type MemoryProcessingPayloadItem = {
-  id: string;
-  timestamp_ms: number;
-  sender_id: string;
-  content: Array<{ type: 'text'; text: string; omitted_bytes: number }>;
-};
-
-export type MemoryProcessingRun = {
-  run_id: string;
-  strategy: string;
-  attempt: number;
-  status: string;
-  started_at: string | null;
-  finished_at: string | null;
-  error: string | null;
-  event_topic: string;
-};
-
-export type MemoryProcessingSemanticItem = {
-  kind: 'episode' | 'fact';
-  entry_id: string;
-  timestamp: string | null;
-  content: string;
-  subject?: string | null;
-  summary?: string | null;
-};
-
-export type MemoryProcessingRecordDetailResult =
-  | {
-      status: 'ok';
-      entry: Pick<MemoryProcessingRecordEntry, 'memcell_id' | 'project_id' | 'session_id' | 'owner_id' | 'timestamp_ms'>;
-      payload: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingPayloadItem[]; omitted_count?: number };
-      runs: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingRun[]; omitted_count?: number };
-      semantic: { status: 'available' | 'partial' | 'unavailable'; reason?: string | null; items: MemoryProcessingSemanticItem[]; omitted_count?: number };
-      current_state: {
-        status: 'available' | 'partial' | 'unavailable';
-        reason?: string | null;
-        label?: 'current_unattributed';
-        profile?: { status: 'present' | 'missing'; updated_at_ms: number | null };
-        indexing?: { status: string; reason?: string; items?: Array<{ md_path: string; status: string; updated_at: string | null; error: string | null }> };
-      };
-    }
-  | MemoryFailure;
-
-export type MemoryWakeResult = (
-  | { ok: true; state: 'running' }
-  | { ok: false; state?: MemoryStatus['state']; error?: string }
-) & { artifact_update?: { ok: boolean; reason?: string | null } };
-
-export type MemoryDataOperationResult = {
-  ok: boolean;
-  operation: 'repair' | 'delete_data';
-  state?: MemoryStatus['state'];
-  result?: 'completed' | 'unchanged' | 'partial' | 'deleted_readiness_failed' | 'failed';
-  error?: string;
-  data_deleted?: boolean;
-  data_remaining?: boolean;
-  roots?: Array<{
-    path: string;
-    existed: boolean;
-    deleted: boolean;
-    error?: string;
-  }>;
-};
 
 export type BackendConnectionState = {
   ok: boolean;
@@ -2607,6 +2261,7 @@ export type WebPushStatus = {
   public_key: string;
   subscription_count: number;
   current_subscription_enabled?: boolean;
+  current_subscription_repairable?: boolean;
   normal_delivery?: WebPushNormalDelivery;
 };
 
@@ -2620,6 +2275,7 @@ export type WebPushStatusPayload = {
 
 export type WebPushSubscriptionResult = {
   ok: boolean;
+  accepted: boolean;
   subscription: {
     id: string;
     user_key: string;
@@ -2628,7 +2284,7 @@ export type WebPushSubscriptionResult = {
     device_id?: string | null;
     user_agent?: string | null;
     device_label?: string | null;
-  };
+  } | null;
 };
 
 export type WebPushTestResult = {
@@ -3754,14 +3410,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
-    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints) =>
+    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation) =>
       postJson('/api/web-push/subscriptions', {
         subscription,
         device_label: deviceLabel,
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
+        background_rotation: backgroundRotation,
       }),
-    unsubscribeWebPush: (endpoint) => deleteJson('/api/web-push/subscriptions', { endpoint }),
+    unsubscribeWebPush: (endpoint, deviceId) =>
+      deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
     sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
     setShowPageAvailability: (sessionId, offline) => postJson(
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,
@@ -3833,49 +3491,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
     },
     installDependency: (dep) => startAndPollDependencyInstall(dep),
-    // handleError: false — every route returns closed `{status:'failed',error}` bodies (never a
-    // thrown ApiError/toast) so the Memory page can render its own inline state per code.
-    getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
-    saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
-    getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
-    getMemoryProcessingRecordEntries: (project, cursor = null, limit = 20) => {
-      const query = new URLSearchParams({ limit: String(limit), project });
-      if (cursor) query.set('cursor', cursor);
-      return getJson(`/api/memory/processing-record/entries?${query.toString()}`, { handleError: false });
-    },
-    getMemoryProcessingRecordEntry: (project, memcellId) => {
-      const query = new URLSearchParams({ memcell_id: memcellId, project });
-      return getJson(`/api/memory/processing-record/entry?${query.toString()}`, { handleError: false });
-    },
-    getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
-    getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
-    getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),
-    getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
-    searchMemory: (query, limit = 20, project) => postJson('/api/memory/search', {
-      query,
-      policy: {
-        mode: 'hybrid',
-        max_results: limit,
-        include_profile: true,
-        include_current_session: false,
-      },
-      ...(project ? { project } : {}),
-    }, { handleError: false }),
-    listMemoryEpisodes: (project, options = {}) => {
-      const limit = options.limit ?? 20;
-      return postJson('/api/memory/list', {
-        project,
-        limit,
-        ...(options.origin ? { origin: options.origin } : {}),
-        ...(project === 'all'
-          ? (options.cursor ? { cursor: options.cursor } : {})
-          : { page: options.page ?? 1 }),
-      }, { handleError: false });
-    },
-    listMemoryProjects: () => getJson('/api/memory/projects', { handleError: false }),
-    deleteMemoryData: (confirmLoss) => postJson('/api/memory/delete-data', { confirm_loss: confirmLoss }, { handleError: false }),
-    wakeMemory: () => postJson('/api/memory/runtime/wake', {}, { handleError: false }),
-    repairMemory: (confirmLoss) => postJson('/api/memory/repair', { confirm_loss: confirmLoss }, { handleError: false }),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
@@ -4244,6 +3859,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.onlySession) search.set('session', params.onlySession);
       const qs = search.toString();
       const path = qs ? `/api/inbox?${qs}` : '/api/inbox';
+      if (params?.backgroundPush) {
+        // A Push-triggered page read is non-interactive just like the worker's
+        // own read. Bypass the shared cache and never adopt an error as an empty map.
+        return apiFetch(path, { headers: { 'X-Avibe-Background-Push': '1' } }).then(async (response) => {
+          if (!response.ok) throw new Error(`Background Inbox refresh failed (${response.status})`);
+          return response.json();
+        });
+      }
       const options = { handleError: params?.handleError };
       return params?.cache === false ? getJson(path, options) : getCachedJson(path, 1500, options);
     },
@@ -4532,7 +4155,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // Logout remains authoritative when Push APIs are unavailable.
       }
       return postJson('/auth/logout', {
-        device_id: getWebPushDeviceId(),
+        device_id: await getWebPushDeviceId(),
         ...(endpoint ? { endpoint } : {}),
       });
     },

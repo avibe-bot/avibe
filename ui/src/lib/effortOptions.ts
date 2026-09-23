@@ -25,9 +25,17 @@
  * declare it. Protocol-family defaults and backend fallbacks still omit it: an
  * unknown relay model must not be over-claimed.
  */
-export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
+// `none` is a known explicit Off value, not a backend/family default. Only a
+// model that declares it may offer it; recognizing it does not add capability.
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const;
 
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+/**
+ * Explicit Off in a model's declared options, distinct from an unset effort.
+ * Adapters translate this value; they never add it to a model's capabilities.
+ */
+export const NO_REASONING_EFFORT = 'none';
 
 // Typed against the vocabulary rather than `string[]`: a backend list that
 // drifts away from it then fails to compile, which is the check the spec asks

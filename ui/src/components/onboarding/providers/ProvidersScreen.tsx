@@ -15,22 +15,26 @@
 // composition, and therefore is this file's: the engine has to be up whether or not
 // there is an assistant to adopt.
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { Button } from '@/components/ui/button';
 import {
   createAgentCollectionReadAuthority,
   createSourceCollectionReadAuthority,
+  type CollectionReadAuthority,
 } from '@/components/settings/models/collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from '@/components/settings/models/gatewayAdoption';
 import { MigrationDialog } from '@/components/settings/models/MigrationDialog';
 import { isImportableKey } from '@/components/settings/models/migrationScan';
 import { modelsApi, type SourceCreated } from '@/components/settings/models/modelsApi';
+import { foldRegionRead } from '@/components/settings/models/regionRead';
 import {
   installAndStartStep,
   resumeInstallAndStartRuntime,
 } from '@/components/settings/models/runtimeLifecycle';
-import type { AgentBackend, RuntimeDependency, Source } from '@/components/settings/models/types';
+import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from '@/components/settings/models/types';
 
 import { ImportKeysNotice } from '../ImportKeysNotice';
 import { useOnboardingMotion } from '../motion';
@@ -123,6 +127,26 @@ const gatewayReadAnswered = (against: GatewayEvidence | null, now: GatewayEviden
     || against.capability !== now.capability)
   && gatewayEvidenceSettled(now);
 
+/**
+ * An observation as a VALUE, rather than as the object that carried it.
+ *
+ * What a supply read is taken against is the machine that will answer it, and these
+ * are the facts that decide whether it can: whether it is up, whether it is the
+ * runtime it claims to be, which build is installed, and whether one may exist on
+ * this host at all. A shell that hands down an equal read it rebuilt — a refresh
+ * that confirmed nothing changed, a parent that re-created its props — has observed
+ * nothing new, so taking the carrier's identity for the observation would restart
+ * the read on every render that produced one.
+ */
+const observationOf = (runtime: RuntimeDependency | null): string => (runtime === null
+  ? 'none'
+  : [
+    runtime.status.health,
+    runtime.status.verified,
+    runtime.status.installed_version ?? '',
+    runtime.manifest.resolution,
+  ].join(':'));
+
 /** Locale-correct enumeration without inventing a separator string for each language.
  *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
 const formatNames = (names: readonly string[], locale: string): string => {
@@ -133,7 +157,17 @@ const formatNames = (names: readonly string[], locale: string): string => {
   }
 };
 
-export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenProps>(
+/**
+ * C4 names one owner for every setup supply read, so the shell may hand this screen
+ * the authority it shares with the completion gate. Optional because a screen mounted
+ * on its own is still a screen: it then owns one for its own life, which is what the
+ * shipped behaviour already was.
+ */
+export type ProvidersScreenProps = SetupScreenProps & {
+  agentReads?: CollectionReadAuthority<AgentSupply[]>;
+};
+
+export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScreenProps>(
   function ProvidersScreen({
     active,
     capability,
@@ -144,6 +178,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     setFlowState,
     onActionChange,
     onNavigate,
+    agentReads: sharedAgentReads,
   }, ref) {
     const { t, i18n } = useTranslation();
     const motion = useOnboardingMotion();
@@ -160,7 +195,8 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // One owner per collection, for the whole life of the screen: the add dialog
     // settles an unknown write against the same generation this screen reads.
     const [sourceReads] = React.useState(createSourceCollectionReadAuthority);
-    const [agentReads] = React.useState(createAgentCollectionReadAuthority);
+    const [ownAgentReads] = React.useState(createAgentCollectionReadAuthority);
+    const agentReads = sharedAgentReads ?? ownAgentReads;
 
     const [sources, setSources] = React.useState<Source[]>([]);
     // Whether the list above is an answer. It starts as neither empty nor absent but
@@ -204,12 +240,57 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
     // also true for the rescan that follows an import, whose consent has just been
     // spent on purpose and must not come back ticked.
     const seededSelectionRef = React.useRef(false);
+    /**
+     * Which request the answer on screen belongs to, or `null` while none does.
+     *
+     * A read with no answer yet, and a retry someone asked for, both mean the screen
+     * is back to not knowing — that is what `reading` says and both have to say it. A
+     * refresh a NEW OBSERVATION started is neither: the inventory it describes has not
+     * been contradicted, so the answer in hand is still the best thing known about it,
+     * and retracting it would take the action away for exactly as long as that refresh
+     * runs. The same reason the shell holds a stale runtime region through a refresh
+     * rather than falling back to `loading`.
+     *
+     * The window that costs is not a matter of patience. The observation that starts
+     * the refresh is the same one that makes the action pressable — `hubAdmitted` needs
+     * the runtime read this screen is re-reading against — so the two land one commit
+     * apart: Continue turns pressable, and the effect that runs straight after takes it
+     * back. A press that arrives in between reaches `activate` with the screen already
+     * 「checking」 and is dropped, and nothing re-issues it. Holding the answer through
+     * the refresh is what stops that commit from existing, rather than narrowing it.
+     */
+    const answeredRef = React.useRef<number | null>(null);
+    /**
+     * The runtime observation this screen's supply read is taken against.
+     *
+     * A supply read is answered by the controller, and D11 is what makes the controller
+     * answerable. On a machine whose controller was merely stopped, the read taken on
+     * arrival can fail for that reason alone — and nothing would ever come back for it,
+     * because the sequence that fixes it publishes into the shell's runtime region, not
+     * into this screen. The observation is therefore part of what the read is taken
+     * against: one current read per observation. It adds no owner, no timer and no
+     * second bootstrap, and a read that fails AFTER establishment is still the explicit
+     * Retry it always was, because nothing new has been observed since.
+     *
+     * Held as the observation's own value — see `observationOf` — so it changes when a
+     * genuinely new one lands and not when the shell merely re-reports the one already
+     * standing. That is also how coming back to this screen brings current server facts
+     * rather than the ones it left behind.
+     */
+    const observation = observationOf(foldRegionRead(runtimeRead, {
+      loading: () => null,
+      ready: (runtime) => runtime,
+      unread: () => null,
+      degraded: (stale) => stale,
+    }));
     React.useEffect(() => {
       if (!active || !ready) return;
       let cancelled = false;
-      // A re-read is a read: while it is in flight the screen is back to not knowing,
-      // which is what a retry means and what the action should say.
-      setSourceRead('reading');
+      // A read with no answer behind it is a read: while it is in flight the screen is
+      // back to not knowing, which is what a retry means and what the action should
+      // say. A refresh of an answer this screen already holds is not — see
+      // `answeredRef`.
+      if (answeredRef.current !== supplyToken) setSourceRead('reading');
       void (async () => {
         // Settled independently, because they answer different questions. A scan that
         // fails says nothing about the sources, and discarding a source list that did
@@ -222,10 +303,15 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
         if (cancelled) return;
         // A stale source read is neither an answer nor a failure: a newer generation
         // superseded it, and that newer one is what will settle this.
-        if (read.status === 'rejected') setSourceRead('unreadable');
-        else if (read.value.kind === 'current') {
+        if (read.status === 'rejected') {
+          // Nothing is held now, so the next refresh is a read with no answer behind
+          // it again and says so.
+          answeredRef.current = null;
+          setSourceRead('unreadable');
+        } else if (read.value.kind === 'current') {
           setSources(read.value.value);
           setSourceRead('read');
+          answeredRef.current = supplyToken;
         }
         // Either failure is still a failure for the sentence: what the screen cannot
         // report is exactly what it and its retry exist to say.
@@ -252,7 +338,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
         seededSelectionRef.current = true;
       })();
       return () => { cancelled = true; };
-    }, [active, ready, supplyToken, setFlowState, sourceReads]);
+    }, [active, ready, observation, supplyToken, setFlowState, sourceReads]);
 
     // ── Gateway ─────────────────────────────────────────────────────────────
 
@@ -480,14 +566,16 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
 
     // ── The action the shell renders ────────────────────────────────────────
 
+    // What the screen knows, not what the list happens to hold: an inventory it
+    // could not read is not an empty one, and 「添加」 offered against it is how a
+    // credential that already exists gets written a second time.
+    const hasSource = sourceRead === 'read' && sources.some(usableSource);
+
     const action = providerAction({
       pendingCount: pending.length,
       importFailed,
-      // What the screen knows, not what the list happens to hold: an inventory it
-      // could not read is not an empty one, and 「添加」 offered against it is how a
-      // credential that already exists gets written a second time.
       supply: sourceRead === 'read'
-        ? { kind: 'read', hasSource: sources.some(usableSource) }
+        ? { kind: 'read', hasSource }
         : { kind: sourceRead },
       gatewayBusy,
       // The same admission the dialogs are opened and submitted against, so the footer
@@ -630,10 +718,51 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
           { count: summary.count, names: formatNames(summary.names, i18n.language) },
         );
 
+    // ── The way on when nothing is connected ────────────────────────────────
+
+    // Connecting a provider is what this screen is for, and it is still the only
+    // thing the stage and the footer offer. But an inventory that answered「none」is
+    // an answer: whoever meant to connect later — or declined the takeover on offer —
+    // has nothing here to press, and a step whose every control stays put is a dead
+    // end. So the way on is stated where the shell keeps what is ancillary to the
+    // pair, as a sentence rather than a second button competing with the one above.
+    //
+    // It navigates and does nothing else. Adding a source, taking over a credential
+    // and installing the engine each keep the control that already owns them, and
+    // none of them happens on the way to the next screen. The engine's admission is
+    // not asked about either: it gates writes, and this is not one — gating the way
+    // out on it is how the dead end got here.
+    //
+    // The slot is the shell's, reached the same way the connection step reaches it,
+    // and only while this screen is the one being read: a portal leaves the screen
+    // root and with it the `inert` the shell puts on the others, so the sentence has
+    // to answer to that activity itself.
+    const routeSurfaceActive = useRouteSurfaceActive();
+    const setupRoot = React.useRef<HTMLDivElement>(null);
+    const [actionAside, setActionAside] = React.useState<HTMLElement | null>(null);
+    React.useEffect(() => {
+      setActionAside(setupRoot.current?.closest('.onboarding-step')
+        ?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null);
+    }, [onActionChange]);
+    const onwardNode = sourceRead === 'read' && !hasSource ? (
+      <div className="onboarding-setup-hint">
+        <p className="text-center text-xs text-muted">
+          {t('onboarding.providers.continueHint')}{' '}
+          <Button type="button" variant="link" size="xs" className="h-auto p-0 align-baseline text-xs"
+            onClick={() => onNavigate('assistants')}>
+            {t('onboarding.providers.actionContinue')}
+          </Button>
+        </p>
+      </div>
+    ) : null;
+
     return (
-      <div className="onboarding-setup">
+      <div className="onboarding-setup" ref={setupRoot}>
         <header className="onboarding-heading">
-          <h2>{t('onboarding.providers.title')}</h2>
+          {/* `h1` with a programmatic tab stop, like every other screen's heading: the
+              shell moves focus here on activation, and a heading it cannot find or
+              cannot focus leaves a keyboard journey standing on the footer button. */}
+          <h1 tabIndex={-1}>{t('onboarding.providers.title')}</h1>
           <p>{t('onboarding.providers.subtitle')}</p>
         </header>
 
@@ -776,6 +905,10 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, SetupScreenPr
             onClose={() => setImportOpen(false)}
           />
         )}
+
+        {onwardNode && active && routeSurfaceActive && actionAside
+          ? createPortal(onwardNode, actionAside)
+          : null}
       </div>
     );
   },

@@ -73,7 +73,7 @@ Use `vibe session update --visible|--hidden` (`--visibility foreground|backgroun
 
 For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.
 
-Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Use `vibe harness status` for one unified live/anomaly snapshot. For current-session run history, use `vibe runs list --current-session`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id.
+Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Use `vibe harness status` for one unified live/anomaly snapshot. For current-session run history, use `vibe runs list --current-session`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id; once that run's input reached the live Session turn, it stops the whole turn like Session Stop, including other runs sharing it.
 
 The CLI exposes more options than this prompt lists. Before creating or changing Harness state, or whenever syntax/runtime effects are uncertain, read the relevant help: `vibe <command> --help` or `vibe <command> <subcommand> --help`.
 

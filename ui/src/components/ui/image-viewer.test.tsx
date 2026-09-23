@@ -131,6 +131,68 @@ describe('ImageViewerProvider — paging belongs to the gallery, not to every im
   });
 });
 
+// The other caller outside the transcript: the composer stages images that are
+// not in the session gallery yet, and previewing one before sending must page
+// through those and only those.
+describe('ImageViewerProvider — a caller-named gallery is the one it pages', () => {
+  const STAGED = ['/api/media/staged_1', '/api/media/staged_2'];
+
+  const mountStaged = (images: string[] = GALLERY) =>
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ImageViewerProvider images={images}>
+          <Opener src={STAGED[0]} options={{ gallery: STAGED }} />
+        </ImageViewerProvider>
+      </I18nextProvider>,
+    );
+
+  const shown = () => document.querySelector('[role="dialog"] img')?.getAttribute('src');
+
+  it('pages within the named set instead of the session gallery', () => {
+    mountStaged();
+    fireEvent.click(screen.getByText('open'));
+
+    expect(screen.getByText('1 / 2')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(shown()).toBe(STAGED[1]);
+    // Wrapping stays in the named set rather than continuing into the gallery.
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(shown()).toBe(STAGED[0]);
+  });
+
+  it('keeps its set when the session gallery changes underneath it', () => {
+    const view = mountStaged([]);
+    fireEvent.click(screen.getByText('open'));
+
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <ImageViewerProvider images={GALLERY}>
+          <Opener src={STAGED[0]} options={{ gallery: STAGED }} />
+        </ImageViewerProvider>
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText('1 / 2')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(shown()).toBe(STAGED[1]);
+  });
+
+  it('shows a single staged image on its own', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <ImageViewerProvider images={GALLERY}>
+          <Opener src={STAGED[0]} options={{ gallery: [STAGED[0]] }} />
+        </ImageViewerProvider>
+      </I18nextProvider>,
+    );
+    fireEvent.click(screen.getByText('open'));
+
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.queryByLabelText('Next')).toBeNull();
+    expect(screen.queryByLabelText('Previous')).toBeNull();
+  });
+});
+
 describe('ImageViewerProvider — retained route activity owns global keys', () => {
   const retained = (active: boolean, options?: ImageViewerOpenOptions) => (
     <I18nextProvider i18n={i18n}>

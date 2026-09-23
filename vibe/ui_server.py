@@ -30,9 +30,11 @@ import psutil
 from aiohttp import ClientConnectionError, ClientSession, WSMsgType
 from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
+from fastapi.exception_handlers import http_exception_handler
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
+from starlette.routing import Match
 
 from vibe.ui_compat import (
     CompatApp,
@@ -67,19 +69,15 @@ from core.show_session_events import (
     ShowSessionEventError,
     localized_show_event_error,
     show_event_payload_session_mismatch,
-    show_event_request_requests_dispatch,
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
-from vibe.message_types import types_with
-from vibe.model_service import MODEL_SERVICE_REFRESH_PATH
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
-from vibe.ui_memory_routes import register_memory_routes
 
 if TYPE_CHECKING:
     from core.show_runtime import ShowRuntimeUnavailableError
@@ -98,6 +96,20 @@ class _ShowEventDispatchOutcome(str, Enum):
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def unknown_api_exception(request: FastAPIRequest, exc: StarletteHTTPException):
+    """The SPA catch-all must not turn an absent API into method-not-allowed."""
+    if exc.status_code == 405 and request.url.path.startswith("/api/"):
+        known_path = any(
+            getattr(route, "path", None) != "/{path:path}"
+            and route.matches(request.scope)[0] != Match.NONE
+            for route in app.routes
+        )
+        if not known_path:
+            return FastAPIResponse(content='{"error":"not_found"}', status_code=404, media_type="application/json")
+    return await http_exception_handler(request, exc)
 
 # Global server instance for graceful shutdown on reload
 _server = None
@@ -632,7 +644,6 @@ def _is_mutation_guard_exempt() -> bool:
     if (
         _is_cli_show_event_request()
         or _is_cli_session_activity_request()
-        or _is_cli_model_service_refresh_request()
     ):
         return True
     return (
@@ -665,10 +676,6 @@ def _is_cli_session_activity_request() -> bool:
         _cli_local_event_token_ok()
         and re.fullmatch(r"/api/sessions/[^/]+/cli-activity", request.path or "") is not None
     )
-
-
-def _is_cli_model_service_refresh_request() -> bool:
-    return _cli_local_event_token_ok() and request.path == MODEL_SERVICE_REFRESH_PATH
 
 
 def _is_show_api_mutation() -> bool:
@@ -1366,10 +1373,10 @@ def _is_local_request(config: V2Config | None = None) -> bool:
     return _is_setup_host_request(config)
 
 
-def is_direct_loopback_memory_request() -> bool:
-    """Strict Memory-only browser admission, intentionally narrower than UI local.
+def _is_direct_loopback_browser_request() -> bool:
+    """Strict same-origin browser admission for local author attribution.
 
-    Memory content and settings never accept proxy forwarding, Docker bridge
+    Protected content and settings never accept proxy forwarding, Docker bridge
     allowances, LAN setup hosts, or remote-access cookies. The browser must be
     directly connected over loopback and present a same-origin header.
     """
@@ -1380,17 +1387,17 @@ def is_direct_loopback_memory_request() -> bool:
     return bool(origin and _same_origin(origin, request.host_url.rstrip("/")))
 
 
-def memory_ui_user_key() -> str | None:
-    """Resolve the Memory principal for a trusted browser request.
+def _trusted_browser_author_key() -> str | None:
+    """Resolve the authenticated browser author for local or remote requests.
 
     Direct loopback keeps the install-local identity. Remote browser access is
     admitted only through the configured Avibe Cloud origin with a valid signed
     session cookie; LAN and arbitrary proxy routes remain closed. Reads require
     the same origin evidence as mutations so a remote session cookie cannot be
-    used as a cross-origin Memory oracle.
+    used as a cross-origin data oracle.
     """
 
-    if is_direct_loopback_memory_request():
+    if _is_direct_loopback_browser_request():
         return "avibe:local"
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
@@ -3083,6 +3090,11 @@ def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
     if getattr(g, "remote_session_logout", False):
         return response
+    # A credentialed Push worker read is not an interactive visit. It may
+    # arrive regularly while the app is closed and must not keep a remote
+    # browser session alive merely by refreshing its icon badge.
+    if request.path == "/api/inbox" and request.headers.get("X-Avibe-Background-Push") == "1":
+        return response
     if _is_current_immutable_static_asset_request():
         return response
     renew = getattr(g, "remote_session_renew", None)
@@ -3243,16 +3255,6 @@ def status():
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
         payload = json.loads(runtime.render_status(detect_extra_processes=False))
     return jsonify(payload)
-
-
-@app.route(MODEL_SERVICE_REFRESH_PATH, methods=["POST"])
-def model_service_refresh():
-    if not _is_cli_model_service_refresh_request():
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-    from vibe.model_service import request_model_service_refresh
-
-    request_model_service_refresh()
-    return jsonify({"ok": True})
 
 
 @app.websocket("/ws/echo")
@@ -3723,7 +3725,6 @@ async def _wait_for_remote_session_authorization_loss(
 ) -> str:
     """Return the terminal state for one accepted remote socket."""
 
-    from vibe import remote_access
     from vibe.authorization import context_from_session_payload
 
     if payload is None:
@@ -5852,7 +5853,6 @@ def _show_page_payload_for_request(payload: dict, context: Any = None) -> dict:
     context = _request_authorization_context(context)
     if context is None or _has_runtime_management_access(context):
         return payload
-    from storage import project_access_service
 
     engine = _projects_engine()
     with engine.connect() as conn:
@@ -6332,13 +6332,13 @@ def _web_push_user_key() -> str:
 
 
 def _workbench_author_id() -> str | None:
-    """Return an author only when the browser passes strict Memory admission."""
+    """Return an author only when the browser passes strict admission."""
 
-    memory_user_key = memory_ui_user_key()
+    author_key = _trusted_browser_author_key()
     prefix = "avibe:"
-    if not isinstance(memory_user_key, str) or not memory_user_key.startswith(prefix):
+    if not isinstance(author_key, str) or not author_key.startswith(prefix):
         return None
-    author_id = memory_user_key[len(prefix) :].strip()
+    author_id = author_key[len(prefix) :].strip()
     return author_id or None
 
 
@@ -6410,7 +6410,7 @@ def web_push_status():
                 logger.debug("web push: ignoring invalid status subscription payload", exc_info=True)
         subscription_count = web_push_service.count_enabled(conn, user_key=user_key)
         current_subscription = (
-            web_push_service.get_enabled_by_endpoint(
+            web_push_service.get_by_endpoint(
                 conn,
                 endpoint=endpoint,
                 user_key=user_key,
@@ -6418,13 +6418,20 @@ def web_push_status():
             if isinstance(endpoint, str) and endpoint.strip()
             else None
         )
+        current_subscription_enabled = bool(current_subscription and current_subscription["enabled"])
+        current_subscription_repairable = bool(
+            current_subscription
+            and not current_subscription_enabled
+            and current_subscription.get("provider_invalidated_at")
+        )
     return jsonify(
         {
             "ok": True,
             "configured": True,
             "public_key": keys.public_key,
             "subscription_count": subscription_count,
-            "current_subscription_enabled": current_subscription is not None,
+            "current_subscription_enabled": current_subscription_enabled,
+            "current_subscription_repairable": current_subscription_repairable,
             "normal_delivery": _web_push_normal_delivery_diagnostics(),
         }
     )
@@ -6448,21 +6455,31 @@ def web_push_subscribe():
     device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     previous_endpoints = payload.get("previous_endpoints") if isinstance(payload.get("previous_endpoints"), list) else None
     subscription = payload.get("subscription") if isinstance(payload.get("subscription"), dict) else payload
+    background_rotation = payload.get("background_rotation") is True
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
-            row = web_push_service.upsert_subscription(
-                conn,
-                user_key=_web_push_user_key(),
-                payload=subscription,
-                user_agent=user_agent,
-                device_label=device_label,
-                device_id=device_id,
-                previous_endpoints=previous_endpoints,
-            )
+            if background_rotation:
+                row = web_push_service.upsert_background_rotated_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    previous_endpoints=previous_endpoints,
+                )
+            else:
+                row = web_push_service.upsert_subscription(
+                    conn,
+                    user_key=_web_push_user_key(),
+                    payload=subscription,
+                    user_agent=user_agent,
+                    device_label=device_label,
+                    device_id=device_id,
+                    previous_endpoints=previous_endpoints,
+                )
     except ValueError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
-    return jsonify({"ok": True, "subscription": row})
+    return jsonify({"ok": True, "accepted": row is not None, "subscription": row})
 
 
 @app.route("/api/web-push/subscriptions", methods=["DELETE"])
@@ -6471,13 +6488,15 @@ def web_push_unsubscribe():
 
     payload = request.json or {}
     endpoint = payload.get("endpoint")
+    device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     if not isinstance(endpoint, str) or not endpoint.strip():
         return jsonify({"ok": False, "error": "endpoint_required"}), 400
     engine = _projects_engine()
     with engine.begin() as conn:
-        disabled = web_push_service.disable_subscription(
+        disabled = web_push_service.disable_device_subscription(
             conn,
             endpoint=endpoint,
+            device_id=device_id,
             user_key=_web_push_user_key(),
         )
     return jsonify({"ok": True, "disabled": disabled})
@@ -7247,7 +7266,6 @@ def _remote_resource_access_context():
     """Resolve the signed remote session required by local ACL metadata APIs."""
 
     from storage import resource_access_service
-    from vibe import remote_access
 
     config = _load_remote_access_config()
     if (
@@ -7392,13 +7410,8 @@ def ui_reload():
         import sys
         import time
         from config import paths as config_paths
-        from vibe.memory_ui_access import process_ui_read_secret
-
         command = f"from vibe.ui_server import run_ui_server; run_ui_server('{bind_host}', {port})"
-        memory_ui_secret = process_ui_read_secret()
-        spawn_kwargs = (
-            {"memory_ui_secret": memory_ui_secret} if memory_ui_secret is not None else {}
-        )
+        spawn_kwargs = {}
         pid = runtime.spawn_background(
             [sys.executable, "-c", command],
             config_paths.get_runtime_ui_pid_path(),
@@ -7994,8 +8007,6 @@ _ALLOWED_DEPENDENCIES = {
     "avault",
     "model-hub-engine",
     "show-runtime",
-    "memory-package",
-    "memory-runtime",
     "tmux",
 }
 
@@ -9269,6 +9280,7 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
     """Project the active claimed Delivery as a temporary transcript row."""
 
     from storage import message_deliveries
+    from storage.sender_identity import attach_sender_labels
 
     turn = message_deliveries.active_turn(conn, session_id)
     if turn is None:
@@ -9285,7 +9297,12 @@ def _active_unmaterialized_input(conn, session_id: str) -> dict[str, Any] | None
         delivered_at=turn.get("started_at") or turn.get("created_at"),
         read_at=None,
     )
-    return payload
+    # This row joins a transcript whose durable rows were already enriched by
+    # ``messages_service``, so it has to carry the same identity fields or the
+    # sender would appear only once the Delivery materializes. Attached after
+    # the public projection, which rewrites metadata rather than allow-listing
+    # fields.
+    return attach_sender_labels(conn, [payload])[0]
 
 
 def _append_active_input(
@@ -9865,8 +9882,7 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
-    For an active row, the controller owns the terminal session write. Memory
-    a volatile Memory barrier is best-effort after that write and never blocks archive. If the
+    For an active row, the controller owns the terminal session write. If the
     controller seam itself is unavailable, archive fails closed.
 
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
@@ -9932,7 +9948,7 @@ async def sessions_archive(session_id: str):
         from vibe import internal_client
 
         try:
-            archive_result = await internal_client.memory_archive_session(session_id)
+            archive_result = await internal_client.archive_session(session_id)
         except (
             internal_client.InternalServerUnavailable,
             internal_client.InternalServerTimeout,
@@ -10222,11 +10238,6 @@ async def _parse_file_upload_form(starlette_request: FastAPIRequest, *, max_file
 
 async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
     return await app.dispatch_native_request(starlette_request, handler)
-
-
-# The Memory routes live in their own module; registered here so their position
-# in the app's route table is unchanged.
-register_memory_routes(app)
 
 
 @app.get("/api/files/list", include_in_schema=False)
@@ -16400,6 +16411,9 @@ def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_co
 @app.route("/<path:path>", methods=["GET", "HEAD"])
 def serve_static(path):
     """Serve static files from ui/dist, with SPA fallback to index.html."""
+    # Unknown API paths are not client-side navigation routes.
+    if path == "api" or path.startswith("api/"):
+        return jsonify({"error": "not_found"}), 404
     ui_dist = get_ui_dist_path()
 
     if path.startswith("assets/"):
@@ -16602,19 +16616,10 @@ async def _reconcile_startup_dependencies_task() -> None:
                 if isinstance(result.get("model_hub_engine"), dict)
                 else {}
             )
-            memory_package = (
-                result.get("memory_package")
-                if isinstance(result.get("memory_package"), dict)
-                else {}
-            )
             logger.warning(
                 "Startup dependency reconcile completed with issues in %sms: "
-                "memory_package=%s askill=%s model_hub_engine=%s show_runtime=%s",
+                "askill=%s model_hub_engine=%s show_runtime=%s",
                 duration_ms,
-                memory_package.get("message")
-                or memory_package.get("reason")
-                or memory_package.get("status")
-                or memory_package.get("ok"),
                 askill.get("message") or askill.get("status") or askill.get("ok"),
                 model_hub_engine.get("message")
                 or model_hub_engine.get("reason")
@@ -16684,9 +16689,6 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
 
-    from vibe.memory_ui_access import initialize_process_ui_read_secret
-
-    initialize_process_ui_read_secret()
     global _UI_RUNTIME_ACTIVE, _server
     import time
     import uvicorn

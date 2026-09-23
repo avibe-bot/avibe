@@ -5,7 +5,6 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any, Tuple
 from uuid import uuid4
 from modules.im import MessageContext
@@ -47,7 +46,6 @@ from core.managed_skills import (
     managed_skill_environment,
     managed_skill_project_base,
 )
-from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
 from core.resource_governance import governor_from_controller
 from core.runtime_activation import RuntimeActivationIdentity
@@ -466,6 +464,7 @@ class SessionHandler(BaseHandler):
         session_key: str,
         stored_claude_session_id: Optional[str],
         current_model: Optional[str],
+        effective_effort: Optional[str],
         agent_system_prompt: Optional[str],
         model_hub_launch: "ModelHubLaunch",
     ) -> ClaudeSDKClient | None:
@@ -477,13 +476,18 @@ class SessionHandler(BaseHandler):
             client,
         ):
             return None
-        if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
-            logger.info("Recreating cached Claude SDK client because Model Hub channel changed")
+        reasoning_changed = getattr(client, "_vibe_reasoning_effort", None) != effective_effort
+        if (
+            reasoning_changed
+            or getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
+        ):
+            reason = "reasoning_effort_changed" if reasoning_changed else "model_hub_channel_changed"
+            logger.info("Recreating cached Claude SDK client: %s", reason)
             await self._wait_for_claude_session_idle(composite_key)
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="model_hub_channel_changed",
+                reason=reason,
             )
             return None
 
@@ -582,6 +586,7 @@ class SessionHandler(BaseHandler):
         session_key: str,
         native_session_id: Optional[str],
         desired_model: Optional[str],
+        effective_effort: Optional[str],
         effective_agent: str,
         agent_system_prompt: Optional[str],
         model_hub_launch: "ModelHubLaunch",
@@ -594,13 +599,18 @@ class SessionHandler(BaseHandler):
             client,
         ):
             return None
-        if getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint:
-            logger.info("Recreating cached Claude subagent SDK client because Model Hub channel changed")
+        reasoning_changed = getattr(client, "_vibe_reasoning_effort", None) != effective_effort
+        if (
+            reasoning_changed
+            or getattr(client, "_vibe_model_hub_fingerprint", "direct") != model_hub_launch.fingerprint
+        ):
+            reason = "reasoning_effort_changed" if reasoning_changed else "subagent_model_hub_channel_changed"
+            logger.info("Recreating cached Claude subagent SDK client: %s", reason)
             await self._wait_for_claude_session_idle(composite_key)
             await self._cleanup_session_locked(
                 composite_key,
                 retire_model_hub_scope=model_hub_launch.channel == "direct",
-                reason="subagent_model_hub_channel_changed",
+                reason=reason,
             )
             return None
         self.ensure_agent_session_id(
@@ -1328,6 +1338,18 @@ class SessionHandler(BaseHandler):
         bind_launch(context, model_hub_launch)
         runtime_model = model_hub_launch.runtime_model or launch_model
         cached_subagent_model = self._cached_claude_subagent_model(explicit_model, model_hub_launch)
+        from modules.agents.opencode.utils import normalize_claude_reasoning_effort
+
+        # Reasoning is a process-creation option, unlike set_model. Resolve it
+        # once for both reuse and creation, including the in-flight create path.
+        catalog_efforts = (
+            model_hub_launch.reasoning_efforts
+            if model_hub_launch.channel in {"hub", "native_cli"}
+            else backend_model_catalog.catalog_reasoning_efforts_for_model("claude", launch_model)
+        )
+        effective_effort = normalize_claude_reasoning_effort(
+            launch_model, explicit_effort, catalog_efforts,
+        )
 
         if not effective_agent:
             # Claude SDK model changes are control requests; only send one when
@@ -1341,6 +1363,7 @@ class SessionHandler(BaseHandler):
                 session_key=session_key,
                 stored_claude_session_id=stored_claude_session_id,
                 current_model=current_model,
+                effective_effort=effective_effort,
                 agent_system_prompt=None,
                 model_hub_launch=model_hub_launch,
             )
@@ -1362,6 +1385,7 @@ class SessionHandler(BaseHandler):
                 session_key=session_key,
                 native_session_id=cached_session_id,
                 desired_model=cached_subagent_model,
+                effective_effort=effective_effort,
                 effective_agent=effective_agent,
                 agent_system_prompt=agent_system_prompt,
                 model_hub_launch=model_hub_launch,
@@ -1388,6 +1412,7 @@ class SessionHandler(BaseHandler):
                     session_key=session_key,
                     native_session_id=stored_claude_session_id,
                     desired_model=cached_subagent_model,
+                    effective_effort=effective_effort,
                     effective_agent=effective_agent,
                     agent_system_prompt=agent_system_prompt,
                     model_hub_launch=model_hub_launch,
@@ -1401,6 +1426,7 @@ class SessionHandler(BaseHandler):
                     session_key=session_key,
                     stored_claude_session_id=stored_claude_session_id,
                     current_model=runtime_model,
+                    effective_effort=effective_effort,
                     agent_system_prompt=None,
                     model_hub_launch=model_hub_launch,
                 )
@@ -1418,7 +1444,7 @@ class SessionHandler(BaseHandler):
                 stored_claude_session_id=fork_source_claude_session_id or stored_claude_session_id,
                 effective_agent=effective_agent,
                 explicit_model=explicit_model,
-                explicit_effort=explicit_effort,
+                effective_effort=effective_effort,
                 agent_system_prompt=agent_system_prompt,
                 fork_session=bool(fork_source_claude_session_id),
             )
@@ -1447,7 +1473,7 @@ class SessionHandler(BaseHandler):
         stored_claude_session_id: Optional[str],
         effective_agent: Optional[str],
         explicit_model: Optional[str],
-        explicit_effort: Optional[str],
+        effective_effort: Optional[str],
         agent_system_prompt: Optional[str],
         fork_session: bool = False,
     ) -> ClaudeSDKClient:
@@ -1500,23 +1526,7 @@ class SessionHandler(BaseHandler):
             if model_hub_launch is not None and model_hub_launch.backend == "claude"
             else effective_model
         )
-        from modules.agents.opencode.utils import normalize_claude_reasoning_effort
-
-        catalog_efforts = (
-            model_hub_launch.reasoning_efforts
-            if model_hub_launch is not None
-            and model_hub_launch.backend == "claude"
-            and model_hub_launch.channel in {"hub", "native_cli"}
-            else backend_model_catalog.catalog_reasoning_efforts_for_model(
-                "claude",
-                effective_model,
-            )
-        )
-        effective_effort = normalize_claude_reasoning_effort(
-            effective_model,
-            explicit_effort,
-            catalog_efforts,
-        )
+        from modules.agents.opencode.utils import NO_REASONING_EFFORT
 
         # Determine final system prompt: agent prompt takes precedence over config.
         # Always append avibe system prompt injection so transport
@@ -1608,7 +1618,11 @@ class SessionHandler(BaseHandler):
         cli_path_override = self._get_claude_cli_path_override()
         if cli_path_override:
             option_kwargs["cli_path"] = cli_path_override
-        if effective_effort:
+        if effective_effort == NO_REASONING_EFFORT:
+            # The exact model declaration admitted Off. Claude expresses that
+            # choice through the thinking switch, not an `effort="none"` tier.
+            option_kwargs["thinking"] = {"type": "disabled"}
+        elif effective_effort:
             option_kwargs["effort"] = effective_effort
         # Only set allowed_tools if agent file specifies tools.
         # Omitting the field keeps SDK default tool behavior.
@@ -1627,7 +1641,9 @@ class SessionHandler(BaseHandler):
             logger.info(f"  Subagent: {effective_agent}")
         if effective_model:
             logger.info(f"  Model: {effective_model}")
-        if effective_effort:
+        if effective_effort == NO_REASONING_EFFORT:
+            logger.info("  Thinking: disabled")
+        elif effective_effort:
             logger.info(f"  Effort: {effective_effort}")
 
         # Log if we're resuming a session
@@ -1651,6 +1667,7 @@ class SessionHandler(BaseHandler):
             ),
         )
         setattr(client, "_vibe_git_path_state", git_path_state)
+        setattr(client, "_vibe_reasoning_effort", effective_effort)
         setattr(
             client,
             "_vibe_model_hub_fingerprint",
@@ -1760,17 +1777,10 @@ class SessionHandler(BaseHandler):
             session_anchor=session_anchor,
         )
 
-        # Resolve admission once: it associates or clears this turn's Memory CLI
-        # session scope as a side effect, so a second call per turn would repeat
-        # that write.
-        configure_memory_cli_access(self.controller, context)
-
         system_prompt_injection = await asyncio.to_thread(
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
-            memory_enabled=bool(getattr(getattr(self.config, "memory", None), "enabled", False)),
-            profile_enabled=bool(getattr(getattr(self.config, "memory", None), "profile_enabled", True)),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

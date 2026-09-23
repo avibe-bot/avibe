@@ -20,7 +20,7 @@ from config.v2_config import RemoteAccessConfig, V2Config
 from storage import remote_access_authorization_service
 from tests.test_remote_access_vibe_cloud import _config
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, cli, model_service, remote_access, ui_server
+from vibe import api, cli, remote_access, ui_server
 
 
 def _response(instance_id="inst_A"):
@@ -62,7 +62,6 @@ def pairing_host(monkeypatch, tmp_path):
         lambda config=None, **kwargs: {"ok": True, "paired": True, "running": True},
     )
     monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
-    monkeypatch.setattr(model_service, "request_model_service_refresh", lambda: None)
     return tmp_path, calls
 
 

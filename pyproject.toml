@@ -43,7 +43,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2.93",
+    "claude-agent-sdk>=0.2.158",
     "anyio>=4.0.0",
     "APScheduler>=3.10.4",
     "slack-sdk>=3.26.0",
@@ -51,6 +51,9 @@ dependencies = [
     "aiohttp>=3.8.0",
     "ijson>=3.5.1",
     "markdown-it-py>=4.2.0",
+    # citation labels need non-transitional UTS #46; the standard library's
+    # "idna" codec is IDNA 2003 and folds a different domain out of some hosts
+    "idna>=3.4",
     "markdown_to_mrkdwn>=0.2.0",
     "typing_extensions>=4.12.2",
     "PyYAML>=6.0",
@@ -77,11 +80,6 @@ dependencies = [
     "pycryptodome>=3.20",
     "prometheus-client>=0.20.0",
 ]
-
-[project.optional-dependencies]
-# Compatibility spelling only. Enabled Memory is reconciled from the matching
-# GitHub Release; it is not a separately indexed dependency.
-memory = []
 
 [project.urls]
 Homepage = "https://github.com/avibe-bot/avibe"
@@ -112,7 +110,6 @@ artifacts = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["vibe", "config", "core", "modules", "storage"]
-exclude = ["vibe/memory_runtime_manifest.json"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "main.py" = "vibe/service_main.py"
@@ -142,7 +139,6 @@ include = [
     "README.md",
     "LICENSE",
 ]
-exclude = ["vibe/memory_runtime_manifest.json"]
 
 [tool.hatch.build.targets.sdist.force-include]
 "skills" = "skills"

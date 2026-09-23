@@ -276,6 +276,23 @@ describe('an incomplete measurement blocks --update too, not just the verdict', 
   const BASELINE = path.join(UI_ROOT, 'eslint-baseline.json');
   const PROBE = path.join(UI_ROOT, 'update-integrity-probe.ts');
 
+  // The probe has to be a real file in the real tree: the gate measures ``ui/``
+  // from its own location, so there is no temporary copy to point it at, and a
+  // fixture the domain walk cannot find would not exercise the thing under test.
+  // It therefore exists on disk for as long as the gate takes to run, and a test
+  // process killed hard enough to skip the ``finally`` leaves it behind — where
+  // it fails ``npm run lint`` for everyone in that checkout, naming a file
+  // nobody wrote. So the file says what it is and who is responsible for it.
+  // Only the directive's line number moves, and nothing asserts that.
+  const PROBE_SOURCE = [
+    '// Temporary fixture: written by ui/scripts/lintBaseline.test.mjs, and deleted',
+    '// by it. Finding this file in a working tree means a test run was killed',
+    '// before it could clean up. Delete it and the lint gate goes green again.',
+    '/* eslint @typescript-eslint/no-explicit-any: "off" */',
+    'export const f = (v: any) => v;',
+    '',
+  ].join('\n');
+
   const runGate = (args) =>
     spawnSync(process.execPath, ['scripts/lint-baseline.mjs', ...args], {
       cwd: UI_ROOT,
@@ -286,11 +303,15 @@ describe('an incomplete measurement blocks --update too, not just the verdict', 
   it('refuses to write a baseline while an integrity check is failing', () => {
     const before = fs.readFileSync(BASELINE);
     try {
-      fs.writeFileSync(PROBE, '/* eslint @typescript-eslint/no-explicit-any: "off" */\nexport const f = (v: any) => v;\n');
+      fs.writeFileSync(PROBE, PROBE_SOURCE);
       const result = runGate(['--update']);
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('INLINE');
       expect(result.stderr).toContain('update-integrity-probe.ts');
+      // Exactly one: the preamble above is prose that happens to mention lint,
+      // so this is what keeps it from quietly becoming a second directive and
+      // changing what the run is being failed for.
+      expect(result.stderr.match(/INLINE/g)).toHaveLength(1);
       expect(fs.readFileSync(BASELINE).equals(before)).toBe(true);
     } finally {
       fs.rmSync(PROBE, { force: true });

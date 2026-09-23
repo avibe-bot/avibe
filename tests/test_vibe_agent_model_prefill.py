@@ -68,6 +68,10 @@ def test_recommendations_exist_in_bundled_model_catalog() -> None:
     assert opencode_model in codex_models
 
 
+def test_claude_recommendation_is_opus_5_5() -> None:
+    assert RECOMMENDED_AGENT_MODELS["claude"] == "claude-opus-5-5"
+
+
 def test_runtime_has_no_backend_default_model_reads() -> None:
     root = Path(__file__).resolve().parents[1]
     runtime_roots = [root / name for name in ("config", "core", "modules", "vibe", "scripts")]

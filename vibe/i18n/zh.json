@@ -126,26 +126,26 @@
       }
     },
     "command": {
-      "workdirMissing": "\u5de5\u4f5c\u76ee\u5f55\u4e0d\u5b58\u5728\uff1a{cwd}",
-      "supervisorExitedDuringStartup": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5728\u542f\u52a8\u671f\u95f4\u9000\u51fa\u3002",
-      "workerNotRecorded": "\u672a\u542f\u52a8\u547d\u4ee4\uff1a\u65e0\u6cd5\u8bb0\u5f55\u5176\u76d1\u63a7\u8fdb\u7a0b\u3002",
-      "supervisorFailed": "\u547d\u4ee4\u76d1\u63a7\u8fdb\u7a0b\u5931\u8d25\uff1a{detail}",
-      "unknownSupervisorFailure": "\u672a\u77e5\u7684\u76d1\u63a7\u8fdb\u7a0b\u9519\u8bef\u3002",
+      "workdirMissing": "工作目录不存在：{cwd}",
+      "supervisorExitedDuringStartup": "命令监控进程在启动期间退出。",
+      "workerNotRecorded": "未启动命令：无法记录其监控进程。",
+      "supervisorFailed": "命令监控进程失败：{detail}",
+      "unknownSupervisorFailure": "未知的监控进程错误。",
       "protocolErrors": {
-        "specTooLarge": "\u547d\u4ee4\u914d\u7f6e\u8fc7\u5927\u3002",
-        "invalidEncoding": "\u547d\u4ee4\u914d\u7f6e\u4e0d\u662f\u6709\u6548\u7684 UTF-8\u3002",
-        "invalidJson": "\u547d\u4ee4\u914d\u7f6e\u4e0d\u662f\u6709\u6548\u7684 JSON\u3002",
-        "unsupportedVersion": "\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u914d\u7f6e\u7248\u672c\u3002",
-        "invalidCommand": "\u547d\u4ee4\u65e0\u6548\u3002"
+        "specTooLarge": "命令配置过大。",
+        "invalidEncoding": "命令配置不是有效的 UTF-8。",
+        "invalidJson": "命令配置不是有效的 JSON。",
+        "unsupportedVersion": "不支持此命令配置版本。",
+        "invalidCommand": "命令无效。"
       },
-      "timedOut": "\u547d\u4ee4\u5728 {seconds} \u79d2\u540e\u8d85\u65f6\u3002",
-      "exited": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\u3002",
-      "exitedWithDetail": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\uff1a{detail}"
+      "timedOut": "命令在 {seconds} 秒后超时。",
+      "exited": "命令退出，状态码 {code}。",
+      "exitedWithDetail": "命令退出，状态码 {code}：{detail}"
     },
     "task": {
-      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002",
-      "schedulerCallbackFailed": "\u8ba1\u5212\u89e6\u53d1\u5728\u5165\u961f\u524d\u5931\u8d25\uff1a{detail}",
-      "scheduleReplaced": "\u672c\u6b21\u8ba1\u5212\u89e6\u53d1\u5c5e\u4e8e\u4efb\u52a1\u7684\u65e7\u8c03\u5ea6\u7248\u672c\uff0c\u56e0\u6b64\u672a\u6267\u884c\u3002"
+      "resultNotRecorded": "无法记录本次运行的结果：任务在运行期间被回收、改绑或删除，其存储状态未发生变化。",
+      "schedulerCallbackFailed": "计划触发在入队前失败：{detail}",
+      "scheduleReplaced": "本次计划触发属于任务的旧调度版本，因此未执行。"
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",
@@ -154,7 +154,7 @@
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
     },
     "run": {
-      "sessionTurnGateUnavailable": "\u672c\u6b21 Agent Run \u65e0\u6cd5\u63a5\u5165\uff1aSession turn gate \u5f53\u524d\u4e0d\u53ef\u7528\u3002\u8bf7\u7b49\u5f85\u670d\u52a1\u542f\u52a8\u5b8c\u6210\u540e\u91cd\u8bd5\u3002",
+      "sessionTurnGateUnavailable": "本次 Agent Run 无法接入：Session turn gate 当前不可用。请等待服务启动完成后重试。",
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
@@ -171,7 +171,13 @@
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
       },
       "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
-      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
+      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。",
+      "cli": {
+        "help": {
+          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn"
+        },
+        "canceledBeforeLiveTurn": "\u8be5 run \u5728\u5176\u8f93\u5165\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn \u4e4b\u524d\u5df2\u88ab\u53d6\u6d88\u3002"
+      }
     },
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
@@ -427,8 +433,8 @@
     "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
     "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}",
     "opencodeBackendError": "OpenCode 错误：{error}",
-        "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。",
-        "opencodePollTransportFailure": "OpenCode 连续 {count} 次轮询失败，运行时不可达；原生 Turn 已中止并记为失败。"
+    "opencodeActiveTurnTimeout": "OpenCode 在配置的 active-turn 上限内没有产出结果（{seconds} 秒），原生 Turn 已中止。",
+    "opencodePollTransportFailure": "OpenCode 连续 {count} 次轮询失败，运行时不可达；原生 Turn 已中止并记为失败。"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",
@@ -477,7 +483,6 @@
     "infoUnavailable": "更新信息不可用，请稍后重试。",
     "upgradeFailed": "升级失败，请检查日志。",
     "upgradeFailedShort": "升级失败",
-    "memoryRequirementUnreadable": "无法安全读取持久化的记忆需求，升级已被阻止。",
     "upgradeFailedSlack": "❌ *升级失败*\n\n请检查日志获取详情。",
     "updating": "正在更新 Avibe...",
     "updatingSlack": "⏳ *正在更新 Avibe...*\n\n请稍等，服务稍后会重启。",
@@ -743,7 +748,8 @@
   },
   "message": {
     "ack": "{agent} 已收到，正在处理...",
-    "quickReplyNote": "回复：{text}"
+    "quickReplyNote": "回复：{text}",
+    "citationUnresolved": "（来源不可用）"
   },
   "backend": {
     "claude": "ClaudeCode",
@@ -812,117 +818,6 @@
       }
     }
   },
-  "memory": {
-    "sender": {
-      "user": "用户",
-      "agent": "Agent"
-    },
-    "cli": {
-      "help": {
-        "command": "通过运行中的控制器使用本地记忆",
-        "status": "显示记忆状态",
-        "profile": "显示记忆档案",
-        "list": "列出已处理的记忆片段",
-        "search": "搜索本地记忆",
-        "remember": "提交个人信息供记忆系统尽力处理",
-        "query": "搜索内容",
-        "project": "记忆项目：default，或 billing 这类小写 slug",
-        "page": "页码（从 1 开始）",
-        "pageLimit": "每页记忆片段数（1-100）",
-        "limit": "最大结果数（1-100）",
-        "mode": "召回模式（默认：hybrid）",
-        "text": "要记住的文本",
-        "json": "输出机器可读格式"
-      },
-      "error": "记忆 {operation} 失败：{code}",
-      "status": "记忆：{state}",
-      "provider": "EverOS {version}：{state}",
-      "attachmentCapture": "IM 附件捕获：{state}",
-      "sourceReason": "来源原因：{reason}",
-      "runtimeState": {
-        "disabled": "已停用",
-        "starting": "正在启动",
-        "running": "运行中",
-        "degraded": "已降级",
-        "needsRepair": "需要修复",
-        "unknown": "未知"
-      },
-      "providerState": {
-        "ok": "正常",
-        "unknown": "未知"
-      },
-      "attachmentCaptureState": {
-        "ready": "可用",
-        "notConfigured": "未配置",
-        "unavailable": "不可用",
-        "unknown": "未知"
-      },
-      "unknownVersion": "未知版本",
-      "reason": {
-        "memoryDisabled": "记忆功能已禁用",
-        "invalidInput": "记忆输入无效",
-        "accessDenied": "记忆访问被拒绝",
-        "inputTooLarge": "记忆输入过大",
-        "queueFull": "记忆队列已满",
-        "lowDiskSpace": "磁盘空间不足",
-        "storeUnavailable": "记忆存储不可用",
-        "runtimeMissing": "记忆运行时缺失",
-        "runtimeUnsupported": "记忆运行时不受支持",
-        "runtimeInstallFailed": "记忆运行时安装失败",
-        "runtimeInstallRequiresStoppedMemory": "记忆功能正在运行。请先在「设置 > 记忆」中关闭记忆，再修复运行时。",
-        "runtimePreparationImportTimeout": "记忆运行时导入就绪检查超时",
-        "runtimePreparationImportFailed": "记忆运行时导入就绪检查失败",
-        "runtimePreparationScrubberTimeout": "记忆运行时错误脱敏器就绪检查超时",
-        "runtimePreparationScrubberFailed": "记忆运行时错误脱敏器就绪检查失败",
-        "runtimePreparationSyncContractFailed": "记忆运行时同步契约验证失败",
-        "runtimePreparationFailed": "记忆运行时准备失败",
-        "reconcileFailed": "记忆协调失败",
-        "wakeFailed": "记忆唤醒失败，未删除数据",
-        "runtimeBusy": "记忆无法安全停止",
-        "permissionDenied": "记忆数据路径权限不足",
-        "diskUnavailable": "记忆磁盘不可用",
-        "localDataUnusable": "本地记忆数据需要修复",
-        "legacyRecoveryRequired": "旧版恢复状态需要明确修复",
-        "sidecarUnavailable": "记忆 sidecar 不可用",
-        "providerTimeout": "记忆服务请求超时",
-        "providerResponseInvalid": "记忆服务响应无效",
-        "capabilityUnavailable": "记忆能力不可用",
-        "processingFailed": "记忆处理失败",
-        "lossConfirmationRequired": "需要确认接受记忆数据丢失",
-        "embeddingUnavailable": "记忆向量服务不可用",
-        "llmUnavailable": "记忆语言模型不可用",
-        "rerankUnavailable": "记忆重排服务不可用",
-        "multimodalUnavailable": "记忆多模态处理不可用",
-        "repairFailed": "记忆修复失败",
-        "repairNotRequired": "记忆无需修复",
-        "deleteDataFailed": "记忆数据删除失败",
-        "reconfigureFailed": "记忆重新配置失败",
-        "operationInProgress": "另一项记忆操作正在进行",
-        "implementationUnavailable": "记忆实现不可用",
-        "implementationIncompatible": "记忆实现不兼容",
-        "unknown": "未知原因"
-      },
-      "fault": {
-        "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
-        "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
-      },
-      "empty": "未找到记忆条目。",
-      "originPrefix": "[{origin}] ",
-      "origin": {
-        "user": "用户记忆",
-        "agent": "Agent 记忆",
-        "both": "用户 + Agent"
-      },
-      "remembered": "记忆请求已确认；系统将尽力处理，但不保证持久保存。",
-      "listWarning": {
-        "truncated": "记忆列表已达到服务排序上限，后续页面可能不完整。"
-      },
-      "readWarning": {
-        "partial": "部分用户记忆、Agent 记忆或项目记忆来源未能加载，结果可能不完整。"
-      },
-      "partialRestartWarning": "记忆设置内容暂不可用：Web UI 已重启，但服务仍在运行，\n  两者共享的记忆访问凭证仅存在于运行中的进程内。\n  请先运行 'vibe stop'，再运行 'vibe'，以同时重启两者。"
-    }
-  },
   "language": {
     "systemDefault": "(系统默认)",
     "en": "English",
@@ -973,7 +868,6 @@
       "mode_switch_blocked": "当前模型管理方式或选择阻止了此操作。",
       "backend_model_catalog_invalid": "Backend 模型列表中包含无效字段。",
       "backend_model_id_invalid": "这个 Backend 模型 ID 无效。",
-      "backend_model_id_prefix": "Claude Code 自定义模型 ID 必须以 claude- 或 anthropic- 开头。",
       "backend_model_duplicate": "同一个 Backend 模型 ID 只能出现一次。",
       "backend_model_locked": "不能修改 Claude Code 的 Default 项或内置模型的来源类型。",
       "backend_model_in_route": "请先清空该模型的路由，再从 Backend 模型列表中移除。",
@@ -1035,7 +929,8 @@
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
-      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。"
+      "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
+      "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"
     }
   },
   "remote_access": {
@@ -1080,7 +975,7 @@
   },
   "turn": {
     "interrupted": {
-      "serviceRestart": "\u26a0\ufe0f \u672c\u8f6e\u6267\u884c\u88ab\u4e2d\u65ad\u2014\u2014Avibe \u670d\u52a1\u5728\u5b83\u8fd0\u884c\u671f\u95f4\u91cd\u542f\u3002\u5982\u679c\u8fd9\u9879\u5de5\u4f5c\u4ecd\u7136\u9700\u8981\u5b8c\u6210\uff0c\u8bf7\u91cd\u65b0\u53d1\u9001\u8bf7\u6c42\u3002"
+      "serviceRestart": "⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。如果这项工作仍然需要完成，请重新发送请求。"
     }
   },
   "runtime": {
@@ -1095,43 +990,43 @@
       "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}"
     },
     "clean": {
-      "commandHelp": "清理过期的 Show、Git、Memory、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
-      "dryRunHelp": "\u4ec5\u62a5\u544a\u53ef\u6e05\u7406\u7684\u5f52\u6863\u4e0e\u7f13\u5b58\u6761\u76ee\uff0c\u4e0d\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
-      "wouldRemoveItems": "\u5c06\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
-      "wouldRemoveArchives": "\u5c06\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
+      "commandHelp": "清理过期的 Show、Git、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
+      "dryRunHelp": "仅报告可清理的归档与缓存条目，不删除任何内容。",
+      "wouldRemoveItems": "将清理 {count} 项 Show Runtime 缓存。",
+      "wouldRemoveArchives": "将清理 {count} 个已下载的 Show Runtime 归档（{size}）。",
       "consumerWouldRemoveItems": "将清理 {count} 项 {consumer} 缓存。",
       "consumerWouldRemoveArchives": "将清理 {count} 个已下载的 {consumer} 归档（{size}）。",
-      "removedItems": "\u5df2\u6e05\u7406 {count} \u9879 Show Runtime \u7f13\u5b58\u3002",
-      "removedArchives": "\u5df2\u6e05\u7406 {count} \u4e2a\u5df2\u4e0b\u8f7d\u7684 Show Runtime \u5f52\u6863\uff08{size}\uff09\u3002",
+      "removedItems": "已清理 {count} 项 Show Runtime 缓存。",
+      "removedArchives": "已清理 {count} 个已下载的 Show Runtime 归档（{size}）。",
       "consumerRemovedItems": "已清理 {count} 项 {consumer} 缓存。",
       "consumerRemovedArchives": "已清理 {count} 个已下载的 {consumer} 归档（{size}）。",
       "consumerPreviewFailed": "{consumer} 缓存预览失败（{reason}）；可能仍有过期条目。",
       "consumerFailed": "{consumer} 清理失败（{reason}）；过期条目仍保留。",
       "consumerArchivesPartial": "{consumer} 归档清理仅部分完成（{reason}）；有 {failed} 个归档无法清理。",
       "consumerArchivesSkipped": "{consumer} 归档清理已跳过（{reason}）；可能仍有过期归档。",
-      "partiallyRemoved": " \u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8bf7\u68c0\u67e5\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
-      "skipped": "\u5f52\u6863\u6e05\u7406\u5df2\u8df3\u8fc7\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u5728\u6b63\u5728\u8fd0\u884c\u7684\u5b89\u88c5\u6216\u6e05\u7406\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
-      "removalFailed": "\u6709 {failed} \u4e2a\u5f52\u6863\u65e0\u6cd5\u5220\u9664\uff1b\u8fc7\u671f\u5f52\u6863\u4ecd\u4fdd\u7559\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002",
-      "skippedInspection": "\u5f52\u6863\u6e05\u7406\u65e0\u6cd5\u68c0\u67e5\u7f13\u5b58\uff08{reason}\uff09\uff1b\u53ef\u80fd\u4ecd\u6709\u8fc7\u671f\u5f52\u6863\u3002\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u4e0e Avibe \u65e5\u5fd7\u3002"
+      "partiallyRemoved": " 有 {failed} 个归档无法删除；请检查权限与 Avibe 日志。",
+      "skipped": "归档清理已跳过（{reason}）；可能仍有过期归档。请在正在运行的安装或清理结束后重试。",
+      "removalFailed": "有 {failed} 个归档无法删除；过期归档仍保留。请检查运行目录权限与 Avibe 日志。",
+      "skippedInspection": "归档清理无法检查缓存（{reason}）；可能仍有过期归档。请检查运行目录权限与 Avibe 日志。"
     },
     "doctor": {
-      "archiveCacheReclaimable": "Show Runtime \u5f52\u6863\u7f13\u5b58\u4e2d\u6709 {count} \u4e2a\u53ef\u56de\u6536\u5f52\u6863\uff08{size}\uff09\uff1b\u5f53\u524d\u4e0e\u56de\u6eda\u5f52\u6863\u4f1a\u88ab\u4fdd\u7559\u3002",
-      "archiveCacheReclaimableAction": "\u5148\u8fd0\u884c `vibe runtime clean --dry-run` \u9884\u89c8\uff0c\u518d\u8fd0\u884c `vibe runtime clean` \u56de\u6536\u7a7a\u95f4\u3002",
-      "archiveCacheClean": "Show Runtime \u5f52\u6863\u7f13\u5b58\u6ca1\u6709\u53ef\u56de\u6536\u5f52\u6863",
+      "archiveCacheReclaimable": "Show Runtime 归档缓存中有 {count} 个可回收归档（{size}）；当前与回滚归档会被保留。",
+      "archiveCacheReclaimableAction": "先运行 `vibe runtime clean --dry-run` 预览，再运行 `vibe runtime clean` 回收空间。",
+      "archiveCacheClean": "Show Runtime 归档缓存没有可回收归档",
       "archiveCacheSkipped": "未能检查 Show Runtime 归档缓存（{reason}）；其中可能仍有可回收归档。",
       "archiveCacheSkippedAction": "等待正在进行的安装或清理结束后，重新运行 Doctor。",
-      "archiveCacheSkippedInspectionAction": "\u8bf7\u68c0\u67e5\u8fd0\u884c\u76ee\u5f55\u6743\u9650\u548c Avibe \u65e5\u5fd7\uff0c\u4fee\u590d\u540e\u91cd\u8bd5 Doctor\u3002",
+      "archiveCacheSkippedInspectionAction": "请检查运行目录权限和 Avibe 日志，修复后重试 Doctor。",
       "providerUnsupportedAction": "请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
-      "repairHealthy": "Show Runtime \u53ef\u4ee5\u6b63\u5e38\u542f\u52a8\uff0c\u65e0\u9700\u4fee\u590d\u3002",
-      "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN \u6307\u5b9a\u7684 Show Runtime \u547d\u4ee4\u65e0\u6cd5\u542f\u52a8\uff1a{reason}\u3002\u8bf7\u4fee\u590d\u6216\u79fb\u9664\u8be5\u8986\u76d6\u540e\u91cd\u65b0\u8fd0\u884c Doctor\u3002",
-      "repairInstalled": "\u5df2\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
-      "repairReinstalled": "\u5df2\u91cd\u65b0\u5b89\u88c5\u5e76\u6210\u529f\u542f\u52a8 Show Runtime\u3002",
-      "repairInstallStartFailed": "Show Runtime \u5df2\u5b89\u88c5\uff0c\u4f46\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",
-      "repairReinstallStartFailed": "Show Runtime \u5df2\u91cd\u65b0\u5b89\u88c5\uff0c\u4f46\u4ecd\u65e0\u6cd5\u542f\u52a8\uff1a{reason}",
-      "repairVerificationFailed": "\u65e0\u6cd5\u9a8c\u8bc1 Show Runtime \u662f\u5426\u53ef\u542f\u52a8\uff0c\u56e0\u6b64\u672a\u5c1d\u8bd5\u91cd\u65b0\u5b89\u88c5\uff1a{detail}",
-      "repairPostVerificationFailed": "Show Runtime \u51c6\u5907\u5df2\u5b8c\u6210\uff0c\u4f46\u65e0\u6cd5\u9a8c\u8bc1\u662f\u5426\u53ef\u542f\u52a8\uff1a{detail}",
-      "repairPrepareFailed": "Show Runtime \u51c6\u5907\u5931\u8d25\uff1a{detail}",
-      "repairLegacyArchiveUnavailable": "\u6253\u5305\u7684 Show Runtime \u6e05\u5355\u4e0d\u53ef\u7528\uff0c\u65e7\u7248\u4e0a\u6e38\u5f52\u6863\u5730\u5740\u4e5f\u6ca1\u6709\u53d1\u5e03\u8d44\u4ea7\u3002\u8bf7\u5347\u7ea7\u6216\u91cd\u65b0\u5b89\u88c5\u5b98\u65b9 Avibe \u8f6f\u4ef6\u5305\uff0c\u6216\u79fb\u9664\u8fc7\u671f\u7684 runtime \u6765\u6e90\u8986\u76d6\u914d\u7f6e\u3002"
+      "repairHealthy": "Show Runtime 可以正常启动，无需修复。",
+      "repairExplicitCommandFailed": "VIBE_SHOW_RUNTIME_BIN 指定的 Show Runtime 命令无法启动：{reason}。请修复或移除该覆盖后重新运行 Doctor。",
+      "repairInstalled": "已安装并成功启动 Show Runtime。",
+      "repairReinstalled": "已重新安装并成功启动 Show Runtime。",
+      "repairInstallStartFailed": "Show Runtime 已安装，但无法启动：{reason}",
+      "repairReinstallStartFailed": "Show Runtime 已重新安装，但仍无法启动：{reason}",
+      "repairVerificationFailed": "无法验证 Show Runtime 是否可启动，因此未尝试重新安装：{detail}",
+      "repairPostVerificationFailed": "Show Runtime 准备已完成，但无法验证是否可启动：{detail}",
+      "repairPrepareFailed": "Show Runtime 准备失败：{detail}",
+      "repairLegacyArchiveUnavailable": "打包的 Show Runtime 清单不可用，旧版上游归档地址也没有发布资产。请升级或重新安装官方 Avibe 软件包，或移除过期的 runtime 来源覆盖配置。"
     }
   },
   "doctor": {
@@ -1150,7 +1045,6 @@
       "unknown": "未知",
       "unknownError": "未知错误",
       "missing": "缺失",
-      "memoryRuntime": "Memory Runtime",
       "modelHubEngine": "Model Hub 引擎（CPA）",
       "currentPlatform": "当前平台",
       "selectedDependencyUrl": "所选依赖 URL",
@@ -1249,8 +1143,6 @@
       "dependencyPlatformUnsupported": "该平台未发布 {label}",
       "dependencyArchiveUrlUnsupported": "{label} 归档 URL 使用不支持的协议：{url}",
       "dependencyNotReady": "{label} 尚未就绪",
-      "memoryRuntimeMissing": "Memory Runtime 缺失：{reason}",
-      "memoryRuntimeError": "Memory Runtime 就绪检查失败：{reason}",
       "dependencyReachable": "{label} 下载端点可访问：{url}",
       "dependencyProbeUnsupported": "{label} 服务不支持无请求体探测",
       "dependencyProbeUnavailable": "无法解析 {label} 归档",
@@ -1436,10 +1328,6 @@
       "dependencyReadyDefault": "依赖已就绪。",
       "dependencyResultFailed": "{target} 修复失败：{detail}",
       "dependencyException": "{target} 安装器失败：{error}",
-      "dryMemoryRuntime": "将请求正在运行的 Avibe 控制器安装或修复 Memory Runtime。",
-      "memoryRuntimeReady": "已通过正在运行的 Avibe 控制器安装或修复 Memory Runtime。",
-      "memoryRuntimeFailed": "Memory Runtime 修复失败：{reason}",
-      "memoryRuntimeControllerUnavailable": "无法连接正在运行的 Avibe 控制器来修复 Memory Runtime：{reason}",
       "dependencyDownloadHttp": "依赖下载经过 {attempts} 次尝试后返回 HTTP {status}。",
       "dependencyDownloadDns": "依赖主机经过 {attempts} 次尝试后 DNS 查询失败。",
       "dependencyDownloadTls": "依赖下载的 TLS 校验失败。",
@@ -1505,8 +1393,8 @@
     }
   },
   "data": {
-    "helpCommand": "\u67e5\u770b Avibe \u6570\u636e,\u6216\u6267\u884c\u663e\u5f0f\u7684 trace \u4fdd\u7559\u7ef4\u62a4",
-    "helpDescription": "\u901a\u8fc7\u53d7\u4fdd\u62a4\u7684\u53ea\u8bfb SQL \u67e5\u770b\u672c\u5730 Avibe SQLite \u72b6\u6001,\u6216\u6267\u884c\u663e\u5f0f\u7ef4\u62a4:`query` \u4e3a\u53ea\u8bfb;`retention --run` \u4f1a\u5220\u9664\u65e7\u7684\u5185\u90e8 trace \u4e8b\u4ef6\u5e76\u53ef\u80fd\u538b\u5b9e\u6570\u636e\u5e93\u3002",
+    "helpCommand": "查看 Avibe 数据,或执行显式的 trace 保留维护",
+    "helpDescription": "通过受保护的只读 SQL 查看本地 Avibe SQLite 状态,或执行显式维护:`query` 为只读;`retention --run` 会删除旧的内部 trace 事件并可能压实数据库。",
     "skillUsage": {
       "ownerRequired": "需要实例管理者或所有者权限。",
       "confirmationRequired": "清除 Skill 统计需要使用 --yes 确认。",
@@ -1516,30 +1404,30 @@
       "helpYes": "确认清除 Skill 统计。"
     },
     "retention": {
-      "invalidDays": "--days \u5fc5\u987b\u5728 {minimum} \u5230 {maximum} \u4e4b\u95f4;\u62d2\u7edd\u8fd0\u884c\u800c\u4e0d\u662f\u9759\u9ed8\u6536\u7a84\u7a97\u53e3\u3002",
-      "helpCommand": "\u67e5\u770b\u6216\u6267\u884c\u5185\u90e8 agent trace \u4e8b\u4ef6\u7684\u6709\u754c\u4fdd\u7559",
-      "helpDescription": "agent_events trace \u4fdd\u7559\u7b56\u7565\u7684\u72b6\u6001\u4e0e\u624b\u52a8\u63a7\u5236:\u8d85\u8fc7\u4fdd\u7559\u7a97\u53e3\u7684 tool_call trace \u4f1a\u88ab\u5220\u9664;\u804a\u5929\u6d88\u606f\u3001\u975e trace \u4e8b\u4ef6\u4e0e\u8f83\u65b0\u7684 trace \u6c38\u8fdc\u4e0d\u4f1a\u88ab\u89e6\u78b0\u3002",
-      "helpRun": "\u7acb\u5373\u6267\u884c\u4e00\u6b21\u4fdd\u7559\u6e05\u7406(\u7ed5\u8fc7\u6bcf\u65e5\u8282\u6d41,\u4ecd\u9075\u5b88\u79df\u7ea6)\u3002",
+      "invalidDays": "--days 必须在 {minimum} 到 {maximum} 之间;拒绝运行而不是静默收窄窗口。",
+      "helpCommand": "查看或执行内部 agent trace 事件的有界保留",
+      "helpDescription": "agent_events trace 保留策略的状态与手动控制:超过保留窗口的 tool_call trace 会被删除;聊天消息、非 trace 事件与较新的 trace 永远不会被触碰。",
+      "helpRun": "立即执行一次保留清理(绕过每日节流,仍遵守租约)。",
       "helpDays": "以天为单位的保留窗口覆盖值(默认:配置值,当前为 {current})。",
-      "helpCompact": "\u5728\u5b89\u5168\u65f6\u540c\u65f6\u7269\u7406\u538b\u5b9e\u6570\u636e\u5e93(VACUUM);\u8574\u542b --run\u3002\u9ed8\u8ba4\u5173\u95ed:VACUUM \u4f1a\u6301\u6709\u6570\u636e\u5e93\u552f\u4e00\u5199\u9501\u5e76\u53ef\u80fd\u963b\u585e\u8fd0\u884c\u4e2d\u670d\u52a1\u7684\u5199\u5165;\u8bf7\u5728\u7ef4\u62a4\u7a97\u53e3\u6216\u670d\u52a1\u505c\u6b62\u65f6\u6267\u884c\u3002",
-      "configRecovered": "Avibe \u914d\u7f6e\u65e0\u6cd5\u8bfb\u53d6\uff08\u5904\u4e8e\u6062\u590d\u9ed8\u8ba4\u72b6\u6001\uff09\uff1b\u4fdd\u7559\u7b56\u7565\u672a\u77e5\u3002\u5982\u9700\u5220\u9664\uff0c\u8bf7\u4f7f\u7528\u663e\u5f0f --days \u7a97\u53e3\u91cd\u65b0\u8fd0\u884c\u3002",
-      "compactionReasonCheckpointBusy": "\u6570\u636e\u5e93\u6b63\u88ab\u5e76\u53d1\u8bfb\u5199\u5360\u7528",
-      "compactionReasonFreeSpace": "\u78c1\u76d8\u7a7a\u95f2\u7a7a\u95f4\u4e0d\u8db3\u4ee5\u5b89\u5168\u91cd\u5199\u6570\u636e\u5e93",
-      "compactionReasonOther": "\u5f53\u524d\u4e0d\u6ee1\u8db3\u5b89\u5168\u538b\u5b9e\u6761\u4ef6",
-      "error": "trace \u4fdd\u7559\u547d\u4ee4\u6267\u884c\u5931\u8d25:{error}",
-      "plan": "\u6709 {count} \u6761\u65e9\u4e8e {days} \u5929\u7684 trace \u8bb0\u5f55\u5f85\u6e05\u7406\uff08\u8f7d\u8377\u6587\u672c\u7ea6 {size}\uff09\u3002",
-      "lastRun": "\u4e0a\u6b21\u4fdd\u7559\u6e05\u7406\uff1a{at}\uff0c\u5220\u9664 {rows} \u6761\u3002",
-      "neverRun": "\u5c1a\u672a\u6267\u884c\u8fc7\u4fdd\u7559\u6e05\u7406\u3002",
-      "disabled": "trace \u4fdd\u7559\u7b56\u7565\u5df2\u5728\u8fd0\u884c\u914d\u7f6e\u4e2d\u5173\u95ed\uff1b\u6bcf\u65e5\u4efb\u52a1\u4e0d\u4f1a\u5220\u9664\u4efb\u4f55\u5185\u5bb9\u3002",
-      "compaction": "\u6570\u636e\u5e93\u5185\u90e8\u5f53\u524d\u53ef\u56de\u6536\u7a7a\u95f4\uff1a{size}\u3002",
-      "ran": "\u672c\u6b21\u4fdd\u7559\u6e05\u7406\u5220\u9664\u4e86 {rows} \u6761 trace \u8bb0\u5f55\u3002",
-      "compacted": "\u6570\u636e\u5e93\u5df2\u538b\u5b9e\uff1b\u5411\u78c1\u76d8\u5f52\u8fd8 {size}\u3002",
-      "compactionDeferred": "\u538b\u5b9e\u5df2\u63a8\u8fdf\uff08{reason}\uff09\uff1b\u884c\u5df2\u5220\u9664\uff0c\u78c1\u76d8\u7a7a\u95f4\u5c06\u5728\u4e0b\u6b21\u5b89\u5168\u901a\u8fc7\u65f6\u5f52\u8fd8\u3002",
-      "compactionSkipped": "\u538b\u5b9e\u5df2\u8df3\u8fc7\uff1a\u53ef\u56de\u6536\u7a7a\u95f4\u8fc7\u5c0f\u3002",
-      "leaseLost": "\u672c\u6b21\u8fd0\u884c\u5c06\u79df\u7ea6\u4e22\u5931\u7ed9\u4e86\u53e6\u4e00\u4e2a\u4fdd\u7559\u6e05\u7406\uff1b\u5220\u9664\u4e2d\u9014\u505c\u6b62\u4e14\u672a\u8bb0\u5f55\u5b8c\u6210\u3002\u8bf7\u5728\u53e6\u4e00\u8fd0\u884c\u7ed3\u675f\u540e\u91cd\u8bd5\u3002",
-      "notDue": "\u4fdd\u7559\u6e05\u7406\u5728\u6700\u8fd1\u4e00\u5929\u5185\u5df2\u8fd0\u884c\u8fc7\uff0c\u65e0\u9700\u91cd\u590d\u3002",
-      "busy": "\u53e6\u4e00\u4e2a\u4fdd\u7559\u6e05\u7406\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002",
-      "cancelled": "\u4fdd\u7559\u6e05\u7406\u5df2\u5728\u6279\u6b21\u8fb9\u754c\u505c\u6b62\uff1b\u672a\u8bb0\u5f55\u5b8c\u6210\u72b6\u6001\u3002"
+      "helpCompact": "在安全时同时物理压实数据库(VACUUM);蕴含 --run。默认关闭:VACUUM 会持有数据库唯一写锁并可能阻塞运行中服务的写入;请在维护窗口或服务停止时执行。",
+      "configRecovered": "Avibe 配置无法读取（处于恢复默认状态）；保留策略未知。如需删除，请使用显式 --days 窗口重新运行。",
+      "compactionReasonCheckpointBusy": "数据库正被并发读写占用",
+      "compactionReasonFreeSpace": "磁盘空闲空间不足以安全重写数据库",
+      "compactionReasonOther": "当前不满足安全压实条件",
+      "error": "trace 保留命令执行失败:{error}",
+      "plan": "有 {count} 条早于 {days} 天的 trace 记录待清理（载荷文本约 {size}）。",
+      "lastRun": "上次保留清理：{at}，删除 {rows} 条。",
+      "neverRun": "尚未执行过保留清理。",
+      "disabled": "trace 保留策略已在运行配置中关闭；每日任务不会删除任何内容。",
+      "compaction": "数据库内部当前可回收空间：{size}。",
+      "ran": "本次保留清理删除了 {rows} 条 trace 记录。",
+      "compacted": "数据库已压实；向磁盘归还 {size}。",
+      "compactionDeferred": "压实已推迟（{reason}）；行已删除，磁盘空间将在下次安全通过时归还。",
+      "compactionSkipped": "压实已跳过：可回收空间过小。",
+      "leaseLost": "本次运行将租约丢失给了另一个保留清理；删除中途停止且未记录完成。请在另一运行结束后重试。",
+      "notDue": "保留清理在最近一天内已运行过，无需重复。",
+      "busy": "另一个保留清理正在运行，请稍后重试。",
+      "cancelled": "保留清理已在批次边界停止；未记录完成状态。"
     }
   }
 }

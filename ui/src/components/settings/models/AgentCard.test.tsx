@@ -577,6 +577,26 @@ describe('AgentCard', () => {
     expect(onProbeSettled).toHaveBeenCalledWith(expect.objectContaining({ backend: 'claude' }));
   });
 
+  it('keeps a chain reread reachable when a long group also offers collapse', async () => {
+    // The two controls used to share one slot, with collapse taking it. Past the
+    // collapsed limit that left a backend whose chains could not be read with no
+    // affordance saying so, which is why the page's own refresh line has to keep
+    // answering for route chains.
+    const onProbeSettled = vi.fn();
+    const models = Array.from({ length: COLLAPSED_MODEL_LIMIT + 2 }, (_, index) => `model-${index + 1}`);
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
+      ...hubAgent,
+      builtin_models: models,
+      model_supply: models.map((modelId) => ({ route_origin: "manual" as const, model_id: modelId, chain_length: 1, has_runnable_hop: true })),
+      routes: {},
+    }]} sources={[]} chains={{ [modelChainKey('claude', models[0] as string)]: { kind: 'unread', retryable: true } }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={onProbeSettled} /></I18nextProvider>);
+
+    expect(screen.getByRole('button', { name: /more model/i })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(onProbeSettled).toHaveBeenCalledOnce();
+    expect(onProbeSettled).toHaveBeenCalledWith(expect.objectContaining({ backend: 'claude' }));
+  });
+
   it('opens Frame 02 with the exact backend and model context', async () => {
     const onOpenRoute = vi.fn();
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={onOpenRoute} onProbeSettled={vi.fn()} /></I18nextProvider>);

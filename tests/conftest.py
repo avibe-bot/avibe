@@ -388,30 +388,93 @@ def hold_migration_lock_elsewhere():
 
 
 @pytest.fixture(autouse=True)
-def _reset_memory_artifact_manager():
-    """Keep the managed Memory runtime bound to the current test home."""
-    if os.environ.get("AVIBE_TEST_BLOCK_MEMORY_IMPORTS") == "1":
-        yield
+def _reset_oauth_runtime_state():
+    """Reset module-level in-memory OAuth caches between tests.
+
+    The handshake store, diagnostic-log throttles, and the unauthenticated /auth
+    rate limiter live in process memory (not under the isolated Avibe home),
+    so without this they would leak across tests sharing a pytest process — e.g. the
+    rate limiter accumulating across files and spuriously 429-ing an unrelated test.
+    """
+    def _reset() -> None:
+        remote_access = sys.modules.get("vibe.remote_access")
+        if remote_access is not None:
+            remote_access._clear_active_hostnames_cache()
+            remote_access._oauth_handshakes.clear()
+        ui_server = sys.modules.get("vibe.ui_server")
+        if ui_server is not None:
+            ui_server._oauth_diag_log_state.clear()
+            ui_server._auth_ratelimit.clear()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
+def _reset_show_runtime_manager():
+    """Stop and clear any global Show Runtime manager spawned during a test.
+
+    The Show Runtime manager is a process-global singleton. Serving-path tests
+    that do not install a fake manager cause ``get_show_runtime_manager()`` to
+    lazily create the real manager, which spawns a Node ``cli.js`` + ``esbuild``
+    subprocess tree whenever a runtime is installed on the machine. Without an
+    explicit teardown the reference can be overwritten by a later test's
+    ``set_show_runtime_manager_for_tests`` swap; the ``atexit`` cleanup at pytest
+    exit then no longer sees it, and the Node/esbuild tree leaks for the lifetime
+    of the machine. Reset after every test so no real subprocess can outlive it.
+    """
+    yield
+    try:
+        from core import show_runtime
+    except Exception:
         return
     try:
-        from avibe_memory.artifact import set_memory_artifact_manager_for_tests
+        show_runtime.set_show_runtime_manager_for_tests(None)
     except Exception:
-        yield
+        pass
+
+
+def _async_items_missing_plugin(items) -> list:
+    """Return selected native coroutine items that need pytest-asyncio."""
+    offenders = []
+    for item in items:
+        if item.get_closest_marker("anyio") is not None:
+            continue
+        if item.get_closest_marker("skip") is not None:
+            continue
+        cls = getattr(item, "cls", None)
+        if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
+            continue
+        try:
+            func = item.obj
+        except Exception:
+            continue
+        if inspect.iscoroutinefunction(func):
+            offenders.append(item)
+    return offenders
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    """Report missing pytest-asyncio without aborting legitimate selections."""
+    if config.pluginmanager.hasplugin("asyncio"):
         return
-    set_memory_artifact_manager_for_tests(None)
-    yield
-    set_memory_artifact_manager_for_tests(None)
-
-
-@pytest.fixture
-async def memory_runtime_factory():
-    """Own active Memory runtimes until their test has fully torn down."""
-
-    from tests.memory_runtime_factory import finalizing_memory_runtimes
-
-    async with finalizing_memory_runtimes() as factory:
-        yield factory
-
+    offenders = _async_items_missing_plugin(items)
+    if not offenders:
+        return
+    message = (
+        'pytest-asyncio is not installed, so asyncio_mode="auto" is inactive. '
+        f"{len(offenders)} selected tests are native 'async def' tests and will "
+        'fail as "async def functions are not natively supported" -- that is the '
+        "missing dev dependency, not a product regression. Install it with "
+        "`uv sync --group dev`."
+    )
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line(f"\n{message}", yellow=True, bold=True)
+    else:
+        print(f"\n{message}", file=sys.stderr)
 
 @pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():

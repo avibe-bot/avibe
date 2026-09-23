@@ -353,6 +353,34 @@ describe('groupFromWire', () => {
     expect(group.rows?.[0].kind).toBe('assistant');
   });
 
+  it('carries an assistant row\'s citation sidecar through the wire shape', () => {
+    // A narration row is rendered through Activity, so its sources have to
+    // survive the wire or the badge degrades to the bare domain link.
+    const group = groupFromWire({
+      id: 'm_c1',
+      anchor_message_id: 'm_r1',
+      anchor_position: 'before',
+      open: false,
+      status: 'done',
+      steps: 2,
+      duration_ms: 1000,
+      rows: [
+        {
+          id: 'm_c1',
+          kind: 'assistant',
+          text: 'Cited [example.com](https://example.com/x)',
+          created_at: '2026-06-01T10:00:01Z',
+          citations: [{ index: 1, ref_id: 'turn0view0', url: 'https://example.com/x', label: 'example.com' }],
+        },
+        { id: 'm_c2', kind: 'assistant', text: 'Plain', created_at: '2026-06-01T10:00:02Z' },
+      ],
+    });
+    expect(group.rows?.[0].citations).toEqual([
+      { index: 1, ref_id: 'turn0view0', url: 'https://example.com/x', label: 'example.com' },
+    ]);
+    expect(group.rows?.[1].citations).toBeUndefined();
+  });
+
   it('maps an open interrupted group anchored after its trigger', () => {
     const group = groupFromWire({
       id: 'e_t1',
@@ -419,6 +447,22 @@ describe('activityRowFromMessage', () => {
     expect(assistant).toEqual({ id: 'm1', kind: 'assistant', text: 'thinking', created_at: 't1' });
     const tool = activityRowFromMessage({ id: 'e1', type: 'tool_call', text: '🔧 `Bash`', created_at: 't2' } as WorkbenchMessage);
     expect(tool.kind).toBe('tool_call');
+  });
+
+  it('lifts the citation sidecar out of the message content envelope', () => {
+    const cited = activityRowFromMessage({
+      id: 'm2',
+      type: 'assistant',
+      text: 'Cited [example.com](https://example.com/x)',
+      created_at: 't3',
+      content: { citations: [{ index: 1, ref_id: 'turn0view0', url: 'https://example.com/x', label: 'example.com' }] },
+    } as unknown as WorkbenchMessage);
+    expect(cited.citations).toEqual([
+      { index: 1, ref_id: 'turn0view0', url: 'https://example.com/x', label: 'example.com' },
+    ]);
+    expect(
+      activityRowFromMessage({ id: 'm3', type: 'assistant', text: 'Plain', created_at: 't4' } as WorkbenchMessage).citations,
+    ).toBeUndefined();
   });
 });
 

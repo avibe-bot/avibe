@@ -17,7 +17,6 @@ GROUPS = (
     ("avault",),
     ("show-runtime", "node"),
     ("model-hub-engine",),
-    ("memory-package", "memory-runtime"),
     ("tmux",),
 )
 
@@ -46,8 +45,6 @@ def probes(monkeypatch):
     )
     rows["show-runtime"].update(installed=None, reason="runtime_install_inspection_failed")
     rows["node"].update(installed=None)
-    rows["memory-package"].update(reason="memory_package_source_build", readiness="not_ready")
-    rows["memory-runtime"].update(reason="memory_runtime_preparation_import_timeout")
     rows["tmux"].update(status="missing")
     calls = []
 
@@ -63,8 +60,7 @@ def probes(monkeypatch):
     monkeypatch.setattr(api, "avault_status", probe(GROUPS[1]))
     monkeypatch.setattr(api, "_show_runtime_dependencies_status", probe(GROUPS[2]))
     monkeypatch.setattr(api, "_model_hub_engine_dependency_status", probe(GROUPS[3]))
-    monkeypatch.setattr(api, "_memory_dependencies_status", probe(GROUPS[4]))
-    monkeypatch.setattr(tmux_runtime, "tmux_status", probe(GROUPS[5]))
+    monkeypatch.setattr(tmux_runtime, "tmux_status", probe(GROUPS[4]))
     return calls
 
 
@@ -79,15 +75,6 @@ def test_selective_checks_preserve_complete_rows_and_only_probe_their_owners(pro
 
     assert result == {"ok": True, "deps": [row for row in complete["deps"] if row["id"] in requested]}
     assert [group for group, _ in probes] == [group for group in GROUPS if set(group).intersection(requested)]
-
-
-def test_coupled_rows_share_one_offline_inspection_and_duplicate_ids_do_not_repeat_it(probes):
-    result = api.dependencies_status(
-        offline=True,
-        dependency_ids=["memory-runtime", "show-runtime", "memory-package", "node", "memory-runtime"],
-    )
-    assert [row["id"] for row in result["deps"]] == ["show-runtime", "memory-package", "memory-runtime", "node"]
-    assert probes == [(GROUPS[2], {"offline": True}), (GROUPS[4], {"offline": True})]
 
 
 def test_invalid_ids_are_rejected_before_any_probe(probes):
@@ -117,7 +104,7 @@ def test_slow_check_cannot_hold_an_unrelated_dependency_request(monkeypatch, pro
         assert pending.result(timeout=2)["deps"][0]["version"] == "0.1.15"
 
 
-@pytest.mark.parametrize("query", ["id=avault", "id=memory-package&id=memory-runtime", ""])
+@pytest.mark.parametrize("query", ["id=avault", ""])
 def test_http_selection_reaches_the_shared_status_owner(monkeypatch, tmp_path, query):
     from vibe.ui_server import app
 
@@ -171,3 +158,12 @@ async def test_http_serves_completed_dependency_while_another_probe_is_blocked(m
             release.set()
             slow_result = await asyncio.wait_for(pending, timeout=3)
         assert slow_result.status_code == 200
+
+
+def test_coupled_rows_share_one_offline_inspection_and_duplicate_ids_do_not_repeat_it(probes):
+    result = api.dependencies_status(
+        offline=True,
+        dependency_ids=["node", "show-runtime", "node"],
+    )
+    assert [row["id"] for row in result["deps"]] == ["show-runtime", "node"]
+    assert probes == [(GROUPS[2], {"offline": True})]

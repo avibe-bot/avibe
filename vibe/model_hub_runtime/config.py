@@ -21,7 +21,39 @@ def write_engine_config(
     runtime_secrets: RuntimeSecrets,
     sources: Iterable[SourceRecord],
     state_store: EngineStateStore,
+    generation: str = "0",
 ) -> None:
+    _secure_write_text(
+        path,
+        render_engine_config(
+            path,
+            host=host,
+            port=port,
+            auth_dir=auth_dir,
+            runtime_secrets=runtime_secrets,
+            sources=sources,
+            state_store=state_store,
+            generation=generation,
+        ),
+    )
+
+
+def render_engine_config(
+    path: Path,
+    *,
+    host: str,
+    port: int,
+    auth_dir: Path,
+    runtime_secrets: RuntimeSecrets,
+    sources: Iterable[SourceRecord],
+    state_store: EngineStateStore,
+    generation: str = "0",
+) -> str:
+    """Render the engine YAML that ``path`` holds, for a start or a hot reload.
+
+    ``generation`` marks every configured model's display name, so a reload is
+    observable as applied even when it leaves the routed model IDs unchanged.
+    """
     if host != "127.0.0.1":
         raise EngineStateError("model hub engine must bind to 127.0.0.1")
     payload: dict[str, Any] = {
@@ -63,11 +95,16 @@ def write_engine_config(
         "ws-auth": True,
     }
     for source in sources:
-        _append_source(payload, source, state_store)
-    _secure_write_yaml(path, payload)
+        _append_source(payload, source, state_store, generation)
+    return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
 
 
-def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineStateStore) -> None:
+def _append_source(
+    payload: dict[str, Any],
+    source: SourceRecord,
+    store: EngineStateStore,
+    generation: str = "0",
+) -> None:
     credential = store.credential_metadata(source.credential_ref)
     if credential["kind"] == "oauth":
         # OAuth credentials are engine auth files, not YAML credential values.
@@ -82,7 +119,11 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
     reasoning_by_model = dict(source.model_reasoning_efforts)
     models = []
     for model in dict.fromkeys((*source.model_ids, *source.route_model_ids)):
-        entry: dict[str, Any] = {"name": model, "alias": model}
+        entry: dict[str, Any] = {
+            "name": model,
+            "alias": model,
+            "display-name": reload_display_name(model, generation),
+        }
         reasoning_efforts = reasoning_by_model.get(model, ())
         if reasoning_efforts:
             # CLIProxyAPI's measured model-registration shape is strongest-first.
@@ -145,9 +186,29 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
     raise EngineStateError("unsupported source protocol")
 
 
-def _secure_write_yaml(path: Path, payload: dict[str, Any]) -> None:
+def expected_model_names(
+    sources: Iterable[SourceRecord],
+    store: EngineStateStore,
+    generation: str,
+) -> dict[str, str]:
+    """Routed ID to display name the rendered YAML registers; OAuth models come from auth files."""
+    expected: dict[str, str] = {}
+    for source in sources:
+        metadata = store.credential_metadata_if_present(source.credential_ref)
+        if metadata is None or metadata.get("kind") != "api_key":
+            continue
+        for model in (*source.model_ids, *source.route_model_ids):
+            expected[f"{source.prefix}/{model}"] = reload_display_name(model, generation)
+    return expected
+
+
+def reload_display_name(model: str, generation: str) -> str:
+    return f"{model} #{generation}"
+
+
+def _secure_write_text(path: Path, text: str) -> None:
     # The file is 0600 by ``write_atomic``; the directory is this function's own
     # concern, because the config it holds names an upstream API key.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
-    write_atomic(path, yaml.safe_dump(payload, sort_keys=False, default_flow_style=False))
+    write_atomic(path, text)

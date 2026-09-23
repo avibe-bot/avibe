@@ -1,15 +1,12 @@
 const matchesRoute = (pathname: string, route: string): boolean =>
   pathname === route || pathname.startsWith(`${route}/`);
 
-export const isMemorySettingsPath = (pathname: string): boolean =>
-  matchesRoute(pathname, '/settings/memory');
-
 /**
  * Where Settings opens when there is no section to resume: a first visit, a
  * device whose storage refused the write, or a remembered section that has
  * since been retired or put out of this visitor's reach. General is readable by
  * every role, so the fallback needs no capability check of its own — the resume
- * does, and settingsSectionMemory applies it. Explicit deep links stay
+ * does, and the settings resume helper applies it. Explicit deep links stay
  * authoritative over both.
  */
 export const SETTINGS_LANDING_PATH = '/settings/general';
@@ -27,7 +24,6 @@ export const OWNER_ONLY_ROUTES = [
   '/settings/backends',
   '/settings/models',
   '/settings/dependencies',
-  '/settings/memory',
   '/settings/diagnostics',
   '/admin/dashboard',
   '/admin/remote-access',

@@ -11,9 +11,12 @@ import { ImageViewerContext, type ImageViewerOpenOptions } from './image-viewer-
 // A session-scoped image lightbox. ChatPage computes the ordered list of media-
 // proxy image URLs in the transcript and wraps the page in a provider; any chat
 // image (markdown inline image or a user attachment) opens it via ``open(src)``,
-// and the lightbox pages left/right through the whole session's images. Used
-// through the optional context so the shared Markdown renderer keeps working
-// (no-op) where there's no provider (e.g. the agent-config editor preview).
+// and the lightbox pages left/right through the whole session's images. A caller
+// whose images are not the transcript's — the composer's staged attachments, the
+// queue strip's single file — names its own set on the open call instead (see
+// ``ImageViewerOpenOptions``). Used through the optional context so the shared
+// Markdown renderer keeps working (no-op) where there's no provider (e.g. the
+// agent-config editor preview).
 
 // Overlay controls sit on a dark backdrop, so the shared Button's themed
 // foreground/hover (tuned for app surfaces) would be invisible here — override
@@ -33,16 +36,23 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // isn't in the list (shouldn't happen for our own clean proxy URLs, but be
   // safe) still shows exactly what was clicked — paging just turns off for it.
   //
-  // ``isolated`` is recorded at open time rather than re-derived per render, so
-  // an isolated view stays isolated for its whole life: the gallery growing to
-  // include this src (the queue flushing into the transcript, say) cannot hand
-  // it paging controls it was opened without.
-  const [view, setView] = React.useState<{ src: string; isolated: boolean } | null>(null);
+  // The set this view pages through is recorded at open time rather than
+  // re-derived per render, so it stays the set the opener named for the view's
+  // whole life: the session gallery growing to include this src (the queue
+  // flushing into the transcript, say) cannot hand a caller-owned view paging it
+  // was opened without. ``null`` means the session gallery — the transcript's own
+  // images, deliberately still live so streaming keeps extending it.
+  const [view, setView] = React.useState<{ src: string; gallery: string[] | null } | null>(null);
   const src = view?.src ?? null;
 
   const open = React.useCallback(
     (next: string, options?: ImageViewerOpenOptions) =>
-      setView({ src: next, isolated: options?.isolated === true }),
+      setView({
+        src: next,
+        // One mechanism, three cases: an explicitly named set, the one-image set
+        // ``isolated`` asks for, or the session gallery when the caller names none.
+        gallery: options?.isolated === true ? [next] : options?.gallery ?? null,
+      }),
     [],
   );
   const close = React.useCallback(() => setView(null), []);
@@ -61,17 +71,22 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // close hit-test must also require the click to be inside the visible stage.
   const stageRef = React.useRef<HTMLDivElement>(null);
 
-  // An isolated view is deliberately not looked up in the gallery at all, so it
-  // reports no index — which turns off the arrows, the counter, and the keyboard
-  // paging below through the one condition they already share.
-  const index = src && !view?.isolated ? images.indexOf(src) : -1;
-  const pageable = index >= 0 && images.length > 1;
+  // Everything about paging reads from this one set: the arrows, the counter and
+  // the keyboard handler below share the single condition it produces. A
+  // one-image set (what ``isolated`` opens as) is therefore not pageable by any
+  // of them, without a second rule that could drift from the first.
+  const gallery = view?.gallery ?? images;
+  const index = src ? gallery.indexOf(src) : -1;
+  const pageable = index >= 0 && gallery.length > 1;
   const step = React.useCallback(
     (delta: number) => {
-      if (index < 0 || images.length === 0) return;
-      setView({ src: images[(index + delta + images.length) % images.length], isolated: false });
+      if (!pageable) return;
+      const next = gallery[(index + delta + gallery.length) % gallery.length];
+      // Keep the view's own set: paging within a caller-owned gallery must not
+      // quietly hand the next image back to the session gallery.
+      setView((cur) => (cur ? { ...cur, src: next } : cur));
     },
-    [index, images],
+    [index, gallery, pageable],
   );
 
   // The lightbox is a modal while its route surface is foreground: it OWNS
@@ -254,7 +269,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
           </div>
           {pageable && (
             <span className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
-              {index + 1} / {images.length}
+              {index + 1} / {gallery.length}
             </span>
           )}
         </div>
