@@ -1247,7 +1247,7 @@ export const RouteChainDialog: React.FC<{
                     </Button>
                     <Button
                       type="button"
-                      variant="outline"
+                      variant="destructive"
                       size="sm"
                       className="model-hub-route-head-action"
                       onClick={() => onManageModel?.("remove")}

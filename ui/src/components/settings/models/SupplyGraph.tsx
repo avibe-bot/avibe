@@ -62,11 +62,12 @@ export const SupplyGraph: React.FC<{
     measure();
     const resize = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     resize?.observe(container);
-    container.addEventListener('scroll', measure, true);
+    // The route pane scrolls outside this container; a sticky card moves then.
+    window.addEventListener('scroll', measure, true);
     window.addEventListener('resize', measure);
     return () => {
       resize?.disconnect();
-      container.removeEventListener('scroll', measure, true);
+      window.removeEventListener('scroll', measure, true);
       window.removeEventListener('resize', measure);
     };
   }, [containerRef, relations]);

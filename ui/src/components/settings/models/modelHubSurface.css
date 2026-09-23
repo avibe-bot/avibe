@@ -2227,6 +2227,12 @@
     gap: var(--model-hub-track-gap);
     align-items: start;
   }
+  /* Beside the routes, providers stay in view while the Agent column scrolls,
+     so every wire keeps both of its ends on screen. */
+  .model-hub-upstream-card {
+    position: sticky;
+    top: 16px;
+  }
 }
 
 .model-hub-wire {
