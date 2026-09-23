@@ -286,6 +286,8 @@ class ConsolidatedMessageDispatcher:
         # progress signal. Heartbeat re-renders do NOT go through the emit path,
         # so they never inflate it. Dropped per turn in ``_drop_status_keys``.
         self._status_step_count: dict[str, int] = {}
+        self._close_after_runtime_tasks: set[asyncio.Task] = set()
+        self._close_after_session_ids: set[str] = set()
         # Current context-window occupancy (keyed by SESSION key, not turn-key) so
         # the footer can show "{n} tok" of context the session is using. Backends
         # report the latest snapshot via ``note_session_tokens(total=…)`` (Claude:
@@ -1606,6 +1608,67 @@ class ConsolidatedMessageDispatcher:
         finally:
             if store is not None:
                 store.close()
+        if semantics.settles_run:
+            self._schedule_close_after_runtime(context)
+
+    def _schedule_close_after_runtime(self, context: MessageContext) -> None:
+        """Release a runtime explicitly marked disposable after its Run settles."""
+
+        payload = getattr(context, "platform_specific", None) or {}
+        if not bool(payload.get("close_after")):
+            return
+        session_id = str(payload.get("agent_session_id") or "").strip()
+        target = payload.get("agent_session_target")
+        target = target if isinstance(target, dict) else {}
+        backend = str(
+            payload.get("agent_backend")
+            or target.get("agent_backend")
+            or ""
+        ).strip()
+        if not session_id or backend not in {"claude", "codex", "opencode"}:
+            logger.warning(
+                "close-after requested without a disposable runtime target: session_id=%s backend=%s",
+                session_id,
+                backend,
+            )
+            return
+        if session_id in self._close_after_session_ids:
+            return
+        self._close_after_session_ids.add(session_id)
+
+        async def _close() -> None:
+            # Let the terminal result finish releasing the active turn before
+            # asking the canonical runtime teardown path to close the backend.
+            try:
+                await asyncio.sleep(0)
+                from core.services.running_agents import end_running_agent
+
+                result = await end_running_agent(
+                    self.controller,
+                    backend=backend,
+                    session_id=session_id,
+                )
+                if not result.get("ok") and result.get("error") != "session_not_live":
+                    logger.warning(
+                        "close-after failed for Agent Session %s: %s",
+                        session_id,
+                        result,
+                    )
+            except Exception:
+                logger.warning(
+                    "close-after runtime teardown failed for Agent Session %s",
+                    session_id,
+                    exc_info=True,
+                )
+            finally:
+                self._close_after_session_ids.discard(session_id)
+
+        task = asyncio.create_task(
+            _close(),
+            name=f"agent-runtime-close-after-{session_id}",
+        )
+        self._close_after_runtime_tasks.add(task)
+        task.add_done_callback(self._close_after_runtime_tasks.discard)
 
     def _schedule_agent_run_activity(
         self,

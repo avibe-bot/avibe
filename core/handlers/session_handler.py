@@ -49,7 +49,10 @@ from core.managed_skills import (
 )
 from core.memory_cli_access import configure_memory_cli_access
 from core.message_context import build_thread_session_anchor, resolve_context_thread_id
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    diagnose_agent_process_exit,
+    governor_from_controller,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
@@ -2839,6 +2842,16 @@ class SessionHandler(BaseHandler):
         returncode = get_claude_client_returncode(client)
         if returncode is not None:
             diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if resource_failure is None:
+                resource_failure = diagnose_agent_process_exit(
+                    self.controller,
+                    get_claude_client_pid(client),
+                )
+                if resource_failure is not None:
+                    setattr(client, "_vibe_resource_failure", resource_failure)
+            if resource_failure is not None:
+                diagnostic = f"{diagnostic}\nResource diagnosis: {resource_failure.message}"
         stderr_tail = get_claude_client_stderr_tail(client)
         if stderr_tail:
             diagnostic = f"{diagnostic}\nClaude stderr tail:\n{stderr_tail}"

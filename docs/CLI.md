@@ -466,6 +466,7 @@ vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correc
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
 With an existing `--session-id`, the default admission is P1: Avibe steers the
@@ -500,6 +501,11 @@ calls, and intermediate assistant updates are not included.
 
 `vibe hook send` is kept only as a deprecated compatibility entrypoint. New
 automation should use `vibe agent run`.
+
+Use `--close-after` for a new or forked Session when the Agent runtime should be
+released after the Run settles while the Session, transcript, and Run record stay
+available. It is rejected for `--session-id`, which targets an existing Session
+with its own runtime lifecycle.
 
 ### `vibe watch`
 

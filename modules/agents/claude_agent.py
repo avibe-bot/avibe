@@ -158,7 +158,17 @@ class ClaudeAgent(BaseAgent):
         if returncode is not None:
             reason_key, reason_values = claude_process_exit_reason_i18n(returncode)
             reason = self._translate_error(reason_key, **reason_values)
-            return f"❌ {self._translate_error('error.claudeProcessTerminated', reason=reason)}"
+            message = self._translate_error("error.claudeProcessTerminated", reason=reason)
+            resource_failure = getattr(client, "_vibe_resource_failure", None)
+            if resource_failure is not None:
+                if getattr(resource_failure, "kind", None) == "pids":
+                    message = (
+                        f"{message} "
+                        f"{self._translate_error('error.agentPidsLimit', current=getattr(resource_failure, 'pids_current', 'unknown'), limit=getattr(resource_failure, 'pids_max', 'max'))}"
+                    )
+                elif getattr(resource_failure, "kind", None) == "memory":
+                    message = f"{message} {self._translate_error('error.agentMemoryLimit')}"
+            return f"❌ {message}"
         return f"❌ Claude error: {error}"
 
     async def handle_message(self, request: AgentRequest) -> None:

@@ -49,7 +49,10 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
 )
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    diagnose_agent_process_exit,
+    governor_from_controller,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
@@ -553,6 +556,7 @@ class CodexAgent(BaseAgent):
                 # Safety net: if the thread is stale (e.g. Codex server-side
                 # expiry, or the proactive invalidation in _get_or_create_transport
                 # was bypassed by a race), invalidate and retry once.
+                resource_failure = self._resource_failure_for_transport(transport)
                 if (
                     self._is_recoverable_transport_error(e)
                     and backend_dispatch_attempted(request.context) is False
@@ -586,6 +590,10 @@ class CodexAgent(BaseAgent):
                             return  # retry succeeded
                         except Exception as retry_err:
                             e = retry_err  # fall through to normal error handling
+                            resource_failure = (
+                                resource_failure
+                                or self._resource_failure_for_transport(transport)
+                            )
 
                 # FAIL LOUD on a server-side "thread not found": the conversation is
                 # gone, so surface the error instead of silently clearing the
@@ -598,7 +606,10 @@ class CodexAgent(BaseAgent):
                 self._turn_registry.clear_pending_turn_start(request.base_session_id, request)
                 logger.error("Error in Codex handle_message: %s", e, exc_info=True)
                 await self._record_model_hub_native_failure(request.context, str(e))
-                error_text = self._error_display_text(e)
+                error_text = self._error_display_text(
+                    e,
+                    resource_failure=resource_failure,
+                )
                 await emit_backend_failure(
                     self.controller,
                     request.context,
@@ -1341,20 +1352,59 @@ class CodexAgent(BaseAgent):
         session_id = payload.get("agent_session_id") if isinstance(payload, dict) else None
         setter(request.base_session_id, session_id)
 
-    def _error_display_text(self, error: BaseException) -> str:
+    def _resource_failure_for_transport(self, transport: CodexTransport | None):
+        process = getattr(transport, "_process", None)
+        if process is None or getattr(process, "returncode", None) is None:
+            return None
+        failure = diagnose_agent_process_exit(
+            self.controller,
+            getattr(process, "pid", None),
+        )
+        if failure is not None:
+            logger.error(
+                "Codex app-server exited under an Agent resource limit: %s",
+                failure.message,
+            )
+        return failure
+
+    def _error_display_text(
+        self,
+        error: BaseException,
+        *,
+        resource_failure=None,
+    ) -> str:
         if isinstance(error, CodexResponseTooLargeError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t('error.codexResponseTooLarge', language, limitMiB=error.limit // (1024 * 1024))}"
-        if isinstance(error, CodexPromptRefreshUnavailableError):
+            message = i18n_t(
+                "error.codexResponseTooLarge",
+                language,
+                limitMiB=error.limit // (1024 * 1024),
+            )
+        elif isinstance(error, CodexPromptRefreshUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t('error.codexPromptRefreshUnavailable', language)}"
-        return f"❌ Codex error: {error}"
+            message = i18n_t("error.codexPromptRefreshUnavailable", language)
+        else:
+            message = f"Codex error: {error}"
+
+        if resource_failure is not None:
+            language = str(
+                getattr(getattr(self.controller, "config", None), "language", "en")
+                or "en"
+            )
+            if getattr(resource_failure, "kind", None) == "pids":
+                message = (
+                    f"{message} "
+                    f"{i18n_t('error.agentPidsLimit', language, current=getattr(resource_failure, 'pids_current', 'unknown'), limit=getattr(resource_failure, 'pids_max', 'max'))}"
+                )
+            elif getattr(resource_failure, "kind", None) == "memory":
+                message = f"{message} {i18n_t('error.agentMemoryLimit', language)}"
+        return f"❌ {message}"
 
     def _runtime_ownership_target_for_cwd(
         self,

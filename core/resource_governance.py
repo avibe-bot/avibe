@@ -17,7 +17,7 @@ DEFAULT_GROUP_NAME = "avibe-agents"
 DEFAULT_RUNTIME_GROUP_NAME = "avibe-runtime"
 DEFAULT_AGENT_CPU_WEIGHT = 50
 DEFAULT_AGENT_IO_WEIGHT = 50
-DEFAULT_AGENT_PIDS_MAX = 512
+DEFAULT_AGENT_PIDS_MAX = 4096
 DEFAULT_AGENT_OOM_SCORE_ADJ = 500
 MIN_AGENT_MEMORY_MAX_BYTES = 512 * 1024 * 1024
 MIB = 1024 * 1024
@@ -37,6 +37,23 @@ class AgentResourceLimits:
     io_weight: int = DEFAULT_AGENT_IO_WEIGHT
     pids_max: int = DEFAULT_AGENT_PIDS_MAX
     oom_score_adj: int = DEFAULT_AGENT_OOM_SCORE_ADJ
+
+
+@dataclass(frozen=True)
+class AgentResourceSnapshot:
+    pids_current: int | None
+    pids_max: int | None
+    pids_events: dict[str, int]
+    memory_events: dict[str, int]
+
+
+@dataclass(frozen=True)
+class AgentResourceFailure:
+    kind: str
+    message: str
+    pids_current: int | None = None
+    pids_max: int | None = None
+    event_delta: int | None = None
 
 
 def _read_text(path: Path) -> str | None:
@@ -64,6 +81,34 @@ def _parse_pid(value: str | None) -> int | None:
     except ValueError:
         return None
     return pid if pid > 0 else None
+
+
+def _parse_counter_file(path: Path) -> dict[str, int]:
+    text = _read_text(path)
+    if not text:
+        return {}
+    counters: dict[str, int] = {}
+    for line in text.splitlines():
+        name, _, raw_value = line.partition(" ")
+        if not name or not raw_value:
+            continue
+        try:
+            value = int(raw_value.strip())
+        except ValueError:
+            continue
+        if value >= 0:
+            counters[name] = value
+    return counters
+
+
+def _parse_pids_max(value: str | None) -> int | None:
+    if not value or value == "max":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _round_down_mib(value: int) -> int:
@@ -374,6 +419,7 @@ class AgentResourceGovernor:
         self._group: Path | None = None
         self._limits: AgentResourceLimits | None = None
         self._disabled_reason: str | None = None
+        self._pid_event_baselines: dict[int, AgentResourceSnapshot] = {}
 
     @property
     def mode(self) -> str:
@@ -394,6 +440,7 @@ class AgentResourceGovernor:
         self._group = None
         self._limits = None
         self._disabled_reason = None
+        self._pid_event_baselines.clear()
 
     def apply_to_pid(self, pid: int | None, *, label: str = "agent") -> bool:
         if not isinstance(pid, int) or pid <= 0:
@@ -406,7 +453,72 @@ class AgentResourceGovernor:
         moved = self._move_pid(group, pid, label=label)
         for child_pid in descendant_pids:
             self._move_pid(group, child_pid, label=f"{label} child", warn=False)
+        if moved:
+            snapshot = self.snapshot()
+            if snapshot is not None:
+                self._pid_event_baselines[pid] = snapshot
         return moved
+
+    def snapshot(self) -> AgentResourceSnapshot | None:
+        """Read the current counters for the shared agent cgroup."""
+
+        group = self._group
+        if group is None:
+            return None
+        return AgentResourceSnapshot(
+            pids_current=_parse_pid(_read_text(group / "pids.current")),
+            pids_max=_parse_pids_max(_read_text(group / "pids.max")),
+            pids_events=_parse_counter_file(group / "pids.events"),
+            memory_events=_parse_counter_file(group / "memory.events"),
+        )
+
+    def diagnose_process_exit(self, pid: int | None) -> AgentResourceFailure | None:
+        """Classify a process exit from counters observed since it was adopted."""
+
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+        current = self.snapshot()
+        baseline = self._pid_event_baselines.pop(pid, None)
+        if current is None:
+            return None
+
+        baseline_pids_max = (baseline.pids_events.get("max", 0) if baseline else 0)
+        pids_max_delta = current.pids_events.get("max", 0) - baseline_pids_max
+        if pids_max_delta > 0:
+            current_label = (
+                str(current.pids_current)
+                if current.pids_current is not None
+                else "unknown"
+            )
+            limit_label = (
+                str(current.pids_max)
+                if current.pids_max is not None
+                else "max"
+            )
+            return AgentResourceFailure(
+                kind="pids",
+                message=(
+                    "agent cgroup pids limit reached "
+                    f"(current={current_label}, max={limit_label}, events.max_delta={pids_max_delta})"
+                ),
+                pids_current=current.pids_current,
+                pids_max=current.pids_max,
+                event_delta=pids_max_delta,
+            )
+
+        baseline_memory = baseline.memory_events if baseline else {}
+        for event_name in ("oom_kill", "oom", "max"):
+            delta = current.memory_events.get(event_name, 0) - baseline_memory.get(event_name, 0)
+            if delta > 0:
+                return AgentResourceFailure(
+                    kind="memory",
+                    message=(
+                        "agent cgroup memory limit reached "
+                        f"(event={event_name}, events_delta={delta})"
+                    ),
+                    event_delta=delta,
+                )
+        return None
 
     def _move_pid(self, group: Path, pid: int, *, label: str, warn: bool = True) -> bool:
         try:
@@ -648,3 +760,9 @@ def governor_from_controller(controller: Any) -> AgentResourceGovernor:
     mark_controller_resource_governor(governor)
     setattr(controller, "_agent_resource_governor", governor)
     return governor
+
+
+def diagnose_agent_process_exit(controller: Any, pid: int | None) -> AgentResourceFailure | None:
+    """Return a resource-limit diagnosis for one adopted backend process."""
+
+    return governor_from_controller(controller).diagnose_process_exit(pid)

@@ -152,6 +152,7 @@ AGENT_RUN_DELIVERY_INTENTS = frozenset(
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
+AGENT_RUN_CLOSE_AFTER_METADATA_KEY = "close_after"
 FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE = "session_turn_gate_unavailable"
 SESSION_TURN_GATE_UNAVAILABLE_I18N_KEY = "harness.run.sessionTurnGateUnavailable"
 
@@ -10914,6 +10915,14 @@ class ScheduledTaskService:
                 ),
                 "vibe_agent_name": agent_name,
                 "vibe_agent_id": agent_id,
+                "agent_backend": (
+                    target_info.agent_backend
+                    if target_info is not None
+                    else None
+                ),
+                "close_after": bool(
+                    (metadata or {}).get(AGENT_RUN_CLOSE_AFTER_METADATA_KEY)
+                ),
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
                 "source_session_id": (metadata or {}).get("source_session_id"),

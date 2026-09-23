@@ -24,7 +24,69 @@ def test_derive_agent_limits_uses_single_aggregate_budget() -> None:
     assert limits.memory_high == 2367 * MIB
     assert limits.cpu_weight == 50
     assert limits.io_weight == 50
-    assert limits.pids_max == 512
+    assert limits.pids_max == 4096
+
+
+def test_governor_diagnoses_pid_limit_from_counter_delta(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    base.mkdir(parents=True)
+    group.mkdir()
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 4\n"),
+        ("memory.events", "max 0\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    monkeypatch.setattr(governor, "_group", group)
+    governor._pid_event_baselines[123] = governor.snapshot()  # type: ignore[assignment]
+    (group / "pids.events").write_text("max 5\n", encoding="utf-8")
+
+    failure = governor.diagnose_process_exit(123)
+
+    assert failure is not None
+    assert failure.kind == "pids"
+    assert failure.pids_current == 100
+    assert failure.pids_max == 4096
+    assert failure.event_delta == 1
+    assert "events.max_delta=1" in failure.message
+
+
+def test_governor_diagnoses_memory_limit_from_counter_delta(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    group = base / "avibe-agents"
+    base.mkdir(parents=True)
+    group.mkdir()
+    for name, value in (
+        ("cgroup.procs", ""),
+        ("pids.current", "100"),
+        ("pids.max", "4096"),
+        ("pids.events", "max 0\n"),
+        ("memory.events", "max 1\noom 0\noom_kill 0\n"),
+    ):
+        (group / name).write_text(value, encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    governor._group = group
+    governor._pid_event_baselines[123] = governor.snapshot()  # type: ignore[assignment]
+    (group / "memory.events").write_text("max 2\noom 0\noom_kill 0\n", encoding="utf-8")
+
+    failure = governor.diagnose_process_exit(123)
+
+    assert failure is not None
+    assert failure.kind == "memory"
+    assert "event=max" in failure.message
 
 
 def test_derive_agent_limits_honors_explicit_bytes() -> None:
@@ -299,7 +361,7 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     assert (group / "memory.oom.group").read_text(encoding="utf-8").strip() == "1"
     assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "50"
     assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 50"
-    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "512"
+    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "4096"
 
 
 def test_governor_falls_back_when_memory_controller_is_missing(

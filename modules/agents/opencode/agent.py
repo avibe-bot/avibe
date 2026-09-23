@@ -43,7 +43,11 @@ from core.native_dispatch_phase import (
     mark_backend_dispatch_attempted,
     prewrite_user_stop_requested,
 )
-from core.resource_governance import governor_from_controller
+from core.resource_governance import (
+    AgentResourceFailure,
+    diagnose_agent_process_exit,
+    governor_from_controller,
+)
 from core.runtime_activation import RuntimeActivationIdentity
 from core.runtime_ownership import (
     RuntimeResourceTarget,
@@ -976,7 +980,48 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             variant=reasoning_effort or default_label,
         )
 
-    def _server_start_error_display_text(self, error: BaseException) -> str:
+    def _resource_failure_for_server(
+        self,
+        server: OpenCodeServerManager | None,
+    ) -> AgentResourceFailure | None:
+        process = getattr(server, "_process", None)
+        if process is None or getattr(process, "returncode", None) is None:
+            return None
+        failure = diagnose_agent_process_exit(
+            self.controller,
+            getattr(process, "pid", None),
+        )
+        if failure is not None:
+            logger.error(
+                "OpenCode server exited under an Agent resource limit: %s",
+                failure.message,
+            )
+        return failure
+
+    def _resource_failure_suffix(
+        self,
+        failure: AgentResourceFailure | None,
+    ) -> str:
+        if failure is None:
+            return ""
+        language = str(
+            getattr(getattr(self.controller, "config", None), "language", "en")
+            or "en"
+        )
+        if failure.kind == "pids":
+            return (
+                f" {i18n_t('error.agentPidsLimit', language, current=failure.pids_current or 'unknown', limit=failure.pids_max or 'max')}"
+            )
+        if failure.kind == "memory":
+            return f" {i18n_t('error.agentMemoryLimit', language)}"
+        return ""
+
+    def _server_start_error_display_text(
+        self,
+        error: BaseException,
+        *,
+        resource_failure: AgentResourceFailure | None = None,
+    ) -> str:
         localized_key = None
         if isinstance(error, OpenCodeModelHubOverlayRequiredError):
             localized_key = "error.opencodeModelHubOverlayRequired"
@@ -989,8 +1034,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            return f"❌ {i18n_t(localized_key, language)}"
-        return f"Failed to start OpenCode server: {error}"
+            message = i18n_t(localized_key, language)
+        else:
+            message = f"Failed to start OpenCode server: {error}"
+        return f"❌ {message}{self._resource_failure_suffix(resource_failure)}"
 
     async def prepare_runtime_restart(self) -> None:
         """Adopt persisted server state before the shared drain snapshot."""
@@ -1218,6 +1265,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         caller_context_binding_renewal: asyncio.Task[None] | None = None
         active_poll_persisted = False
         active_poll_removal_pending = False
+        resource_failure: AgentResourceFailure | None = None
 
         def remove_active_poll() -> None:
             nonlocal active_poll_persisted, active_poll_removal_pending
@@ -1258,13 +1306,17 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = self._resource_failure_for_server(server)
             logger.error(f"Failed to start OpenCode server: {e}", exc_info=True)
             await emit_backend_failure(
                 self.controller,
                 request.context,
                 self.name,
                 str(e),
-                display_text=self._server_start_error_display_text(e),
+                display_text=self._server_start_error_display_text(
+                    e,
+                    resource_failure=resource_failure,
+                ),
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1303,6 +1355,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             # The previous session is gone server-side — surface it as a terminal
             # ERROR result (outbound chokepoint turns the dot red), don't silently
             # fork a fresh session and lose context.
@@ -1311,7 +1364,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=f"❌ {e}",
+                display_text=f"❌ {e}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1322,6 +1375,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 model_hub_overlay_reservation,
             )
             model_hub_overlay_reservation = None
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             # A transient/transport/auth failure while acquiring the session
             # (get_session now raises on non-404, Codex P2): surface it as a
             # terminal error result instead of letting it propagate unhandled or be
@@ -1334,7 +1388,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 str(e),
-                display_text=message,
+                display_text=f"{message}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
             await self._remove_ack_reaction(request)
@@ -1804,6 +1858,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             raise
         except OpenCodePromptRejectedError as e:
             error_text = f"{type(e).__name__}: {e}"
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             logger.error("OpenCode prompt was definitively rejected: %s", e)
 
             poll_can_be_removed = not (logical_turn_id and start_attempt_id)
@@ -1855,7 +1910,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 error_text,
-                display_text=f"OpenCode request failed: {error_text}",
+                display_text=(
+                    f"OpenCode request failed: {error_text}"
+                    f"{self._resource_failure_suffix(resource_failure)}"
+                ),
                 request=request,
             )
         except Exception as e:
@@ -1863,6 +1921,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             error_details = str(e).strip()
             error_text = f"{error_name}: {error_details}" if error_details else error_name
 
+            resource_failure = resource_failure or self._resource_failure_for_server(server)
             logger.error(f"OpenCode request failed: {error_text}", exc_info=True)
             await self.record_model_hub_native_failure(request.context, error_text)
             try:
@@ -1888,7 +1947,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.context,
                 self.name,
                 error_text,
-                display_text=message,
+                display_text=f"{message}{self._resource_failure_suffix(resource_failure)}",
                 request=request,
             )
         finally:
