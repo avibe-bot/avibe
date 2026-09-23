@@ -2035,7 +2035,7 @@ class CLIProxyEngineAdapter:
 
         The observation seam determines protocol from upstream responses, so the
         legacy temporary record uses a neutral engine-store protocol marker.
-        Explicit Bearer is restricted to the Anthropic interface. Neither marker
+        Explicit Bearer is restricted to Anthropic interfaces. Neither marker
         supplies authentication evidence; observation still needs upstream proof.
         """
 

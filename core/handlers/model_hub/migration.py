@@ -1224,6 +1224,23 @@ def _require_native_api_key_transport(
         raise MigrationConflictError from None
 
 
+def _bearer_transport(item: NativeMigrationItem) -> NativeMigrationItem | None:
+    """Carry a custom-endpoint Anthropic key over as the Bearer the engine sends.
+
+    The pinned engine sends ``x-api-key`` only to the official origin. Custom
+    endpoints get Bearer, so migration proves and provisions exactly that header;
+    an endpoint that refuses it fails proof and the native files stay untouched.
+    """
+    if item.kind == "oauth_native" or item.protocol != "anthropic" or item.auth_scheme is not None:
+        return None
+    candidate = replace(item, auth_scheme="bearer")
+    try:
+        _require_native_api_key_transport(candidate)
+    except MigrationConflictError:
+        return None
+    return candidate
+
+
 def scan_native_configs(
     config: ModelHubConfig,
     *,
@@ -1301,7 +1318,7 @@ def scan_native_configs(
             try:
                 _require_native_api_key_transport(item)
             except MigrationConflictError:
-                item = replace(
+                item = _bearer_transport(item) or replace(
                     item, proposed_action="reauth", selected=False,
                     notes_key="settings.models.migration.blocked.transport",
                 )
@@ -1505,6 +1522,8 @@ async def _prepare_takeover(
                         "vendor": item.vendor,
                         "base_url": validate_base_url(item.base_url),
                         "key": item.secret,
+                        # Bearer exists only on the Anthropic interface.
+                        **({"protocol": "anthropic"} if item.auth_scheme == "bearer" else {}),
                     }, on_reserved=lambda ref: host.revocations.add("observation", ref), **auth_options)
                     protocol = cast(Any, observation.protocol)
                     _require_native_api_key_transport(item, observed_protocol=protocol)
