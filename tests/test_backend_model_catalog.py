@@ -1015,6 +1015,49 @@ def test_visible_backend_model_entries_drops_only_hidden_rows():
     assert [entry["id"] for entry in visible] == ["claude-opus-5", "claude-kept"]
 
 
+def test_bundled_retirements_outrank_a_remote_catalog_cached_before_them():
+    import copy
+
+    bundled = backend_model_catalog.load_bundled_catalog()
+    stale = copy.deepcopy(bundled)
+    stale["backends"]["claude"]["models"] = [
+        {"id": "claude-opus-4"},
+        {"id": "claude-sonnet-4", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-opus-5"},
+    ]
+
+    blocked = backend_model_catalog._claude_blocked_model_ids(stale, bundled)
+    merged = backend_model_catalog.merge_model_sources(
+        backend_model_catalog._claude_sources(stale, bundled),
+        blocked_model_ids=blocked,
+    )
+
+    ids = {entry["id"] for entry in merged}
+    assert "claude-opus-5" in ids
+    assert not ids & set(RETIRED_CLAUDE_MODELS)
+
+
+def test_an_explicitly_listed_remote_row_can_revive_a_retired_model():
+    import copy
+
+    bundled = backend_model_catalog.load_bundled_catalog()
+    remote = copy.deepcopy(bundled)
+    remote["backends"]["claude"]["models"] = [{"id": "claude-opus-4", "visibility": "list"}]
+
+    merged = backend_model_catalog.merge_model_sources(
+        backend_model_catalog._claude_sources(remote, bundled),
+        blocked_model_ids=backend_model_catalog._claude_blocked_model_ids(remote, bundled),
+    )
+
+    assert "claude-opus-4" in {entry["id"] for entry in merged}
+
+
+def test_fresh_model_hub_catalog_omits_retired_models():
+    from config.v2_config import _default_backend_models
+
+    assert not {model.id for model in _default_backend_models("claude")} & set(RETIRED_CLAUDE_MODELS)
+
+
 def test_snapshot_returns_immediately_while_remote_refresh_runs(monkeypatch, tmp_path):
     refresh_started = threading.Event()
     release_refresh = threading.Event()

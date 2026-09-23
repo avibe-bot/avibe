@@ -46,9 +46,9 @@ from core.handlers.model_hub.migration_journal import (
 )
 from core.handlers.model_hub.migration_persisted import PersistedInventory
 from vibe.backend_model_catalog import (
-    backend_model_entries,
     bundled_catalog_reasoning_efforts_by_model,
     load_bundled_catalog,
+    visible_backend_model_entries,
 )
 from vibe.codex_config import (
     read_codex_auth_state,
@@ -281,7 +281,7 @@ def _ids(
 
 def _native_model_ids(backend: str) -> tuple[str, ...]:
     catalog = load_bundled_catalog()
-    return tuple(entry["id"] for entry in backend_model_entries(backend, catalog))
+    return tuple(entry["id"] for entry in visible_backend_model_entries(backend, catalog))
 
 
 def _safe_account_label(value: object) -> Optional[str]:

@@ -2178,7 +2178,7 @@ def test_source_create_nonce_owns_permanent_credential_through_cancellation(tmp_
 
 def test_agents_endpoint_projects_builtin_models(tmp_path):
     """list_agents() carries each fixed menu from the backend catalog."""
-    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+    from vibe.backend_model_catalog import load_bundled_catalog, visible_backend_model_entries
 
     service, _store, _adapter = _service(tmp_path)
     agents = {agent["backend"]: agent for agent in service.list_agents()}
@@ -2187,7 +2187,7 @@ def test_agents_endpoint_projects_builtin_models(tmp_path):
 
     catalog = load_bundled_catalog()
     for backend in ("claude", "codex"):
-        expected = [entry["id"] for entry in backend_model_entries(backend, catalog)]
+        expected = [entry["id"] for entry in visible_backend_model_entries(backend, catalog)]
         assert expected, f"bundled catalog must list built-in {backend} models"
         assert agents[backend]["builtin_models"] == expected
 
@@ -2854,6 +2854,58 @@ def test_builtin_reconcile_inserts_in_snapshot_order_and_preserves_every_other_r
     assert "invalid\ud800" not in {model.id for model in agent.models}
     assert {model.id: model.to_payload() for model in agent.models if model.id in unchanged} == unchanged
     assert refreshed == ["codex"]
+
+
+def test_builtin_reconcile_drops_retired_builtins_unless_a_route_pins_them(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, _adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_pinned0001",
+        kind="api_key",
+        vendor="anthropic",
+        display_name="Pinned supplier",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="claude-sonnet-4", provenance="manual")],
+        credential_ref="cred_pinned0001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["claude"]
+    agent.sources.order = [source.id]
+    pinned_hop = ModelHubRouteHopConfig(source_id=source.id, model_id="claude-sonnet-4")
+    agent.models = [
+        ModelHubBackendModelConfig(id="claude-opus-5", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-opus-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-sonnet-4", origin="builtin"),
+        ModelHubBackendModelConfig(id="claude-haiku-4", origin="manual"),
+    ]
+    agent.routes = {
+        "claude-opus-4": ModelHubRouteConfig(),
+        "claude-sonnet-4": ModelHubRouteConfig(hops=(pinned_hop,)),
+    }
+    monkeypatch.setattr(
+        service,
+        "_builtin_snapshots",
+        lambda _backends: {"claude": {"complete": True, "models": [{"id": "claude-opus-5"}]}},
+    )
+
+    changed = asyncio.run(service.reconcile_builtin_models(("claude",)))
+
+    agent = store.config.agents["claude"]
+    assert changed == ["claude"]
+    # The unpinned retired built-in leaves; a pinned route and a user-added row stay.
+    assert [model.id for model in agent.models] == [
+        "claude-opus-5",
+        "claude-sonnet-4",
+        "claude-haiku-4",
+    ]
+    assert "claude-opus-4" not in agent.routes
+    assert agent.routes["claude-sonnet-4"].hops == (pinned_hop,)
+    assert "claude-opus-4" not in {row["id"] for row in service.backend_catalog_models("claude")}
 
 
 def test_builtin_reconcile_is_blocked_only_by_store_writability(monkeypatch, tmp_path):

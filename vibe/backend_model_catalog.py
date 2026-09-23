@@ -752,6 +752,14 @@ def visible_backend_model_entries(
     return [entry for entry in backend_model_entries(backend, catalog) if not _model_hidden(entry)]
 
 
+def retired_backend_model_ids(backend: str, catalog: dict[str, Any] | None) -> frozenset[str]:
+    """Ids this catalog tombstones, i.e. models the backend no longer serves."""
+
+    return frozenset(
+        entry["id"] for entry in backend_model_entries(backend, catalog) if _model_hidden(entry)
+    )
+
+
 def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> dict[str, Any]:
     backend_key = (backend or "").strip().lower()
     if backend_key not in _SUPPORTED_BACKENDS:
@@ -767,7 +775,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
 
     if backend_key == "claude":
         sources = _claude_sources(remote_catalog, bundled_catalog)
-        blocked: set[str] = set()
+        blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     else:
         local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
@@ -872,7 +880,7 @@ def backend_builtin_snapshot(
             bundled_catalog,
             local_models=local_models,
         )
-        blocked: set[str] = set()
+        blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     else:
         local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
         local_complete = not cli_installed or local_catalog_read
@@ -1090,6 +1098,27 @@ def _model_hidden(entry: dict[str, Any]) -> bool:
 def _model_explicitly_visible(entry: dict[str, Any]) -> bool:
     visibility = entry.get("visibility")
     return isinstance(visibility, str) and visibility.strip().lower() in _VISIBLE_VISIBILITIES
+
+
+def _claude_blocked_model_ids(
+    remote_catalog: dict[str, Any],
+    bundled_catalog: dict[str, Any],
+) -> set[str]:
+    """Bundled retirements outrank a remote catalog cached before they shipped.
+
+    Only a remote row that is explicitly visible may bring a retired id back;
+    an old cached row that merely lists the id does not.
+    """
+
+    remote_entries = backend_model_entries("claude", remote_catalog)
+    explicit_remote_models = {
+        entry["id"] for entry in remote_entries if _model_explicitly_visible(entry)
+    }
+    return {
+        model
+        for model in retired_backend_model_ids("claude", bundled_catalog)
+        if model not in explicit_remote_models
+    }
 
 
 def _codex_blocked_model_ids(

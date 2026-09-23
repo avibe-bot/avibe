@@ -24,6 +24,7 @@ from config.v2_config import (
     ModelHubBackendModelConfig,
     ModelHubConfig,
     model_hub_fixed_menu_ids,
+    model_hub_retired_menu_ids,
     ModelHubMenuConfig,
     ModelHubModelConfig,
     ModelHubRouteConfig,
@@ -4746,9 +4747,25 @@ class ModelHubService:
                 if admitted is not None:
                     snapshot.append(admitted)
             builtin_order = tuple(model.id for model in snapshot)
+            # A retired built-in leaves the catalog unless the user pinned a route to it.
+            retired = model_hub_retired_menu_ids(backend)
+            kept = [
+                model
+                for model in agent.models
+                if not (
+                    model.origin == "builtin"
+                    and model.id in retired
+                    and normalized_model_hub_override(agent.routes.get(model.id)) is None
+                )
+            ]
+            added = len(kept) != len(agent.models)
+            if added:
+                for model in agent.models:
+                    if model not in kept:
+                        agent.routes.pop(model.id, None)
+                agent.models = kept
             present = {model.id for model in agent.models}
             removed = set(agent.removed_model_ids)
-            added = False
             for model in snapshot:
                 model_id = model.id
                 if model_id in present or model_id in removed:
