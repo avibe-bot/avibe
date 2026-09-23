@@ -78,6 +78,20 @@ _CODEX_BUILT_IN_MODELS = [
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
 ]
+# Retired Codex ids that only ever came from the legacy list or a Codex CLI
+# cache, never the bundled menu. They are blocked here rather than tombstoned in
+# the bundled catalog, which would add them to the persisted fixed menu.
+_RETIRED_CODEX_MODELS = frozenset(
+    {
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.4-nano",
+        "gpt-5.1-codex-max",
+        "gpt-5.1-codex-mini",
+        "gpt-5.1",
+        "gpt-5",
+    }
+)
 _REASONING_LABELS = {
     "none": "None",
     "minimal": "Minimal",
@@ -745,6 +759,12 @@ def visible_backend_model_entries(
     return [entry for entry in backend_model_entries(backend, catalog) if not _model_hidden(entry)]
 
 
+def unlisted_retired_backend_model_ids(backend: str) -> frozenset[str]:
+    """Retired ids no bundled catalog row carries, so no tombstone can name them."""
+
+    return _RETIRED_CODEX_MODELS if (backend or "").strip().lower() == "codex" else frozenset()
+
+
 def retired_backend_model_ids(backend: str, catalog: dict[str, Any] | None) -> frozenset[str]:
     """Ids this catalog tombstones, i.e. models the backend no longer serves."""
 
@@ -1134,7 +1154,10 @@ def _codex_blocked_model_ids(
         for entry in [*remote_entries, *bundled_entries]
         if _model_explicitly_visible(entry)
     }
-    return _bundled_retired_model_ids("codex", remote_catalog, bundled_catalog) | {
+    retired = _bundled_retired_model_ids("codex", remote_catalog, bundled_catalog) | {
+        model for model in _RETIRED_CODEX_MODELS if model not in explicit_catalog_models
+    }
+    return retired | {
         entry["id"] for entry in remote_entries if _model_hidden(entry)
     } | {
         entry["id"]

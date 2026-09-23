@@ -1660,7 +1660,16 @@ def test_codex_retirements_outrank_stale_remote_and_local_caches(monkeypatch, tm
     codex_dir = tmp_path / ".codex"
     codex_dir.mkdir()
     (codex_dir / "models_cache.json").write_text(
-        json.dumps({"models": [{"slug": "gpt-5.2", "visibility": "list"}, {"slug": "gpt-5.4", "visibility": "list"}]}),
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-5.2", "visibility": "list"},
+                    {"slug": "gpt-5.1-codex-mini", "visibility": "list"},
+                    {"slug": "gpt-5.3-codex", "visibility": "list"},
+                    {"slug": "gpt-5.4", "visibility": "list"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_dir))
@@ -1670,8 +1679,6 @@ def test_codex_retirements_outrank_stale_remote_and_local_caches(monkeypatch, tm
     models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
 
     assert {"gpt-6-sol", "gpt-5.4", "gpt-5.3-codex-spark"} <= set(models)
-    # Bundled and stale remote catalogs listed only gpt-5.2; the other ids came
-    # solely from the legacy list, so dropping it removes them everywhere.
     assert not set(models) & set(RETIRED_CODEX_MODELS)
 
 
@@ -1683,6 +1690,15 @@ def test_an_explicitly_listed_remote_row_can_revive_a_retired_codex_model(monkey
     models = backend_model_catalog.backend_model_snapshot("codex", schedule_refresh=False)["models"]
 
     assert "gpt-5.2" in models
+
+
+def test_a_revived_gpt_5_2_keeps_its_bundled_metadata():
+    from config.v2_config import _default_backend_models
+
+    row = next(model for model in _default_backend_models("codex") if model.id == "gpt-5.2")
+
+    assert row.display_name == "GPT-5.2"
+    assert row.reasoning_efforts == ["low", "medium", "high", "xhigh"]
 
 
 def test_retired_codex_models_stay_in_the_fixed_menu_for_released_configs():

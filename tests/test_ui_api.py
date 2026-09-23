@@ -2806,7 +2806,8 @@ def test_codex_models_merges_cli_cache_and_filters_hidden_models(monkeypatch, tm
     ]
     assert result["models"].index("gpt-5.4") < result["models"].index("gpt-5.4-mini")
     assert "gpt-5.3-codex-spark" in result["models"]
-    assert "gpt-5.1-codex-mini" in result["models"]
+    # Retired ids stay out even when a local CLI cache still lists them.
+    assert "gpt-5.1-codex-mini" not in result["models"]
     assert "gpt-5.1" not in result["models"]
     assert "gpt-5.2" not in result["models"]
     assert result["models"].count("gpt-5.4") == 1
