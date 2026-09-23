@@ -2320,3 +2320,31 @@ def test_direct_mode_refuses_chain_and_probe(tmp_path):
     with pytest.raises(ModelHubError) as probe_error:
         asyncio.run(service.probe_agent("claude", "claude-opus-4-6"))
     assert probe_error.value.code == "direct_mode"
+
+
+def test_new_subscription_joins_only_the_agents_its_catalog_serves(tmp_path):
+    key = _source("src_placekey01", ("claude-opus-4-6",))
+    config = _config([key])
+    service, _, _ = _service(tmp_path, config)
+    chatgpt = _source("src_placegpt01", ("gpt-5.5",), kind="subscription", vendor="openai")
+    claude = _source("src_placeclaude", ("claude-opus-4-6",), kind="subscription")
+    gemini = _source("src_placegemini", ("gemini-3-pro",), kind="subscription", vendor="gemini")
+    bundle = _source("src_placebundle", ("claude-opus-4-6", "gpt-5.5"), kind="subscription", vendor="opencode")
+    for source in (chatgpt, claude, gemini, bundle):
+        config.sources.append(source)
+        service._apply_source_placement(config, source)
+    order = {backend: config.agents[backend].sources.order for backend in ("claude", "codex", "opencode")}
+    # Subscriptions go ahead of keys, only where their fixed catalog serves the
+    # menu; OpenCode reaches every vendor. Keys stay everywhere.
+    assert order["claude"] == [claude.id, bundle.id, key.id]
+    assert order["codex"] == [chatgpt.id, bundle.id, key.id]
+    assert order["opencode"] == [chatgpt.id, claude.id, gemini.id, bundle.id, key.id]
+
+
+def test_new_subscription_without_a_catalog_joins_its_vendor_agent(tmp_path):
+    config = _config([])
+    service, _, _ = _service(tmp_path, config)
+    chatgpt = _source("src_placeempty", (), kind="subscription", vendor="openai")
+    config.sources.append(chatgpt)
+    service._apply_source_placement(config, chatgpt)
+    assert [backend for backend in ("claude", "codex", "opencode") if chatgpt.id in config.agents[backend].sources.order] == ["codex", "opencode"]

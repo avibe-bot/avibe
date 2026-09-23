@@ -2179,12 +2179,53 @@ class ModelHubService:
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
     ) -> None:
-        """Add a new Source to eligible backend defaults without editing overrides."""
+        """Add a new Source to eligible backend defaults without editing overrides.
+
+        A subscription serves a fixed catalog, so it joins only the backends whose
+        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
+        keys there. API keys stay open to every eligible backend, appended.
+        """
 
         for backend in MODEL_HUB_BACKENDS:
             agent = config.agents[backend]
-            if self._eligible_for_agent(source, backend) and source.id not in agent.sources.order:
+            if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
+                continue
+            if source.kind != "subscription":
                 agent.sources.order.append(source.id)
+                continue
+            if not self._subscription_serves_backend(agent, source, backend):
+                continue
+            by_id = {item.id: item for item in config.sources}
+            position = next(
+                (
+                    index
+                    for index, source_id in enumerate(agent.sources.order)
+                    if (existing := by_id.get(source_id)) is not None and existing.kind != "subscription"
+                ),
+                len(agent.sources.order),
+            )
+            agent.sources.order.insert(position, source.id)
+
+    @staticmethod
+    def _subscription_serves_backend(
+        agent: ModelHubAgentSupplyConfig,
+        source: ModelHubSourceConfig,
+        backend: BackendName,
+    ) -> bool:
+        if backend == "opencode":
+            return True
+        if not agent.models or not any(not model.retired for model in source.models):
+            # Nothing to compare: fall back to the vendor's own Agent.
+            return _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend
+        return any(
+            _matching_v1_model_id(
+                backend=backend,
+                requested_model=model.id,
+                source=source,
+                include_manual=True,
+            ) is not None
+            for model in agent.models
+        )
 
     def _matching_menu_model_hops(
         self,
