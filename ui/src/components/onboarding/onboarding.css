@@ -304,7 +304,10 @@
     --ob-heading-gap: 12px;
     --ob-heading-h: 132px;
     --ob-heading-mb: 18px;
-    --ob-main-top: 90px;
+    /* Only the floor under the header now: the composition is centred in the room
+       the window leaves, so a large screen no longer needs the offset that used to
+       push a top-anchored frame down into view. */
+    --ob-main-top: 20px;
     --ob-access-w: 830px;
     --ob-access-lead-fs: 17px;
   }
@@ -419,6 +422,14 @@
   /* Makes the content box measurable in `cqw`, which is how the card's width
      guard resolves. A percentage cannot: `min-height: %` resolves against height. */
   container-type: inline-size;
+}
+/* The composition sits in the middle of whatever room the window leaves under the
+   header, so a tall window reads as one centred frame instead of a screenful of
+   content with an empty half below it. Auto margins rather than `align-items:
+   center`: when the composition is taller than the box, an auto margin resolves to
+   zero, which keeps the top edge reachable and lets the shell scroll as before. */
+.onboarding-shell-content > * {
+  margin-block: auto;
 }
 /* Owner amendment, 2026-09-18: both steps share the same top anchor.
    Normal flow scrolls on short windows; only the lower composition changes. */
