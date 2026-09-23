@@ -88,7 +88,6 @@ PROMPT_MODULES: tuple[PromptModule, ...] = (
     PromptModule("harness-routing-prompt", "Harness Routing Prompt", "harness.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("harness-agents-prompt", "Harness Agents Prompt", "harness-agents.md", placeholders=("enabled_agents_rows",)),
     PromptModule("preferences-context-prompt", "Preferences and Project Context Prompt", "preferences-context.md", leading_newlines=1, trailing_newlines=1, placeholders=("preferences_path", "platform")),
-    PromptModule("memory-context-prompt", "Memory and Project Context Prompt", "memory-context.md", leading_newlines=1, trailing_newlines=1),
     PromptModule("skills-manual-prompt", "Explicit Skill Requests", "skills-manual.md", leading_newlines=2),
     PromptModule("skills-catalog-heading", "Available Skills Heading", "skills-catalog-heading.md", leading_newlines=2, trailing_newlines=1),
     PromptModule("skills-pagination-prompt", "Skills Discovery Pagination", "skills-pagination.md", trailing_newlines=1),

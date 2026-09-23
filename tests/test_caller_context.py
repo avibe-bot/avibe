@@ -28,19 +28,18 @@ def test_caller_context_from_env_requires_session_id() -> None:
     assert caller_context_from_env({}) is None
 
 
-def test_independent_environment_drops_proof_without_making_it_persistable() -> None:
+def test_independent_environment_drops_caller_without_mutating_source() -> None:
     from core.caller_context import (
-        AVIBE_CALLER_SESSION_PROOF_ENV,
         CALLER_CONTEXT_ENV_NAMES,
         environment_without_caller_context,
         validated_caller_env_snapshot,
     )
 
     env = {key: "old" for key in CALLER_CONTEXT_ENV_NAMES}
-    env.update({AVIBE_CALLER_SESSION_PROOF_ENV: "transient", "KEEP": "ordinary"})
+    env["KEEP"] = "ordinary"
     assert environment_without_caller_context(env) == {"KEEP": "ordinary"}
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(env)
-    assert env[AVIBE_CALLER_SESSION_PROOF_ENV] == "transient"
+    assert "KEEP" not in validated_caller_env_snapshot(env)
+    assert all(env[key] == "old" for key in CALLER_CONTEXT_ENV_NAMES)
 
 
 def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
@@ -461,14 +460,6 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
         session_stable_only=True,
     )
     assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
-    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV, validated_caller_env_snapshot
-
-    # No durable execution owner in this pure caller-shape fixture.
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in full
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in scoped
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in validated_caller_env_snapshot(full)
-    assert AVIBE_CALLER_SESSION_PROOF_ENV not in caller_context_from_env(full).to_metadata()
-
 
 
 def test_remote_workbench_caller_context_survives_env_and_claude_stable_form() -> None:
@@ -536,6 +527,69 @@ def test_remote_workbench_caller_without_matching_snapshot_fails_closed() -> Non
 
     assert context is not None and context.is_remote is True
     assert caller_resource_user_context(context) == {}
+
+
+@pytest.mark.parametrize(
+    "trigger", ["scheduled", "watch", "hook", "webhook", "agent_run", "callback"]
+)
+def test_harness_remote_editor_uses_persisted_snapshot_without_owner_fallback(trigger) -> None:
+    from modules.im import MessageContext
+
+    snapshot = {
+        "sub": "editor-1",
+        "vibe_instance_role": "editor",
+        "vibe_instance_access_source": "organization_group",
+        "vibe_organization_id": "org-1",
+    }
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "task_trigger_kind": trigger,
+                "message_metadata": {"resource_user_context": snapshot},
+            }
+        ),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote
+    assert caller_resource_user_context(context) == snapshot
+    assert context.to_env()[AVIBE_CALLER_REMOTE_ENV] == "1"
+
+
+@pytest.mark.parametrize("snapshot", [{}, {"vibe_instance_role": "editor"}, "invalid"])
+def test_scheduled_missing_or_malformed_snapshot_never_becomes_local_owner(snapshot) -> None:
+    from modules.im import MessageContext
+
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {
+                "task_trigger_kind": "scheduled",
+                "message_metadata": {"resource_user_context": snapshot},
+            }
+        ),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and context.is_remote
+    assert caller_resource_user_context(context) == {}
+
+
+@pytest.mark.parametrize("trigger", ["scheduled", "watch", "hook", "webhook"])
+def test_local_harness_turn_with_producer_metadata_stays_local(trigger) -> None:
+    from modules.im import MessageContext
+
+    context = caller_context_from_platform_payload(
+        _agent_turn_payload(
+            {"task_trigger_kind": trigger, "message_metadata": {}}
+        ),
+        message=MessageContext(user_id="scheduled", channel_id="task-1", platform="avibe"),
+        fallback_platform="avibe",
+    )
+
+    assert context is not None and not context.is_remote
+    assert caller_resource_user_context(context) is None
 
 
 def test_a_dm_loses_nothing_to_the_session_scoped_form() -> None:

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { LEGACY_SETTINGS_REDIRECTS } from './settingsRoutes';
 
 import {
   normalizeRestorablePwaPath,
@@ -13,9 +14,29 @@ describe('PWA route memory', () => {
     expect(normalizeRestorablePwaPath('/inbox')).toBe('/inbox');
     expect(normalizeRestorablePwaPath('/settings/shortcuts')).toBe('/settings/shortcuts');
     expect(normalizeRestorablePwaPath('/chat/session-123?from=push#latest')).toBe('/chat/session-123');
+    expect(normalizeRestorablePwaPath('/apps/show/page-123?from=push#latest')).toBe('/apps/show/page-123');
     expect(normalizeRestorablePwaPath('/admin/settings/backends/codex')).toBe(
-      '/admin/settings/backends/codex',
+      '/settings/backends/codex',
     );
+  });
+
+  it.each(LEGACY_SETTINGS_REDIRECTS)('canonicalizes declared alias $from through storage and launch', ({ from, to }) => {
+    const canonical = new URL(to, 'https://avibe.local').pathname;
+    // Every currently declared destination is safe and restorable. New aliases
+    // must satisfy that policy rather than silently expanding a second list.
+    expect(normalizeRestorablePwaPath(to)).toBe(canonical);
+    const remembered = readLastPwaPath({ getItem: () => `${from}?obsolete=1#旧` });
+    expect(remembered).toBe(canonical);
+    expect(resolvePwaLaunchPath(true, { pathname: '/', search: '', hash: '' }, remembered)).toBe(canonical);
+    const setItem = vi.fn();
+    writeLastPwaPath(from, { setItem });
+    expect(setItem).toHaveBeenCalledWith('avibe.pwa.last-route.v1', canonical);
+  });
+
+  it.each(['/settings/memory/unknown', '/admin/settings/unknown', '/admin/unknown',
+    '//evil.example/settings/memory', '/\\evil.example/settings/memory',
+    'https://avibe.local/settings/memory', 'javascript:alert(1)'])('rejects unsafe or undeclared alias %s', (path) => {
+    expect(normalizeRestorablePwaPath(path)).toBeNull();
   });
 
   it('rejects setup, retired, unknown, and cross-origin paths', () => {
@@ -32,6 +53,7 @@ describe('PWA route memory', () => {
     expect(resolvePwaLaunchPath(false, root, '/chat/session-123')).toBeNull();
     expect(resolvePwaLaunchPath(true, { ...root, pathname: '/inbox' }, '/chat/session-123')).toBeNull();
     expect(resolvePwaLaunchPath(true, { ...root, search: '?login=1' }, '/chat/session-123')).toBeNull();
+    expect(resolvePwaLaunchPath(true, { ...root, hash: '#explicit' }, '/settings/memory')).toBeNull();
     expect(resolvePwaLaunchPath(true, root, '/')).toBeNull();
   });
 

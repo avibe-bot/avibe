@@ -69,15 +69,4 @@ describe('settings section memory', () => {
     expect(settingsResumePath(true, storageHolding('/settings/service')))
       .toBe('/settings/service');
   });
-
-  it.each(['/settings/memory', '/settings/models', '/settings/platforms/groups'])(
-    'resumes %s whatever its feature flag is doing',
-    (remembered) => {
-      // A feature flag decides which rows the rail advertises, not which pages a
-      // person may be on: Memory with memory off is its setup surface, and a
-      // Model Hub that is off redirects itself. Reading config here would only
-      // let a pending or failed projection throw away a preference.
-      expect(settingsResumePath(true, storageHolding(remembered))).toBe(remembered);
-    },
-  );
 });

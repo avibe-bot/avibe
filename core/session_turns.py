@@ -28,9 +28,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Iter
 
 from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
-from sqlalchemy.exc import IntegrityError
 
-from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.delivery_target import normalize_message_kind
 from core.agent_input import AgentInputMetadata
 from core.backend_failure import backend_failure_notification_output
@@ -116,7 +114,7 @@ class SessionLifecycleSnapshot:
 
 @dataclass
 class TurnLifecycleAdmission:
-    """One idempotent lease bridging turn admission into Memory capture."""
+    """One idempotent lease bridging turn admission into capture."""
 
     _state: _SessionLifecycleState
     _released: bool = field(default=False, init=False)
@@ -711,7 +709,7 @@ class SessionTurnManager:
         raw_session_id: str,
         snapshot: object,
     ) -> bool:
-        """Revalidate a retained generation before Memory attribution."""
+        """Revalidate a retained session lifecycle generation."""
 
         if not isinstance(raw_session_id, str) or not raw_session_id:
             raise ValueError("session lifecycle requires a session id")
@@ -755,11 +753,6 @@ class SessionTurnManager:
         if self._session_lifecycle_states.get(raw_session_id) is not state:
             raise RuntimeError("session lifecycle ownership changed")
         state.epoch += 1
-        if abandon_captures:
-            adapter = getattr(self.controller, "memory_adapter", None)
-            abandon = getattr(adapter, "abandon_memory_captures_for_session", None)
-            if callable(abandon):
-                abandon(raw_session_id)
 
     async def run_session_lifecycle(
         self,
@@ -768,7 +761,7 @@ class SessionTurnManager:
         *,
         deadline_seconds: float = 5.0,
     ) -> Any:
-        """Run a destructive transition without waiting for Memory capture."""
+        """Run a destructive transition without waiting for capture."""
 
         state = self._session_lifecycle_state(raw_session_id)
         await state.operation_lock.acquire()
@@ -776,7 +769,7 @@ class SessionTurnManager:
         try:
             pre_epoch = state.epoch
             # Lifecycle operations are intentionally non-blocking with respect
-            # to Memory delivery. If a capture already owns the admission lock,
+            # to delivery. If a capture already owns the admission lock,
             # advance the generation immediately; the capture will revalidate
             # its snapshot and drop without provider I/O. An uncontended lock
             # acquisition completes synchronously on this event loop.
@@ -2348,24 +2341,6 @@ class SessionTurnManager:
                 continue
             return None
 
-    def restore_memory_context(self, session_id: str, turn_id: str) -> Optional["MessageContext"]:
-        """Reconstruct only this still-live execution, never a later Session turn."""
-        with self._sqlite_engine().connect() as conn:
-            turn = delivery_store.get_turn(conn, turn_id)
-            if not turn or turn["session_id"] != session_id or turn["state"] not in delivery_store.TURN_OWNER_STATES:
-                return None
-            delivery = delivery_store.delivery_for_turn(conn, turn_id)
-        if delivery is None:
-            return None
-        context = self._delivery_context(session_id)
-        self._hydrate_delivery_context(context, delivery)
-        self._restore_scheduled_dispatch_context(context, delivery)
-        context.platform_specific["turn_token"] = turn_id
-        context.platform_specific["turn_source"] = (
-            SOURCE_SCHEDULED if context.platform_specific.get("delivery_source") == "harness" else SOURCE_HUMAN
-        )
-        return context
-
     def _hydrate_delivery_context(
         self,
         context: "MessageContext",
@@ -2398,33 +2373,12 @@ class SessionTurnManager:
             not isinstance(snapshot, dict) or "message_kind" not in snapshot
         )
         author_id = payload.get("author_id")
-        if legacy_workbench:
+        if legacy_workbench and not author_id:
             author_id = delivery_store.legacy_admitted_user_id(metadata)
         if author_id:
             context.user_id = str(author_id)
         context.message_kind = normalize_message_kind(payload.get("message_kind"))
         context.is_original_human_text = context.message_kind == "original"
-        memory_enabled = bool(
-            getattr(
-                getattr(getattr(self.controller, "config", None), "memory", None),
-                "enabled",
-                False,
-            )
-        )
-        memory_cli_admitted = bool(
-            context.platform == "avibe"
-            and payload.get("source") == "user"
-            and memory_enabled
-            and author_id
-            and (
-                not legacy_workbench
-                or delivery_store.legacy_is_cli_admitted(metadata)
-            )
-        )
-        if memory_cli_admitted:
-            context.platform_specific["memory_cli_admitted"] = True
-        else:
-            context.platform_specific.pop("memory_cli_admitted", None)
         context.platform_specific.update(
             {
                 "delivery_id": str(delivery["id"]),

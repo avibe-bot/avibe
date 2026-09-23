@@ -14,6 +14,34 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  memory-insight-contract:
+    # Repository branch protection still requires this historical context name.
+    # An administrator can rename that requirement after this compatibility job
+    # has landed; the job itself is a substantive removal contract, not a shim.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - name: Prepare hermetic UI asset placeholder
+        run: |
+          mkdir -p ui/dist
+          printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+      - name: Install package and test dependencies
+        run: uv pip install --system -e . --group dev
+      - name: Validate removed-feature compatibility contract
+        run: |
+          pytest -q tests/test_memory_removal.py tests/test_admin_notifications.py \
+            tests/test_message_facts_generic.py
+
   ruff:
     runs-on: ubuntu-latest
     steps:
@@ -24,7 +52,6 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
-            packaging/avibe-memory/pyproject.toml
             uv.lock
       - name: Run pre-commit (ruff)
         run: |
@@ -127,7 +154,6 @@ jobs:
           cache: "pip"
           cache-dependency-path: |
             pyproject.toml
-            packaging/avibe-memory/pyproject.toml
             uv.lock
 
       - name: Build package artifact
@@ -136,12 +162,10 @@ jobs:
           AVIBE_PACKAGE_CONTRACT_VERSION: 3.0.99rc1
           SETUPTOOLS_SCM_PRETEND_VERSION: 3.0.99rc1
           SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS: 3.0.99rc1
-          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_MEMORY: 3.0.99rc1
         run: |
           # Build backends are installed by each isolated PEP 517 build.
           python -m pip install --disable-pip-version-check build
           python scripts/prepare_local_show_runtime_manifest.py
-          python -m build --outdir memory-dist packaging/avibe-memory
           python -m build
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
@@ -159,15 +183,12 @@ jobs:
           retention-days: 1
 
       # Keep the existing core-only wheel artifact stable for all consumers.
-      # Multiple source directories preserve dist/ and memory-dist/ in this
       # companion artifact, consumed only by the distribution contracts.
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
           name: vibe-package-contracts-linux
           path: |
             dist/*.tar.gz
-            memory-dist/*.whl
-            memory-dist/*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -232,43 +253,6 @@ jobs:
             fi
           done
           echo "All unit test shards and UI checks passed."
-
-  memory-insight-contract:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
-        with:
-          python-version: "3.12.12"
-
-      - name: Install pinned uv
-        run: |
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.9.18
-
-      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-${{ runner.arch }}-ci-memory-uv-0.9.18-py3.12.12-${{ hashFiles('scripts/memory_runtime/uv.lock') }}
-
-      - name: Provision pinned Memory Runtime
-        run: uv sync --frozen --project scripts/memory_runtime
-
-      - name: Run Memory Runtime real-wheel contracts
-        env:
-          AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT: "1"
-        run: |
-          set -o pipefail
-          output="$RUNNER_TEMP/memory-insight-contract.log"
-          uv run --frozen --project scripts/memory_runtime \
-            --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
-            python -m pytest \
-            tests/scenarios/memory_repair/test_memory_lifecycle_runtime.py::test_real_wake_preserves_old_and_processes_new_input \
-            -ra | tee "$output"
-          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
-            echo "Memory Runtime contract tests must not skip."
-            exit 1
-          fi
 
   migration-release-guard:
     runs-on: ubuntu-latest
@@ -340,7 +324,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [packaged-memory, installer]
+        suite: [installer]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -358,7 +342,7 @@ jobs:
         if: matrix.suite == 'installer'
         with:
           name: vibe-package-contracts-linux
-          path: .
+          path: dist
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
@@ -390,22 +374,10 @@ jobs:
           set -o pipefail
           output="$RUNNER_TEMP/distribution-contracts.log"
           AVIBE_CORE_WHEEL="$(ls dist/avibe_os-*.whl)" \
-          AVIBE_MEMORY_WHEEL="$(ls memory-dist/avibe_memory-*.whl)" \
-            pytest tests/test_memory_distribution.py -v -ra | tee "$output"
+          AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)" \
+            pytest tests/test_distribution_artifacts.py -v -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
             echo "Distribution contracts must not skip."
-            exit 1
-          fi
-
-      - name: Run packaged Memory package-shape smoke
-        if: matrix.suite == 'packaged-memory'
-        run: |
-          set -o pipefail
-          test -f vibe/show_runtime_manifest.json
-          output="$RUNNER_TEMP/memory-upgrade-packaged.log"
-          pytest tests/test_memory_upgrade_packaged.py -m integration -v -ra | tee "$output"
-          if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
-            echo "Packaged Memory upgrade smoke must not skip."
             exit 1
           fi
 
@@ -418,7 +390,6 @@ jobs:
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
-            tests/e2e/test_upgrade_command.py \
             -v
 
   install-upgrade-regression:

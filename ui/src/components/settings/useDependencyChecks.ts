@@ -10,7 +10,6 @@ export const DEPENDENCY_CHECK_GROUPS = [
   ['avault'],
   ['show-runtime', 'node'],
   ['model-hub-engine'],
-  ['memory-package', 'memory-runtime'],
   ['tmux'],
 ] as const;
 

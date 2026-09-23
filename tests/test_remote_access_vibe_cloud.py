@@ -16,8 +16,9 @@ from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, 
 from storage.db import create_sqlite_engine
 from storage.models import remote_access_authorizations
 from tests.ui_server_test_helpers import remote_session_cookie
-from vibe import api, model_service, remote_access, ui_server
+from vibe import api, remote_access, ui_server
 from vibe import runtime
+from vibe.ui_compat import g, jsonify
 
 
 @pytest.fixture(autouse=True)
@@ -221,6 +222,22 @@ def test_session_cookie_roundtrip() -> None:
 
     assert remote_access.validate_session_cookie(config, cookie) is True
     assert remote_access.validate_session_cookie(config, cookie + "x") is False
+
+
+def test_background_push_inbox_read_does_not_renew_remote_cookie(monkeypatch):
+    config = _config()
+    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    monkeypatch.setattr(remote_access, "renew_session_cookie", lambda *_: "renewed-cookie")
+
+    for path, headers, should_renew in (
+        ("/api/inbox", {"X-Avibe-Background-Push": "1"}, False),
+        ("/api/inbox", {}, True),
+        ("/api/session", {"X-Avibe-Background-Push": "1"}, True),
+    ):
+        with ui_server.app.test_request_context(path, headers=headers):
+            g.remote_session_renew = {"sub": "user-1"}
+            response = ui_server.renew_remote_access_cookie(jsonify({"ok": True}))
+            assert (remote_access.SESSION_COOKIE_NAME in response.headers.get("Set-Cookie", "")) is should_renew
 
 
 def test_session_cookie_rejects_empty_session_secret() -> None:
@@ -718,89 +735,6 @@ def test_exchange_oauth_code_allows_30_seconds_of_clock_skew(
         assert exc_info.value.reason == expected_reason
 
 
-@pytest.mark.parametrize(
-    ("setup_host", "origin_host"),
-    [("127.0.0.1", "127.0.0.1"), ("fd00::1", "[::1]"), ("[2001:db8::5]", "[::1]")],
-)
-def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path, setup_host, origin_host) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
-    config = _config()
-    config.ui.setup_host = setup_host
-    config.remote_access.vibe_cloud.enabled = False
-    config.remote_access.vibe_cloud.session_secret = ""
-    config.save()
-
-    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
-        assert url == "https://backend.test/api/v1/pairing/redeem"
-        assert payload["pairing_key"] == "vrp_test"
-        assert payload["origin_service"] == f"http://{origin_host}:5123"
-        assert kwargs["connection_target"].hostname == "backend.test"
-        assert kwargs["connection_target"].connect_host == "93.184.216.34"
-        return {
-            "instance_id": "inst_123",
-            "client_id": "vr_client_123",
-            "issuer": "https://backend.test",
-            "authorization_endpoint": "https://backend.test/oauth/authorize",
-            "token_endpoint": "https://backend.test/oauth/token",
-            "jwks_uri": "https://backend.test/oauth/jwks.json",
-            "public_url": "https://alex.avibe.bot",
-            "redirect_uri": "https://alex.avibe.bot/auth/callback",
-            "tunnel_token": "tunnel-token",
-            "instance_secret": "instance-secret",
-        }
-
-    monkeypatch.setattr(remote_access, "_json_request", fake_request)
-    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
-    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
-    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
-    refreshes: list[bool] = []
-    monkeypatch.setattr(
-        model_service,
-        "request_model_service_refresh",
-        lambda: refreshes.append(True),
-    )
-
-    result = remote_access.pair("vrp_test", "https://backend.test")
-    saved_payload = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
-
-    assert result["ok"] is True
-    assert result["pairing"]["ok"] is True
-    assert result["start"]["ok"] is True
-    assert saved_payload["remote_access"]["vibe_cloud"]["enabled"] is True
-    assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
-    assert saved_payload["remote_access"]["vibe_cloud"]["session_secret"]
-    assert refreshes == [True]
-
-
-def test_disabling_pairing_requests_an_immediate_model_service_refresh(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _config()
-    cloud = config.remote_access.vibe_cloud
-    cloud.enabled = True
-    cloud.backend_url = "https://backend.test"
-    cloud.instance_id = "inst_123"
-    cloud.instance_secret = "instance-secret"
-    config.save()
-    refreshes: list[bool] = []
-    monkeypatch.setattr(
-        model_service,
-        "request_model_service_refresh",
-        lambda: refreshes.append(True),
-    )
-
-    saved = api.save_config(
-        {"remote_access": {"vibe_cloud": {"enabled": False}}},
-        validate_remote_access_network=False,
-    )
-
-    assert saved.remote_access.vibe_cloud.runtime_credentials() is None
-    assert refreshes == [True]
-
-
 def test_pair_origin_service_follows_effective_ui_port(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_UI_PORT", "15130")
@@ -1266,37 +1200,6 @@ def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, t
     config.save()
 
     assert remote_access.origin_service_for_pairing() == "http://[::1]:15130"
-
-
-@pytest.mark.parametrize(
-    ("setup_host", "bind_host", "origin_host"),
-    [
-        ("", "127.0.0.1", "127.0.0.1"),
-        ("ui.example.test", "0.0.0.0", "127.0.0.1"),
-        ("192.168.2.3", "0.0.0.0", "127.0.0.1"),
-        ("0.0.0.0", "0.0.0.0", "127.0.0.1"),
-        ("127.0.0.2", "127.0.0.2", "127.0.0.2"),
-        ("::1", "::1", "[::1]"),
-        ("[::1]", "::1", "[::1]"),
-        ("::", "::", "[::1]"),
-        ("[::]", "::", "[::1]"),
-        ("fd00::1", "::", "[::1]"),
-        ("2001:db8::5", "::", "[::1]"),
-        (" [2001:db8::5] ", "::", "[::1]"),
-        ("fe80::1%eth0", "::", "[::1]"),
-        ("::ffff:192.0.2.5", "::", "[::1]"),
-    ],
-)
-def test_pairing_consumers_share_the_bind_address_family(monkeypatch, setup_host, bind_host, origin_host):
-    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
-    config = _config()
-    config.ui.setup_host = setup_host
-    config.ui.setup_port = 15130
-    origin = f"http://{origin_host}:15130"
-
-    assert runtime.effective_ui_bind_host(config) == bind_host
-    assert remote_access.origin_service_for_pairing(config) == origin
-    assert model_service._model_service_ui_origins(config) == (origin,)
 
 
 def test_ra_tq_007_runtime_status_payload_includes_tunnel_quality(monkeypatch, tmp_path) -> None:
@@ -2072,7 +1975,6 @@ def test_binding_transition_initializes_sqlite_before_taking_config_lock(monkeyp
     assert "sqlite" in order
     assert "config" in order
     assert order.index("sqlite") < order.index("config")
-
 
 
 def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tmp_path) -> None:
@@ -3533,3 +3435,81 @@ def test_overlapping_heartbeat_refuses_stale_personal_kind(monkeypatch, tmp_path
     )
     assert remote_access.report_runtime_status(V2Config.load())["ok"] is True
     assert V2Config.load().remote_access.vibe_cloud.instance_kind == "organization"
+
+
+@pytest.mark.parametrize(
+    ("setup_host", "origin_host"),
+    [("127.0.0.1", "127.0.0.1"), ("fd00::1", "[::1]"), ("[2001:db8::5]", "[::1]")],
+)
+def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path, setup_host, origin_host) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
+    config = _config()
+    config.ui.setup_host = setup_host
+    config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.session_secret = ""
+    config.save()
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        assert url == "https://backend.test/api/v1/pairing/redeem"
+        assert payload["pairing_key"] == "vrp_test"
+        assert payload["origin_service"] == f"http://{origin_host}:5123"
+        assert kwargs["connection_target"].hostname == "backend.test"
+        assert kwargs["connection_target"].connect_host == "93.184.216.34"
+        return {
+            "instance_id": "inst_123",
+            "client_id": "vr_client_123",
+            "issuer": "https://backend.test",
+            "authorization_endpoint": "https://backend.test/oauth/authorize",
+            "token_endpoint": "https://backend.test/oauth/token",
+            "jwks_uri": "https://backend.test/oauth/jwks.json",
+            "public_url": "https://alex.avibe.bot",
+            "redirect_uri": "https://alex.avibe.bot/auth/callback",
+            "tunnel_token": "tunnel-token",
+            "instance_secret": "instance-secret",
+        }
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://backend.test")
+    saved_payload = json.loads((tmp_path / "config" / "config.json").read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert result["pairing"]["ok"] is True
+    assert result["start"]["ok"] is True
+    assert saved_payload["remote_access"]["vibe_cloud"]["enabled"] is True
+    assert saved_payload["remote_access"]["vibe_cloud"]["tunnel_token"] == "tunnel-token"
+    assert saved_payload["remote_access"]["vibe_cloud"]["session_secret"]
+
+
+@pytest.mark.parametrize(
+    ("setup_host", "bind_host", "origin_host"),
+    [
+        ("", "127.0.0.1", "127.0.0.1"),
+        ("ui.example.test", "0.0.0.0", "127.0.0.1"),
+        ("192.168.2.3", "0.0.0.0", "127.0.0.1"),
+        ("0.0.0.0", "0.0.0.0", "127.0.0.1"),
+        ("127.0.0.2", "127.0.0.2", "127.0.0.2"),
+        ("::1", "::1", "[::1]"),
+        ("[::1]", "::1", "[::1]"),
+        ("::", "::", "[::1]"),
+        ("[::]", "::", "[::1]"),
+        ("fd00::1", "::", "[::1]"),
+        ("2001:db8::5", "::", "[::1]"),
+        (" [2001:db8::5] ", "::", "[::1]"),
+        ("fe80::1%eth0", "::", "[::1]"),
+        ("::ffff:192.0.2.5", "::", "[::1]"),
+    ],
+)
+def test_pairing_consumers_share_the_bind_address_family(monkeypatch, setup_host, bind_host, origin_host):
+    monkeypatch.delenv("VIBE_UI_PORT", raising=False)
+    config = _config()
+    config.ui.setup_host = setup_host
+    config.ui.setup_port = 15130
+    origin = f"http://{origin_host}:15130"
+
+    assert runtime.effective_ui_bind_host(config) == bind_host
+    assert remote_access.origin_service_for_pairing(config) == origin

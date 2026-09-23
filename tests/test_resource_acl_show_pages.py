@@ -1164,10 +1164,7 @@ def test_remote_viewer_archive_is_denied_under_instance_role(monkeypatch, tmp_pa
             store.close()
 
         archive_session = AsyncMock()
-        monkeypatch.setattr(
-            "vibe.internal_client.memory_archive_session",
-            archive_session,
-        )
+        monkeypatch.setattr("vibe.internal_client.archive_session", archive_session)
 
         # §3.2: archiving a session that has a Show Page stays reserved to the
         # Instance Editor role; a plain Instance Viewer with project read access

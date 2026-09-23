@@ -1092,22 +1092,9 @@ def _spawn_runtime_log_sinks(stdout_path: Path, stderr_path: Path) -> tuple[subp
     return stdout_sink, stderr_sink
 
 
-def _spawn_stdin(
-    process: subprocess.Popen,
-    *,
-    memory_ui_secret: str | None,
-) -> None:
-    if memory_ui_secret is None or process.stdin is None:
-        return
-    process.stdin.write(f"{memory_ui_secret}\n".encode("utf-8"))
-    process.stdin.close()
-
-
 def independent_process_env(
     env: dict[str, str] | None,
-    *,
-    memory_ui_secret: str | None = None,
-) -> dict[str, str]:
+ ) -> dict[str, str]:
     """Build the environment for a process Avibe owns, not one it runs for a caller.
 
     The service, the UI server, the connector and the restart supervisor all
@@ -1121,11 +1108,6 @@ def independent_process_env(
     from core.caller_context import environment_without_caller_context
 
     child_env = environment_without_caller_context(env)
-    if memory_ui_secret is None:
-        return child_env
-    from vibe.memory_ui_access import MEMORY_UI_SECRET_STDIN_ENV
-
-    child_env[MEMORY_UI_SECRET_STDIN_ENV] = "1"
     return child_env
 
 
@@ -1142,13 +1124,6 @@ def discard_spawned_child(process: subprocess.Popen) -> None:
     failure it is cleaning up after: anything it cannot do is logged instead.
     """
 
-    if process.stdin is not None:
-        try:
-            process.stdin.close()
-        except OSError:
-            # A secret write that failed on a broken pipe leaves buffered bytes
-            # the close tries to flush again. The child is being killed anyway.
-            pass
     try:
         process.kill()
     except OSError:
@@ -1170,21 +1145,21 @@ def _spawn_owned_process(
     stderr_name: str,
     env: dict[str, str] | None,
     *,
-    memory_ui_secret: str | None,
     hand_over: Callable[[subprocess.Popen], None] | None = None,
     withdraw: Callable[[int], None] | None = None,
 ) -> subprocess.Popen:
     """Start a process the caller owns, or leave no process at all.
 
     A caller can only undo what it knows about. Every step between ``Popen``
-    and the moment the caller knows -- the secret written to the child's stdin,
-    the pid record that lets any other process find it, the caller's own note
-    that it created the child -- used to be able to raise with the child
-    already running, and then no caller could see it: `cmd_start`'s rollback
-    looked for a UI it had created and found none, and the orphan kept the
-    listener every later start then failed to bind. So a failure anywhere in
-    that span kills and reaps the child before it propagates, and every caller
-    inherits the rule instead of each rolling back a window it cannot observe.
+    and the moment the caller knows -- closing the parent's copies of the
+    child's handles, the pid record that lets any other process find it, the
+    caller's own note that it created the child -- used to be able to raise
+    with the child already running, and then no caller could see it:
+    `cmd_start`'s rollback looked for a UI it had created and found none, and
+    the orphan kept the listener every later start then failed to bind. So a
+    failure anywhere in that span kills and reaps the child before it
+    propagates, and every caller inherits the rule instead of each rolling back
+    a window it cannot observe.
 
     ``hand_over`` is the caller's side of that span: it records the child and
     captures it as created, and it runs inside the guarded region so that
@@ -1199,12 +1174,10 @@ def _spawn_owned_process(
     stderr_path = _log_path(stderr_name)
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_sink, stderr_sink = _spawn_runtime_log_sinks(stdout_path, stderr_path)
-    stdin = subprocess.PIPE if memory_ui_secret is not None else open(os.devnull, "rb")
+    stdin = open(os.devnull, "rb")
     # The child holds its own copies of these once it starts; the parent's must
     # still close, or a log sink never sees end-of-file.
-    parent_handles = [
-        handle for handle in (stdin, stdout_sink.stdin, stderr_sink.stdin) if handle is not subprocess.PIPE
-    ]
+    parent_handles = [stdin, stdout_sink.stdin, stderr_sink.stdin]
     process: subprocess.Popen | None = None
     try:
         process = subprocess.Popen(
@@ -1214,10 +1187,9 @@ def _spawn_owned_process(
             stderr=stderr_sink.stdin,
             cwd=str(get_working_dir()),
             close_fds=True,
-            env=independent_process_env(env, memory_ui_secret=memory_ui_secret),
+            env=independent_process_env(env),
             **isolated_subprocess_kwargs(),
         )
-        _spawn_stdin(process, memory_ui_secret=memory_ui_secret)
         # Closing can fail too, so it happens inside this region and before the
         # handover: once the caller owns the child, nothing here can raise.
         _close_parent_handles(parent_handles)
@@ -1269,7 +1241,6 @@ def spawn_background(
     stderr_name: str,
     env: dict[str, str] | None = None,
     *,
-    memory_ui_secret: str | None = None,
     start_info: ProcessStartInfo | None = None,
 ):
     """Start a process recorded in ``pid_path``; the record exists iff the child does.
@@ -1289,7 +1260,6 @@ def spawn_background(
         stdout_name,
         stderr_name,
         env,
-        memory_ui_secret=memory_ui_secret,
         hand_over=hand_over,
         withdraw=lambda pid: _forget_pid_record(pid_path, pid),
     ).pid
@@ -1301,7 +1271,6 @@ def spawn_service_background_process(
     stderr_name: str,
     env: dict[str, str] | None = None,
     *,
-    memory_ui_secret: str | None = None,
     hand_over: Callable[[subprocess.Popen], None] | None = None,
     withdraw: Callable[[int], None] | None = None,
 ) -> subprocess.Popen:
@@ -1310,7 +1279,6 @@ def spawn_service_background_process(
         stdout_name,
         stderr_name,
         env,
-        memory_ui_secret=memory_ui_secret,
         hand_over=hand_over,
         withdraw=withdraw,
     )
@@ -1994,7 +1962,6 @@ def start_service(
     *,
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
-    memory_ui_secret: str | None = None,
     start_info: ProcessStartInfo | None = None,
     launcher: ServiceLauncher | None = None,
 ) -> int:
@@ -2032,7 +1999,6 @@ def start_service(
     pid = _resolve_service_pid(
         wait_for_ready=wait_for_ready,
         initial_ready_timeout=initial_ready_timeout,
-        memory_ui_secret=memory_ui_secret,
         launcher=launcher,
         start_info=start_info,
     )
@@ -2050,7 +2016,6 @@ def _resolve_service_pid(
     *,
     wait_for_ready: bool,
     initial_ready_timeout: float,
-    memory_ui_secret: str | None,
     launcher: ServiceLauncher | None,
     start_info: ProcessStartInfo | None,
 ) -> int:
@@ -2062,12 +2027,10 @@ def _resolve_service_pid(
     """
 
     from storage.migrations import guard_source_checkout_default_state_bootstrap
-    from vibe.memory_ui_access import process_ui_read_secret
 
     def result(pid: int, *, reused: bool) -> int:
         return start_info.capture(pid, reused=reused) if start_info is not None else pid
 
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
@@ -2124,12 +2087,6 @@ def _resolve_service_pid(
         scope_prefix = maybe_systemd_scope_prefix()
         if scope_prefix:
             logger.info("cgroup scope bootstrap: launching service inside a delegated user scope")
-        spawn_kwargs = (
-            {"memory_ui_secret": memory_ui_secret}
-            if memory_ui_secret is not None
-            else {}
-        )
-
         # The reservation is how anything outside this frame finds a service that
         # has not taken the lock yet -- `stop_service()` included, and so every
         # rollback -- and `start_info` is how the caller knows it created one.
@@ -2153,7 +2110,6 @@ def _resolve_service_pid(
             },
             hand_over=hand_over,
             withdraw=_clear_service_pid_reservation,
-            **spawn_kwargs,
         )
         pid = process.pid
         if scope_prefix:
@@ -2388,15 +2344,12 @@ def start_ui(
     port,
     *,
     wait_for_ready: bool = True,
-    memory_ui_secret: str | None = None,
     start_info: ProcessStartInfo | None = None,
     launcher: ServiceLauncher | None = None,
 ):
-    from vibe.memory_ui_access import process_ui_read_secret
     from vibe.desktop_runtime import normalize_desktop_port
 
     port = normalize_desktop_port(port)
-    memory_ui_secret = memory_ui_secret or process_ui_read_secret()
     pid_path = paths.get_runtime_ui_pid_path()
     if pid_path.exists():
         try:
@@ -2437,11 +2390,7 @@ def start_ui(
     # sent source text across the generation boundary would run the replacement's
     # idea of startup inside the replaced install.
     command = "from vibe.ui_server import run_ui_server; run_ui_server('{}', {})".format(host, port)
-    spawn_kwargs = (
-        {"memory_ui_secret": memory_ui_secret}
-        if memory_ui_secret is not None
-        else {}
-    )
+    spawn_kwargs = {}
     # `start_info` is captured inside the spawn, not after it returns: in between,
     # a signal left a live UI with a pid record that `cmd_start`'s rollback,
     # which undoes only what `start_info` names as created, never looked at.

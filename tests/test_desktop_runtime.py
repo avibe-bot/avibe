@@ -1129,7 +1129,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
-        memory=SimpleNamespace(enabled=False),
         language="en",
     )
     spawned = []
@@ -1139,7 +1138,6 @@ def test_cmd_start_reused_controller_starts_missing_ui_and_emits_untagged_ready(
     monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
     monkeypatch.setattr(cli, "_ensure_config", lambda: config)
     monkeypatch.setattr(cli, "_write_status", lambda *args: None)
-    monkeypatch.setattr(cli, "_live_ui_server_pid", lambda: None)
     monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
     monkeypatch.setattr(cli.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
     monkeypatch.setattr(cli.runtime, "process_create_time", lambda pid: process_times[pid])

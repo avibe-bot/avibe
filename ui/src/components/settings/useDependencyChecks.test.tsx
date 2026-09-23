@@ -45,45 +45,45 @@ describe('independent dependency checks', () => {
     const read = vi.fn(async (options: DependencyReadOptions = {}) => ready(options));
     const { result } = renderHook(() => useDependencyChecks(read));
     read.mockImplementationOnce(() => old.promise);
-    act(() => { void result.current.refresh('memory-runtime'); });
+    act(() => { void result.current.refresh('node'); });
     const oldSignal = read.mock.calls[0][0]?.signal;
 
-    await act(async () => result.current.refresh('memory-runtime'));
+    await act(async () => result.current.refresh('node'));
     expect(oldSignal?.aborted).toBe(true);
-    const current = result.current.checks['memory-runtime'];
+    const current = result.current.checks['node'];
     expect(read.mock.calls.map(([options]) => options?.ids)).toEqual([
-      ['memory-package', 'memory-runtime'], ['memory-package', 'memory-runtime'],
+      ['show-runtime', 'node'], ['show-runtime', 'node'],
     ]);
 
     await act(async () => old.resolve({
       ok: true,
-      deps: ['memory-package', 'memory-runtime'].map((id) => row(id, { installed: false, status: 'error' })),
+      deps: ['show-runtime', 'node'].map((id) => row(id, { installed: false, status: 'error' })),
     }));
-    expect(result.current.checks['memory-runtime']).toEqual(current);
+    expect(result.current.checks['node']).toEqual(current);
   });
 
   it('keeps prior raw failure evidence when the latest inspection fails', async () => {
-    const source = Object.freeze(row('memory-package', {
+    const source = Object.freeze(row('show-runtime', {
       installed: false, status: 'error', readiness: 'not_ready', action_class: 'operator_only',
-      reason: 'memory_package_source_build',
+      reason: 'runtime_inspection_failed',
     }));
-    const failure = Object.freeze(row('memory-runtime', {
-      installed: false, status: 'error', reason: 'memory_runtime_preparation_import_timeout',
+    const failure = Object.freeze(row('node', {
+      installed: false, status: 'error', reason: 'runtime_timeout',
     }));
     const read = vi.fn().mockResolvedValue({ ok: true, deps: [source, failure] });
     const { result } = renderHook(() => useDependencyChecks(read));
-    await act(async () => result.current.refresh('memory-runtime'));
+    await act(async () => result.current.refresh('node'));
     read.mockRejectedValue(new Error('unavailable'));
-    await act(async () => result.current.refresh('memory-runtime'));
-    expect(result.current.checks['memory-package']).toEqual({ data: source, checking: false, error: 'failed' });
-    expect(result.current.checks['memory-runtime']).toEqual({ data: failure, checking: false, error: 'failed' });
+    await act(async () => result.current.refresh('node'));
+    expect(result.current.checks['show-runtime']).toEqual({ data: source, checking: false, error: 'failed' });
+    expect(result.current.checks['node']).toEqual({ data: failure, checking: false, error: 'failed' });
   });
 
-  it.each([{ ok: false, deps: [] }, { ok: true, deps: [] }, { ok: true, deps: [row('memory-package')] }])(
+  it.each([{ ok: false, deps: [] }, { ok: true, deps: [] }, { ok: true, deps: [row('show-runtime')] }])(
     'never treats an incomplete group response as checked: %j', async (response) => {
       const { result } = renderHook(() => useDependencyChecks(vi.fn().mockResolvedValue(response)));
-      await act(async () => result.current.refresh('memory-runtime'));
-      for (const id of ['memory-package', 'memory-runtime']) {
+      await act(async () => result.current.refresh('node'));
+      for (const id of ['show-runtime', 'node']) {
         expect(result.current.checks[id]).toEqual({ data: null, checking: false, error: 'failed' });
       }
     },

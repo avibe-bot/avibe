@@ -33,7 +33,6 @@ def test_every_prompt_markdown_file_has_one_stably_ordered_registry_entry() -> N
     assert sorted(registered) == present
     ids = [module.id for module in PROMPT_MODULES]
     assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
-    assert ids.index("skills-catalog") > ids.index("memory-context-prompt")
     assert ids.index("skills-catalog-heading") < ids.index("skills-pagination-prompt") < ids.index("skills-catalog")
 
 
@@ -46,7 +45,6 @@ def test_prompt_rendering_replaces_only_declared_placeholders() -> None:
 
     assert "`/tmp/preferences.md`" in rendered
     assert "`avibe/<user_id>`" in rendered
-    assert prompt_module("memory-context-prompt").source().find("{0,62}") >= 0
 
 
 def test_prompt_catalog_export_is_deterministic_and_source_addressable() -> None:

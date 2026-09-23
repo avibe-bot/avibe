@@ -512,7 +512,7 @@ def test_model_hub_client_uses_windows_endpoint_auth_and_instance_validation(
     ]
 
 
-def test_memory_clients_use_windows_endpoint_auth_and_instance_validation(
+def test_archive_client_uses_windows_endpoint_auth_and_instance_validation(
     monkeypatch,
     tmp_path,
 ):
@@ -520,33 +520,30 @@ def test_memory_clients_use_windows_endpoint_auth_and_instance_validation(
     monkeypatch.setattr(internal_client, "_platform_name", lambda: "nt")
     descriptor = _descriptor(instance_id="3" * 32, bearer_token="C" * 43)
     control_ipc.write_descriptor_atomic(control_ipc.default_descriptor_path(), descriptor)
-    requests: list[tuple[str, str]] = []
+    requests: list[tuple[str, str, dict]] = []
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        requests.append((request.method, request.headers["authorization"]))
+        payload = json.loads(request.content)
+        requests.append((request.url.path, request.headers["authorization"], payload))
+        response_instance = "4" * 32 if payload["session_id"] == "ses_stale" else descriptor.instance_id
         return httpx.Response(
             200,
-            json={"status": "ready"},
-            headers={
-                control_ipc.CONTROL_IPC_INSTANCE_HEADER: descriptor.instance_id,
-            },
+            json={"ok": True},
+            headers={control_ipc.CONTROL_IPC_INSTANCE_HEADER: response_instance},
         )
 
     transport = httpx.MockTransport(_handler)
-    monkeypatch.setattr(internal_client.httpx, "HTTPTransport", lambda **_kwargs: transport)
     monkeypatch.setattr(internal_client.httpx, "AsyncHTTPTransport", lambda **_kwargs: transport)
 
-    assert asyncio.run(internal_client.memory_status()) == {
+    assert asyncio.run(internal_client.archive_session("ses_ok")) == {
         "status_code": 200,
-        "body": {"status": "ready"},
+        "body": {"ok": True},
     }
-    assert internal_client.memory_status_sync() == {
-        "status_code": 200,
-        "body": {"status": "ready"},
-    }
+    with pytest.raises(internal_client.InternalServerUnavailable, match="stale instance"):
+        asyncio.run(internal_client.archive_session("ses_stale"))
     assert requests == [
-        ("GET", f"Bearer {descriptor.bearer_token}"),
-        ("GET", f"Bearer {descriptor.bearer_token}"),
+        ("/internal/sessions/archive", f"Bearer {descriptor.bearer_token}", {"session_id": "ses_ok"}),
+        ("/internal/sessions/archive", f"Bearer {descriptor.bearer_token}", {"session_id": "ses_stale"}),
     ]
 
 

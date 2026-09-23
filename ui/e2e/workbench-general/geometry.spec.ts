@@ -152,6 +152,55 @@ const bottomOf = async (locator: import('@playwright/test').Locator) => {
 };
 
 test.describe('workbench home geometry', () => {
+  for (const remembered of ['/admin/settings/memory', '/settings/memory']) {
+    test(`PWA launch canonicalizes persisted ${remembered} and restores only once`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.addInitScript((path) => {
+        Object.defineProperty(navigator, 'userAgent', { get: () => 'iPhone' });
+        Object.defineProperty(navigator, 'standalone', { get: () => true });
+        localStorage.setItem('avibe.pwa.last-route.v1', `${path}?old=1#obsolete`);
+      }, remembered);
+      await open(page, '/');
+      await expect(page).toHaveURL(/\/settings\/general$/);
+      await expect(page.locator(`${SETTINGS_CONTENT} h1`)).toHaveText('General');
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('avibe.pwa.last-route.v1')))
+        .toBe('/settings/general');
+      // The app pushes a restore entry above the manifest root. Going back is
+      // a real in-app action, not another cold launch or another restoration.
+      await page.goBack();
+      await expect(page).toHaveURL(/\/$/);
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('avibe.pwa.last-route.v1'))).toBe('/');
+      expect(denied).toEqual([]);
+    });
+  }
+  for (const [remembered, launch, expected] of [
+    ['/settings/memory', '/settings/shortcuts', '/settings/shortcuts'],
+    ['/settings/memory/unknown', '/', '/'],
+    ['//evil.example/settings/memory', '/', '/'],
+  ]) {
+    test(`PWA launch respects explicit route and safety: ${remembered} at ${launch}`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await page.addInitScript((path) => {
+        Object.defineProperty(navigator, 'userAgent', { get: () => 'iPhone' });
+        Object.defineProperty(navigator, 'standalone', { get: () => true });
+        localStorage.setItem('avibe.pwa.last-route.v1', path);
+      }, remembered);
+      await open(page, launch);
+      await expect.poll(() => page.evaluate(() => localStorage.getItem('avibe.pwa.last-route.v1'))).toBe(expected);
+      expect(new URL(page.url()).pathname).toBe(expected);
+      expect(denied).toEqual([]);
+    });
+  }
+  for (const path of ['/admin/settings/memory', '/settings/memory']) {
+    test(`retired bookmark ${path} reaches General without feature requests`, async ({ page }) => {
+      const denied = await serveProduct(page);
+      await open(page, path);
+      await expect(page).toHaveURL(/\/settings\/general$/);
+      await expect(page.locator(SETTINGS_RAIL)).toBeVisible();
+      await expect(page.locator(`${SETTINGS_CONTENT} h1`)).toHaveText('General');
+      expect(denied).toEqual([]);
+    });
+  }
   test('keeps the sidebar at 248 and lets everything beside it grow', async ({ page }) => {
     const denied = await serveProduct(page);
 
@@ -211,7 +260,7 @@ test.describe('workbench home geometry', () => {
       const inheritedReads = new Set([
         '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
         '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
-        '/api/inbox', '/api/version', '/api/memory/settings', '/api/events',
+        '/api/inbox', '/api/version', '/api/events',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();
@@ -484,7 +533,7 @@ test.describe('general settings geometry', () => {
       } else {
         await page.getByRole('button', { name: 'Apps', exact: true }).click();
         await page.getByRole('dialog', { name: 'Apps' }).getByRole('link', { name: 'Settings', exact: true }).click();
-        await page.getByRole('link', { name: 'All settings', exact: true }).click();
+        await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
       }
       await expect(page.locator('[data-settings-overlay="true"]')).toBeVisible();
       await page.getByRole('navigation', { name: 'Settings sections' })

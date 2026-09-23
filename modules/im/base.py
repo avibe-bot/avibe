@@ -1,7 +1,6 @@
 """Base classes and data structures for IM platform abstraction"""
 
 import logging
-from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Dict, Any, List, Tuple, Literal, cast
 from dataclasses import dataclass
@@ -47,7 +46,7 @@ class MessageContext:
     platform_specific: Optional[Dict[str, Any]] = None
     files: Optional[List[FileAttachment]] = None  # List of file attachments
     # Inbound adapters set this only after classifying their native event.
-    # None is intentionally fail-closed for Memory capture and commands.
+    # None is intentionally fail-closed for capture and commands.
     is_original_human_text: Optional[bool] = None
     # Attachment turns use a separate native-event classification so adding
     # files never widens the existing ordinary-text contract.

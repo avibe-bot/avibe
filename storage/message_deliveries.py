@@ -39,65 +39,18 @@ FAILURE_RETRY_HISTORY_KIND = "backend_failure_retry"
 WEB_PUSH_USER_KEY_METADATA = "_web_push_user_key"
 WEB_PUSH_USER_KEYS_METADATA = "_web_push_user_keys"
 WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA = "_web_push_authorization_contexts"
-LEGACY_MEMORY_USER_ID_METADATA = "_memory_user_id"
-LEGACY_MEMORY_ORDINARY_TEXT_METADATA = "_memory_ordinary_text"
-LEGACY_MEMORY_CLI_ADMITTED_METADATA = "_memory_cli_admitted"
-LEGACY_MEMORY_MERGE_IDENTITY_METADATA_KEYS = (
-    LEGACY_MEMORY_USER_ID_METADATA,
-    LEGACY_MEMORY_ORDINARY_TEXT_METADATA,
-    LEGACY_MEMORY_CLI_ADMITTED_METADATA,
-)
-
-
-def _legacy_memory_metadata(metadata: object) -> dict[str, Any]:
-    return metadata if isinstance(metadata, dict) else {}
 
 
 def legacy_admitted_user_id(metadata: object) -> str | None:
-    """Read the principal from a released pre-author_id Message row."""
-
-    memory_user_id = _legacy_memory_metadata(metadata).get(
-        LEGACY_MEMORY_USER_ID_METADATA
-    )
-    if not isinstance(memory_user_id, str) or not memory_user_id.strip():
-        return None
-    return memory_user_id.strip()
+    """Read the author identity of a released pre-author_id delivery row."""
+    value = metadata.get("_memory_user_id") if isinstance(metadata, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def legacy_is_ordinary_text(metadata: object) -> bool:
-    """Read the literal ordinary-text flag from a released Message row."""
+def message_kind_from_metadata(metadata: object) -> str:
+    """Translate persisted metadata into the core message vocabulary."""
 
-    return (
-        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_ORDINARY_TEXT_METADATA)
-        is True
-    )
-
-
-def legacy_is_cli_admitted(metadata: object) -> bool:
-    """Read the literal CLI-admission flag from a released Message row."""
-
-    return (
-        _legacy_memory_metadata(metadata).get(LEGACY_MEMORY_CLI_ADMITTED_METADATA)
-        is True
-    )
-
-
-def legacy_memory_merge_identity(
-    metadata: object,
-) -> tuple[str | None, bool, bool]:
-    """Return the released Memory facts that one dispatch kept singular."""
-
-    return (
-        legacy_admitted_user_id(metadata),
-        legacy_is_ordinary_text(metadata),
-        legacy_is_cli_admitted(metadata),
-    )
-
-
-def legacy_message_kind(metadata: object) -> str:
-    """Translate released `_memory_*` rows into the core message vocabulary."""
-
-    metadata = _legacy_memory_metadata(metadata)
+    metadata = metadata if isinstance(metadata, dict) else {}
     if metadata.get("quick_reply_for"):
         return "quick_reply"
     if any(
@@ -109,7 +62,9 @@ def legacy_message_kind(metadata: object) -> str:
         return "edited"
     if metadata.get("is_system") or metadata.get("system"):
         return "system"
-    return "original" if legacy_is_ordinary_text(metadata) else "unknown"
+    # Released GENERAL delivery rows need positive evidence of ordinary text;
+    # a missing or malformed legacy marker must not grant human-input status.
+    return "original" if metadata.get("_memory_ordinary_text") is True else "unknown"
 
 
 def utc_now_iso() -> str:
@@ -216,9 +171,10 @@ def message_snapshot(
     if source == "user":
         metadata = metadata_without_delegated_owner(metadata)
         metadata.pop("scheduled_provenance", None)
+    # New input cannot stamp retired private identity fields. Existing queued
+    # rows remain readable through legacy_admitted_user_id without migration.
     filtered_metadata = {
-        key: value
-        for key, value in (metadata or {}).items()
+        key: value for key, value in (metadata or {}).items()
         if not str(key).startswith("_memory_")
     }
     return {
@@ -532,7 +488,7 @@ def _delivery_payload_from_snapshot(
         "message_kind": (
             normalize_message_kind(snapshot.get("message_kind"))
             if "message_kind" in snapshot
-            else legacy_message_kind(metadata)
+            else message_kind_from_metadata(metadata)
         ),
         "text": snapshot.get("content_text") or content.get("text") or "",
         "content": content,
@@ -557,6 +513,12 @@ def delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
+    """Read a delivery's immutable message snapshot when one is available."""
+    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
+    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
+
+
 def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
     """Return whether an immutable Delivery snapshot records remote origin."""
 
@@ -567,145 +529,6 @@ def delivery_has_remote_resource_context(row: dict[str, Any]) -> bool:
     )
 
 
-def metadata_with_delegated_memory_owner(
-    metadata: dict[str, Any], *, session_id: str | None
-) -> dict[str, Any]:
-    """Stamp same-Session delegation from its current host-owned Delivery.
-
-    Caller identifiers locate the execution; caller-supplied owner values never
-    authorize it. A continuation carries its already stamped owner without an
-    ancestry lookup. Missing identity leaves ordinary Memory denial intact.
-    """
-    result = dict(metadata)
-    result.pop("delegated_memory_owner", None)
-    created_by = result.get("created_by")
-    caller = created_by.get("caller") if isinstance(created_by, dict) else None
-    if not session_id or not isinstance(caller, dict) or caller.get("session_id") != session_id:
-        return result
-    import asyncio
-    import os
-    from core.caller_context import AVIBE_CALLER_SESSION_PROOF_ENV
-    from vibe.internal_client import delegated_memory_owner_sync, InternalServerUnavailable
-
-    proof = os.environ.get(AVIBE_CALLER_SESSION_PROOF_ENV, "")
-    if not proof:
-        return result
-    # Definition creation in a controller event loop must not synchronously
-    # call its own socket. Agent CLI creation runs outside that loop.
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        return result
-    try:
-        owner = delegated_memory_owner_sync(session_id, proof)
-    except InternalServerUnavailable:
-        return result
-    if not owner:
-        return result
-    # Resource Owner is not itself a Memory identity. In particular a caller
-    # cannot borrow another remote user's admitted Delivery by naming its Session.
-    if owner.get("platform") == "avibe":
-        remote = result.get("resource_user_context")
-        expected = f"remote:{remote.get('sub')}" if isinstance(remote, dict) and remote.get("sub") else "local"
-        if owner["user_id"] != expected:
-            return result
-    result["delegated_memory_owner"] = dict(owner)
-    return result
-
-
-def current_delivery_memory_owner(session_id: str, *, turn_id: str | None = None) -> dict[str, Any] | None:
-    """Host owner from an exact same-Session Turn, or the current candidate."""
-    from storage.db import get_cached_sqlite_engine
-
-    with get_cached_sqlite_engine().connect() as conn:
-        turn = get_turn(conn, turn_id) if turn_id is not None else active_turn(conn, session_id)
-        if not turn or turn["session_id"] != session_id:
-            return None
-        delivery = delivery_for_turn(conn, turn["id"])
-        if delivery is None:
-            return None
-        payload = execution_delivery_payload(conn, delivery)
-    return memory_owner_from_payload(payload)
-
-
-def current_turn_memory_authority_conflict(session_id: str) -> bool:
-    """Return whether an active Turn carries an owner from another authority.
-
-    This is deliberately a read-only host-side check for the Memory boundary.
-    Delivery admission and native steering must not call Memory or consult this
-    helper; the boundary evaluates the immutable delivery rows at consumption
-    time instead.
-    """
-
-    from storage.db import get_cached_sqlite_engine
-
-    with get_cached_sqlite_engine().connect() as conn:
-        turn = active_turn(conn, session_id)
-        if not turn:
-            return False
-        initial = delivery_for_turn(conn, str(turn["id"]))
-        if initial is None:
-            return False
-        initial_payload = execution_delivery_payload(conn, initial)
-        initial_authority = memory_authority_for_payload(initial_payload)
-        initial_owner = memory_owner_from_payload(initial_payload)
-        for delivery in deliveries_for_turn(conn, str(turn["id"])):
-            # Only an input that may already be in the native Turn can carry
-            # foreign authority into it; a definitively unwritten row cannot.
-            if delivery.get("state") not in POSSIBLY_WRITTEN_DELIVERY_STATES:
-                continue
-            payload = execution_delivery_payload(conn, delivery)
-            if (
-                delivery.get("id") != initial.get("id")
-                and (initial_owner is not None or memory_owner_from_payload(payload) is not None)
-                and memory_authority_for_payload(payload) != initial_authority
-            ):
-                return True
-    return False
-
-
-def execution_delivery_payload(conn: Connection, delivery: dict[str, Any]) -> dict[str, Any]:
-    """Read this exact Delivery's immutable content, including after acceptance."""
-    snapshot = message_for_delivery(conn, delivery) if delivery.get("message_id") else None
-    return _delivery_payload_from_snapshot(delivery, snapshot) if snapshot else delivery_payload(delivery)
-
-
-def memory_owner_from_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
-    """One owner representation for authenticated humans and host continuations."""
-    source_metadata = payload.get("metadata") or {}
-    if payload.get("author") == "user" and payload.get("source") == "user":
-        user_id = payload.get("author_id")
-        if not user_id:
-            user_id = legacy_admitted_user_id(source_metadata) if legacy_is_cli_admitted(source_metadata) else None
-        owner = {
-            "platform": payload.get("platform"),
-            "user_id": user_id,
-            "is_dm": "::user::" in str(payload.get("scope_id") or ""),
-        }
-    elif payload.get("source") == "harness":
-        provenance = scheduled_delivery_provenance(payload)
-        spec = provenance["platform_specific"] if provenance else {}
-        trigger = spec.get("task_trigger_kind")
-        metadata = spec.get("message_metadata")
-        owner = (metadata.get("delegated_memory_owner")
-                 if isinstance(trigger, str) and trigger.strip() and isinstance(metadata, Mapping) else None)
-    else:
-        owner = None
-    return delegated_memory_owner(owner)
-
-
-def delegated_memory_owner(value: object) -> dict[str, Any] | None:
-    """Normalize the optional host owner fact; admission owns platform policy."""
-    if not isinstance(value, Mapping):
-        return None
-    platform, user_id = value.get("platform"), value.get("user_id")
-    if not all(isinstance(field, str) and field.strip() for field in (platform, user_id)):
-        return None
-    return {"platform": platform, "user_id": user_id, "is_dm": value.get("is_dm") is True}
-
-
 def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     """Only a host harness Delivery can restore scheduling authority."""
     if payload.get("source") != "harness":
@@ -714,19 +537,6 @@ def scheduled_delivery_provenance(payload: Mapping[str, Any]) -> dict[str, Any] 
     provenance = metadata.get("scheduled_provenance") if isinstance(metadata, Mapping) else None
     spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
     return provenance if isinstance(spec, Mapping) else None
-
-
-def memory_authority_for_payload(payload: Mapping[str, Any]) -> str:
-    """Compare human and delegated authority without credential-refresh noise."""
-    owner = memory_owner_from_payload(payload)
-    provenance = scheduled_delivery_provenance(payload)
-    metadata = provenance["platform_specific"].get("message_metadata") if provenance else payload.get("metadata")
-    resource = metadata.get("resource_user_context") if isinstance(metadata, Mapping) else None
-    if isinstance(resource, Mapping):
-        # Refreshing the same credential does not change its resource authority.
-        resource = {key: value for key, value in resource.items()
-                    if key not in {"claims_issued_at", "authorization_expires_at"}}
-    return _canonical_json([owner, resource])
 
 
 def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
@@ -747,23 +557,18 @@ def metadata_without_delegated_owner(metadata: object) -> dict[str, Any]:
 
 def public_message_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     """Hide execution identity in both queued and accepted public messages."""
-    def without_private_fields(value: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: item for key, item in value.items()
-            if key != "resource_user_context"
-            and not str(key).startswith(("_web_push_", "_memory_"))
-        }
+    def without_private_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: without_private_fields(item) for key, item in value.items()
+                if key not in {"resource_user_context", "delegated_memory_owner"}
+                and not str(key).startswith(("_web_push_", "_memory_"))
+            }
+        if isinstance(value, list):
+            return [without_private_fields(item) for item in value]
+        return value
 
-    result = without_private_fields(metadata_without_delegated_owner(metadata))
-    provenance = result.get("scheduled_provenance")
-    spec = provenance.get("platform_specific") if isinstance(provenance, dict) else None
-    nested = spec.get("message_metadata") if isinstance(spec, dict) else None
-    if isinstance(nested, dict):
-        result["scheduled_provenance"] = {
-            **provenance,
-            "platform_specific": {**spec, "message_metadata": without_private_fields(nested)},
-        }
-    return result
+    return without_private_fields(metadata if isinstance(metadata, dict) else {})
 
 
 def public_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -800,7 +605,7 @@ def _delegated_authority_merge_identity(metadata: Mapping[str, Any]) -> str:
     # Compare raw authority, including absent/malformed values, before batching.
     # Execution IDs and unrelated metadata must not disable normal coalescing.
     return _canonical_json([
-        {key: value.get(key) for key in ("delegated_memory_owner", "resource_user_context")}
+        {"resource_user_context": value.get("resource_user_context")}
         if isinstance(value, Mapping) else None
         for value in (metadata, nested)
     ])
@@ -815,13 +620,19 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
     kind = (
         normalize_message_kind(value.get("message_kind"))
         if "message_kind" in value
-        else legacy_message_kind(metadata)
+        else message_kind_from_metadata(metadata)
     )
     return (
         *(value.get(field) for field in _MESSAGE_MERGE_IDENTITY_FIELDS[:-1]),
         kind,
+        # Queue projections normalize message_kind before collection, so do not
+        # use that field's presence to detect a released pre-author_id row here.
+        # Preserve its effective author before merging discards later metadata.
+        # An explicit modern author wins; resource authority remains a separate
+        # discriminator below. No private compatibility field is projected out.
+        legacy_admitted_user_id(metadata)
+        if value.get("platform") == "avibe" and not value.get("author_id") else None,
         _delegated_authority_merge_identity(metadata),
-        legacy_memory_merge_identity(metadata),
     )
 
 

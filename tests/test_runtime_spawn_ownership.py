@@ -89,33 +89,6 @@ def test_a_child_whose_pid_record_cannot_be_written_does_not_survive(spawned, tm
     _assert_log_sinks_released(spawned)
 
 
-@pytest.mark.parametrize("primitive", ["spawn_background", "spawn_service_background_process"])
-def test_a_child_whose_secret_cannot_be_delivered_does_not_survive(
-    spawned, monkeypatch, tmp_path: Path, primitive: str
-) -> None:
-    def broken_pipe(process, *, memory_ui_secret):
-        raise BrokenPipeError(errno.EPIPE, "injected: the child closed stdin before the secret")
-
-    monkeypatch.setattr(runtime, "_spawn_stdin", broken_pipe)
-    pid_path = tmp_path / "vibe-ui.pid"
-
-    with pytest.raises(BrokenPipeError):
-        if primitive == "spawn_background":
-            runtime.spawn_background(
-                _sleeper(), pid_path, "ui_stdout.log", "ui_stderr.log", memory_ui_secret="secret"
-            )
-        else:
-            runtime.spawn_service_background_process(
-                _sleeper(), "service_stdout.log", "service_stderr.log", memory_ui_secret="secret"
-            )
-
-    _assert_killed_and_reaped(spawned)
-    # The record is written after the secret, so a failed delivery never names
-    # a process that was then killed.
-    assert not pid_path.exists()
-    _assert_log_sinks_released(spawned)
-
-
 class _HandleThatFailsToClose:
     """A parent-side handle whose close releases the descriptor, then raises.
 
