@@ -270,21 +270,23 @@ def plan_native_cleanup(
             env = payload.get("env")
             if env is not None and not isinstance(env, dict):
                 raise TakeoverStateError("native configuration cannot be parsed")
+            # A credential the Hub cannot carry stays native, with the Base
+            # URL it may depend on. Hub launches pin their own connection.
+            retained = bool(payload.get("apiKeyHelper"))
             if isinstance(env, dict):
-                for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN"):
+                for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
                     value = env.get(key)
-                    if key != "ANTHROPIC_BASE_URL" and value:
-                        selected = (
-                            selected_api_key(value)
-                            if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
-                            else isinstance(value, str) and value in selected_secrets
-                        )
-                        if not selected:
-                            raise TakeoverStateError("another native credential requires migration")
-                    env.pop(key, None)
-            if payload.get("apiKeyHelper"):
-                raise TakeoverStateError("native credential helper requires configuration")
-            payload.pop("apiKeyHelper", None)
+                    selected = (
+                        selected_api_key(value)
+                        if key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+                        else isinstance(value, str) and value in selected_secrets
+                    )
+                    if value and not selected:
+                        retained = True
+                    else:
+                        env.pop(key, None)
+                if not retained:
+                    env.pop("ANTHROPIC_BASE_URL", None)
 
         for path in claude_settings_paths(home, project_roots):
             edit_json(path, clear_settings, guard_unchanged=True)
@@ -299,16 +301,16 @@ def plan_native_cleanup(
         config_path, auth_path = get_codex_config_paths(home)
 
         def clear_auth(payload: dict) -> None:
-            if payload.get("OPENAI_API_KEY") and not selected_api_key(payload["OPENAI_API_KEY"]):
-                raise TakeoverStateError("another native credential requires migration")
-            if payload.get("tokens") and not any(
+            # Credentials outside the selection stay native (see Claude above).
+            if not payload.get("OPENAI_API_KEY") or selected_api_key(payload["OPENAI_API_KEY"]):
+                payload.pop("OPENAI_API_KEY", None)
+            if not payload.get("tokens") or any(
                 item.backend == "codex" and item.kind == "oauth_native"
                 and not item.native_store_placeholder
                 for item in items
             ):
-                raise TakeoverStateError("another native credential requires migration")
-            for key in ("OPENAI_API_KEY", "tokens", "auth_mode", "last_refresh"):
-                payload.pop(key, None)
+                for key in ("tokens", "auth_mode", "last_refresh"):
+                    payload.pop(key, None)
 
         edit_json(auth_path, clear_auth, guard_unchanged=True)
         for config_path in codex_config_paths(home, project_roots):
@@ -332,7 +334,7 @@ def plan_native_cleanup(
                     if not isinstance(provider, dict):
                         continue
                     if provider.get("experimental_bearer_token") and not selected_api_key(provider["experimental_bearer_token"]):
-                        raise TakeoverStateError("another native credential requires migration")
+                        continue
                     # Retain user labels, capabilities, and timeout preferences.
                     for key in ("base_url", "env_key", "experimental_bearer_token", "requires_openai_auth"):
                         provider.pop(key, None)
@@ -388,7 +390,7 @@ def plan_native_cleanup(
                             )
                         )
                         if not reference:
-                            raise TakeoverStateError("another native credential requires migration")
+                            continue
                     options.pop("apiKey", None)
                     options.pop("baseURL", None)
                     if not options:

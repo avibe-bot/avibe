@@ -187,19 +187,16 @@ describe('ImportKeysNotice', () => {
     renderNotice();
     const user = userEvent.setup();
 
-    // Two of five. The subscription and the reauth row are not offers; and the
-    // Claude key beside that subscription is not one either, because the dialog this
-    // sentence opens takes a backend whole and will not submit a batch that omits
-    // the sign-in sitting in the same file. Counting it would advertise a key whose
-    // own review has nothing to press.
-    expect(await screen.findByText('Found 2 API keys to import into Model Hub')).toBeTruthy();
+    // Three of five. The subscription and the reauth row are not offers; they stay
+    // native and never hold back the keys beside them.
+    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
 
     // The same number, read off the dialog: what it counted is what can be ticked.
     const dialog = await openDialog(user);
     const offered = within(dialog)
       .getAllByRole('checkbox')
       .filter((box) => !(box as HTMLButtonElement).disabled);
-    expect(offered).toHaveLength(2);
+    expect(offered).toHaveLength(3);
   });
 
   it('offers exactly the rows it counted, and no subscription or reauth row', async () => {
@@ -216,10 +213,8 @@ describe('ImportKeysNotice', () => {
     // provider guessed from the backend that held the key.
     expect(within(dialog).getByText('自建中转 · sk-…abcd')).toBeTruthy();
 
-    expect(within(dialog).getByText(/Claude 账号登录/)).toBeTruthy();
-    expect(
-      (within(dialog).getByRole('checkbox', { name: /Claude 账号登录/ }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    // Rows the Hub cannot carry are not shown at all.
+    expect(within(dialog).queryByText(/Claude 账号登录/)).toBeNull();
     expect(within(dialog).queryByText(/Re-authorize/)).toBeNull();
     expect(within(dialog).getByRole('button', { name: 'Start migration' })).toBeTruthy();
   });
@@ -263,13 +258,12 @@ describe('ImportKeysNotice', () => {
     const dialog = await openDialog(user);
     await user.click(within(dialog).getByRole('button', { name: 'Start migration' }));
 
-    // What is left on the machine is a Claude key nothing here may take and a reauth
-    // row that was never an offer. The receipt says what happened; it does not invite
-    // a second look at a review with nothing to press. Settings still has both.
-    expect(await screen.findByText('Migrated 2 API keys into Model Hub')).toBeTruthy();
+    // What is left on the machine is a subscription and a reauth row that were never
+    // offers. The receipt says what happened; it does not invite a second look at a
+    // review with nothing to press.
+    expect(await screen.findByText('Migrated 3 API keys into Model Hub')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Review migration' })).toBeNull();
     expect(stored.map((i) => i.id)).toEqual([
-      'mig_claude_key',
       'mig_claude_oauth',
       'mig_codex_reauth',
     ]);
@@ -301,7 +295,7 @@ describe('ImportKeysNotice', () => {
     stored = [...stored, { ...OPENCODE_ZHIPU, id: 'mig_opencode_new', masked_detail: 'kimi · sk-…7a10' }];
     renderNotice();
 
-    expect(await screen.findByText('Found 3 API keys to import into Model Hub')).toBeTruthy();
+    expect(await screen.findByText('Found 4 API keys to import into Model Hub')).toBeTruthy();
   });
 
   it('does not ask again for a key its review could not act on', async () => {
@@ -312,10 +306,9 @@ describe('ImportKeysNotice', () => {
     await user.click(await screen.findByRole('button', { name: 'Dismiss import notice' }));
     unmount();
     cleanup();
-    // A second Claude key, in the group the sign-in beside it blocks. Nothing this
-    // entry can offer has changed, so reappearing would be a notice about keys it
-    // would then decline to import.
-    stored = [...stored, { ...CLAUDE_KEY, id: 'mig_claude_key_2', masked_detail: 'sk-…7a10' }];
+    // A second key the Hub cannot carry. Nothing this entry can offer has changed,
+    // so reappearing would be a notice about keys it would then decline to import.
+    stored = [...stored, { ...CODEX_REAUTH, id: 'mig_codex_reauth_2', masked_detail: 'sk-…7a10' }];
     renderNotice();
 
     await waitFor(() => expect(modelsApi.scanMigration).toHaveBeenCalledTimes(2));

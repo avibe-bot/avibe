@@ -4590,7 +4590,10 @@ class ModelHubService:
                                     self.migration_journal.completed() or {}
                                 ).get("clean_native_stores"),
                             )
-                            if any(item.backend == backend for item in available):
+                            if any(
+                                item.backend == backend and item.proposed_action == "import"
+                                for item in available
+                            ):
                                 raise ModelHubError("mode_switch_blocked", status=409)
                             config = self._clone_config(previous)
                             self._agent(config, backend).mode = "hub"

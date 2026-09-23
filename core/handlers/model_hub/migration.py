@@ -1894,7 +1894,10 @@ async def apply_native_migration(
                                 project_roots=host.migration_project_roots(),
                                 clean_native_stores=record.get("clean_native_stores"),
                             )
-                            if not any(item.backend in record["backends"] for item in residual):
+                            if not any(
+                                item.backend in record["backends"] and item.proposed_action == "import"
+                                for item in residual
+                            ):
                                 return result
                             completed_record = record
                 else:
@@ -1915,9 +1918,13 @@ async def apply_native_migration(
         backends = tuple(sorted({item.backend for item in selected}))
         if any(set(item.required_backends) - set(backends) for item in selected):
             raise MigrationConflictError
-        # A CLI takeover cannot leave an unselected credential maintaining its
-        # original authentication. Selection is therefore grouped by backend.
-        if any(item.backend in backends and item.id not in item_ids for item in available):
+        # A takeover moves every credential the Hub can carry, so selection is
+        # grouped by backend. Rows it cannot carry stay native: a Hub launch
+        # pins its own connection above them, so they are shadowed, not used.
+        if any(
+            item.backend in backends and item.proposed_action == "import" and item.id not in item_ids
+            for item in available
+        ):
             raise MigrationConflictError
         retained_inventory_ids = (
             set(record.get("inventory_ids", [item["id"] for item in record["items"]]))
@@ -2015,7 +2022,10 @@ async def apply_native_migration(
                     selected.extend(item for item in resolved if item not in selected)
                     if (original.receipt_identity or original.id) in retained_inventory_ids:
                         retained_item_ids.update(item.id for item in resolved)
-                if any(item.backend in backends and item not in selected for item in rescanned):
+                if any(
+                    item.backend in backends and item.proposed_action == "import" and item not in selected
+                    for item in rescanned
+                ):
                     raise MigrationConflictError
                 record = await _prepare_takeover(
                     host, previous, selected, mask_credential=mask_credential,

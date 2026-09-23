@@ -282,19 +282,15 @@ describe('SettingsModelsPage surface branches', () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
-  it('keeps Direct mode and blocks migration when only unsupported native auth exists', async () => {
+  it('switches straight to the gateway when only native auth it cannot carry exists', async () => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [blockedMigrationCandidate] });
     const setMode = vi.spyOn(modelsApi, 'setAgentMode')
       .mockResolvedValue({ ...directAgent('claude'), mode: 'hub' });
     renderPage([], [directAgent('claude')]);
 
     await userEvent.click(await screen.findByRole('button', { name: /Switch to gateway|切换到模型网关/i }));
-    const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByText(/Use the existing Add flow|现有的添加流程/)).toBeTruthy();
-    expect(
-      (within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    expect(setMode).not.toHaveBeenCalled();
+    await waitFor(() => expect(setMode).toHaveBeenCalledWith('claude', 'hub'));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('opens the same migration dialog from an existing Hub user entry', async () => {

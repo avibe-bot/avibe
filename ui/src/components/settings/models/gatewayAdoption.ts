@@ -1,3 +1,4 @@
+import { isImportable } from './migrationGrouping';
 import { apiFailure, type ModelsApi } from './modelsApi';
 import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeInstallAndStartRuntime } from './runtimeLifecycle';
@@ -97,7 +98,8 @@ export async function resumeGatewayAdoption(
 
   try {
     const scan = await api.scanMigration();
-    const candidates = scan.items.filter((item) => item.backend === backend);
+    // Rows the Hub cannot carry stay native and never hold the switch back.
+    const candidates = scan.items.filter((item) => item.backend === backend && isImportable(item));
     return { ok: true, agent: current, runtime, candidates };
   } catch (error) {
     return {

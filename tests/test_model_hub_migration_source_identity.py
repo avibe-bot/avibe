@@ -240,13 +240,14 @@ def test_deduplication_keeps_blocked_config_layers_visible(monkeypatch, tmp_path
     rows = service.migration_scan()["items"]
     assert len(rows) == 2
     assert {row["proposed_action"] for row in rows} == {"import", "reauth"}
-    before = auth.read_bytes()
-    with pytest.raises(ModelHubError):
-        asyncio.run(service.migration_apply(
-            [row["id"] for row in rows if row["proposed_action"] == "import"],
-        ))
-    assert not adapter.provisioned
-    assert auth.read_bytes() == before
+    # The importable layer migrates; the {file:} layer stays native.
+    blocked = paths[1].read_bytes()
+    result = asyncio.run(service.migration_apply(
+        [row["id"] for row in rows if row["proposed_action"] == "import"],
+    ))
+    assert result["applied"] == 1 and adapter.provisioned
+    assert paths[1].read_bytes() == blocked
+    assert [row["proposed_action"] for row in service.migration_scan()["items"]] == ["reauth"]
 
 
 def _model_only_opencode(monkeypatch, tmp_path):

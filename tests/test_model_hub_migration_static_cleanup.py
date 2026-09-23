@@ -159,13 +159,14 @@ def test_static_canonical_value_reuses_existing_ref(home, tmp_path, shape):
 
 
 @pytest.mark.parametrize("shape", CONFIG_SHAPES)
-def test_other_canonical_credential_does_not_authorize_cleanup(home, tmp_path, shape):
+def test_other_canonical_credential_is_left_in_place(home, tmp_path, shape):
     path, roots = _seed(home, shape)
     before = path.read_bytes()
     service, _, adapter = _service(tmp_path, migration_home=home)
     [item] = _items(service, roots)
-    with pytest.raises(TakeoverStateError, match="another native credential"):
-        plan_native_cleanup([replace(item, secret="fixture-other")], home=home, project_roots=roots)
+    edits = plan_native_cleanup([replace(item, secret="fixture-other")], home=home, project_roots=roots)
+    # An unselected credential stays native; the Hub launch shadows it.
+    assert next(edit for edit in edits if edit.path == path).after == before
     assert path.read_bytes() == before and not adapter.provisioned
 
 
@@ -207,8 +208,8 @@ def test_padding_only_change_never_bypasses_exact_consent(home, tmp_path, shape,
 
 @pytest.mark.parametrize("value", [" \t ", "fixture-other", ["fixture"], {"key": KEY}, 123])
 @pytest.mark.parametrize("field", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"])
-def test_unselected_settings_value_still_refuses_cleanup(home, tmp_path, value, field):
-    _seed(home, "claude-user-api", KEY)
+def test_unselected_settings_value_stays_while_selected_key_is_cleaned(home, tmp_path, value, field):
+    path, _ = _seed(home, "claude-user-api", KEY)
     # A real second native layer, not a new supported filename.
     project = home / "project"
     other = project / ".claude/settings.local.json"
@@ -216,9 +217,9 @@ def test_unselected_settings_value_still_refuses_cleanup(home, tmp_path, value, 
     before = other.read_bytes()
     service, _, adapter = _service(tmp_path, migration_home=home)
     selected = next(item for item in _items(service, (project,)) if item.secret == KEY)
-    with pytest.raises(TakeoverStateError, match="another native credential"):
-        plan_native_cleanup([selected], home=home, project_roots=(project,))
-    assert other.read_bytes() == before
+    edits = {edit.path: edit for edit in plan_native_cleanup([selected], home=home, project_roots=(project,))}
+    assert KEY.encode() not in edits[path].after
+    assert edits[other.absolute()].after == before
     assert not adapter.provisioned
 
 
