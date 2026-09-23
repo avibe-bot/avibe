@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 from http.server import BaseHTTPRequestHandler
 import os
@@ -170,7 +172,7 @@ def test_noncanonical_official_tags_fail_before_artifact_construction(
 
 
 @pytest.mark.parametrize(("workflow_name", "job_name", "checkout_name", "workflow_ref"), WORKFLOWS)
-def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workflow_name, job_name, checkout_name, workflow_ref):
+def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, monkeypatch, workflow_name, job_name, checkout_name, workflow_ref):
     job = _job(workflow_name, job_name)
     checkout = _step(job, checkout_name)
     assert checkout["uses"].startswith("actions/checkout@")
@@ -182,18 +184,28 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
     verification = _step(job, "Verify built distribution contracts")
     assert "release-automation/tests/test_distribution_artifacts.py" in verification["run"]
     assert "AVIBE_CORE_WHEEL=" in verification["run"] and "AVIBE_CORE_SDIST=" in verification["run"]
+    assert "working-directory" not in verification
     assert job["steps"].index(checkout) < job["steps"].index(verification)
     # Replay the path/ref contract: release source lacks the automation, while
     # the workflow commit supplies it via the declared sparse checkout.
     remote = tmp_path / "remote"
     remote.mkdir()
     _fixture_git(remote, "init")
-    _fixture_git(remote, "commit", "--allow-empty", "-m", "release source")
+    source_skill = remote / "skills" / "use-avibe" / "SKILL.md"
+    source_skill.parent.mkdir(parents=True)
+    source_skill.write_text("Released skill content\n", encoding="utf-8")
+    (remote / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    _fixture_git(remote, "add", ".")
+    _fixture_git(remote, "commit", "-m", "release source")
     release = _fixture_git(remote, "rev-parse", "HEAD")
+    source_skill.write_text("Workflow-only revision\n", encoding="utf-8")
     for name in files:
         target = remote / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("print('workflow-owned automation')\n")
+        if name == "tests/test_distribution_artifacts.py":
+            shutil.copy2(ROOT / name, target)
+        else:
+            target.write_text("print('workflow-owned automation')\n", encoding="utf-8")
     _fixture_git(remote, "add", ".")
     _fixture_git(remote, "commit", "-m", "workflow automation")
     workflow = _fixture_git(remote, "rev-parse", "HEAD")
@@ -204,6 +216,21 @@ def test_workflow_owned_checkout_supplies_the_executed_contract(tmp_path, workfl
     assert _fixture_git(destination, "rev-parse", "HEAD") != release
     for name in files:
         assert (destination / name).is_file()
+    assert not (destination / "skills").exists()
+    source_checkout = tmp_path / "build-source"
+    _fixture_git(tmp_path, "clone", "--no-checkout", str(remote), str(source_checkout))
+    _fixture_git(source_checkout, "checkout", release)
+    contract = destination / "tests/test_distribution_artifacts.py"
+    spec = importlib.util.spec_from_file_location("sparse_distribution_contract", contract)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with monkeypatch.context() as scoped:
+        scoped.chdir(source_checkout)
+        expected = module._expected_builtin_skills_snapshot()
+    assert expected["use-avibe/SKILL.md"]["sha256"] == hashlib.sha256(
+        b"Released skill content\n"
+    ).hexdigest()
     if workflow_name == "publish.yml":
         upload = _step(job, "Upload GitHub release assets")
         script = "release-automation/scripts/github_release.py"

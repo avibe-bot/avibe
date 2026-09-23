@@ -1451,6 +1451,26 @@ passed. The two focused Settings page test files passed 16/16, and UI build and
 lint passed without baseline drift. Exact-head CI, Codex review and publication
 remain separate gates.
 
+## H26 — rc13 distribution verification source boundary
+
+The `gh-v3.1.1rc13` Release (AI Notes) build-assets job 35927306218 built a
+wheel and sdist with all 21 builtin skill files, then failed their installed
+mirror checks. The expected snapshot was read from the release-automation
+sparse checkout, which contains the verification test but no `skills/**`, so
+the comparison used an empty expected set. The artifacts were not published;
+rc13 remains immutable evidence and cannot be reused.
+
+The expected skill bytes now come from the build-source checkout, which is
+also the working directory of the verification step. The test still compares
+every installed skill's path, hash and mode for both wheel and sdist and
+requires a nonempty source snapshot. This matters when a manually dispatched
+workflow checks out automation from a different revision than the requested
+release source: adding `skills/**` to the automation checkout would compare
+against the wrong commit. A sparse-checkout fixture exercises both workflows
+with distinct source and automation revisions, and installed wheel/sdist
+consumers check real built artifacts. The asset matrix and release workflows
+are unchanged; a new reviewed head and unused TEST tag are required.
+
 ## Known-by-design ledger additions
 
 - **Taken up in H19.** `query_endpoint` sets `stderr(Stdio::null())` and the
