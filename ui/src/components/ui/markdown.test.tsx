@@ -310,8 +310,10 @@ describe('Markdown source citations', () => {
   // What core/citations.py's _escape_label writes: every character a Markdown
   // reader - or an IM dialect - would not show verbatim.
   const escapeLabel = (label: string) => label.replace(/([\\[\]`<*_~&|])/g, '\\$1');
+  // And what its _link_spelling writes: the URL keeps its parentheses, and the
+  // destination escapes them so an unbalanced one cannot end the link early.
   const link = (citation: { label: string; url: string }) =>
-    `[${escapeLabel(citation.label)}](${citation.url})`;
+    `[${escapeLabel(citation.label)}](${citation.url.replace(/[()]/g, '\\$&')})`;
   const guide = (over: Partial<CitationSource> = {}): CitationSource => ({
     index: 1,
     ref_id: 'turn0view0',

@@ -380,6 +380,195 @@
       "anchors_exhaustive": true
     },
     {
+      "key": "paren_path",
+      "why": "Parentheses in the address, balanced, unbalanced and already percent-encoded, one of them beside a literal IPv6 host. Each is the page its source named, so the URL keeps it as written; only the link guards it, and every reader has to land on the same address.",
+      "sources": {
+        "turn0view0": {
+          "url": "https://en.wikipedia.org/wiki/Foo_(bar)",
+          "title": "Balanced"
+        },
+        "turn0view1": {
+          "url": "https://example.com/a_(b?q=c)d",
+          "title": "Unbalanced"
+        },
+        "turn0view2": {
+          "url": "https://example.com/a%28b%29",
+          "title": "Encoded"
+        },
+        "turn0view3": {
+          "url": "https://[::1]:8443/x(y",
+          "title": "Loopback"
+        }
+      },
+      "agent_text": "One citeturn0view0, two citeturn0view1, three citeturn0view2, four citeturn0view3.",
+      "web_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Balanced",
+          "url": "https://en.wikipedia.org/wiki/Foo_(bar)",
+          "label": "en.wikipedia.org",
+          "spans": [
+            [
+              4,
+              65
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 2,
+          "ref_id": "turn0view1",
+          "title": "Unbalanced",
+          "url": "https://example.com/a_(b?q=c)d",
+          "label": "example.com",
+          "spans": [
+            [
+              71,
+              118
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 3,
+          "ref_id": "turn0view2",
+          "title": "Encoded",
+          "url": "https://example.com/a%28b%29",
+          "label": "example.com",
+          "spans": [
+            [
+              126,
+              169
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 4,
+          "ref_id": "turn0view3",
+          "title": "Loopback",
+          "url": "https://[::1]:8443/x(y",
+          "label": "[::1]",
+          "spans": [
+            [
+              176,
+              210
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        }
+      ],
+      "im_citations": [
+        {
+          "index": 1,
+          "ref_id": "turn0view0",
+          "title": "Balanced",
+          "url": "https://en.wikipedia.org/wiki/Foo_(bar)",
+          "label": "en.wikipedia.org",
+          "spans": [
+            [
+              4,
+              65
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 2,
+          "ref_id": "turn0view1",
+          "title": "Unbalanced",
+          "url": "https://example.com/a_(b?q=c)d",
+          "label": "example.com",
+          "spans": [
+            [
+              71,
+              118
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 3,
+          "ref_id": "turn0view2",
+          "title": "Encoded",
+          "url": "https://example.com/a%28b%29",
+          "label": "example.com",
+          "spans": [
+            [
+              126,
+              169
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        },
+        {
+          "index": 4,
+          "ref_id": "turn0view3",
+          "title": "Loopback",
+          "url": "https://[::1]:8443/x(y",
+          "label": "[::1]",
+          "spans": [
+            [
+              176,
+              210
+            ]
+          ],
+          "body_sha256": "1074ba2db78640f7e7ce0668e7efa7f227f5d8c1cb464e1cc671f1a6b672700d"
+        }
+      ],
+      "web_text": "One [en.wikipedia.org](https://en.wikipedia.org/wiki/Foo_\\(bar\\)), two [example.com](https://example.com/a_\\(b?q=c\\)d), three [example.com](https://example.com/a%28b%29), four [\\[::1\\]](https://[::1]:8443/x\\(y).",
+      "im_text": "One [en.wikipedia.org](https://en.wikipedia.org/wiki/Foo_\\(bar\\)), two [example.com](https://example.com/a_\\(b?q=c\\)d), three [example.com](https://example.com/a%28b%29), four [\\[::1\\]](https://[::1]:8443/x\\(y).",
+      "quick_replies": [],
+      "files": [],
+      "web_anchors": [
+        {
+          "label": "en.wikipedia.org",
+          "url": "https://en.wikipedia.org/wiki/Foo_(bar)",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/a_(b?q=c)d",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/a%28b%29",
+          "cited": true
+        },
+        {
+          "label": "[::1]",
+          "url": "https://[::1]:8443/x(y",
+          "cited": true
+        }
+      ],
+      "im_anchors": [
+        {
+          "label": "en.wikipedia.org",
+          "url": "https://en.wikipedia.org/wiki/Foo_(bar)",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/a_(b?q=c)d",
+          "cited": true
+        },
+        {
+          "label": "example.com",
+          "url": "https://example.com/a%28b%29",
+          "cited": true
+        },
+        {
+          "label": "[::1]",
+          "url": "https://[::1]:8443/x(y",
+          "cited": true
+        }
+      ],
+      "anchors_cover_destinations": true,
+      "anchors_exhaustive": true
+    },
+    {
       "key": "footnote",
       "why": "A GFM footnote definition holding a link to the same page. One renderer reads a link there and the other reads a definition, which is exactly the disagreement that cost the real citation its badge.",
       "sources": {

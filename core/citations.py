@@ -114,13 +114,17 @@ _IPV4_TOO_LARGE = 1 << 32
 _REFERENCE_RE = re.compile(
     r"&(#[0-9]{1,7}|#[Xx][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});"
 )
-# What a citation destination has to spell that plain URI spelling does not.
-# ``normalizeUri`` keeps parentheses, but an unbalanced one truncates the link;
-# and an ``&`` that starts a live reference would be resolved a second time on
-# the way out, turning one delivered URL into a different one. Both are written
-# as escapes BEFORE ``spell_uri`` runs, which keeps them untouched - so the
-# result is still a fixed point, and the reference grammar stays defined once.
-_CITATION_UNSAFE_RE = re.compile(rf"[()]|&(?={_REFERENCE_RE.pattern[1:]})")
+# What a citation destination has to spell that plain URI spelling does not:
+# an ``&`` that starts a live reference would be resolved a second time on the
+# way out, turning one delivered URL into a different one. It is written as an
+# escape BEFORE ``spell_uri`` runs, which keeps it untouched - so the result is
+# still a fixed point, and the reference grammar stays defined once. A
+# parenthesis is not here: it is part of the address, and escaping it in the URL
+# names a different page. Only the link needs it guarded - see
+# ``_link_spelling``.
+_CITATION_UNSAFE_RE = re.compile(rf"&(?={_REFERENCE_RE.pattern[1:]})")
+# The two characters of an address that can end a Markdown destination early.
+_DESTINATION_PAREN_RE = re.compile(r"[()]")
 # WHATWG forbidden domain code points, checked after percent-decoding. The C0
 # range is there in full: a host is not allowed to hold any of it, and a
 # citation whose host carries one names a page no browser opens.
@@ -142,7 +146,7 @@ _PORT_DIGITS = len(str(_PORT_MAX))
 _IPV6_OPEN_RE = re.compile(r"\[|%5[Bb]")
 _IPV6_CLOSE_RE = re.compile(r"\]|%5[Dd]")
 # Where an authority ends. A backslash ends one too for a special scheme, but
-# ``_canonical_uri`` has already percent-encoded it by this point.
+# ``safe_url`` has already refused every address still holding one.
 _AUTHORITY_END_RE = re.compile(r"[/?#]")
 _TITLE_MAX = 200
 _LABEL_MAX = 64
@@ -767,6 +771,14 @@ def safe_url(value: Any) -> str:
     raw = _normalize_destination(value)
     if not raw:
         return ""
+    # A browser reads a backslash in an http(s) authority or path as ``/`` and
+    # one in a query as data, so there is no single spelling of it that names
+    # the page for every reader: ``https://trusted.example\\@attacker.example/``
+    # opens trusted.example and, percent-encoded, is attributed to
+    # attacker.example. The citation is refused rather than guessed at. An
+    # already-encoded ``%5C`` is data to every reader and is kept.
+    if "\\" in raw:
+        return ""
     url = _canonical_uri(raw)
     scheme, separator, _ = url.partition(":")
     # A browser lowercases the scheme, and a renderer that only knows the
@@ -1115,8 +1127,17 @@ def body_digest(text: str) -> str:
 
 
 def _link_spelling(citation: Citation) -> str:
-    """The exact Markdown link a citation is written as."""
-    return f"[{_escape_label(citation.label)}]({citation.url})"
+    """The exact Markdown link a citation is written as.
+
+    A parenthesis stays in the URL and is escaped in the destination, which
+    every reader resolves back to the character: an unbalanced one would
+    otherwise end the link early. ``safe_url`` has refused any backslash, so an
+    escape here cannot pair with one already in the address. An angle-bracket
+    destination would say the same thing, but Telegram and WeChat do not read
+    that form as a link.
+    """
+    destination = _DESTINATION_PAREN_RE.sub(lambda match: "\\" + match.group(), citation.url)
+    return f"[{_escape_label(citation.label)}]({destination})"
 
 
 def _utf16_offsets(text: str, offsets: Iterable[int]) -> dict[int, int]:

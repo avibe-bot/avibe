@@ -133,12 +133,24 @@ class CitationRenderingPerPlatformTests(unittest.TestCase):
         self.assertIn(f'<a href="{URL}">developers.openai.com</a>', rendered)
 
     def test_telegram_keeps_a_cited_url_holding_markdown_punctuation_intact(self):
-        """``safe_url`` percent-encodes the parens, so the link cannot end early."""
-        url = "https://en.wikipedia.org/wiki/Foo_%28bar%29"
+        """The link escapes the parens and Telegram opens the address as written."""
+        for url in (
+            "https://en.wikipedia.org/wiki/Foo_(bar)",
+            "https://example.com/a_(b",
+            "https://example.com/a%28b%29",
+        ):
+            with self.subTest(url=url):
+                text, citations = resolve_citations(
+                    "Claimed.\ue200cite\ue202turn0view0\ue201",
+                    {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=url)},
+                    unresolved_label="[source unavailable]",
+                )
 
-        rendered = TelegramFormatter().render(f"See [en.wikipedia.org]({url})")
+                rendered = TelegramFormatter().render(text)
 
-        self.assertIn(f'<a href="{url}">en.wikipedia.org</a>', rendered)
+                self.assertEqual(citations[0]["url"], url)
+                self.assertIn(f'<a href="{url}">', rendered)
+                self.assertTrue(rendered.endswith("</a>"))
 
     def test_telegram_leaves_a_cited_link_inside_a_code_block_literal(self):
         rendered = TelegramFormatter().render(f"```\n{LINK}\n```")

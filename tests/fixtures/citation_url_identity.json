@@ -62,9 +62,9 @@
       "label": null
     },
     {
-      "why": "parentheses would end the Markdown destination early; the renderer keeps the escapes",
+      "why": "parentheses are part of the address and stay literal; only the Markdown link escapes them",
       "raw": "https://en.wikipedia.org/wiki/Cite_(disambiguation)",
-      "url": "https://en.wikipedia.org/wiki/Cite_%28disambiguation%29",
+      "url": "https://en.wikipedia.org/wiki/Cite_(disambiguation)",
       "label": "en.wikipedia.org"
     },
     {
@@ -92,10 +92,10 @@
       "label": "example.com"
     },
     {
-      "why": "P1: a raw backslash in the authority sends urlsplit and the browser to different hosts",
+      "why": "P1: a raw backslash in the authority sends urlsplit and the browser to different hosts, so it names no source",
       "raw": "https://attacker.example\\@developers.openai.com/page",
-      "url": "https://attacker.example%5C@developers.openai.com/page",
-      "label": "developers.openai.com"
+      "url": null,
+      "label": null
     },
     {
       "why": "P1: a backslash inside the host itself is not a host a browser will resolve",

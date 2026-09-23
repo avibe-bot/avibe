@@ -444,21 +444,93 @@ class TestUntrustedMetadata:
         assert source_label(url) == expected
         assert bool(safe_url(url)) is bool(expected)
 
-    def test_markdown_punctuation_in_a_url_is_percent_encoded(self):
-        """An unencoded ``)`` would truncate the link and leave prose behind it."""
+    def test_markdown_punctuation_is_protected_in_the_link_and_not_in_the_url(self):
+        """A parenthesis is part of the address, and only Markdown needs it guarded.
+
+        Percent-encoding it in the URL protected the link and moved the page:
+        ``Foo_%28bar%29`` is not the path the source gave. The URL keeps it, and
+        the link the answer carries escapes it, which every reader resolves back.
+        """
         url = 'https://en.wikipedia.org/wiki/Foo_(bar)?q=a b&t="x"<y>'
 
-        encoded = safe_url(url)
+        canonical = safe_url(url)
 
-        assert encoded == (
-            "https://en.wikipedia.org/wiki/Foo_%28bar%29?q=a%20b&t=%22x%22%3Cy%3E"
+        assert canonical == (
+            "https://en.wikipedia.org/wiki/Foo_(bar)?q=a%20b&t=%22x%22%3Cy%3E"
         )
         text, citations = resolve(
             f"Claimed.{marker('turn0view0')}",
             {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=url)},
         )
-        assert text == f"Claimed. [en.wikipedia.org]({encoded})"
-        assert citations[0]["url"] == encoded
+        assert text == (
+            "Claimed. [en.wikipedia.org]"
+            "(https://en.wikipedia.org/wiki/Foo_\\(bar\\)?q=a%20b&t=%22x%22%3Cy%3E)"
+        )
+        assert citations[0]["url"] == canonical
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("https://en.wikipedia.org/wiki/Foo_(bar)", "https://en.wikipedia.org/wiki/Foo_(bar)"),
+            ("https://example.com/a_(b", "https://example.com/a_(b"),
+            ("https://example.com/a)b", "https://example.com/a)b"),
+            ("https://example.com/a%28b%29", "https://example.com/a%28b%29"),
+            ("https://example.com/a&#40;b&#x29;", "https://example.com/a(b)"),
+            ("https://[::1]:8443/x(y?q=(1)", "https://[::1]:8443/x(y?q=(1)"),
+        ],
+        ids=["balanced", "unbalanced-open", "unbalanced-close", "already-encoded",
+             "character-reference", "ipv6"],
+    )
+    def test_a_parenthesis_reaches_the_reader_as_the_source_wrote_it(self, raw, expected):
+        """The sidecar, the link and what a Markdown reader resolves all agree."""
+        assert safe_url(raw) == expected
+
+        text, citations = resolve(
+            f"Claimed.{marker('turn0view0')}",
+            {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=raw)},
+        )
+
+        assert citations[0]["url"] == expected
+        tokens = MARKDOWN.parseInline(text)[0].children
+        hrefs = [token.attrGet("href") for token in tokens if token.type == "link_open"]
+        assert hrefs == [MARKDOWN.normalizeLink(expected)]
+        assert text.endswith(")")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://trusted.example\\@attacker.example/x",
+            "https://example.com/a\\b",
+            "https://example.com/p?q=a\\b",
+            "https://example.com/a&#92;b",
+            "https://example.com/a&bsol;b",
+        ],
+        ids=["authority", "path", "query", "numeric-reference", "named-reference"],
+    )
+    def test_a_backslash_left_in_the_address_names_no_source(self, url):
+        """A browser reads ``\\`` as ``/`` in an http(s) authority and path, and
+        as data in a query, so no one spelling of it names the page for every
+        reader - ``trusted.example\\@attacker.example`` opens trusted.example
+        in a browser and was attributed to attacker.example. It is refused."""
+        assert safe_url(url) == ""
+
+        text, citations = resolve(
+            f"Claimed.{marker('turn0view0')}",
+            {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=url)},
+        )
+        assert text == f"Claimed. {UNRESOLVED}"
+        assert citations == []
+
+    def test_an_encoded_backslash_is_an_ordinary_character_of_the_address(self):
+        """``%5C`` is data to every reader, so it is kept exactly as written."""
+        url = "https://example.com/a%5Cb?q=c%5Cd"
+
+        assert safe_url(url) == url
+        _, citations = resolve(
+            f"Claimed.{marker('turn0view0')}",
+            {"turn0view0": CitationSource(ref_id="turn0view0", title="T", url=url)},
+        )
+        assert citations[0]["url"] == url
 
     def test_non_ascii_title_is_preserved_and_collapsed_to_one_line(self):
         source = CitationSource(

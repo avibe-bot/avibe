@@ -134,6 +134,20 @@ CASES: tuple[dict[str, Any], ...] = (
         "text": "Cited. {m0}",
     },
     {
+        "key": "paren_path",
+        "why": "Parentheses in the address, balanced, unbalanced and already "
+        "percent-encoded, one of them beside a literal IPv6 host. Each is the "
+        "page its source named, so the URL keeps it as written; only the link "
+        "guards it, and every reader has to land on the same address.",
+        "sources": {
+            "turn0view0": ("https://en.wikipedia.org/wiki/Foo_(bar)", "Balanced"),
+            "turn0view1": ("https://example.com/a_(b?q=c)d", "Unbalanced"),
+            "turn0view2": ("https://example.com/a%28b%29", "Encoded"),
+            "turn0view3": ("https://[::1]:8443/x(y", "Loopback"),
+        },
+        "text": "One {m0}, two {m1}, three {m2}, four {m3}.",
+    },
+    {
         "key": "footnote",
         "why": "A GFM footnote definition holding a link to the same page. One "
         "renderer reads a link there and the other reads a definition, which is "

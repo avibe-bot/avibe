@@ -364,13 +364,23 @@ blob with no way to reach the page the answer is based on.
   Cleaning after resolution would have deleted it and pointed the persisted URL
   at `…/pq`, a page the badge never opens. Then
   percent-encoding that matches `normalizeUri` — existing `%XX` escapes
-  preserved, lone surrogates repaired to `U+FFFD`, parentheses encoded so a
-  Markdown destination cannot truncate, and the result a fixed point of itself —
+  preserved, lone surrogates repaired to `U+FFFD`, and the result a fixed point
+  of itself —
   and the scheme lowercased, since a renderer that only knows the lowercase
   spelling sees no link at all (Telegram delivered
-  `[example.com](HTTPS://Example.com/X)` as raw Markdown). Backslash escapes are deliberately *not*
-  resolved: WHATWG reads `\` as a host separator, so it is preserved as `%5C`
-  rather than becoming a second way to spell an authority. Beyond that the URL
+  `[example.com](HTTPS://Example.com/X)` as raw Markdown). Parentheses are
+  part of the address and stay literal in the URL and the sidecar: encoding
+  them as `%28`/`%29` protected the link and named a different page. Only the
+  Markdown link guards them, as `\(`/`\)` in the destination, which the Web
+  renderer, Slack, Telegram and WeChat each resolve back to the character. An
+  angle-bracket destination `<url>` says the same in CommonMark, but the real
+  Telegram and WeChat paths do not read it as a link, so it is not used. A raw
+  backslash left after normalization — literal or spelled `&#92;`/`&bsol;` — is
+  refused: WHATWG reads it as `/` in an http(s) authority and path and as data
+  in a query, so no single spelling of it names the page for every reader
+  (`https://trusted.example\@attacker.example/x` opens trusted.example and,
+  percent-encoded, was attributed to attacker.example). An already-encoded
+  `%5C` is data everywhere and is kept. Beyond that the URL
   is left as it arrived: it names the page its source gave, and `:0080`,
   `Example.COM` and an uncompressed IPv6 address all open the same page, so this
   is not the place to decide two spellings are one. What is judged is only

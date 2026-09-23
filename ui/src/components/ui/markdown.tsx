@@ -192,7 +192,7 @@ function hasLiteralAuthorityBrackets(url: string): boolean {
 // image `src` reaches an `href` too. Nothing else about the node is read or
 // written, and the mark is consumed by `mentionUrlTransform` rather than
 // rendered: `a` and `img` below take the props they name, not a spread.
-export function remarkLiteralAuthority() {
+function remarkLiteralAuthority() {
   return (tree: unknown) => {
     const definitions = new Map<string, string>();
     eachMdastNode(tree as MdastNode, (node) => {
