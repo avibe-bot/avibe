@@ -5271,7 +5271,6 @@
       "title": "Choose your AI assistants",
       "subtitle": "Enable an assistant, confirm its default model, and start working",
       "install": "Install",
-      "installed": "Installed",
       "notInstalled": "Not installed",
       "installFailed": "Installation failed",
       "enabled": "Enabled",
@@ -5290,7 +5289,16 @@
       "configureRoute": "Configure model route",
       "defaultModel": "Default model",
       "defaultModelNamed": "Model route for {{name}}, review and reorder",
-      "noteEnabled": "Enabled. Ready to work once its model route is ready."
+      "noteEnabled": "Uses the default Model Hub route",
+      "notEnabled": "Not enabled",
+      "installAndEnable": "Install and enable",
+      "installedNotEnabled": "Installed, not enabled",
+      "noteNotEnabled": "Enable to use your models",
+      "noteNotInstalled": "Install {{name}} to use your models",
+      "defaultModelWithBackups_one": "Default model · 1 backup",
+      "defaultModelWithBackups_other": "Default model · {{count}} backups",
+      "routeFallbackInUse": "Using a backup model",
+      "noteNoModels": "No usable model yet"
     },
     "route": {
       "title": "Default model route",

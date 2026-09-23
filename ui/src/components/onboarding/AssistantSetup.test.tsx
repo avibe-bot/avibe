@@ -73,17 +73,17 @@ describe('assistant installation presentation', () => {
     }
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     await act(async () => finishClaude({ ok: false, message: 'Network unavailable', output: 'Installer exited 1' }));
     expect(row('Claude Code').getByText('Network unavailable')).toBeTruthy();
     expect(row('Claude Code').getByText('View details')).toBeTruthy();
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
     expect(row('OpenCode').getByText('Not installed')).toBeTruthy();
     mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/claude' });
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/bin/claude');
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('a failed install settlement refreshes connection state without admitting stale readiness', async () => {
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
@@ -203,7 +203,7 @@ describe('assistant installation presentation', () => {
     const back = vi.fn();
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onBack={back} />));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     fireEvent.click(row('Codex').getByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(back).toHaveBeenCalledWith({ agents: expect.objectContaining({
@@ -241,13 +241,13 @@ describe('assistant installation presentation', () => {
       ? Promise.resolve({ found: true, path: '/isolated/external/claude' })
       : name === 'codex' ? Promise.resolve({ found: false }) : Promise.reject(new Error('Probe unavailable')));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     expect(row('Claude Code').queryByRole('alert')).toBeNull();
     expect(row('Claude Code').queryByText('Details claude')).toBeNull();
     expect(row('Codex').getByText('Failed codex')).toBeTruthy();
     expect(row('Codex').getByText('Details codex')).toBeTruthy();
     expect(row('OpenCode').getByText('Error: Probe unavailable')).toBeTruthy();
-    expect(row('OpenCode').queryByRole('button', { name: 'Installed' })).toBeNull();
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.enabled })).toBeNull();
     // A rejected probe retains install evidence; a later missing result shows it again.
     mock.api.detectCli.mockResolvedValue({ found: false });
     fireEvent.click(row('OpenCode').getByRole('button', { name: 'Retry' }));
@@ -268,12 +268,12 @@ describe('assistant installation presentation', () => {
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     expect(mock.api.installAgent).toHaveBeenCalledWith('codex');
     await act(async () => finishInstall({ ok: true, path: '/isolated/bin/codex' }));
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
     expect(row('Codex').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     await act(async () => finishConfig(data()));
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('settles an enable write that lands while the screen is away, and reads nothing from hiding', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
@@ -351,14 +351,14 @@ describe('assistant installation presentation', () => {
     // retained screen mounted. That is the one probe the stale path ever gets.
     await waitFor(() => expect(probes('/stale/claude')).toBe(1));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     const retainedProbes = probes('/retained/claude');
 
     view.rerender(shown(saved, false, publish));
     view.rerender(shown(saved, true, publish));
     await waitFor(() => expect(probes('/retained/claude')).toBe(retainedProbes + 1));
     expect(probes('/stale/claude')).toBe(1);
-    expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('does not enable entry from installed, draining, failed or unknown states', async () => {
     for (const application of ['draining', 'failed', 'unknown']) {

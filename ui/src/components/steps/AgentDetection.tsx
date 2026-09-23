@@ -37,8 +37,16 @@ import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import { DefaultRouteDialog } from '../onboarding/DefaultRouteDialog';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
-import type { AgentSupply } from '../settings/models/types';
-import type { SetupRouteFocus } from '../onboarding/setupRoute';
+import type { AgentSupply, RouteHop, Source } from '../settings/models/types';
+import type { AssistantRouteView } from '../onboarding/AssistantRow';
+import {
+  chainMembership,
+  hydrateSetupRoutes,
+  saveSetupRoutes,
+  type SetupRouteFocus,
+  type SetupRouteTargetSnapshot,
+} from '../onboarding/setupRoute';
+import { modelsApi } from '../settings/models/modelsApi';
 
 interface AgentDetectionProps {
   active?: boolean;
@@ -141,6 +149,102 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     setRouteFocus({ backend, agentName: backend });
     setRouteOpen(true);
   };
+  // One route, read once for the whole step. Every enabled assistant routes through
+  // the same chain, so the three cards share one read instead of asking for their own,
+  // and the dialog reads into the same state. Whatever it or the person has since put
+  // there is the fresher copy, so this only ever fills an empty one.
+  const [routeRead, setRouteRead] = useState<{ done: boolean; targets: SetupRouteTargetSnapshot[]; sources: Source[] }>(
+    { done: false, targets: [], sources: [] });
+  const routeReadStarted = useRef(false);
+  const readSharedRoute = useCallback(async () => {
+    if (!agentReads || !setFlowState) return;
+    try {
+      const [supplyRead, listed] = await Promise.all([
+        agentReads.read(),
+        modelsApi.listSources().catch(() => [] as Source[]),
+      ]);
+      const hydration = await hydrateSetupRoutes({
+        listVibeAgents: (params) => api.listVibeAgents(params),
+        getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+        getAgentChain: modelsApi.getAgentChain,
+      }, supplyRead.kind === 'current' ? supplyRead.value : []);
+      setRouteRead({ done: true, targets: hydration.targets, sources: Array.isArray(listed) ? listed : [] });
+      setFlowState((current) => (current.routeOrderDirty || current.routeOrder.length > 0
+        ? current
+        : { ...current, routeOrder: hydration.union }));
+    } catch {
+      // The card falls back to the label that opens the dialog, and the dialog reads
+      // for itself.
+      setRouteRead((current) => ({ ...current, done: true }));
+    }
+  }, [agentReads, api, setFlowState]);
+  useEffect(() => {
+    if (!active || !modelHubEnabled || !canEditSetupRoute || routeReadStarted.current) return;
+    routeReadStarted.current = true;
+    void readSharedRoute();
+  }, [active, modelHubEnabled, canEditSetupRoute, readSharedRoute]);
+  const sharedRoute = flowState?.routeOrder ?? [];
+  const sharedRouteRef = useRef(sharedRoute);
+  sharedRouteRef.current = sharedRoute;
+  // Switching an assistant on is the moment it joins the shared route, so it is the
+  // moment the route is written for it. Without this the card would promise the shared
+  // model while the assistant still called whatever its own chain said — which is the
+  // difference between the screen describing the setup and the screen performing it.
+  const adoptSharedRoute = useCallback(async (backend: RuntimeBackendId) => {
+    const shared = sharedRouteRef.current;
+    if (!agentReads || !setFlowState || shared.length === 0) return;
+    try {
+      const supplyRead = await agentReads.read();
+      const hydration = await hydrateSetupRoutes({
+        listVibeAgents: (params) => api.listVibeAgents(params),
+        getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+        getAgentChain: modelsApi.getAgentChain,
+      }, supplyRead.kind === 'current' ? supplyRead.value : []);
+      const mine = hydration.targets.filter((target) => target.backend === backend);
+      if (mine.length) {
+        await saveSetupRoutes(shared, mine, {
+          getVibeAgent: (name, params) => api.getVibeAgent(name, params),
+          listAgents: () => agentReads.readValue(),
+          getAgentChain: modelsApi.getAgentChain,
+          previewAgentChain: modelsApi.previewAgentChain,
+          putAgentChain: modelsApi.putAgentChain,
+          getAgentModelCandidates: modelsApi.getAgentModelCandidates,
+          putAgentModels: modelsApi.putAgentModels,
+        }, { dirty: true });
+      }
+    } catch {
+      // Nothing is claimed on a failed write: the read below is what the cards show,
+      // so a route that did not move is reported as the model it still resolves to.
+    }
+    await readSharedRoute();
+  }, [agentReads, api, setFlowState, readSharedRoute]);
+  // A model is named the way its Source names it, and by its id when the Source has
+  // no name for it — the card shows what the person picked, not an internal id.
+  const modelLabel = (hop: RouteHop): string => {
+    const source = routeRead.sources.find((row) => row.id === hop.source_id);
+    const model = source?.models?.find((row) => row.id === hop.model_id);
+    return model?.display_name?.trim() || hop.model_id;
+  };
+  const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
+    const loading = Boolean(canEditSetupRoute && modelHubEnabled && !routeRead.done && sharedRoute.length === 0);
+    const preferred = sharedRoute[0] ?? null;
+    // What this assistant will actually call. It matches the shared preferred model
+    // unless its own chain cannot start there, which is the one case the card has to
+    // say out loud rather than promise a model that will not answer.
+    const own = routeRead.targets.find((target) => target.backend === backend);
+    const ownHops = own ? chainMembership(own.chain) : [];
+    // Its own chain when it has one, the shared order when it does not: the card
+    // describes what this assistant will call, and an assistant that has not joined the
+    // shared route yet joins it the moment it is switched on or the route is saved.
+    const hops = ownHops.length ? ownHops : sharedRoute;
+    const mine = hops[0] ?? null;
+    return {
+      loading,
+      model: mine ? modelLabel(mine) : null,
+      backups: Math.max(0, hops.length - 1),
+      fallback: Boolean(mine && preferred && (mine.source_id !== preferred.source_id || mine.model_id !== preferred.model_id)),
+    };
+  };
   const [connections, setConnections] = useState<Partial<Record<RuntimeBackendId, BackendConnectionState>>>({});
   const [connectionPending, setConnectionPending] = useState<Partial<Record<RuntimeBackendId, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<RuntimeBackendId, string>>>({});
@@ -218,6 +322,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const onRoutesSaved = async (saved: SetupRouteFocus) => {
     await agentReads?.refresh();
     await refreshConnection(saved.backend);
+    // The cards read from the same route the dialog just wrote, so they read it again.
+    await readSharedRoute();
   };
   // Being read again is one event with one owner, however it arrives: the shell
   // activates this screen, or the route surface it sits on comes back. In the shell both
@@ -375,6 +481,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // failed, and it does not bury what the write had to say.
       try {
         await agentReads?.refresh();
+        if (enabled && modelHubEnabled && canEditSetupRoute) await adoptSharedRoute(backend);
       } catch (error) {
         if (enableIntent.current[backend] !== intent) return;
         setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
@@ -538,8 +645,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           </Button>
   );
   const hintSentence = canContinue ? null : (
-        <p className="text-center text-xs text-muted">
-          {t('onboarding.connection.entryHint')}{' '}
+        /* The sentence is what the eye lines up with the action below it, so the
+           sentence is what gets centred. The rescan rides in the flanking column
+           beside it — inside one centred line it pulled the sentence off the
+           action's axis by half its own width. */
+        <p className="onboarding-setup-hint-line text-xs text-muted">
+          <span>{t('onboarding.connection.entryHint')}</span>
           {rescan}
         </p>
   );
@@ -812,6 +923,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               : !connectionErrors[name] && connections[name]?.ready
                 ? (connections[name]?.auth === 'subscription' ? 'subscription' : 'api_key')
                 : undefined}
+            hubManaged={Boolean(canEditSetupRoute && modelHubEnabled)}
+            enabled={agent.enabled}
+            route={routeViewFor(name)}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
@@ -823,7 +937,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               label={t('onboarding.setup.enableNamed', { name: getBackendUiMeta(name).label })}
               onClick={() => toggle(name, !agent.enabled)} />}
             lifecycle={<BackendLifecycleChip name={name} enabled={agent.enabled} cliStatus={active ? agent.status || 'unknown' : 'unknown'}
-              readyLabel={t('onboarding.setup.installed')}
+              readyLabel={t('onboarding.setup.enabled')}
+              disabledLabel={t('onboarding.setup.notEnabled')}
               refreshKey={chipRefresh[name]}
               externallyBusy={!!refreshingAgents[name]}
               onVisual={(visual) => setVisuals((current) => (current[name] === visual ? current : { ...current, [name]: visual }))}

@@ -559,6 +559,9 @@ const flowErrorDetail = () => {
 const primaryAction = () => document.querySelector('.onboarding-primary-action') as HTMLButtonElement;
 const assistantsRoot = () => document.querySelector('[data-setup-screen-root="assistants"]') as HTMLElement;
 const assistantCard = (name: string) => within(within(assistantsRoot()).getByLabelText(name));
+/** The card's route button is named for the assistant it belongs to: the label on it is
+    the shared route's first model, which is not knowable before the read lands. */
+const routeButton = (name: string) => en.onboarding.setup.defaultModelNamed.replace('{{name}}', name);
 const backAction = () => document.querySelector('.onboarding-back-action') as HTMLButtonElement;
 /** Nothing that ends setup, and nothing that leaves the screen. */
 function expectNoForwardWrite() {
@@ -938,7 +941,7 @@ describe('setup route editor on the registered journey', () => {
     });
 
     await setup();
-    fireEvent.click(await assistantCard('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute }));
+    fireEvent.click(await assistantCard('Claude Code').findByRole('button', { name: routeButton('Claude Code') }));
     fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'OpenAI · gpt-5') }));
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.addSource }));
     await waitFor(() => expect(document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen')).toBe('providers'));
@@ -948,14 +951,14 @@ describe('setup route editor on the registered journey', () => {
     await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
     fireEvent.click(primaryAction());
     await screen.findByRole('button', { name: 'Enter workspace' });
-    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute }));
+    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: routeButton('Claude Code') }));
     expect((await screen.findByText(en.onboarding.route.preferred)).closest('.setup-add-row')?.textContent).toContain('gpt-4.1');
 
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
     await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [hops[1], hops[0]] }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
 
-    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute }));
+    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: routeButton('Claude Code') }));
     expect((await screen.findByText(en.onboarding.route.preferred)).closest('.setup-add-row')?.textContent).toContain('gpt-4.1');
     fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -992,6 +995,7 @@ describe('setup route editor on the registered journey', () => {
     fireEvent.click(primaryAction());
     const enter = await screen.findByRole('button', { name: 'Enter workspace' });
     await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(true));
+    // Nothing is routed yet, so the card offers the route itself rather than a model.
     fireEvent.click(await assistantCard('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute }));
     await user.click(await screen.findByRole('button', { name: en.settings.models.routeDialog.addHop }));
     await user.click(screen.getByRole('option', { name: /gpt-5/ }));

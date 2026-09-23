@@ -13,7 +13,6 @@ import type {
 import {
   classifyRetry,
   hydrateSetupRoutes,
-  projectTargetHops,
   retrySetupRoutes,
   saveSetupRoutes,
   selectSetupRouteTarget,
@@ -102,7 +101,6 @@ describe('setup route projection', () => {
   it('keeps two models on the same source as distinct rows', () => {
     const claude = target('claude', 'opus-5', [A, B], ['claude']);
     expect(unionRouteOrder([claude])).toEqual([A, B]);
-    expect(projectTargetHops([B, A], claude.membership)).toEqual([B, A]);
   });
 
   it('does not treat a displayed union as a write when existing orders diverge', () => {
@@ -114,15 +112,14 @@ describe('setup route projection', () => {
     expect(targetChanged(union, codex)).toBe(true);
   });
 
-  it('projects disjoint native memberships instead of sharing every row', () => {
+  it('gives every assistant the whole shared order, not the part it already had', () => {
     const claude = target('claude', 'opus-5', [A, B], ['claude']);
     const codex = target('codex', 'gpt-5', [C, D], ['codex']);
     const union = unionRouteOrder([claude, codex]);
     expect(union).toEqual([A, B, C, D]);
-    expect(projectTargetHops(union, claude.membership)).toEqual([A, B]);
-    expect(projectTargetHops(union, codex.membership)).toEqual([C, D]);
-    expect(targetChanged(union, claude)).toBe(false);
-    expect(targetChanged(union, codex)).toBe(false);
+    // Neither assistant is already on the shared route, so both have something to save.
+    expect(targetChanged(union, claude)).toBe(true);
+    expect(targetChanged(union, codex)).toBe(true);
   });
 
   it('selects the focused Agent/backend and does not inherit another card\'s target', () => {
@@ -225,6 +222,20 @@ describe('saveSetupRoutes', () => {
     expect(api.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A, B] });
     expect(results).toEqual([expect.objectContaining({ kind: 'confirmed' })]);
     expect(store['claude:opus-5']?.manual_override?.hops).toEqual([A, B]);
+  });
+
+  it('writes the whole shared route onto an assistant that had a route of its own', async () => {
+    // The screen says all three assistants use one default model, so an assistant that
+    // arrived with a different chain is moved onto the shared one rather than keeping
+    // the part of it that happened to overlap.
+    const claude = target('claude', 'opus-5', [A], ['claude']);
+    const codex = target('codex', 'gpt-5', [C], ['codex']);
+    const { api, store } = writes({ 'claude:opus-5': claude.chain, 'codex:gpt-5': codex.chain });
+    const results = await saveSetupRoutes([A, C], [claude, codex], api, { dirty: true });
+    expect(api.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [A, C] });
+    expect(api.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [A, C] });
+    expect(results.every((row) => row.kind === 'confirmed')).toBe(true);
+    expect(store['codex:gpt-5']?.manual_override?.hops).toEqual([A, C]);
   });
 
   it('reordering an automatic chain persists a manual override and reads it back', async () => {

@@ -104,13 +104,23 @@ export const chainMembership = (chain: AgentChain): RouteHop[] => {
   return chain.chain.map((link) => ({ source_id: link.source_id, model_id: link.model_id }));
 };
 
-export const projectTargetHops = (shared: RouteHop[], membership: RouteHop[]): RouteHop[] => {
-  const allowed = new Set(membership.map(hopIdentity));
-  return shared.filter((hop) => allowed.has(hopIdentity(hop)));
-};
-
+/**
+ * One route, taken whole by every assistant that is on.
+ *
+ * Setup states it as one thing — 「the default model, and what to fall back to」 —
+ * and with Model Hub holding the credentials any assistant can call any model, so
+ * the route each of them saves is the shared order itself. It used to be filtered
+ * down to the hops that assistant already had, which quietly meant an assistant
+ * with a route of its own kept it: the screen said every assistant shared one
+ * model while two of them called different ones.
+ *
+ * A model a backend's own catalog would not accept is reached the way Model Hub
+ * already reaches one — the assistant keeps its menu model and that model's chain
+ * points at the shared hops. This is what makes Claude Code able to resolve to an
+ * OpenAI model at all, and it is the same write for all three backends.
+ */
 export const targetChanged = (shared: RouteHop[], target: SetupRouteTargetSnapshot): boolean =>
-  !sameRouteDraft(projectTargetHops(shared, target.membership), target.membership);
+  !sameRouteDraft(shared, chainMembership(target.chain));
 
 export const withMembershipHop = (membership: RouteHop[], hop: RouteHop): RouteHop[] => {
   if (membership.some((row) => hopIdentity(row) === hopIdentity(hop))) return membership;
@@ -405,12 +415,9 @@ export async function saveSetupRoutes(
   const results: TargetSaveResult[] = [];
   for (const target of targets) {
     const key = targetKey(target.backend, target.modelId);
-    const desired = projectTargetHops(shared, target.membership);
+    const desired = shared;
     const baselineHops = chainMembership(target.chain);
-    if (
-      desired.length === 0
-      || (sameRouteDraft(desired, baselineHops) && sameRouteDraft(target.membership, baselineHops))
-    ) {
+    if (desired.length === 0 || sameRouteDraft(desired, baselineHops)) {
       results.push({ key, kind: 'skipped' });
       continue;
     }
@@ -443,7 +450,7 @@ export async function retrySetupRoutes(
       results.push(prior ?? { key, kind: 'skipped' });
       continue;
     }
-    const desired = projectTargetHops(shared, target.membership);
+    const desired = shared;
     if (desired.length === 0) {
       results.push({ key, kind: 'skipped' });
       continue;
@@ -489,6 +496,7 @@ export async function retrySetupRoutes(
 export const saveNeedsRetry = (results: readonly TargetSaveResult[]): boolean =>
   results.some((row) => row.kind === 'failed' || row.kind === 'reconcile');
 
-export const hopsFor = (targets: readonly SetupRouteTargetSnapshot[], hop: RouteHop): string[] =>
-  targets.filter((target) => target.membership.some((row) => hopIdentity(row) === hopIdentity(hop)))
-    .flatMap((target) => target.agentNames);
+/** Who a row applies to. Every enabled assistant saves the whole route, so the answer
+    is the same for every row — which is the point the list is making. */
+export const hopsFor = (targets: readonly SetupRouteTargetSnapshot[], _hop: RouteHop): string[] =>
+  [...new Set(targets.flatMap((target) => target.agentNames))];

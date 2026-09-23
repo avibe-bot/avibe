@@ -1078,6 +1078,74 @@
    card's min-height absorbs the extra line the way it absorbs an error line. */
 .onboarding-method-row > span, .onboarding-method-connected > span { min-width: 0; }
 .onboarding-method-connected > svg { color: var(--mint-ink); flex-shrink: 0; }
+/* The shared route, drawn on the card: a label over the model it currently resolves
+   to, and the chevron that says the dialog is behind it. Two lines of type where the
+   method rows carry one, so it takes the method row's height plus a line — still
+   inside the two rows the card's floor reserves, which is what keeps the three cards
+   and the action below them where they were. */
+.onboarding-model-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: calc(var(--ob-method-h) + 16px);
+  padding: 8px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--ob-card);
+  color: var(--foreground);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.onboarding-model-choice:hover:not(:disabled) { border-color: var(--ob-active-border); }
+.onboarding-model-choice:disabled { cursor: default; color: var(--muted); }
+/* Switched off, the row is a statement rather than a control, so it steps back to the
+   note's weight instead of wearing the dimming that means "blocked". */
+.onboarding-model-choice:disabled { border-color: var(--border); }
+/* The read has not landed: the box, the label and a bar where the model will be. A
+   spinner here would say the card is working; the bar says the name is on its way. */
+.onboarding-model-choice-pending {
+  display: block;
+  width: 110px;
+  height: 13px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .onboarding-model-choice-pending { animation: onboarding-choice-pulse 1.4s ease-in-out infinite; }
+}
+@keyframes onboarding-choice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.onboarding-model-choice > span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.onboarding-model-choice small {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onboarding-model-choice strong {
+  font-size: var(--ob-method-fs);
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.onboarding-model-choice > svg { flex-shrink: 0; color: var(--muted); }
+/* Installed but off: a line, not a control. The switch above is the only thing to
+   press, and this says the binary is already there. */
+.onboarding-method-receipt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: var(--ob-method-h);
+  font-size: var(--ob-method-fs);
+  color: var(--muted);
+}
+.onboarding-method-receipt > svg { color: var(--mint-ink); flex-shrink: 0; }
 /* The card's body reads top to bottom the way the story's does: the identity header,
    then the state line, then the note and the work. The body is the flexible one, so an
    error or a wrapped action grows downward and the three identity headers stay level
@@ -1348,6 +1416,13 @@
    without reaching the cards; the block scrolls inside that. */
 .onboarding-step[data-setup-screen="assistants"] { --ob-aside-max: 48px; }
 .onboarding-setup-hint { width: 100%; text-align: center; }
+/* Sentence centred on the action's axis, rescan beside it: equal flanking columns put
+   the middle one in the middle of the slot whatever the link costs, and the link starts
+   where the sentence ends. Both columns can give all their width back, so a narrow
+   window wraps the sentence instead of pushing the link off the screen. */
+.onboarding-setup-hint-line { display: grid; grid-template-columns: 1fr auto 1fr; align-items: baseline; gap: 6px; }
+.onboarding-setup-hint-line > span { grid-column: 2; }
+.onboarding-setup-hint-line > :not(span) { grid-column: 3; justify-self: start; }
 
 /* Provider tiers are consumed by L2; their bands are the same C3 bands as the shell. */
 .onboarding-shell {
