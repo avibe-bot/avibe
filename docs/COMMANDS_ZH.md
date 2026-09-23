@@ -897,7 +897,7 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 | --- | --- |
 | `vibe runs list` | 列出最近 run |
 | `vibe runs show <run_id>` | 查看单个 run |
-| `vibe runs cancel <run_id>` | 请求取消 run |
+| `vibe runs cancel <run_id>` | 请求取消 run；若该 run 的输入已进入正在运行的 Session turn，会像 Session Stop 一样停止整个 turn，同一 turn 中的其他 run 也会一起停止 |
 
 ## 6. 推荐心智模型
 

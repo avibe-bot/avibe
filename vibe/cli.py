@@ -17022,7 +17022,7 @@ def build_parser():
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
     runs_show_parser.add_argument("run_id", nargs="?")
     _add_json_noop(runs_show_parser)
-    runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
+    runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop")
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 
