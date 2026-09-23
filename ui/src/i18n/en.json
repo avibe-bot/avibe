@@ -31,6 +31,7 @@
       "stop": "Stop Runtime…",
       "quit": "Quit",
       "login": "Start at Login",
+      "settings": "Settings…",
       "stopTitle": "Stop Runtime",
       "stopMessage": "Stop the Runtime started by this app? Active work will be interrupted. The desktop app stays open and your data is preserved.",
       "stopAction": "Stop Runtime",

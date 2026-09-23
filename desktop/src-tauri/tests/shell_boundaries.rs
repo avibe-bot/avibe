@@ -777,6 +777,45 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
+fn settings_open_through_the_deep_link_path_only_while_a_workbench_is_shown() {
+    let source = shipping_source("src/lib.rs");
+    let body = |name: &str| -> String {
+        source
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{name} exists"))
+            .split("\n}\n")
+            .next()
+            .expect("function body")
+            .to_owned()
+    };
+    // One item, created disabled, in both native menus.
+    assert!(
+        source.contains("MenuItem::with_id(app, SETTINGS_MENU_ID, &catalog.settings, false, Some(\"CmdOrCtrl+,\"))")
+    );
+    let tray = body("install_native_tray");
+    assert!(tray.contains("&settings,\n            &login,"));
+    assert!(
+        tray.contains("submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)")
+    );
+    assert!(source.contains("SETTINGS_MENU_ID => open_workbench_settings(app),"));
+    // The item's enabled state and the handler share one rule.
+    let refresh = body("refresh_runtime_tray");
+    assert!(refresh.contains("let settings = settings_is_available(activity, workbench_origin);"));
+    assert!(refresh.contains("menus.settings.set_enabled(settings)?;"));
+    let handler = body("open_workbench_settings");
+    let gate = handler
+        .find("if !settings_is_available(")
+        .expect("the handler refuses without a Workbench");
+    let delivery = handler
+        .find("receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);")
+        .expect("Settings is delivered as a deep link");
+    assert!(gate < delivery, "the handler must refuse before delivering");
+    assert!(!handler.contains(".navigate("), "the deep-link path owns navigation");
+    assert!(source.contains("const SETTINGS_DEEP_LINK: &str = \"avibe://settings\";"));
+}
+
+#[test]
 fn explicit_stop_does_not_schedule_automatic_recovery() {
     let source = shipping_source("src/lib.rs");
     let stop = source

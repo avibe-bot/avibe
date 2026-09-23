@@ -70,6 +70,10 @@ const OPEN_MENU_ID: &str = "open-avibe";
 const STOP_MENU_ID: &str = "stop-runtime";
 const QUIT_MENU_ID: &str = "quit-avibe";
 const LOGIN_MENU_ID: &str = "start-at-login";
+const SETTINGS_MENU_ID: &str = "open-settings";
+/// What Settings opens: the Workbench deep link, whose destination
+/// `parse_deep_link` owns, delivered the way an external link is.
+const SETTINGS_DEEP_LINK: &str = "avibe://settings";
 #[cfg(feature = "bundled-runtime")]
 const ACTIVITY_UNINSTALL: u8 = 3;
 
@@ -105,6 +109,7 @@ struct NativeTrayCatalog {
     stop: String,
     quit: String,
     login: String,
+    settings: String,
     stop_title: String,
     stop_message: String,
     stop_action: String,
@@ -271,10 +276,11 @@ struct NativeMenus {
     application: Option<Submenu<tauri::Wry>>,
     status: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
+    settings: MenuItem<tauri::Wry>,
     login: CheckMenuItem<tauri::Wry>,
     notifications: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
-    displayed: Mutex<Option<(TrayRuntimeState, bool)>>,
+    displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
 }
 
 fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -282,6 +288,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, &catalog.open, true, None::<&str>)?;
     let status = MenuItem::with_id(app, "runtime-status", &catalog.starting, false, None::<&str>)?;
     let stop = MenuItem::with_id(app, STOP_MENU_ID, &catalog.stop, true, None::<&str>)?;
+    // Enabled by `refresh_runtime_tray` once the window shows a Workbench.
+    let settings = MenuItem::with_id(app, SETTINGS_MENU_ID, &catalog.settings, false, Some("CmdOrCtrl+,"))?;
     let login_state = app.autolaunch().is_enabled();
     let login_unavailable = login_state.is_err();
     let login = CheckMenuItem::with_id(
@@ -309,6 +317,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &open,
             &status,
             &PredefinedMenuItem::separator(app)?,
+            &settings,
             &login,
             &notifications,
             &PredefinedMenuItem::separator(app)?,
@@ -321,6 +330,11 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         _ => None,
     });
     if let Some(submenu) = &application {
+        // `Menu::default` opens the macOS app submenu with About and a separator;
+        // Settings takes its own group right below, where the platform puts it.
+        // Elsewhere the first submenu is File, and Settings leads it.
+        let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
+        submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     app.set_menu(application_menu)?;
@@ -334,6 +348,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         application,
         status,
         stop,
+        settings,
         login,
         notifications,
         stop_present: AtomicBool::new(false),
@@ -353,6 +368,24 @@ fn stop_is_available(owned: bool, activity: u8) -> bool {
     owned && matches!(activity, ACTIVITY_IDLE | ACTIVITY_MONITOR)
 }
 
+/// Settings live in the Workbench, so they open only while the window shows one:
+/// the shell is monitoring the listener it navigated to. During bootstrap, stop,
+/// or removal there is nothing to open, and a queued request would land later.
+fn settings_is_available(activity: u8, workbench_origin: bool) -> bool {
+    activity == ACTIVITY_MONITOR && workbench_origin
+}
+
+fn open_workbench_settings(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
+    if !settings_is_available(shell.activity.load(Ordering::SeqCst), workbench_origin) {
+        return;
+    }
+    receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);
+}
+
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -367,13 +400,16 @@ fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
             state
         };
         let owned = stop_is_available(shell.host.has_owned_runtime(), activity);
+        let workbench_origin = shell.active_origin.lock().is_ok_and(|origin| origin.is_some());
+        let settings = settings_is_available(activity, workbench_origin);
         let mut displayed = menus.displayed.lock().expect("native tray state lock");
-        if displayed.as_ref() == Some(&(state.clone(), owned)) {
+        if displayed.as_ref() == Some(&(state.clone(), owned, settings)) {
             return;
         }
         let update = || -> tauri::Result<()> {
             let label = state.label(&native_tray_catalog());
             menus.status.set_text(&label)?;
+            menus.settings.set_enabled(settings)?;
             if owned != menus.stop_present.load(Ordering::SeqCst) {
                 if owned {
                     menus.tray.insert(&menus.stop, 2)?;
@@ -395,7 +431,7 @@ fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
             Ok(())
         };
         if update().is_ok() {
-            *displayed = Some((state, owned));
+            *displayed = Some((state, owned, settings));
         } else {
             eprintln!("failed to refresh native Runtime controls");
         }
@@ -1430,6 +1466,7 @@ pub fn run() {
         .on_menu_event(|app, event| {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
+                SETTINGS_MENU_ID => open_workbench_settings(app),
                 STOP_MENU_ID => request_runtime_lifecycle(app.clone(), false),
                 QUIT_MENU_ID => request_runtime_lifecycle(app.clone(), true),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
@@ -1560,6 +1597,15 @@ mod tests {
     use async_trait::async_trait;
     use avibe_runtime_host::{HealthProbe, LaunchWatch, LaunchedRuntime, ResolvedRuntimeLauncher, RuntimeLauncher};
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn settings_open_only_while_the_window_shows_a_workbench() {
+        for activity in 0..=u8::MAX {
+            assert!(!settings_is_available(activity, false));
+            assert_eq!(settings_is_available(activity, true), activity == ACTIVITY_MONITOR);
+        }
+        assert!(avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK).is_some());
+    }
 
     #[test]
     fn stop_authority_requires_ownership_and_exclusive_idle_or_monitor_activity() {
