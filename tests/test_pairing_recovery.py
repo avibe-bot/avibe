@@ -385,6 +385,56 @@ def test_definitive_redeem_failure_retires_prepared_claim(pairing_host, monkeypa
     assert not (root / "state/pending-pairing.json").exists()
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    ["invalid_pairing_key", "pairing_key_expired", "pairing_key_used"],
+)
+def test_only_known_redeem_rejections_retire_prepared_claim(
+    pairing_host, monkeypatch, error_code,
+):
+    root, _ = pairing_host
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            remote_access.BackendRequestError(400, {"error": error_code})
+        ),
+    )
+
+    result = remote_access.pair("key_bad", "https://backend.test")
+
+    assert result["error"] == error_code
+    assert not (root / "state/pending-pairing.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [
+        (408, "backend_http_error"),
+        (429, "backend_http_error"),
+        (400, "unknown_pairing_failure"),
+    ],
+)
+def test_ambiguous_redeem_failures_retain_prepared_claim(
+    pairing_host, monkeypatch, status, error_code,
+):
+    root, _ = pairing_host
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            remote_access.BackendRequestError(status, {"error": error_code})
+        ),
+    )
+
+    result = remote_access.pair("key_unknown", "https://backend.test")
+
+    assert result["error"] == "pairing_redeem_indeterminate"
+    assert json.loads(
+        (root / "state/pending-pairing.json").read_text(encoding="utf-8")
+    )["phase"] == "prepared"
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 def test_definitive_failure_retirement_can_be_retried_through_cli(
     pairing_host,

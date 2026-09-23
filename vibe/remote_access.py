@@ -4549,6 +4549,9 @@ _PENDING_PAIRING_SCHEMA_VERSION = 1
 _PENDING_PAIRING_PHASES = frozenset(
     {"prepared", "redeemed", "applied", "revoked", "retirement_pending"}
 )
+_DEFINITIVE_PAIRING_REDEEM_ERRORS = frozenset(
+    {"invalid_pairing_key", "pairing_key_expired", "pairing_key_used"}
+)
 
 
 class _PairingLockUnavailable(RuntimeError):
@@ -4828,6 +4831,13 @@ def _pairing_failure_after_claim(
             "cause": result.get("error"),
         },
     }
+
+
+def _is_definitive_pairing_redeem_failure(error: BackendRequestError) -> bool:
+    """Return whether the backend contract proves the key was not redeemed."""
+
+    error_code = error.payload.get("error")
+    return isinstance(error_code, str) and error_code in _DEFINITIVE_PAIRING_REDEEM_ERRORS
 
 
 def _probe_atomic_parent(directory: Path) -> None:
@@ -5130,7 +5140,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
         )
     except BackendRequestError as exc:
         failure = {"ok": False, **exc.payload, "status": exc.status}
-        if exc.status < 500:
+        if _is_definitive_pairing_redeem_failure(exc):
             return _pairing_failure_after_claim(claim["operation_id"], failure)
         return {
             **failure,

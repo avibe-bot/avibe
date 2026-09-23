@@ -43,12 +43,15 @@ durable and never promises recovery across an unrecorded crash.
   revoked, or otherwise not recoverable; `pair()` reports the state instead.
 - Applied recovery accepts only the exact durable target identity. The
   generated session secret is created once per operation and reused on retry.
-- Definitive rejection, malformed-response, and origin-update failures record
-  a terminal `retirement_pending` marker under the configuration lock before
-  retirement. A keyless retry only retires this marker; it neither redeems nor
-  applies credentials. Uncertain transport/server failures stay `prepared`.
-  If even terminal publication fails, report the unrecoverable local state
-  instead of promising a keyless recovery.
+- Definitive rejection is identified by an explicit backend error code
+  (`invalid_pairing_key`, `pairing_key_expired`, or `pairing_key_used`), not by
+  the HTTP status alone. These, malformed-response, and origin-update failures
+  record a terminal `retirement_pending` marker under the configuration lock
+  before retirement. A keyless retry only retires this marker; it neither
+  redeems nor applies credentials. Unknown or ambiguous HTTP failures,
+  including timeout-style and rate-limit responses, stay `prepared` and are
+  reported as indeterminate. If even terminal publication fails, report the
+  unrecoverable local state instead of promising a keyless recovery.
 - A verified revoked fence can be retired on repeated clear or an
   already-unpaired settings save. Unreadable journals block a real revocation,
   but do not block unrelated writes on an already-unpaired configuration.
@@ -62,10 +65,10 @@ durable and never promises recovery across an unrecorded crash.
   Only the latest status request may publish its result or failure; pairing
   starts and component teardown invalidate older reads. A late response must
   not hide a newer recovery action or make failed status verification current.
-- Transport and server failures retain an uncertain prepared claim and report
-  an indeterminate result. CLI instructions show explicit new-key replacement
-  with the intended backend; they never promise that keyless retry can recover
-  an unrecorded response.
+- Transport and server failures, including unrecognized HTTP error codes,
+  retain an uncertain prepared claim and report an indeterminate result. CLI
+  instructions show explicit new-key replacement with the intended backend;
+  they never promise that keyless retry can recover an unrecorded response.
 
 ## Recovery boundaries
 
