@@ -2690,6 +2690,10 @@ class CLIProxyEngineAdapter:
         # account (re-auth) or an account another Source already owns.
         fresh = [record for record in changed if record.identity not in flow.before_auth_fingerprints]
         candidates = fresh or [record for record in changed if record.identity not in foreign]
+        if not fresh and candidates and len(candidates) != len(changed):
+            # Existing records of this and another Source both changed: the
+            # login may have rewritten either, so neither can be named.
+            candidates = changed
         if not candidates and not changed and len(provider_records) == 1:
             candidates = provider_records
         if not candidates and changed:

@@ -8380,7 +8380,7 @@ def test_supervisor_fails_closed_with_direct_mode_escape(tmp_path: Path) -> None
     assert exc_info.value.direct_mode_available is True
 
 
-@pytest.mark.parametrize("second_account", ["other", "same"])
+@pytest.mark.parametrize("second_account", ["other", "same", "mixed"])
 def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
     tmp_path: Path,
     second_account: str,
@@ -8410,9 +8410,15 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
                     self.deletes.append(str((query or {}).get("name")))
                     return {"status": "ok"}
                 self.auth_calls += 1
+                unbound = {**first, "id": "codex-c.json", "name": "codex-c.json",
+                           "id_token": {"chatgpt_account_id": "acct-c"}}
                 if self.auth_calls == 1:
-                    return {"files": [first]}
+                    return {"files": [first, unbound] if second_account == "mixed" else [first]}
                 refreshed = {**first, "modtime": "2026-09-23T01:40:00Z"}
+                if second_account == "mixed":
+                    # Nothing new: the login rewrote one of two existing
+                    # records, and either could be it.
+                    return {"files": [refreshed, {**unbound, "modtime": "2026-09-23T01:41:00Z"}]}
                 new = {
                     "id": "codex-b.json",
                     "name": "codex-b.json",
@@ -8450,7 +8456,7 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
     async def run() -> None:
         store = EngineStateStore(tmp_path / "state")
         store.prepare_instance("install-1")
-        for name in ("codex-a.json", "codex-b.json"):
+        for name in ("codex-a.json", "codex-b.json", "codex-c.json"):
             (store.auth_dir / name).write_text("{}", encoding="utf-8")
             (store.auth_dir / name).chmod(0o600)
         first_ref = store.bind_oauth_credential("src_first12345", "openai", "codex-a.json")
@@ -8464,7 +8470,11 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
 
         assert store.credential_metadata(first_ref)["source_id"] == "src_first12345"
         assert (store.auth_dir / "codex-a.json").exists()
-        if second_account == "other":
+        if second_account == "mixed":
+            assert completed.state == "failed"
+            assert completed.error_key == "models.oauth.ambiguous_engine_binding"
+            assert not client.patches and not client.deletes
+        elif second_account == "other":
             assert completed.state == "success"
             assert completed.credential_ref and completed.credential_ref != first_ref
             assert store.credential_metadata(completed.credential_ref)["auth_name"] == "codex-b.json"

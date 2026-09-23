@@ -329,11 +329,14 @@ def plan_native_cleanup(
             removable.update(item.native_provider_id for item in items if item.backend == "codex" and item.native_provider_id)
             providers = config.get("model_providers")
             if isinstance(providers, dict):
-                for provider_id in removable:
+                for provider_id in sorted(removable):
                     provider = providers.get(provider_id)
                     if not isinstance(provider, dict):
                         continue
                     if provider.get("experimental_bearer_token") and not selected_api_key(provider["experimental_bearer_token"]):
+                        # A retained provider keeps its selectors too, or
+                        # direct mode would stop using what was kept.
+                        removable.discard(provider_id)
                         continue
                     # Retain user labels, capabilities, and timeout preferences.
                     for key in ("base_url", "env_key", "experimental_bearer_token", "requires_openai_auth"):

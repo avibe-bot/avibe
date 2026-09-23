@@ -245,3 +245,21 @@ def test_padded_settings_bearer_uses_proven_header_after_custody(home, tmp_path)
             assert json.loads(path.read_bytes()) == {"env": {"KEEP_FIXTURE": "preserved"}}
 
     asyncio.run(scenario())
+
+
+def test_codex_retained_bearer_provider_keeps_its_selectors(home, tmp_path):
+    path = home / ".codex/config.toml"
+    _write(path, 'model_provider = "relay"\n'
+           '[profiles.work]\nmodel_provider = "relay"\n'
+           '[model_providers.relay]\nbase_url = "https://relay.example/v1"\n'
+           'experimental_bearer_token = "fixture-unselected-bearer"\n')
+    service, _, _ = _service(tmp_path, migration_home=home)
+    [item] = _items(service, ())
+    # Another credential (e.g. OAuth) is imported while `relay` is active.
+    other = replace(item, kind="oauth_native", secret=None, native_provider_id="relay")
+    edits = plan_native_cleanup([other], home=home)
+    for edit in edits:
+        edit.apply()
+    content = path.read_text()
+    assert content.count('model_provider = "relay"') == 2
+    assert "fixture-unselected-bearer" in content and "relay.example" in content

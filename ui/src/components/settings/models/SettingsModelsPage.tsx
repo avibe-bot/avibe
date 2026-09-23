@@ -344,7 +344,7 @@ export const SettingsModelsPage: React.FC = () => {
   // An Agent named in the warning list is a destination, not a label: the page
   // that can fix it is Agents, and it has to open on the one that needs the fix.
   const openAgentDefinition = React.useCallback(
-    (name: string) => navigate(`/agents?agent=${encodeURIComponent(name)}`),
+    (name: string) => navigate(`/agents?tab=definitions&agent=${encodeURIComponent(name)}`),
     [navigate],
   );
   /** The catalog's 「Add models」 action reads the candidates endpoint, which
