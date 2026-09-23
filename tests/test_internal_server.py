@@ -7473,11 +7473,11 @@ def test_run_cancel_stops_a_turn_with_an_unresolved_steer(
     assert turn["control_state"] == "waiting_terminal"
 
 
-def test_run_cancel_joining_an_unconfirmed_stop_is_not_confirmed(
+def test_run_cancel_joining_a_refused_stop_retries_its_own_stop(
     monkeypatch,
     tmp_path,
 ):
-    """A Run cancel that joins a Stop still awaiting its receipt stays unconfirmed."""
+    """A Run cancel waits for a joined Stop's receipt and retries when refused."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -7485,7 +7485,7 @@ def test_run_cancel_joining_an_unconfirmed_stop_is_not_confirmed(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     engine, session, turn_id = _create_active_test_turn(
         tmp_path,
-        native_id="proj_run_cancel_joins_unconfirmed_stop",
+        native_id="proj_run_cancel_joins_refused_stop",
     )
     session_id = session["id"]
     request_store = TaskExecutionStore()
@@ -7509,14 +7509,19 @@ def test_run_cancel_joining_an_unconfirmed_stop_is_not_confirmed(
     internal_server.create_app(controller)
     stop_entered = asyncio.Event()
     release_stop = asyncio.Event()
+    stop_calls = 0
 
-    async def _refusing_stop(stop_context):
+    async def _refuse_first_stop(stop_context):
+        nonlocal stop_calls
+        stop_calls += 1
+        if stop_calls > 1:
+            return True
         stop_entered.set()
         await release_stop.wait()
         stop_context.platform_specific["stop_failure_reason"] = "refused"
         return False
 
-    controller.command_handler.handle_stop = AsyncMock(side_effect=_refusing_stop)
+    controller.command_handler.handle_stop = AsyncMock(side_effect=_refuse_first_stop)
     context = MessageContext(
         user_id="workbench",
         channel_id=session_id,
@@ -7534,23 +7539,32 @@ def test_run_cancel_joining_an_unconfirmed_stop_is_not_confirmed(
         try:
             session_stop = asyncio.create_task(controller.session_turns.cancel(session_id))
             await asyncio.wait_for(stop_entered.wait(), timeout=1.0)
-            run_cancel = await controller.session_turns.cancel(
-                session_id,
-                agent_run_id=run.id,
+            run_cancel = asyncio.create_task(
+                controller.session_turns.cancel(session_id, agent_run_id=run.id)
             )
+            await asyncio.sleep(0.1)
+            assert not run_cancel.done()
+            # Nothing is recorded while the joined Stop has no receipt.
+            assert request_store.get_run(run.id)["cancel_requested"] is False
             release_stop.set()
-            return run_cancel, await session_stop
+            return await run_cancel, await session_stop
         finally:
             holder.cancel()
             await asyncio.gather(holder, return_exceptions=True)
 
     run_cancel, session_stop = asyncio.run(_go())
 
-    assert run_cancel["ok"] is False, run_cancel
-    assert run_cancel["code"] == "stop_unknown"
-    assert run_cancel["reason"] == "joined_unconfirmed_interrupt"
     assert session_stop["ok"] is False, session_stop
-    controller.command_handler.handle_stop.assert_awaited_once()
+    assert run_cancel == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "cancel_requested",
+    }
+    assert controller.command_handler.handle_stop.await_count == 2
+    assert request_store.get_run(run.id)["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None and turn["control_state"] == "waiting_terminal"
 
 
 def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):

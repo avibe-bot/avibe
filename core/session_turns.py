@@ -487,6 +487,10 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     return not (sink_token is not None and ctx_token != sink_token)
 
 
+# A Run cancel joining another Stop waits this long for that Stop's receipt.
+_RUN_CANCEL_JOIN_WAIT_SECONDS = 20.0
+_RUN_CANCEL_JOIN_POLL_SECONDS = 0.05
+
 @dataclass
 class Turn:
     """The one active turn for an avibe session — the EXECUTION half of the FSM
@@ -3479,7 +3483,6 @@ class SessionTurnManager:
         should_interrupt = False
         should_cancel_prewrite = False
         joined = False
-        joined_control_state: str | None = None
         with self._runtime_start_owner(
             request.session_id,
             backend,
@@ -3573,6 +3576,21 @@ class SessionTurnManager:
                         turn_id=str(current_id or ""),
                     )
                     replacement_terminalized = False
+                    if stops_turn and current.get("control_state") in {
+                        "pending",
+                        "interrupting",
+                        "reconciling",
+                    }:
+                        # A Stop without a receipt may still be refused. Record
+                        # nothing so a refused Stop cannot leave this Run
+                        # marked canceled while its backend keeps running.
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "reconciling",
+                            current_id,
+                            "joined_unconfirmed_interrupt",
+                        )
                     if not stops_turn:
                         replacement_terminalized = (
                             self._terminalize_detached_run_replacement(
@@ -3635,7 +3653,6 @@ class SessionTurnManager:
                         )
                 if control_in_progress:
                     joined = True
-                    joined_control_state = str(current.get("control_state") or "")
                     if request.content is None and current.get("control_mode") == "replace":
                         successor_turn_id = str(
                             current.get("control_successor_turn_id") or ""
@@ -3791,16 +3808,6 @@ class SessionTurnManager:
         if current is None and delivery_id:
             return self._committed_delivery_result(delivery_id)
         if joined:
-            if cancel_run_id and joined_control_state != "waiting_terminal":
-                # The Stop this Run cancel joined has no receipt yet and may still
-                # be refused, so the cancellation is not confirmed.
-                return DeliveryResult(
-                    None,
-                    None,
-                    "reconciling",
-                    interrupt_target_id,
-                    "joined_unconfirmed_interrupt",
-                )
             return DeliveryResult(
                 delivery_id,
                 None,
@@ -8267,18 +8274,25 @@ class SessionTurnManager:
                         "status": "stale_released",
                         "reason": "runtime_gone",
                     }
-        result = await self.deliver(
-            DeliveryRequest(
-                session_id=session_id,
-                priority="p0",
-                content=None,
-                expected_turn_id=(str(owner["id"]) if owner is not None else None),
-                cancel_agent_run_id=(
-                    normalized_agent_run_id
-                ),
-            ),
-            context=turn.context if turn is not None else None,
+        request = DeliveryRequest(
+            session_id=session_id,
+            priority="p0",
+            content=None,
+            expected_turn_id=(str(owner["id"]) if owner is not None else None),
+            cancel_agent_run_id=normalized_agent_run_id,
         )
+        context = turn.context if turn is not None else None
+        result = await self.deliver(request, context=context)
+        # A Run cancel that meets another Stop awaiting its receipt waits for
+        # that receipt: accepted confirms this cancel, refused lets it retry.
+        deadline = asyncio.get_running_loop().time() + _RUN_CANCEL_JOIN_WAIT_SECONDS
+        while (
+            normalized_agent_run_id
+            and result.reason == "joined_unconfirmed_interrupt"
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(_RUN_CANCEL_JOIN_POLL_SECONDS)
+            result = await self.deliver(request, context=context)
         if result.state == "run_detached":
             return {
                 "ok": True,
