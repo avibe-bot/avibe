@@ -145,9 +145,10 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         <p className="onboarding-assistant-note">
           {hubState
             ? t(hubState === 'missing' ? 'onboarding.setup.noteNotInstalled'
-              : hubState === 'enabled'
+              : hubState === 'enabled' || hubState === 'idle'
                 ? (route?.kind === 'no-agent-model' ? 'onboarding.setup.noteModelUnset'
-                  : route?.kind === 'route' && !routeModel ? 'onboarding.setup.noteNoModels' : 'onboarding.setup.noteEnabled')
+                  : route?.kind === 'route' && !routeModel ? 'onboarding.setup.noteNoModels'
+                    : hubState === 'enabled' ? 'onboarding.setup.noteEnabled' : 'onboarding.setup.noteNotEnabled')
                 : 'onboarding.setup.noteNotEnabled', { name: label })
             : status === 'missing'
               ? t('onboarding.setup.installFirstNamed', { name: label })

@@ -22,7 +22,11 @@ function Screen({ id, ref, ...props }: SetupScreenProps & { id: SetupScreenId; r
     }
   }, [props.active, props.onActionChange]);
   useImperativeHandle(ref, () => ({ activate: () => props.onNavigate(id === 'intro' ? 'providers' : 'assistants') }));
-  return <><h1 tabIndex={-1}>{id}</h1><input aria-label={`${id} draft`} value={value} onChange={(event) => setValue(event.target.value)} /></>;
+  return <><h1 tabIndex={-1}>{id}</h1>
+    {id === 'providers' && <><div className="setup-provider-stage" data-testid="incoming-diagram" />
+      <div className="setup-destinations" data-testid="incoming-destinations" /></>}
+    {id === 'assistants' && <div className="onboarding-assistant" data-testid="incoming-assistant" />}
+    <input aria-label={`${id} draft`} value={value} onChange={(event) => setValue(event.target.value)} /></>;
 }
 const show = (capability: SetupScreenProps['capability'] = 'enabled', gatewayEnabled: boolean | null = true,
   extra: { navigationLocked?: boolean; onRetrySetup?: () => void } = {}) =>
@@ -115,9 +119,16 @@ it('focuses the arriving heading only after its animated handoff clears inert', 
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'intro' }));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     const arriving = container.querySelector<HTMLElement>('[data-setup-screen-root="providers"]')!;
+    expect(arriving.hasAttribute('hidden')).toBe(false);
+    expect(arriving.querySelector('h1')?.textContent).toBe('providers');
+    expect(arriving.querySelector('[data-testid="incoming-diagram"]')).toBeTruthy();
+    expect(container.querySelector('[data-handoff="providers"] .setup-destinations')).toBeTruthy();
     expect(arriving.hasAttribute('inert')).toBe(true);
+    expect(savedFeeds).toHaveLength(1);
     expect(document.activeElement).not.toBe(arriving.querySelector('h1'));
     act(() => vi.advanceTimersByTime(900));
+    expect(container.querySelector('[data-handoff]')).toBeNull();
+    expect(arriving.querySelector('[data-testid="incoming-destinations"]')).toBeTruthy();
     expect(arriving.hasAttribute('inert')).toBe(false);
     expect(document.activeElement).toBe(arriving.querySelector('h1'));
   } finally {

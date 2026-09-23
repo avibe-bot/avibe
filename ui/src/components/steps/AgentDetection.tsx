@@ -148,17 +148,20 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     failure: { epoch: number; token: number } | null;
     chains: Partial<Record<RuntimeBackendId, AgentChain | null>>;
     models: Partial<Record<RuntimeBackendId, string | null>>;
+    backendReads: Partial<Record<RuntimeBackendId, 'ready' | 'failed'>>;
     sources: Source[];
     supplies: AgentSupply[];
-  }>({ done: false, failed: false, confirmed: null, failure: null, chains: {}, models: {}, sources: [], supplies: [] });
+  }>({ done: false, failed: false, confirmed: null, failure: null, chains: {}, models: {}, backendReads: {}, sources: [], supplies: [] });
   const routeReadToken = useRef(0);
-  const routeTargetReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
+  const sharedRouteReady = () => active && activeRef.current && routeRead.done && !routeRead.failed
     && routeRead.confirmed?.epoch === activation.current
     && routeRead.confirmed?.token === routeReadToken.current;
-  const routeFailureCurrent = () => active && activeRef.current && routeRead.failed
-    && routeRead.failure?.epoch === activation.current
-    && routeRead.failure?.token === routeReadToken.current;
-  const readCardRoutes = useCallback(async () => {
+  const routeTargetReady = (backend: RuntimeBackendId) => sharedRouteReady() && routeRead.backendReads[backend] === 'ready';
+  const routeFailureCurrent = (backend: RuntimeBackendId) => active && activeRef.current && (
+    (routeRead.failed && routeRead.failure?.epoch === activation.current
+      && routeRead.failure?.token === routeReadToken.current)
+    || (sharedRouteReady() && routeRead.backendReads[backend] === 'failed'));
+  const readCardRoutes = useCallback(async (target?: RuntimeBackendId) => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
     const epoch = activation.current;
@@ -171,25 +174,45 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       ]);
       if (supplyRead.kind !== 'current' || !vibeAgents.ok) throw new Error('Route inventory unreadable');
       const supplies = supplyRead.value;
-      const fullAgents = await Promise.all(vibeAgents.agents.filter((row) =>
-        !row.archived && ASSISTANT_ORDER.includes(row.backend as RuntimeBackendId))
-        .map(async (row) => (await api.getVibeAgent(row.name, { cache: false })).agent ?? null));
-      const models: Partial<Record<RuntimeBackendId, string | null>> = {};
-      const chains: Partial<Record<RuntimeBackendId, AgentChain | null>> = {};
-      await Promise.all(ASSISTANT_ORDER.map(async (backend) => {
-        const candidates = fullAgents.filter((row) => row?.backend === backend && isBuiltinAgent(row));
-        const selected = candidates.find((row) => row?.name === backend)
-          ?? candidates.find((row) => row?.name === 'default') ?? candidates[0];
-        models[backend] = selected?.model ?? null;
-        const supply = supplies.find((row) => row.backend === backend);
-        if (supply?.mode === 'hub' && selected?.model) {
-          const backendChains = await modelsApi.getAgentChains(backend);
-          chains[backend] = backendChains.find((chain) => chain.model_id === selected.model) ?? null;
-        }
-      }));
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
-      setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, failure: null, chains, models, sources: listed, supplies });
-      return true;
+      setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, failure: null,
+        chains: {}, models: {}, backendReads: {}, sources: listed, supplies });
+      const backendPromises = ASSISTANT_ORDER.map(async (backend) => {
+        try {
+          const details = await Promise.all(vibeAgents.agents.filter((row) =>
+            !row.archived && row.backend === backend)
+            .map(async (row) => {
+              const detail = await api.getVibeAgent(row.name, { cache: false });
+              if (!detail.ok || !detail.agent) throw new Error('Agent detail unreadable');
+              return detail.agent;
+            }));
+          const candidates = details.filter((row) => row.backend === backend && isBuiltinAgent(row));
+          const selected = candidates.find((row) => row.name === backend)
+            ?? candidates.find((row) => row.name === 'default') ?? candidates[0];
+          const model = selected?.model ?? null;
+          const supply = supplies.find((row) => row.backend === backend);
+          let chain: AgentChain | null = null;
+          if (supply?.mode === 'hub' && model) {
+            const backendChains = await modelsApi.getAgentChains(backend);
+            chain = backendChains.find((row) => row.model_id === model) ?? null;
+          }
+          if (token !== routeReadToken.current || epoch !== activation.current) return false;
+          setRouteRead((current) => ({ ...current,
+            models: { ...current.models, [backend]: model },
+            chains: { ...current.chains, [backend]: chain },
+            backendReads: { ...current.backendReads, [backend]: 'ready' },
+          }));
+          return true;
+        } catch {
+          if (token !== routeReadToken.current || epoch !== activation.current) return false;
+          setRouteRead((current) => ({ ...current,
+            backendReads: { ...current.backendReads, [backend]: 'failed' },
+          }));
+          return false;
+        }
+      });
+      return target ? backendPromises[ASSISTANT_ORDER.indexOf(target)]
+        : Promise.all(backendPromises).then(() => true);
     } catch {
       if (token !== routeReadToken.current || epoch !== activation.current) return false;
       setRouteRead((current) => ({ ...current, done: true, failed: true, confirmed: null, failure: { epoch, token } }));
@@ -209,7 +232,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   };
   const routeViewFor = (backend: RuntimeBackendId): AssistantRouteView => {
     if (!canEditSetupRoute || !modelHubEnabled) return { kind: 'unavailable' };
-    if (!routeTargetReady()) return { kind: routeFailureCurrent() ? 'failed' : 'pending' };
+    if (!routeTargetReady(backend)) return { kind: routeFailureCurrent(backend) ? 'failed' : 'pending' };
     if (!routeRead.models[backend]) return { kind: 'no-agent-model' };
     const chain = routeRead.chains[backend];
     const mine = chain?.chain[0] ?? null;
@@ -240,7 +263,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       || confirmed?.epoch !== activation.current || confirmed.token !== connectionTokens.current[backend]) return undefined;
     return connections[backend]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined);
   };
-  const confirmedSupplyMode = (backend: RuntimeBackendId) => routeTargetReady()
+  const confirmedSupplyMode = (backend: RuntimeBackendId) => sharedRouteReady()
     ? routeRead.supplies.find((row) => row.backend === backend)?.mode
     : undefined;
   const installMode = (backend: RuntimeBackendId) => {
@@ -313,7 +336,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
   }, [api, t]);
   const refreshRouteOwnership = (name: RuntimeBackendId) => Promise.all([
-    readCardRoutes(), refreshConnection(name),
+    readCardRoutes(name), refreshConnection(name),
   ]).then(([routeReady]) => routeReady);
   // Being read again is one event with one owner, however it arrives: the shell
   // activates this screen, or the route surface it sits on comes back. In the shell both
@@ -908,7 +931,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
               : connectionMode ?? supplyMode;
           const hubRoute = mode === 'hub';
           const openRoute = () => {
-            if (mode !== 'hub' || !routeTargetReady()) return;
+            if (mode !== 'hub' || !routeTargetReady(name)) return;
             const supply = routeRead.supplies.find((row) => row.backend === name);
             const modelId = routeRead.models[name];
             if (supply?.mode === 'hub' && modelId) {
@@ -948,12 +971,12 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
-            routeError={canEditSetupRoute && modelHubEnabled && routeFailureCurrent()
+            routeError={canEditSetupRoute && modelHubEnabled && routeFailureCurrent(name)
               ? t('settings.models.routeDialog.fail.reconcileRead')
               : ownershipConflict ? t('onboarding.setup.ownershipChanged') : undefined}
-            onRetryRoute={() => void (ownershipConflict ? refreshRouteOwnership(name) : readCardRoutes())}
+            onRetryRoute={() => void (ownershipConflict ? refreshRouteOwnership(name) : readCardRoutes(name))}
             configuringDisabled={!mode || syncing || pendingWrites[name] || !!refreshingAgents[name] || !!connectionPending[name]
-              || (hubRoute && canEditSetupRoute && (!routeTargetReady() || supplyMode !== 'hub'))
+              || (hubRoute && canEditSetupRoute && (!routeTargetReady(name) || supplyMode !== 'hub'))
               || (hubRoute
                 ? agent.status !== 'ok'
                 : !agent.enabled || agent.status !== 'ok')}

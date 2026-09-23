@@ -202,11 +202,14 @@ dismissing an offer changes neither the stage nor the action anchor.
 
 **Snapshot hooks.** The handoff reads live DOM across screens, so these class names are a
 contract, not styling. L1's `setupHandoff.ts` queries them; L2 and L3 must render them.
-An inactive `hidden` root has no measurable box. L1 must temporarily lay out the incoming
-root invisibly and inertly for measurement, without activating its effects or action feed,
-then switch activity at handoff completion. Restore `hidden` after cancellation; the settled
-state still has exactly one active screen. L1's geometry test must exercise this real path,
-not measurements taken with every screen already visible.
+An inactive `hidden` root has no measurable box. At handoff start, the incoming screen
+becomes the displayed root: its heading and diagram or summary appear immediately, as in
+Show session `ses36vg559de2`'s `begin` and `chooseAssistants`. Only the incoming destination
+cards stay visually hidden while the cloned outgoing cards fly into place (about 900 ms).
+The incoming root remains inert and its effects and action feed inactive until landing.
+After cancellation, restore the inactive root's `hidden` state; the settled state still
+has exactly one active screen. L1's geometry test must exercise this real path, not
+measurements taken with every screen already visible.
 
 | Transition | Reads from | Lands on |
 | --- | --- | --- |
