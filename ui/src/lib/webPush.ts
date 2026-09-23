@@ -157,7 +157,7 @@ export async function disableWebPush(api: ApiContextType): Promise<boolean> {
     await subscription.unsubscribe();
   }
   if (endpoint) {
-    await api.unsubscribeWebPush(endpoint);
+    await api.unsubscribeWebPush(endpoint, getWebPushDeviceId());
     return true;
   }
   return false;

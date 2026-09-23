@@ -6488,13 +6488,15 @@ def web_push_unsubscribe():
 
     payload = request.json or {}
     endpoint = payload.get("endpoint")
+    device_id = payload.get("device_id") if isinstance(payload.get("device_id"), str) else None
     if not isinstance(endpoint, str) or not endpoint.strip():
         return jsonify({"ok": False, "error": "endpoint_required"}), 400
     engine = _projects_engine()
     with engine.begin() as conn:
-        disabled = web_push_service.disable_subscription(
+        disabled = web_push_service.disable_device_subscription(
             conn,
             endpoint=endpoint,
+            device_id=device_id,
             user_key=_web_push_user_key(),
         )
     return jsonify({"ok": True, "disabled": disabled})

@@ -537,7 +537,7 @@ export type ApiContextType = {
     deviceId?: string,
     previousEndpoints?: string[],
   ) => Promise<WebPushSubscriptionResult>;
-  unsubscribeWebPush: (endpoint: string) => Promise<{ ok: boolean; disabled: boolean }>;
+  unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
   setShowPageAvailability: (sessionId: string, offline: boolean) => Promise<any>;
   /** Read the session's Show Page without creating it; rejects with
@@ -3762,7 +3762,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
       }),
-    unsubscribeWebPush: (endpoint) => deleteJson('/api/web-push/subscriptions', { endpoint }),
+    unsubscribeWebPush: (endpoint, deviceId) =>
+      deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
     sendWebPushTest: (payload) => postJson('/api/web-push/test', payload ?? {}),
     setShowPageAvailability: (sessionId, offline) => postJson(
       `/api/show-pages/${encodeURIComponent(sessionId)}/availability`,

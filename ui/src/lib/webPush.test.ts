@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { ApiContextType } from '@/context/ApiContext';
-import { enableWebPush } from './webPush';
+import { disableWebPush, enableWebPush } from './webPush';
 
 describe('web push recovery', () => {
   afterEach(() => {
@@ -121,5 +121,29 @@ describe('web push recovery', () => {
     expect(oldSubscription.unsubscribe).toHaveBeenCalledOnce();
     expect(registration.pushManager.subscribe).not.toHaveBeenCalled();
     expect(api.subscribeWebPush).not.toHaveBeenCalled();
+  });
+
+  it('sends the device ID when disabling a browser subscription', async () => {
+    const subscription = {
+      endpoint: 'https://push.example.test/sub/old',
+      unsubscribe: vi.fn(async () => true),
+    };
+    vi.stubGlobal('window', {
+      localStorage: { getItem: () => 'device-1' },
+    });
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        getRegistration: vi.fn(async () => ({
+          pushManager: { getSubscription: vi.fn(async () => subscription) },
+        })),
+      },
+    });
+    const api = {
+      unsubscribeWebPush: vi.fn(async () => ({ ok: true, disabled: true })),
+    } as unknown as ApiContextType;
+
+    expect(await disableWebPush(api)).toBe(true);
+    expect(subscription.unsubscribe).toHaveBeenCalledOnce();
+    expect(api.unsubscribeWebPush).toHaveBeenCalledWith(subscription.endpoint, 'device-1');
   });
 });

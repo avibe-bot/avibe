@@ -3349,6 +3349,59 @@ def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     assert status_after.get_json()["current_subscription_repairable"] is False
 
 
+def test_web_push_disable_retires_a_racing_rotation_for_same_device(monkeypatch, tmp_path):
+    from storage import web_push_service
+    from storage.db import create_sqlite_engine
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    client = app.test_client()
+    headers = csrf_headers(client)
+    old = {
+        "endpoint": "https://push.example.test/sub/old",
+        "keys": {"p256dh": "old-key", "auth": "old-auth"},
+    }
+    rotated = {
+        "endpoint": "https://push.example.test/sub/rotated",
+        "keys": {"p256dh": "new-key", "auth": "new-auth"},
+    }
+    other = {
+        "endpoint": "https://push.example.test/sub/other",
+        "keys": {"p256dh": "other-key", "auth": "other-auth"},
+    }
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": old, "device_id": "device-1"},
+        headers=headers,
+    ).status_code == 200
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": rotated, "background_rotation": True, "previous_endpoints": [old["endpoint"]]},
+        headers=headers,
+    ).get_json()["accepted"] is True
+    assert client.post(
+        "/api/web-push/subscriptions",
+        json={"subscription": other, "device_id": "device-2"},
+        headers=headers,
+    ).status_code == 200
+
+    disabled = client.delete(
+        "/api/web-push/subscriptions",
+        json={"endpoint": old["endpoint"], "device_id": "device-1"},
+        headers=headers,
+    )
+    assert disabled.status_code == 200
+    assert disabled.get_json()["disabled"] is True
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=rotated["endpoint"], user_key="local",
+        ) is None
+        assert web_push_service.get_enabled_by_endpoint(
+            conn, endpoint=other["endpoint"], user_key="local",
+        ) is not None
+
+
 def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeypatch, tmp_path):
     from storage import web_push_service
     from storage.db import create_sqlite_engine
