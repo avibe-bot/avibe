@@ -39,8 +39,8 @@ const CARD_SHARE = 0.306352;
 /** The wire box is the card times the reference's own 350/300, so the handoffs stay on
  *  the cards' midline at every tier. */
 const WIRE_RATIO = 350 / 300;
-/** What the stage reserves beyond the card, spent by the introduction on the return band
- *  and by the connection on the 20 + 44 import capsule. */
+/** What the stage reserves beyond the card: the band the introduction draws its return
+ *  wire in. */
 const STAGE_EXTRA = 64;
 
 const box = async (page: Page, selector: string, index = 0) => {
@@ -563,6 +563,83 @@ const expectSamePair = async (page: Page, before: Pair) => {
   }
 };
 
+/**
+ * One set of coordinates for all three screens.
+ *
+ * The composition is centred in the window, so anything that joins the column changes
+ * where the heading, the cards and the action sit — which is how the assistants step,
+ * whose readiness caption is portalled under the pair, came to sit 9px above the two
+ * steps before it. The slot now lives in the cell the screens share, resting on its
+ * bottom edge, so this asserts both halves: the three screens agree, and filling the
+ * slot leaves them agreeing.
+ */
+test.describe('shared screen anchors', () => {
+  for (const viewport of [{ width: 1132, height: 664 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
+    test(`${viewport.width} desktop captions share one horizontal line`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await serveProduct(page);
+      await serveModelHub(page);
+      await openOnboarding(page, { lang: 'zh' });
+      const center = async (selector: string) => {
+        const rect = await box(page, selector);
+        return rect.y + rect.height / 2;
+      };
+      const welcome = await center('.onboarding-story-caption');
+      await page.getByRole('button', { name: '立即开始' }).click();
+      await page.clock.runFor(950);
+      await expect(page.locator('.setup-provider-summary')).toContainText('已选');
+      const providers = await center('.setup-provider-summary');
+      await page.locator('.onboarding-setup-hint button').click();
+      await page.clock.runFor(950);
+      const assistants = await center('.onboarding-setup-hint');
+      expect(welcome).toBeCloseTo(providers, 0);
+      expect(assistants).toBeCloseTo(providers, 0);
+    });
+  }
+
+  test('the heading and the action keep one y on every screen, with or without an aside', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const denied = await serveProduct(page);
+    await serveModelHub(page);
+    await openOnboarding(page, { lang: 'zh' });
+    await openSetup(page, 'zh');
+    await settleEffects(page);
+
+    const anchors = () => page.evaluate(() => {
+      const top = (node: Element) => Math.round(node.getBoundingClientRect().top);
+      const aside = document.querySelector('.onboarding-action-aside')!.getBoundingClientRect();
+      const content = [...document.querySelectorAll('[data-setup-screen-root]:not([hidden]) .onboarding-stage > *')]
+        .map((node) => node.getBoundingClientRect()).filter((rect) => rect.height > 0);
+      return {
+        headings: [...document.querySelectorAll('[data-setup-screen-root] .onboarding-heading')].map(top),
+        action: top(document.querySelector('.onboarding-primary-action')!),
+        asideTop: Math.round(aside.top),
+        contentBottom: Math.round(Math.max(...content.map((rect) => rect.bottom))),
+      };
+    });
+
+    const before = await anchors();
+    // Every screen's heading starts where the current screen's does, and the action is
+    // the same distance below all of them.
+    expect(new Set(before.headings).size).toBe(1);
+
+    // The tallest thing the slot carries, on the screen with the least room for it.
+    await page.evaluate(() => {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = 'diagnostic '.repeat(60);
+      document.querySelector('.onboarding-action-aside')!.append(paragraph);
+    });
+    await settleEffects(page);
+    const after = await anchors();
+    expect(after.headings).toEqual(before.headings);
+    expect(after.action).toBe(before.action);
+    // It grows upward into empty room and stops before the composition above it.
+    expect(after.asideTop).toBeLessThan(before.action);
+    expect(after.asideTop).toBeGreaterThanOrEqual(after.contentBottom);
+    expect(denied).toEqual([]);
+  });
+});
+
 test.describe('shared action anchor', () => {
   for (const viewport of ANCHOR_TIERS) {
     for (const lang of ['en', 'zh'] as const) {
@@ -605,12 +682,15 @@ test.describe('shared action anchor', () => {
           await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
           await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
         }
-        // The last screen contributes a caption, and a caption is ancillary: it is drawn
-        // below the pair it explains. That placement is what lets it grow without moving
-        // the anchor, and what keeps it off the button it is describing.
+        // The desktop hint sits in the free band above the action; phone keeps its
+        // own compact placement below the pair. Neither position moves the action.
         const caption = await box(page, '.onboarding-setup-hint');
         const backRect = await box(page, '.onboarding-back-action');
-        expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
+        if (viewport.width >= 760) {
+          expect(caption.y + caption.height).toBeLessThanOrEqual(action.y - 8);
+        } else {
+          expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
+        }
         await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
         await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
         // And the last word on reachability is a real click, which Playwright refuses to
@@ -724,7 +804,7 @@ test.describe('post-action aside', () => {
         expect(denied).toEqual([]);
       });
 
-      test(`${size(viewport)} ${lang} holds a refused permission write and the import offer under the pair`, async ({ page }) => {
+      test(`${size(viewport)} ${lang} holds a refused permission write under the pair`, async ({ page }) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
         await serveModelHub(page);
@@ -738,15 +818,11 @@ test.describe('post-action aside', () => {
         const before = await pair(page);
         await openSetup(page, lang);
 
-        // Co-presence: the capsule keeps its reserved slot in the stage, the permission
-        // callout is in the slot after the pair. Two asides, one anchor.
-        const notice = page.locator('.onboarding-import-notice');
+        // The permission callout is in the slot after the pair: an aside under the anchor.
         const callout = page.locator('.onboarding-action-aside').getByText(
           lang === 'zh' ? '不设置时 OpenCode' : 'Without this, OpenCode');
-        await expect(notice).toBeVisible();
         await expect(callout).toBeVisible();
         await expectSamePair(page, before);
-        expect((await box(page, '.onboarding-import-notice')).y).toBeLessThan(before.primary.y);
 
         // A write that has not answered yet: the callout says so and nothing moves.
         const setup = page.locator('.onboarding-action-aside').getByRole('button', {
@@ -773,22 +849,10 @@ test.describe('post-action aside', () => {
         await expectSamePair(page, before);
         await clearToasts(page);
 
-        // Refusing the offer is the stage's event, not the slot's: the capsule lives in
-        // the stage and the callout in the aside, so dismissing one may not disturb the
-        // other or the pair's own box. Nor may it move the pair at all — the capsule's
-        // place in the stage is reserved whether or not the capsule is in it, and the
-        // stage is floored at the taller of the two steps' cards, so a card that wraps
-        // past `--ob-card-h` no longer spends the offer's band on its way down.
+        // The stage is floored at the tallest step's cards, so a card that wraps past
+        // `--ob-card-h` cannot move the pair either.
         const stageBefore = await stageHeight(page);
-        const slotBefore = await box(page, '.onboarding-import-slot');
-        await page.getByRole('button', { name: lang === 'zh' ? '关闭导入提示' : 'Dismiss import notice' }).click();
-        await expect(notice).toHaveCount(0);
         await expectSamePair(page, before);
-        // The slot is what makes that true: refusing empties it, it does not remove it.
-        const slotAfter = await box(page, '.onboarding-import-slot');
-        expect(round(slotAfter.height)).toBe(round(slotBefore.height));
-        expect(round(slotAfter.y)).toBe(round(slotBefore.y));
-        expect(await stageHeight(page)).toBeCloseTo(stageBefore, 1);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
         expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
         expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
@@ -803,25 +867,20 @@ test.describe('post-action aside', () => {
           focusable: node.querySelectorAll('a[href], button, input, select, textarea, [tabindex]').length,
         }))).toEqual({ children: 0, focusable: 0 });
         // Back is the other half of the cross-screen claim: the introduction the pair
-        // returns to is the one it started on, after the step it came from had spent an
-        // offer, a refusal and a permission write.
+        // returns to is the one it started on, after the step it came from had spent a
+        // permission write.
         await expectSamePair(page, before);
 
-        // And re-entering is not a third position. The offer stays refused, so this is
-        // the step at its shortest — the reading the reservation exists for. The clock
-        // here is frozen and only a test moves it, so the handoff is nudged until the
-        // screen has arrived rather than once, which races the click's own commit.
+        // And re-entering is not a third position. The clock here is frozen and only a
+        // test moves it, so the handoff is nudged until the screen has arrived rather
+        // than once, which races the click's own commit.
         await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
         await expect.poll(async () => {
           await page.clock.runFor(950);
           return page.locator('[data-setup-sequence]').getAttribute('data-setup-screen');
         }).toBe('assistants');
         await page.locator('.onboarding-assistants').waitFor();
-        await expect(notice).toHaveCount(0);
         await expectSamePair(page, before);
-        const slotAgain = await box(page, '.onboarding-import-slot');
-        expect(round(slotAgain.height)).toBe(round(slotBefore.height));
-        expect(round(slotAgain.y)).toBe(round(slotBefore.y));
         expect(await stageHeight(page)).toBeCloseTo(stageBefore, 1);
         expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
         expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
@@ -906,131 +965,6 @@ test.describe('completion recovery in the slot', () => {
       });
     }
   }
-});
-
-/**
- * The import offer. Everything about WHICH keys it counts is a component-level rule and is
- * tested there; what only a browser can show is that the capsule is an aside rather than a
- * banner, that refusing it does not move the button underneath, and that its help text can
- * actually be reached by a pointer, a keyboard and a finger.
- */
-test.describe('import capsule', () => {
-  test('is a centred capsule whose dismissal leaves the action where it was', async ({ page }, info) => {
-    await page.setViewportSize({ width: 1200, height: 800 });
-    const denied = await serveProduct(page);
-    await serveModelHub(page);
-    await openOnboarding(page, { lang: 'zh' });
-    await openSetup(page, 'zh');
-
-    const notice = page.locator('.onboarding-import-notice');
-    // Three importable keys among five scanned rows: the two native subscription tokens
-    // are the settings migration's business, never this entry's.
-    await expect(notice).toHaveText(/发现 3 个可导入模型网关的 API Key/);
-
-    const capsule = await box(page, '.onboarding-import-notice');
-    const slot = await box(page, '.onboarding-import-slot');
-    const cards = await box(page, '.onboarding-assistants');
-    const stage = await box(page, '.onboarding-stage');
-    const action = await box(page, '.onboarding-primary-action');
-    expect(round(capsule.height)).toBe(44);
-    // Content width, centred under the cards — not a full-width banner.
-    expect(capsule.width).toBeLessThan(cards.width);
-    expect(capsule.x + capsule.width / 2).toBeCloseTo(cards.x + cards.width / 2, 0);
-    expect(capsule.y - (cards.y + cards.height)).toBeCloseTo(20, 0);
-    // It sits at the top of its own slot, and the slot is the offer's reserved place in
-    // the stage rather than a box drawn around whatever arrived: a reservation that has
-    // to hold the other language's wrapped card leaves its slack under the composition,
-    // which is where the action's own 20 is measured from.
-    expect(capsule.y).toBeCloseTo(slot.y, 0);
-    expect(slot.height).toBeGreaterThanOrEqual(capsule.height - 0.5);
-    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
-    expect(await page.locator('.onboarding-import-notice').evaluate((node) => getComputedStyle(node).boxShadow)).toBe('none');
-
-    await settleEffects(page);
-    await page.screenshot({ path: info.outputPath('import-capsule-1200x800-dark-zh.png') });
-
-    // The layout space is reserved, so refusing the offer moves nothing: the slot keeps
-    // the height the capsule had, and the stage and the action keep theirs.
-    await page.getByRole('button', { name: '关闭导入提示' }).click();
-    await expect(notice).toHaveCount(0);
-    const emptySlot = await box(page, '.onboarding-import-slot');
-    const after = await box(page, '.onboarding-primary-action');
-    expect(round(emptySlot.height)).toBe(round(slot.height));
-    expect(round(emptySlot.y)).toBe(round(slot.y));
-    expect(round((await box(page, '.onboarding-stage')).height)).toBe(round(stage.height));
-    expect(round(after.y)).toBe(round(action.y));
-    expect(round(after.x)).toBe(round(action.x));
-    expect(denied).toEqual([]);
-  });
-
-  test('phones put the offer and its refusal on one line and the actions on the next', async ({ page }, info) => {
-    await page.setViewportSize({ width: 390, height: 844 });
-    await serveProduct(page);
-    await serveModelHub(page);
-    await openOnboarding(page, { lang: 'zh' });
-    await openSetup(page, 'zh');
-
-    const text = await box(page, '.onboarding-import-notice-text');
-    const dismiss = await box(page, '.onboarding-import-notice-dismiss');
-    const actions = await box(page, '.onboarding-import-notice-actions');
-    expect(dismiss.y).toBeCloseTo(text.y + text.height / 2 - dismiss.height / 2, 0);
-    expect(actions.y).toBeGreaterThanOrEqual(text.y + text.height);
-    // The full Chinese sentence at the verified width: wrapped if it must be, never cut.
-    const intact = await page.locator('.onboarding-import-notice-text')
-      .evaluate((node) => node.scrollWidth <= node.clientWidth + 1 && getComputedStyle(node).textOverflow !== 'ellipsis');
-    expect(intact).toBe(true);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
-    await settleEffects(page);
-    await page.screenshot({ path: info.outputPath('import-capsule-390x844-dark-zh.png') });
-  });
-
-  // A real touch context, because the whole point of the hint's pointer handling is that
-  // a finger and a mouse arrive differently: Chromium only reports `pointerType: 'touch'`
-  // when the context actually has a touchscreen, so a synthetic event could not show that
-  // a tap produces one clean toggle instead of hover-open-then-click-closed.
-  test.describe(() => {
-    test.use({ hasTouch: true });
-
-    test('the help text opens on hover, on focus and on tap, and closes on Escape or outside', async ({ page }) => {
-      await page.setViewportSize({ width: 1200, height: 800 });
-      await serveProduct(page);
-      await serveModelHub(page);
-      await openOnboarding(page, { lang: 'zh' });
-      await openSetup(page, 'zh');
-
-      const help = page.getByRole('button', { name: '什么是模型网关？' });
-      const body = page.getByText(/模型网关管理你选择的认证信息/);
-
-      // Pointer: the panel is portalled, so it must survive the trip from trigger to panel.
-      await help.hover();
-      await expect(body).toBeVisible();
-      await body.hover();
-      await expect(body).toBeVisible();
-      await page.mouse.move(10, 10);
-      // Leaving defers the close by 120ms, which is exactly what let the pointer make
-      // the trip above. The fixture's clock is frozen, so that delay has to be spent.
-      await expect(body).toBeVisible();
-      await page.clock.runFor(200);
-      await expect(body).toBeHidden();
-
-      // Keyboard: focus reveals it and Escape takes it back, without trapping the tab order.
-      await help.focus();
-      await expect(body).toBeVisible();
-      await page.keyboard.press('Escape');
-      await expect(body).toBeHidden();
-      await expect(help).toBeFocused();
-
-      // Touch: one clean toggle, and a tap elsewhere dismisses it.
-      const target = (await help.boundingBox())!;
-      await page.touchscreen.tap(target.x + target.width / 2, target.y + target.height / 2);
-      await expect(body).toBeVisible();
-      // The dismissable layer arms its outside listener in a zero-delay timeout, which a
-      // frozen clock never reaches. Spending it is the fixture's business, not a wait.
-      await page.clock.runFor(50);
-      await page.touchscreen.tap(8, 400);
-      await expect(body).toBeHidden();
-    });
-  });
 });
 
 /**

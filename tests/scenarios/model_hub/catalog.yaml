@@ -37,7 +37,8 @@ capability:
     # narrows, plus the one predicate that separates them.
     - ui/src/components/settings/models/MigrationDialog.test.tsx
     - ui/src/components/settings/models/migrationScan.test.ts
-    - ui/src/components/onboarding/ImportKeysNotice.test.tsx
+    - ui/src/components/onboarding/providers/providerStage.test.ts
+    - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx
     # The gate that resolves those rows against vitest's own collection, and
     # its own evidence.
     - ui/scripts/scenarioCatalog.test.mjs
@@ -753,12 +754,13 @@ scenarios:
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_masked_credential_is_the_same_masking_the_detail_already_showed
       - tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_presentation_metadata_leaves_every_pre_existing_value_and_id_alone
   - id: MH-MIG-004
-    name: Setup's key-import entry counts, offers and submits one and the same set, and leaves subscriptions and reauth rows to the settings migration
+    name: Setup's key-import offer, count and submitted batch agree, leaving subscriptions and reauth rows to settings
     status: covered
     kind: migration
     layer: unit
-    test: "ui/src/components/onboarding/ImportKeysNotice.test.tsx::MH-MIG-004: submits only the rows still ticked"
+    test: "ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::MH-MIG-004: submits the batch it counted, and keeps the blocked card after the rescan"
     related_tests:
+      - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::counts the takeable group beside it, and only that one
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
       - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action
   - id: MH-MIG-005
@@ -772,6 +774,12 @@ scenarios:
       - tests/test_model_hub_persisted_migration.py::test_shell_saved_key_takeover_keeps_unrelated_bytes_and_runtime
       - tests/test_model_hub_persisted_migration.py::test_new_shell_layer_during_provision_cannot_escape_consent
       - tests/test_model_hub_persisted_migration.py::test_shared_shell_key_requires_both_backend_consents
+  - id: MH-MIG-006
+    name: Setup keeps distinct credentials even when their display masks collide with a Hub source
+    status: covered
+    kind: migration
+    layer: unit
+    test: "ui/src/components/onboarding/providers/providerStage.test.ts::MH-MIG-006: keeps a key whose display mask collides with a Hub source"
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered

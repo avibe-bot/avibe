@@ -162,8 +162,8 @@ export type ProviderSlot = {
  * but blocked, for review in Settings. The server migrates a backend whole and
  * refuses a batch that omits any of its rows, so there is no half of it to take.
  *
- * One helper rather than the call spelled out five times, so the cards, the capsule's
- * count, the CTA's batch, the seeded consent and the reconciliation cannot drift into
+ * One helper rather than the call spelled out five times, so the cards, the
+ * primary action's batch, the seeded consent and reconciliation cannot drift into
  * answering the same question two ways.
  */
 const setupGroups = (items: MigrationItem[]): MigrationGroup[] =>
@@ -322,7 +322,7 @@ export function providerSlots(input: {
  * occupies its brand's slot — that collapse is presentation, and it is right — but
  * the scan has no knowledge of the Hub's inventory: it reads native stores, so a
  * row under a connected brand is a second credential until something compares the
- * two. Letting the stage's brand set answer that question is how a row the capsule
+ * two. Letting the stage's brand set answer that question is how a row the scan
  * still counts becomes reachable from nowhere. Whether it is the same key is a
  * question about credentials, and the pane that lists it is where it is answered.
  */
@@ -354,18 +354,21 @@ export const slotSelected = (
  * scope the scan, drop groups this entry point cannot consent to, then take every
  * importable row of the consented backends.
  */
-export function pendingImportRows(selection: MigrationSelection): MigrationItem[] {
+export function pendingImportRows(
+  selection: MigrationSelection,
+): MigrationItem[] {
   const items = selection.scan?.items ?? [];
   const consented = new Set(
     setupGroups(items)
-      .filter((group) => groupSelectable(group) && selection.selectedBackends.includes(group.backend))
+      .filter((group) => groupSelectable(group)
+        && selection.selectedBackends.includes(group.backend))
       .map((group) => group.backend),
   );
   return appliableItems(items, consented);
 }
 
 /**
- * The keys the capsule offers to review.
+ * The keys the setup migration offer can review.
  *
  * Not every importable key in the scan: a key whose consent group is blocked by an
  * OAuth row or a blocker cannot be consented to from here, so advertising it would
@@ -374,9 +377,8 @@ export function pendingImportRows(selection: MigrationSelection): MigrationItem[
  * because that is setup's scope, and 「发现 N 个可导入的 API Key」 is what the
  * sentence says.
  *
- * The migration feature's own projection, because the standalone capsule in
- * Settings' wizard has to count the same way and cannot reach into this screen to
- * do it.
+ * This identity set also owns dismissal across rescans; selection remains scoped
+ * to complete backend consent groups.
  */
 export function offeredImportKeys(selection: MigrationSelection): MigrationItem[] {
   return takeableImportRows(selection.scan?.items ?? [], isImportableKey, isImportableKey);
@@ -389,7 +391,7 @@ export function offeredImportKeys(selection: MigrationSelection): MigrationItem[
  * that — a group whose every linked importable row is marked opens ticked. A
  * controlled caller that built its selection only from what it previously held would
  * throw those defaults away on the first scan and show a stage where nothing is
- * chosen and a capsule announcing keys to import, which is two answers to one
+ * chosen while the migration offer announces keys to import, which is two answers to one
  * question. Seeded once, on the first scan; every later scan is reconciled instead,
  * because by then the selection is the person's rather than the server's.
  */
@@ -471,6 +473,8 @@ export function reconcileSelection(
 }
 
 export type ProviderSummary =
+  /** The source read has not landed, so the stage has nothing to say yet. */
+  | { kind: 'pending' }
   | { kind: 'none' }
   | { kind: 'added'; count: number; names: string[] }
   | { kind: 'selected'; count: number; names: string[] }
@@ -491,6 +495,8 @@ export function providerSummary(input: {
   sources: readonly Source[];
   selected: readonly AgentBackend[];
   failed: boolean;
+  /** Whether the source read is still out. An empty list is not yet an answer. */
+  reading?: boolean;
 }): ProviderSummary {
   if (input.failed) return { kind: 'error' };
   const added = new Map<string, string>();
@@ -503,7 +509,10 @@ export function providerSummary(input: {
     .filter((slot) => slotSelected(slot, input.selected))
     .map((slot) => slot.label);
   if (selected.length > 0) return { kind: 'selected', count: selected.length, names: selected };
-  return { kind: 'none' };
+  // Nothing found — but an unfinished read has not found nothing, it has not looked.
+  // Saying 「no provider selected」 here states a verdict about a question still open,
+  // which is what made the sentence flicker through a denial on the way in.
+  return input.reading ? { kind: 'pending' } : { kind: 'none' };
 }
 
 /**

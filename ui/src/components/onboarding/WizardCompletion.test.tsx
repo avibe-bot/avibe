@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
@@ -11,7 +10,7 @@ import en from '../../i18n/en.json';
 
 const mock = vi.hoisted(() => ({ control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
-  readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
+  readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), updateVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
 },
   // The endpoints the second screen reads, and — through the one Agent-supply authority
   // the shell shares with it — the endpoints the entry gate judges. Only the endpoints:
@@ -194,8 +193,8 @@ describe('explicit any-one-ready completion', () => {
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
   });
-  it.each(['start', 'legacy IM'])('keeps failed completion recoverable (%s)', async (failure) => {
-    if (failure !== 'start') mock.api.mutateConfig.mockRejectedValue(new Error("Config 'slack.bot_token' must be provided"));
+  it.each(['start', 'config write'])('keeps failed completion recoverable (%s)', async (failure) => {
+    if (failure !== 'start') mock.api.mutateConfig.mockRejectedValue(new Error('Config write unavailable'));
     const enter = await setup({ stopped: failure === 'start' });
     if (failure === 'start') mock.control.mockRejectedValue(new Error('Start unavailable'));
     fireEvent.click(enter);
@@ -238,10 +237,7 @@ describe('the correlated entry gate', () => {
     // binary detectCli does not find. Every condition is satisfied somewhere and none
     // of them meet. `connection.installed` is not the detector.
     allConnected();
-    mock.api.listVibeAgents.mockResolvedValue({
-      ok: true, default_agent_name: null,
-      agents: [CLAUDE_AGENT, { name: 'codex-agent', backend: 'codex', enabled: true, archived: false, source: 'builtin' }],
-    });
+    serveAgents(null, [CLAUDE_AGENT, { name: 'codex-agent', backend: 'codex', enabled: true, archived: false, source: 'builtin' }]);
     mock.models.listAgents.mockResolvedValue([hubSupply('claude', []), hubSupply('codex', [route('codex-agent')])]);
     const enter = await setup();
     mock.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: binary }));
@@ -518,8 +514,8 @@ describe('the correlated entry gate', () => {
   });
 });
 
-/** A saved platform whose required credential is gone: the shape that stops completion
- *  and hands the slot a repair form. Shared with the navigation-ownership cases below. */
+/** A saved platform whose required credential is gone: the shape that used to stop
+ *  completion. Shared with the navigation cases below. */
 function incompleteSlack() {
   const config = baseConfig({ platforms: { primary: 'slack', enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token', 'app_token'] }], slack: { bot_token: '', app_token: '', has_bot_token: false, has_app_token: true, proxy_url: '' }, agent: { default_cwd: '/original' } }) as ReturnType<typeof baseConfig> & { slack: Record<string, unknown>; platform_catalog: Record<string, unknown>[] };
   serveConfig(config);
@@ -527,109 +523,22 @@ function incompleteSlack() {
   return config;
 }
 
-// AUTH-SETUP-120: the actual Wizard consumes legacy-IM recovery and narrow mutations.
-describe('saved messaging recovery', () => {
-  it('mounts only after explicit repair, saves changed credentials only, then rechecks and completes', async () => {
-    const config = incompleteSlack();
+// AUTH-SETUP-120: a saved platform is no longer a gate. The Wizard finishes on the
+// config it was given and writes nothing on the platform's behalf.
+describe('saved messaging no longer gates the workspace', () => {
+  it('completes with an enabled platform whose saved credential is gone', async () => {
+    incompleteSlack();
     fireEvent.click(await setup({ stopped: true }));
-    await screen.findByRole('region', { name: en.onboarding.connection.platformRepair });
-    expect(mock.control).not.toHaveBeenCalled(); expect(mock.api.slackManifest).not.toHaveBeenCalled();
-    mock.api.mutateConfig.mockImplementation(async (mutations) => {
-      if (mutations[0].path[0] === 'slack') {
-        serveConfig({ ...config, slack: { ...config.slack, has_bot_token: true }, agent: { default_cwd: '/concurrent' } });
-        return {};
-      }
-      persistConfig(mutations);
-      return {};
-    });
-    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.platformRepair }));
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.slackConfig.step2Title) }));
-    fireEvent.change(await screen.findByPlaceholderText(en.slackConfig.botTokenPlaceholder), { target: { value: 'xoxb-fixture-only' } });
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await screen.findByTestId('destination');
-    expect(mock.api.mutateConfig.mock.calls[0][0]).toEqual([{ kind: 'set', path: ['slack', 'bot_token'], value: 'xoxb-fixture-only' }]);
-    expect(mock.api.mutateConfig.mock.calls[1][0]).toEqual([{ kind: 'set', path: ['setup_completed'], value: true }]);
-    expect(mock.api.slackAuthTest).not.toHaveBeenCalled(); expect(mock.control).toHaveBeenCalledExactlyOnceWith('start');
-  });
-  it('keeps failed repair drafts editable and cancel preserves credentials', async () => {
-    incompleteSlack(); mock.api.mutateConfig.mockRejectedValue(new Error('Platform apply failed'));
-    fireEvent.click(await setup()); fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.slackConfig.step2Title) }));
-    const input = await screen.findByPlaceholderText(en.slackConfig.botTokenPlaceholder);
-    fireEvent.change(input, { target: { value: 'xoxb-retained-draft' } });
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await screen.findByText('Platform apply failed');
-    expect((input as HTMLInputElement).value).toBe('xoxb-retained-draft'); expect(screen.queryByTestId('destination')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.api.mutateConfig.mock.lastCall![0]).toEqual([{ kind: 'set', path: ['setup_completed'], value: true }]);
+    expect(mock.api.slackManifest).not.toHaveBeenCalled(); expect(mock.api.slackAuthTest).not.toHaveBeenCalled();
+    expect(mock.control).toHaveBeenCalledExactlyOnceWith('start');
   });
   it('honors redacted credential markers and the WeChat runnable exception', async () => {
     const config = incompleteSlack();
     serveConfig({ ...config, platforms: { primary: 'slack', enabled: ['slack', 'wechat'] }, slack: { has_bot_token: true, has_app_token: true }, wechat: {}, platform_catalog: [...config.platform_catalog, { id: 'wechat', credential_fields: ['bot_token'] }] });
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.slackManifest).not.toHaveBeenCalled(); expect(mock.api.slackAuthTest).not.toHaveBeenCalled();
-  });
-});
-
-
-// AUTH-SETUP-120: Discord's existing form emits credential and auxiliary settings.
-describe('saved Discord recovery', () => {
-  async function repairDiscord() {
-    const config = baseConfig({ agents: { claude: { enabled: true } }, platforms: { primary: 'discord', enabled: ['discord'] }, platform_catalog: [{ id: 'discord', config_key: 'discord', credential_fields: ['bot_token'] }], discord: { bot_token: '', has_bot_token: false } });
-    serveConfig(config);
-    mock.api.discordAuthTest.mockResolvedValue({ ok: true });
-    mock.api.discordGuilds.mockResolvedValue({ ok: true, guilds: [{ id: 'g-one', name: 'Guild One' }, { id: 'g-two', name: 'Guild Two' }] });
-    mock.api.mutateConfig.mockImplementation(async (changes) => {
-      if (changes[0].path[0] === 'discord') {
-        serveConfig({ ...config, discord: { bot_token: '', has_bot_token: true } });
-        return {};
-      }
-      persistConfig(changes);
-      return {};
-    });
-    fireEvent.click(await setup());
-    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.discordConfig.step4Title) }));
-    const input = await screen.findByPlaceholderText(en.discordConfig.botTokenPlaceholder);
-    fireEvent.change(input, { target: { value: 'fixture-discord-token' } });
-    fireEvent.click(screen.getByRole('button', { name: en.discordConfig.validateToken }));
-    await screen.findByRole('checkbox', { name: 'Guild One' });
-    return input;
-  }
-  it.each(['selected', 'cleared', 'unchanged', 'excluded'] as const)('persists only the intended guild selection (%s)', async (mode) => {
-    mock.manageAccess = mode !== 'excluded';
-    await repairDiscord();
-    if (mode === 'selected' || mode === 'cleared') fireEvent.click(screen.getByRole('checkbox', { name: 'Guild One' }));
-    if (mode === 'cleared') fireEvent.click(screen.getByRole('button', { name: en.discordConfig.clearGuilds }));
-    if (mode === 'excluded') expect(screen.getByRole('checkbox', { name: 'Guild One' }).hasAttribute('disabled')).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await screen.findByTestId('destination');
-    if (mode === 'selected' || mode === 'cleared') {
-      expect(mock.api.saveSettings).toHaveBeenCalledExactlyOnceWith({ guilds: mode === 'selected' ? { 'g-one': { enabled: true } } : {} }, 'discord');
-      expect(mock.api.saveSettings.mock.invocationCallOrder[0]).toBeLessThan(mock.api.mutateConfig.mock.invocationCallOrder[1]);
-    } else expect(mock.api.saveSettings).not.toHaveBeenCalled();
-    expect(mock.api.mutateConfig.mock.calls[0][0]).toEqual([{ kind: 'set', path: ['discord', 'bot_token'], value: 'fixture-discord-token' }]);
-  });
-  it('retains selected guild and credential draft after partial save failure, then retries before completion', async () => {
-    const input = await repairDiscord();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Guild Two' }));
-    mock.api.saveSettings.mockRejectedValueOnce(new Error('Guild settings failed'));
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await screen.findByText('Guild settings failed');
-    expect(screen.queryByTestId('destination')).toBeNull();
-    expect((screen.getByRole('checkbox', { name: 'Guild Two' }) as HTMLInputElement).checked).toBe(true);
-    expect((input as HTMLInputElement).value).toBe('fixture-discord-token');
-    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await screen.findByTestId('destination');
-    expect(mock.api.saveSettings).toHaveBeenCalledTimes(2);
-    expect(mock.api.saveSettings).toHaveBeenLastCalledWith({ guilds: { 'g-two': { enabled: true } } }, 'discord');
-  });
-  it('cancelled selection writes neither credentials nor settings', async () => {
-    await repairDiscord(); fireEvent.click(screen.getByRole('checkbox', { name: 'Guild One' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(mock.api.saveSettings).not.toHaveBeenCalled(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('destination')).toBeNull();
   });
 });
 
@@ -644,13 +553,7 @@ const flowErrorDetail = () => {
   return (disclosure.textContent ?? '').slice((disclosure.querySelector('summary')?.textContent ?? '').length);
 };
 const primaryAction = () => document.querySelector('.onboarding-primary-action') as HTMLButtonElement;
-const assistantsRoot = () => document.querySelector('[data-setup-screen-root="assistants"]') as HTMLElement;
-const assistantCard = (name: string) => within(within(assistantsRoot()).getByLabelText(name));
 const backAction = () => document.querySelector('.onboarding-back-action') as HTMLButtonElement;
-// The footer's spinner carries Tailwind's `motion-safe:` variant, so the token in the
-// DOM is the whole `motion-safe:animate-spin`. A bare `.animate-spin` matches nothing
-// here whatever the shell renders, which would make every "not busy" check vacuous.
-const spinners = () => primaryAction().querySelectorAll('[class~="motion-safe:animate-spin"]').length;
 /** Nothing that ends setup, and nothing that leaves the screen. */
 function expectNoForwardWrite() {
   expect(mock.api.mutateConfig).not.toHaveBeenCalled();
@@ -859,86 +762,11 @@ describe('fresh prerequisite boundary', () => {
     await act(async () => { release({ ok: true }); });
     expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
-  it('a recovery completion callback passes the same boundary', async () => {
-    // A repair that succeeded still re-enters the completion, and re-entering is not a
-    // pass: the gateway went off while the repair was being written.
-    const config = incompleteSlack();
-    fireEvent.click(await setup());
-    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.slackConfig.step2Title) }));
-    fireEvent.change(await screen.findByPlaceholderText(en.slackConfig.botTokenPlaceholder), { target: { value: 'xoxb-fixture-only' } });
-    mock.api.mutateConfig.mockImplementation(async () => {
-      serveConfig({ ...config, slack: { ...config.slack, has_bot_token: true } });
-      serveFreshOnly(async () => jsonResponse(baseConfig({ model_hub: { enabled: false } })));
-      return {};
-    });
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await waitFor(() => expect(flowError()).toBe(en.onboarding.flow.gatewayRequired));
-    expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
-    expect(screen.queryByTestId('destination')).toBeNull();
-  });
 });
 
-// XpVU: a recovery owns the journey while it is open, and says so by holding the
-// shared pair — not by pretending work is running.
-describe('recovery navigation ownership', () => {
-  // A saved platform's repair is offered, not started: until somebody asks for it
-  // nothing runs, so the pair is held rather than busy, and refusing it returns
-  // the journey untouched.
-  it('a platform repair holds both controls without a busy spinner, and gives them back on cancel', async () => {
-    incompleteSlack();
-    fireEvent.click(await setup({ stopped: true }));
-    await screen.findByRole('region', { name: en.onboarding.connection.platformRepair });
-    expect(backAction().hasAttribute('disabled')).toBe(true);
-    expect(primaryAction().hasAttribute('disabled')).toBe(true);
-    expect(spinners()).toBe(0);
-    expect(mock.api.slackManifest).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(backAction().hasAttribute('disabled')).toBe(false));
-    expect(screen.queryByRole('region', { name: en.onboarding.connection.platformRepair })).toBeNull();
-    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
-    expect(screen.queryByTestId('destination')).toBeNull();
-  });
-  it('keeps the journey put while a deferred platform repair is unsettled, survives its failure, and completes on a later success', async () => {
-    const config = incompleteSlack();
-    let releaseApply!: (ok: boolean) => void;
-    mock.api.mutateConfig.mockImplementation(async (mutations: { path: string[]; value: unknown }[]) => {
-      if (mutations[0].path[0] !== 'slack') {
-        persistConfig(mutations);
-        return {};
-      }
-      if (!await new Promise<boolean>((resolve) => { releaseApply = resolve; })) throw new Error('Platform apply failed');
-      serveConfig({ ...config, slack: { ...config.slack, has_bot_token: true } });
-      return {};
-    });
-    fireEvent.click(await setup({ stopped: true }));
-    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.connection.platformRepair }));
-    fireEvent.click(await screen.findByRole('button', { name: new RegExp(en.slackConfig.step2Title) }));
-    const input = await screen.findByPlaceholderText(en.slackConfig.botTokenPlaceholder);
-    fireEvent.change(input, { target: { value: 'xoxb-deferred' } });
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledOnce());
-    // Unsettled: the write is out and the answer is not in, so the journey neither
-    // leaves nor arrives on its own.
-    fireEvent.click(backAction());
-    expect(document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen')).toBe('assistants');
-    expect(screen.queryByTestId('destination')).toBeNull();
-
-    // A refused write is not a finished recovery: the form stays, with its draft.
-    await act(async () => { releaseApply(false); });
-    await screen.findByText('Platform apply failed');
-    await screen.findByRole('region', { name: en.onboarding.connection.platformRepair });
-    expect(screen.queryByTestId('destination')).toBeNull();
-    expect((input as HTMLInputElement).value).toBe('xoxb-deferred');
-    expect(backAction().hasAttribute('disabled')).toBe(true);
-
-    // And an explicit second attempt, settling for real, is what finishes setup.
-    fireEvent.click(screen.getByRole('button', { name: en.platform.apply }));
-    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2));
-    await act(async () => { releaseApply(true); });
-    expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig.mock.lastCall![0]).toEqual([{ kind: 'set', path: ['setup_completed'], value: true }]);
-  });
+// XpVU: a screen that is waiting on its own answer holds the shared pair while it
+// waits — without pretending separate work is running.
+describe('journey navigation ownership', () => {
   it('an ordinary not-yet-ready primary still lets the journey go back', async () => {
     await arriveAtProviders();
     // Only now: the second screen's own admission needs a connection answer, so hanging
@@ -1055,169 +883,6 @@ describe('the registered journey', () => {
     await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
     fireEvent.click(primaryAction());
     const enter = await screen.findByRole('button', { name: 'Enter workspace' });
-    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
-    fireEvent.click(enter);
-    expect(await screen.findByTestId('destination')).toBeTruthy();
-  });
-});
-
-describe('setup route editor on the registered journey', () => {
-  const hops = [
-    { source_id: 'src_openai', model_id: 'gpt-5' },
-    { source_id: 'src_openai', model_id: 'gpt-4.1' },
-  ];
-  const chainOf = (order = hops) => ({
-    contract_version: 10,
-    backend: 'claude' as const,
-    model_id: 'opus-5',
-    manual_override: { hops: order },
-    route_origin: 'manual' as const,
-    current: order[0],
-    chain: order.map((hop) => ({
-      ...hop,
-      channel: 'hub' as const,
-      health: 'healthy' as const,
-      runnable: true,
-      reason: null,
-      retry_at: null,
-    })),
-    supply_state: 'ok' as const,
-  });
-
-  it('reorders the exact saved chain, keeps the draft through add-source, then enters', async () => {
-    serveAgents('claude-agent', [{ ...CLAUDE_AGENT, model: 'opus-5' }]);
-    mock.models.listAgents.mockResolvedValue([
-      hubSupply('claude', [route('claude-agent', { effective_model_id: 'opus-5' })]),
-    ]);
-    mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({
-      ok: true, backend, enabled: true, installed: true, auth: 'none',
-      application: 'applied', ready: backend === 'claude', entry_eligible: backend === 'claude',
-      supply_mode: backend === 'claude' ? 'hub' : undefined,
-    }));
-    mock.models.getAgentChain.mockResolvedValue(chainOf());
-    mock.models.previewAgentChain.mockImplementation(async (_backend, _model, body) =>
-      chainOf(body.manual_override?.hops ?? hops));
-    mock.models.putAgentChain.mockImplementation(async (_backend, _model, body) => {
-      const next = chainOf(body.hops);
-      mock.models.getAgentChain.mockResolvedValue(next);
-      return { chain: next };
-    });
-
-    await setup();
-    fireEvent.click(await assistantCard('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute }));
-    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.route.moveDownNamed.replace('{{name}}', 'OpenAI · gpt-5') }));
-    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.addSource }));
-    await waitFor(() => expect(document.querySelector('[data-setup-screen]')?.getAttribute('data-setup-screen')).toBe('providers'));
-    expect(mock.models.putAgentChain).not.toHaveBeenCalled();
-
-    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionContinue));
-    await waitFor(() => expect(primaryAction().hasAttribute('disabled')).toBe(false));
-    fireEvent.click(primaryAction());
-    await screen.findByRole('button', { name: 'Enter workspace' });
-    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute }));
-    expect((await screen.findByText(en.onboarding.route.preferred)).closest('.setup-add-row')?.textContent).toContain('gpt-4.1');
-
-    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [hops[1], hops[0]] }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-
-    fireEvent.click(assistantCard('Claude Code').getByRole('button', { name: en.onboarding.setup.configureRoute }));
-    expect((await screen.findByText(en.onboarding.route.preferred)).closest('.setup-add-row')?.textContent).toContain('gpt-4.1');
-    fireEvent.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-
-    fireEvent.click(screen.getByRole('button', { name: 'Enter workspace' }));
-    expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
-    expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
-  });
-
-  it('selects the first exact hop on an empty route, then enters', async () => {
-    const user = userEvent.setup();
-    let routed = false;
-    serveAgents('claude-agent', [{ ...CLAUDE_AGENT, model: 'opus-5' }]);
-    mock.models.listAgents.mockResolvedValue([
-      hubSupply('claude', [route('claude-agent', { effective_model_id: 'opus-5' })]),
-    ]);
-    mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({
-      ok: true, backend, enabled: true, installed: true, auth: 'none',
-      application: 'applied', ready: backend === 'claude' && routed, entry_eligible: backend === 'claude' && routed,
-      supply_mode: backend === 'claude' ? 'hub' : undefined,
-    }));
-    mock.models.getAgentChain.mockResolvedValue(chainOf([]));
-    mock.models.previewAgentChain.mockImplementation(async (_backend, _model, body) =>
-      chainOf(body.manual_override?.hops ?? []));
-    mock.models.putAgentChain.mockImplementation(async (_backend, _model, body) => {
-      routed = true;
-      const next = chainOf(body.hops);
-      mock.models.getAgentChain.mockResolvedValue(next);
-      return { chain: next };
-    });
-
-    await arriveAtProviders();
-    fireEvent.click(primaryAction());
-    const enter = await screen.findByRole('button', { name: 'Enter workspace' });
-    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(true));
-    fireEvent.click(await assistantCard('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute }));
-    await user.click(await screen.findByRole('button', { name: en.settings.models.routeDialog.addHop }));
-    await user.click(screen.getByRole('option', { name: /gpt-5/ }));
-    await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
-    await user.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('claude', 'opus-5', { hops: [hops[0]] }));
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
-
-    fireEvent.click(enter);
-    expect(await screen.findByTestId('destination')).toBeTruthy();
-    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith([{ kind: 'set', path: ['setup_completed'], value: true }]);
-    expect(mock.api.setDefaultVibeAgent).not.toHaveBeenCalled();
-  });
-
-  it('saves the Codex card onto Codex and refreshes Enter after the real PUT', async () => {
-    const user = userEvent.setup();
-    const saved: Record<string, typeof hops> = { claude: [], codex: [] };
-    serveAgents('claude-agent', [
-      { ...CLAUDE_AGENT, model: 'opus-5' },
-      { name: 'codex', backend: 'codex', model: 'gpt-5' },
-    ]);
-    mock.models.listAgents.mockResolvedValue([
-      hubSupply('claude', [route('claude-agent', { effective_model_id: 'opus-5' })]),
-      hubSupply('codex', [route('codex', { effective_model_id: 'gpt-5' })]),
-    ]);
-    mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({
-      ok: true, backend, enabled: true, installed: true, auth: 'none',
-      application: 'applied',
-      ready: Boolean(saved[backend]?.length),
-      entry_eligible: Boolean(saved[backend]?.length),
-      supply_mode: 'hub',
-    }));
-    mock.models.getAgentChain.mockImplementation(async (backend: AgentBackend, model: string) => ({
-      ...chainOf(saved[backend] ?? []),
-      backend,
-      model_id: model,
-    }));
-    mock.models.previewAgentChain.mockImplementation(async (backend, model, body) => ({
-      ...chainOf(body.manual_override?.hops ?? []),
-      backend,
-      model_id: model,
-    }));
-    mock.models.putAgentChain.mockImplementation(async (backend, model, body) => {
-      saved[backend] = body.hops;
-      return { chain: { ...chainOf(body.hops), backend, model_id: model } };
-    });
-
-    await arriveAtProviders();
-    fireEvent.click(primaryAction());
-    const enter = await screen.findByRole('button', { name: 'Enter workspace' });
-    await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(true));
-    fireEvent.click(await assistantCard('Codex').findByRole('button', { name: en.onboarding.setup.configureRoute }));
-    await user.click(await screen.findByRole('button', { name: en.settings.models.routeDialog.addHop }));
-    await user.click(screen.getByRole('option', { name: /gpt-5/ }));
-    await user.click(screen.getByRole('button', { name: en.settings.models.routeDialog.add.confirm }));
-    await user.click(screen.getByRole('button', { name: en.onboarding.route.done }));
-    await waitFor(() => expect(mock.models.putAgentChain).toHaveBeenCalledWith('codex', 'gpt-5', { hops: [hops[0]] }));
-    expect(mock.models.putAgentChain).not.toHaveBeenCalledWith('claude', expect.anything(), expect.anything());
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(enter.hasAttribute('disabled')).toBe(false));
     fireEvent.click(enter);
     expect(await screen.findByTestId('destination')).toBeTruthy();

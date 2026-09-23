@@ -1,11 +1,8 @@
 /**
  * C2 — the setup flow's interface contract.
  *
- * Proposed for `master` before the three-screen lanes fork, so a lane reads one shared
- * declaration instead of transcribing a shape out of a plan document. Everything here is
- * cross-lane by construction: the shell (L1) renders it, the providers screen (L2) and the
- * assistants screen (L3) implement against it. A deviation needs orchestrator sign-off
- * BEFORE the edit, not a reconciling commit afterwards.
+ * The shell, providers screen and assistants screen share this declaration. The shell owns
+ * navigation and provider selection; each assistant route remains owned by Model Hub.
  *
  * The binding prose that goes with these types — geometry and DOM hooks (C3), the entry
  * gate (C4), the stable dialog frame (C5) and the field-by-field data mapping (C6) — lives
@@ -15,7 +12,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { ParseKeys } from 'i18next';
 import type { TranslationKey } from '@/i18n/types';
-import type { AgentBackend, MigrationScan, RouteHop, RuntimeDependency } from '../settings/models/types';
+import type { AgentBackend, MigrationScan, RuntimeDependency } from '../settings/models/types';
 import { foldRegionRead, type RegionRead } from '../settings/models/regionRead';
 import { runtimeCanAttemptInstall, runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 
@@ -27,9 +24,10 @@ export type SetupScreenId = (typeof SETUP_SCREENS)[number];
 /**
  * Which transition is playing, or `false` when none is. Named for the screen being
  * ENTERED, because the snapshot is taken from the screen being left: `providers` shrinks
- * the story cards into the destination row, `assistants` lifts that row into full cards.
+ * the story cards into the destination row, `assistants` lifts that row into full cards,
+ * and `intro` grows the row back into the story it came from.
  */
-export type SetupHandoffTarget = Exclude<SetupScreenId, 'intro'>;
+export type SetupHandoffTarget = SetupScreenId;
 
 /** The leading glyph the shell draws inside the primary action. */
 export type SetupActionIcon = 'none' | 'arrow-right' | 'spinner';
@@ -123,9 +121,9 @@ export type SetupProviderSelection = {
 
 /**
  * State the SHELL owns, because it has to outlive any single screen: leaving screen 2 for
- * screen 3 and coming back must find the same selection, the same cumulative import count
- * and the same route order (handoff §5 "状态保留"). Anything the server already owns —
- * installed CLIs, enabled backends, persisted sources — is read, never mirrored here.
+ * screen 3 and coming back must find the same selection and cumulative import count.
+ * Anything the server already owns — installed CLIs, enabled backends, persisted
+ * sources and model routes — is read, never mirrored here.
  */
 export type SetupFlowState = {
   /** Ephemeral scan/consent draft. Replace on a fresh scan and reconcile whole groups;
@@ -136,26 +134,12 @@ export type SetupFlowState = {
   importedCount: number;
   /** Source ids added through the "Add more" card, which is what its badge counts. */
   addedThroughMore: string[];
-  /** Model-ranked working draft: each row identifies BOTH source and upstream model.
-   *  This is not a putAgentSources payload. C6/D4/D9 specify explicit Agent/menu-model
-   *  targets and projection through each target's reviewed exact-hop membership. The
-   *  shared mounted route owner retains target baselines and pending write receipts;
-   *  this list alone cannot reconstruct them or justify a source-priority write.
-   *  Hydrate only while clean; a dirty draft survives navigation and is cleared only
-   *  after every intended write is read back. Empty means no hydrated draft, not no
-   *  server route. C4 never gates entry on this client draft. */
-  routeOrder: RouteHop[];
-  /** Whether `routeOrder` holds an edit the server has not confirmed. Decides if a re-entry
-   *  may hydrate; all intended writes must be confirmed before clearing it. */
-  routeOrderDirty: boolean;
 };
 
 export const INITIAL_SETUP_FLOW_STATE: SetupFlowState = {
   providerSelection: { scan: null, selectedBackends: [] },
   importedCount: 0,
   addedThroughMore: [],
-  routeOrder: [],
-  routeOrderDirty: false,
 };
 
 /**

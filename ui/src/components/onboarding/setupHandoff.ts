@@ -1,11 +1,16 @@
 import type { SetupScreenId } from './setupFlow';
 
 type Piece = { node: HTMLElement; bounds: DOMRect };
+/** A piece the departing card carries but the arriving one has no place for, and how
+ *  long it is given to leave. The prototype dissolves them rather than cutting them
+ *  with the screen, which is what keeps the shrinking card readable mid-flight. */
+type FadingPiece = Piece & { duration: number; lift: number };
 type CardSnapshot = {
   bounds: DOMRect; surface: string; border: string; radius: string;
-  /** Whether the source card wore the mint halo; the flight fades it through the token. */
-  glow: boolean;
-  icon: Piece; name: Piece;
+  /** The halo the source card wore, faded out over the flight exactly as the
+   *  reference does — the arriving card carries none. */
+  shadow: string;
+  icon: Piece; name: Piece; fading: FadingPiece[];
 };
 export type SetupSnapshot = { cards: CardSnapshot[]; retiring?: Piece };
 const timing: KeyframeAnimationOptions = { duration: 860, easing: 'cubic-bezier(.32,0,.16,1)', fill: 'both' };
@@ -13,6 +18,20 @@ const timing: KeyframeAnimationOptions = { duration: 860, easing: 'cubic-bezier(
 const hooks = (screen: SetupScreenId) => screen === 'providers'
   ? { card: '.setup-destination', icon: '.setup-destination-logo', name: '.setup-destination-name' }
   : { card: screen === 'intro' ? '.onboarding-collaboration-card' : '.onboarding-assistant', icon: '.onboarding-card-logo', name: '.onboarding-card-name' };
+
+/**
+ * What a departing card holds beyond its identity: the story's role, caption and
+ * written work. The identity flies to the next screen; these have nowhere to land,
+ * so they leave on their own timing — the role first, because it sits on the line
+ * the identity is still moving along.
+ */
+const FADING: Partial<Record<SetupScreenId, { selector: string; duration: number; lift: number }[]>> = {
+  intro: [
+    { selector: '.onboarding-card-role', duration: 130, lift: 0 },
+    { selector: '.onboarding-story-status', duration: 190, lift: 12 },
+    { selector: '.onboarding-skeleton', duration: 190, lift: 12 },
+  ],
+};
 
 function capturePiece(element: HTMLElement): Piece {
   const node = element.cloneNode(true) as HTMLElement;
@@ -30,8 +49,12 @@ export function captureSetupCards(root: HTMLElement, screen: SetupScreenId): Set
     const name = card.querySelector<HTMLElement>(selectors.name);
     if (!icon || !name) return [];
     const style = getComputedStyle(card);
+    const fading = (FADING[screen] ?? []).flatMap(({ selector, duration, lift }) => {
+      const element = card.querySelector<HTMLElement>(selector);
+      return element ? [{ ...capturePiece(element), duration, lift }] : [];
+    });
     return [{ bounds: card.getBoundingClientRect(), surface: style.backgroundColor, border: style.borderColor,
-      radius: style.borderRadius, glow: style.boxShadow !== 'none', icon: capturePiece(icon), name: capturePiece(name) }];
+      radius: style.borderRadius, shadow: style.boxShadow, icon: capturePiece(icon), name: capturePiece(name), fading }];
   });
   const stage = screen === 'providers' ? root.querySelector<HTMLElement>('.setup-provider-stage') : null;
   const retiring = stage ? capturePiece(stage) : undefined;
@@ -48,26 +71,20 @@ export function setupHandoffAllowed(paused = false): boolean {
     && typeof HTMLElement.prototype.animate === 'function';
 }
 
-/** Measure the incoming mounted screen without activating its effects or changing flow. */
-export function measureSetupScreen(root: HTMLElement): () => void {
-  const hidden = root.hidden;
-  const style = root.getAttribute('style');
-  root.hidden = false;
-  root.inert = true;
-  Object.assign(root.style, { position: 'absolute', inset: '0', visibility: 'hidden', pointerEvents: 'none' });
-  return () => {
-    root.hidden = hidden;
-    if (style === null) root.removeAttribute('style'); else root.setAttribute('style', style);
-  };
-}
-
-/** The returned cleanup cancels without navigating. Visibility/resize finish instantly. */
+/**
+ * Fly one screen's identities onto the next screen's, which is already on screen.
+ *
+ * The incoming screen is live for the whole flight — its wires measure, its reads
+ * run and its heading is the real one — so the cards land into a diagram that was
+ * drawn before they arrived rather than into a blank that fills in afterwards. Only
+ * the landing cards are held back, by the stylesheet, so the moving shells own them.
+ *
+ * The returned cleanup cancels without navigating. Visibility/resize finish instantly.
+ */
 export function playSetupHandoff(
-  host: HTMLElement, outgoing: HTMLElement, incoming: HTMLElement,
-  from: SetupScreenId, to: SetupScreenId, onComplete: () => void,
+  host: HTMLElement, snapshot: SetupSnapshot, incoming: HTMLElement,
+  to: SetupScreenId, onComplete: () => void,
 ): () => void {
-  const snapshot = captureSetupCards(outgoing, from);
-  const restoreIncoming = measureSetupScreen(incoming);
   const targets = Array.from(incoming.querySelectorAll<HTMLElement>(hooks(to).card));
   const origin = host.getBoundingClientRect();
   const layer = document.createElement('div');
@@ -87,16 +104,6 @@ export function playSetupHandoff(
     layer.append(snapshot.retiring.node);
     animate(snapshot.retiring.node, [{ opacity: 1 }, { opacity: 0, transform: 'translateY(-36px)' }], { ...timing, duration: 300 });
   }
-  // The next provider stage enters behind the moving assistant identities.
-  const providerStage = to === 'providers' ? incoming.querySelector<HTMLElement>('.setup-provider-stage') : null;
-  if (providerStage) {
-    const arriving = capturePiece(providerStage);
-    arriving.node.querySelector('.setup-destinations')?.remove();
-    position(arriving);
-    arriving.node.style.visibility = 'visible';
-    layer.append(arriving.node);
-    animate(arriving.node, [{ opacity: 0, transform: 'translateY(-24px)' }, { opacity: 1, transform: 'translateY(0)' }]);
-  }
   snapshot.cards.forEach((source, index) => {
     const target = targets[index];
     if (!target) return;
@@ -106,15 +113,25 @@ export function playSetupHandoff(
     const card = document.createElement('div');
     card.className = 'onboarding-handoff-card';
     Object.assign(card.style, { left: `${source.bounds.x - origin.x}px`, top: `${source.bounds.y - origin.y}px`,
-      width: `${bounds.width}px`, height: `${bounds.height}px` });
+      width: `${source.bounds.width}px`, height: `${source.bounds.height}px` });
     const surface = document.createElement('div');
     surface.className = 'onboarding-handoff-surface';
+    // Scale only ever shrinks, as the reference does: the shell is built at whichever
+    // box is bigger and the other end is the scaled one. A shell scaled past its own
+    // size would magnify its 1px border and its radius with it, which is the bulging
+    // corner the reference never shows.
+    const growing = bounds.width * bounds.height > source.bounds.width * source.bounds.height;
+    if (growing) Object.assign(surface.style, { right: 'auto', bottom: 'auto', width: `${bounds.width}px`, height: `${bounds.height}px` });
+    const scaled = growing
+      ? `scale(${source.bounds.width / bounds.width},${source.bounds.height / bounds.height})`
+      : `scale(${bounds.width / source.bounds.width},${bounds.height / source.bounds.height})`;
     card.append(surface);
     animate(card, [{ transform: 'translate(0,0)' }, { transform: `translate(${bounds.x - source.bounds.x}px,${bounds.y - source.bounds.y}px)` }]);
-    if (source.glow) surface.dataset.glow = 'true';
     animate(surface, [
-      { transform: `scale(${source.bounds.width / bounds.width},${source.bounds.height / bounds.height})`, background: source.surface, borderColor: source.border, borderRadius: source.radius },
-      { transform: 'scale(1,1)', background: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius },
+      { transform: growing ? scaled : 'scale(1,1)', background: source.surface, borderColor: source.border, borderRadius: source.radius,
+        boxShadow: source.shadow === 'none' ? 'none' : 'var(--ob-active-shadow)' },
+      { transform: growing ? 'scale(1,1)' : scaled,
+        background: style.backgroundColor, borderColor: style.borderColor, borderRadius: style.borderRadius, boxShadow: 'none' },
     ]);
     for (const [piece, selector] of [[source.icon, hooks(to).icon], [source.name, hooks(to).name]] as const) {
       const child = target.querySelector<HTMLElement>(selector);
@@ -128,24 +145,22 @@ export function playSetupHandoff(
         color: getComputedStyle(child).color,
       }]);
     }
+    for (const piece of source.fading) {
+      Object.assign(piece.node.style, { position: 'absolute', left: `${piece.bounds.x - source.bounds.x}px`, top: `${piece.bounds.y - source.bounds.y}px`,
+        width: `${piece.bounds.width}px`, height: `${piece.bounds.height}px`, margin: '0', padding: '0' });
+      card.append(piece.node);
+      animate(piece.node, [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: `translateY(${piece.lift}px)` }],
+        { duration: piece.duration, easing: 'ease-out', fill: 'both' });
+    }
     layer.append(card);
   });
-  restoreIncoming();
   host.append(layer);
-  // Start the halo fade one frame in, so the transition runs against the mounted layer.
-  const fade = window.requestAnimationFrame(() => {
-    for (const node of layer.querySelectorAll<HTMLElement>('[data-glow]')) node.removeAttribute('data-glow');
-  });
-  const previousVisibility = outgoing.style.visibility;
-  outgoing.style.visibility = 'hidden';
   let settled = false;
   const media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
   const cleanup = () => {
     window.clearTimeout(timer);
-    window.cancelAnimationFrame(fade);
     animations.forEach((animation) => animation.cancel());
     layer.remove();
-    outgoing.style.visibility = previousVisibility;
     window.removeEventListener('resize', finish);
     document.removeEventListener('visibilitychange', visibility);
     media?.removeEventListener('change', finish);

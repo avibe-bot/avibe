@@ -11,11 +11,12 @@ import en from '../../i18n/en.json';
 import type { BackendConnectionState } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { SetupAction } from './setupFlow';
+import { INITIAL_SETUP_FLOW_STATE } from './setupFlow';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
   listVibeAgents: vi.fn(), getVibeAgent: vi.fn(),
-}, models: { getAgentChain: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
+}, models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
@@ -38,6 +39,25 @@ const next = vi.fn();
 const shown = (saved: ReturnType<typeof data>, active: boolean, onActionChange: (action: SetupAction) => void) =>
   wrap(<AgentDetection data={saved} active={active} onActionChange={onActionChange} onNext={next} />, active);
 const configureAction = () => row('Claude Code').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ });
+const hubAgent = (enabled = true) => ({
+  id: 'claude-claude', name: 'claude', display_name: 'claude', description: null,
+  backend: 'claude' as const, model: 'opus-5', reasoning_effort: null,
+  enabled, archived: false, archived_at: null, source: 'file', updated_at: '',
+  system_prompt: null, created_at: '', metadata: { builtin_default: true },
+});
+const hubChain = (modelId: string) => ({
+  contract_version: 10, backend: 'claude', model_id: 'opus-5',
+  manual_override: { hops: [{ source_id: 'src_a', model_id: modelId }] },
+  route_origin: 'manual', current: { source_id: 'src_a', model_id: modelId },
+  chain: [{ source_id: 'src_a', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
+  supply_state: 'ok',
+});
+const hubReads = {
+  read: async () => ({ kind: 'current' as const, value: [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }] }),
+  refresh: async () => ({ kind: 'current' as const, value: [] }),
+  readValue: async () => [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }],
+  invalidate: () => undefined,
+};
 beforeEach(() => {
   vi.resetAllMocks();
   mock.api.getConfig.mockResolvedValue(data());
@@ -52,10 +72,131 @@ beforeEach(() => {
   mock.api.getVibeAgent.mockResolvedValue({ ok: false, agent: null });
   mock.models.listSources.mockResolvedValue([]);
   mock.models.getAgentChain.mockRejectedValue(new Error('chain unread'));
+  mock.models.getAgentChains.mockResolvedValue([]);
 });
 afterEach(cleanup);
 
 describe('assistant installation presentation', () => {
+  it('enables a Hub assistant after a successful install', async () => {
+    const saved = data();
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/codex', message: '' });
+    render(wrap(<AgentDetection data={{ ...saved, capabilities: { model_hub: { enabled: true } } }} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: 'Install and enable' }));
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ kind: 'set', path: ['agents', 'codex', 'enabled'], value: true })]),
+    ));
+  });
+  it('does not enable a Direct assistant after the ordinary Install action', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'direct',
+    }));
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(row('Codex').getByRole('switch').getAttribute('aria-checked')).toBe('false');
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it.each(['unknown', 'failed'] as const)('does not promise Hub enablement when the mode read is %s', async (outcome) => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    mock.api.getBackendConnection.mockImplementation(async (backend) => {
+      if (backend === 'codex' && outcome === 'failed') throw new Error('unreadable');
+      return { ok: true, backend, installed: false, enabled: false, auth: 'none',
+        application: 'applied', ready: false, entry_eligible: false,
+        supply_mode: backend === 'codex' ? undefined : 'direct' };
+    });
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    expect(row('Codex').queryByRole('button', { name: 'Install and enable' })).toBeNull();
+    fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it('does not auto-enable if a Hub install changes to Direct before it finishes', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.codex.enabled = false;
+    let mode: 'hub' | 'direct' = 'hub';
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false,
+      supply_mode: backend === 'codex' ? mode : 'direct',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    fireEvent.click(await row('Codex').findByRole('button', { name: 'Install and enable' }));
+    mode = 'direct';
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
+    expect(mock.api.getBackendConnection.mock.calls.filter(([backend]) => backend === 'codex').length).toBeGreaterThanOrEqual(4);
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it('does not enable from a stale Hub read when reentry offered ordinary Install', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    let reenter = false;
+    let clickedOrdinaryInstall = false;
+    const onActionChange = vi.fn(() => {
+      if (!reenter || clickedOrdinaryInstall) return;
+      const action = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: 'Install' });
+      clickedOrdinaryInstall = true;
+      action.click();
+    });
+    const props = { data: saved, onNext: vi.fn(), onActionChange };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await row('Claude Code').findByRole('button', { name: 'Install and enable' });
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    reenter = true;
+    await act(async () => view.rerender(wrap(<AgentDetection {...props} active />, true)));
+    expect(clickedOrdinaryInstall).toBe(true);
+    expect(mock.api.installAgent).toHaveBeenCalledWith('claude');
+
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/claude', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
+  it('does not promise enablement when a missing assistant has conflicting Hub and Direct reads', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: false, auth: 'none',
+      application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
+    }));
+    const listed = pending<[]>();
+    mock.models.listSources.mockReturnValue(listed.promise);
+    const install = pending<{ ok: boolean; path: string; message: string }>();
+    mock.api.installAgent.mockReturnValue(install.promise);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: false, mode: 'direct' as const, menu_kind: 'fixed' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
+    await act(async () => listed.resolve([]));
+
+    expect(row('Claude Code').queryByRole('button', { name: 'Install and enable' })).toBeNull();
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
+    await act(async () => install.resolve({ ok: true, path: '/isolated/bin/claude', message: '' }));
+    expect(mock.api.mutateConfig).not.toHaveBeenCalled();
+  });
   it('keeps fixed row order, independent installs and retry details', async () => {
     let finishClaude!: (value: unknown) => void;
     mock.api.installAgent.mockImplementation((name) => name === 'claude'
@@ -73,17 +214,42 @@ describe('assistant installation presentation', () => {
     }
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     await act(async () => finishClaude({ ok: false, message: 'Network unavailable', output: 'Installer exited 1' }));
     expect(row('Claude Code').getByText('Network unavailable')).toBeTruthy();
     expect(row('Claude Code').getByText('View details')).toBeTruthy();
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
     expect(row('OpenCode').getByText('Not installed')).toBeTruthy();
     mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/claude' });
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/bin/claude');
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
+  });
+  it('does not undo a newer disable when an install finishes', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.enabled = false;
+    let enabled = false;
+    let finish!: (value: unknown) => void;
+    mock.api.installAgent.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    mock.api.mutateConfig.mockImplementation(async (mutations) => {
+      enabled = mutations[0].value;
+      return {};
+    });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: false, enabled: backend === 'claude' ? enabled : true,
+      auth: 'none', application: 'applied', ready: false, entry_eligible: false,
+      supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    fireEvent.click(await row('Claude Code').findByRole('button', { name: en.onboarding.setup.installAndEnable }));
+    const toggle = row('Claude Code').getByRole('switch');
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2));
+    await act(async () => finish({ ok: true, path: '/isolated/bin/claude' }));
+    expect(mock.api.mutateConfig).toHaveBeenCalledTimes(2);
+    expect(enabled).toBe(false);
   });
   it('a failed install settlement refreshes connection state without admitting stale readiness', async () => {
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
@@ -137,7 +303,7 @@ describe('assistant installation presentation', () => {
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
   });
   it('opens the setup route editor when the backend is already Hub-owned', async () => {
-    const saved = data(); saved.agents.claude.status = 'ok';
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } }; saved.agents.claude.status = 'ok';
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true,
       backend,
@@ -157,14 +323,16 @@ describe('assistant installation presentation', () => {
     mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [agent], default_agent_name: 'claude' });
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.models.listSources.mockResolvedValue([]);
-    mock.models.getAgentChain.mockResolvedValue({
+    const chain = {
       contract_version: 10, backend: 'claude', model_id: 'opus-5',
       manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }] },
       route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
       chain: [{ source_id: 'src_a', model_id: 'opus-5', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
       supply_state: 'ok',
-    });
-    const flowState = { providerSelection: { scan: null, selectedBackends: [] }, importedCount: 0, addedThroughMore: [], routeOrder: [], routeOrderDirty: false };
+    };
+    mock.models.getAgentChains.mockResolvedValue([chain]);
+    mock.models.getAgentChain.mockResolvedValue(chain);
+    const flowState = INITIAL_SETUP_FLOW_STATE;
     const agentReads = {
       read: async () => ({ kind: 'current' as const, value: [{ backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const, named_agents: [{ name: 'claude', effective_model_id: 'opus-5', supply_status: 'ok' as const }] }] }),
       refresh: async () => ({ kind: 'current' as const, value: [] }),
@@ -172,11 +340,14 @@ describe('assistant installation presentation', () => {
       invalidate: () => undefined,
     };
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={flowState} setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={agentReads} />));
-    const action = await row('Claude Code').findByRole('button', { name: en.onboarding.setup.configureRoute });
+    await waitFor(() => expect(mock.api.getVibeAgent).toHaveBeenCalledWith('claude', { cache: false }));
+    await waitFor(() => expect(mock.models.getAgentChains).toHaveBeenCalledWith('claude'));
+    expect(await mock.models.getAgentChains.mock.results.at(-1)?.value).toEqual([chain]);
+    const action = await row('Claude Code').findByRole('button', { name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code') });
     const enter = screen.getByRole('button', { name: 'Enter workspace' });
     expect(enter.hasAttribute('disabled')).toBe(true);
     fireEvent.click(action);
-    expect(await screen.findByRole('dialog', { name: en.onboarding.route.title })).toBeTruthy();
+    expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(screen.getByTestId('location').textContent).toBe('/');
     expect(enter.hasAttribute('disabled')).toBe(true);
   });
@@ -203,7 +374,7 @@ describe('assistant installation presentation', () => {
     const back = vi.fn();
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onBack={back} />));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     fireEvent.click(row('Codex').getByRole('switch'));
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(back).toHaveBeenCalledWith({ agents: expect.objectContaining({
@@ -241,13 +412,13 @@ describe('assistant installation presentation', () => {
       ? Promise.resolve({ found: true, path: '/isolated/external/claude' })
       : name === 'codex' ? Promise.resolve({ found: false }) : Promise.reject(new Error('Probe unavailable')));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     expect(row('Claude Code').queryByRole('alert')).toBeNull();
     expect(row('Claude Code').queryByText('Details claude')).toBeNull();
     expect(row('Codex').getByText('Failed codex')).toBeTruthy();
     expect(row('Codex').getByText('Details codex')).toBeTruthy();
     expect(row('OpenCode').getByText('Error: Probe unavailable')).toBeTruthy();
-    expect(row('OpenCode').queryByRole('button', { name: 'Installed' })).toBeNull();
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.enabled })).toBeNull();
     // A rejected probe retains install evidence; a later missing result shows it again.
     mock.api.detectCli.mockResolvedValue({ found: false });
     fireEvent.click(row('OpenCode').getByRole('button', { name: 'Retry' }));
@@ -268,12 +439,12 @@ describe('assistant installation presentation', () => {
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     expect(mock.api.installAgent).toHaveBeenCalledWith('codex');
     await act(async () => finishInstall({ ok: true, path: '/isolated/bin/codex' }));
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
     expect(row('Codex').getByRole('button', { name: /Add subscription|API Key connected|Subscription connected/ }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     await act(async () => finishConfig(data()));
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
-    expect(row('Codex').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('settles an enable write that lands while the screen is away, and reads nothing from hiding', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
@@ -351,14 +522,14 @@ describe('assistant installation presentation', () => {
     // retained screen mounted. That is the one probe the stale path ever gets.
     await waitFor(() => expect(probes('/stale/claude')).toBe(1));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy());
+    await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     const retainedProbes = probes('/retained/claude');
 
     view.rerender(shown(saved, false, publish));
     view.rerender(shown(saved, true, publish));
     await waitFor(() => expect(probes('/retained/claude')).toBe(retainedProbes + 1));
     expect(probes('/stale/claude')).toBe(1);
-    expect(row('Claude Code').getByRole('button', { name: 'Installed' })).toBeTruthy();
+    expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('does not enable entry from installed, draining, failed or unknown states', async () => {
     for (const application of ['draining', 'failed', 'unknown']) {
@@ -382,6 +553,541 @@ describe('assistant installation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Subscription connected' }));
     expect(configure).toHaveBeenCalledOnce();
   });
+  it('does not offer route repair when an installed Hub assistant has no selected model', () => {
+    render(wrap(<AssistantRow backend="claude" status="ok" installing={false} detecting={false}
+      lifecycle={<span>Enabled</span>} enabledControl={null} enabled hubManaged
+      onInstall={vi.fn()} onDetect={vi.fn()} onConfigure={vi.fn()}
+      route={{ kind: 'no-agent-model' }} />));
+    expect(screen.getByText(en.onboarding.setup.noteModelUnset)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+  });
+  it.each([
+    ['no-agent-model', en.onboarding.setup.noteModelUnset],
+    ['empty-route', en.onboarding.setup.noteNoModels],
+  ] as const)('shows %s on a disabled Hub card without offering an editor', (kind, note) => {
+    const configure = vi.fn();
+    render(wrap(<AssistantRow backend="claude" status="ok" installing={false} detecting={false}
+      lifecycle={<span>Installed</span>} enabledControl={null} hubManaged
+      onInstall={vi.fn()} onDetect={vi.fn()} onConfigure={configure}
+      route={kind === 'no-agent-model' ? { kind } : { kind: 'route', model: null, backups: 0 }} />));
+    expect(screen.getByText(note)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(configure).not.toHaveBeenCalled();
+  });
+});
+
+describe('Hub route refresh', () => {
+  it.each(['direct', 'hub'] as const)('uses current %s route ownership when the connection read fails', async (mode) => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockRejectedValue(new Error('connection unreadable'));
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode, menu_kind: 'fixed' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+
+    if (mode === 'direct') {
+      const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', { name: /Add subscription/ });
+      await waitFor(() => expect(action.disabled).toBe(false));
+      expect(row('Claude Code').queryByRole('button', {
+        name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+      })).toBeNull();
+      fireEvent.click(action);
+      expect(await screen.findByRole('dialog')).toBeTruthy();
+      expect(mock.models.getAgentChains).not.toHaveBeenCalled();
+    } else {
+      const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+        name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+      });
+      await waitFor(() => expect(action.disabled).toBe(false));
+      fireEvent.click(action);
+      expect(await screen.findByRole('dialog')).toBeTruthy();
+      expect(mock.models.getAgentChains).toHaveBeenCalledWith('claude');
+    }
+  });
+
+  it.each([
+    ['hub', 'direct'],
+    ['direct', 'hub'],
+  ] as const)('keeps conflicting connection %s and route %s ownership in an unknown state', async (connectionMode, routeMode) => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: connectionMode,
+    }));
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    const listed = pending<[]>();
+    mock.models.listSources.mockReturnValue(listed.promise);
+    let currentSupplyMode: 'hub' | 'direct' = routeMode;
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: currentSupplyMode, menu_kind: 'fixed' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
+    await act(async () => listed.resolve([]));
+
+    expect(row('Claude Code').queryByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    })).toBeNull();
+    const action = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: /Add subscription/ });
+    expect(action.disabled).toBe(true);
+    action.removeAttribute('disabled');
+    fireEvent.click(action);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(row('Claude Code').getByText(en.onboarding.setup.ownershipChanged)).toBeTruthy();
+    const connectionReads = mock.api.getBackendConnection.mock.calls.length;
+    currentSupplyMode = connectionMode;
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(mock.api.getBackendConnection.mock.calls.length).toBeGreaterThan(connectionReads));
+    if (connectionMode === 'hub') {
+      await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
+    } else {
+      await waitFor(() => expect(row('Claude Code').getByRole<HTMLButtonElement>('button', { name: 'API Key connected' }).disabled).toBe(false));
+    }
+    expect(row('Claude Code').queryByText(en.onboarding.setup.ownershipChanged)).toBeNull();
+  });
+
+  it('keeps configuration disabled when neither ownership read succeeds', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.getBackendConnection.mockRejectedValue(new Error('connection unreadable'));
+    const reads = { ...hubReads, read: async () => { throw new Error('route unreadable'); } };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText('Error: connection unreadable');
+    const action = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: /Add subscription/ });
+    expect(action.disabled).toBe(true);
+    action.removeAttribute('disabled');
+    fireEvent.click(action);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('does not reuse a Direct connection while rereading Hub ownership on reentry', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    let mode: 'direct' | 'hub' = 'direct';
+    const nextConnection = pending<BackendConnectionState>();
+    const nextSupply = pending<Awaited<ReturnType<typeof hubReads.read>>>();
+    mock.api.getBackendConnection.mockImplementation(async (backend) => backend === 'claude' && mode === 'hub'
+      ? nextConnection.promise
+      : { ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+        application: 'applied', ready: true, entry_eligible: true, supply_mode: mode });
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    const reads = { ...hubReads, read: async () => mode === 'hub' ? nextSupply.promise
+      : { kind: 'current' as const, value: [
+        { backend: 'claude' as const, cli_present: true, mode: 'direct' as const, menu_kind: 'fixed' as const },
+      ] } };
+    const props = { data: saved, onNext: vi.fn(), onNavigate: vi.fn(), agentReads: reads };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(row('Claude Code').getByRole<HTMLButtonElement>('button', { name: 'API Key connected' }).disabled).toBe(false));
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    mode = 'hub';
+    view.rerender(wrap(<AgentDetection {...props} active />, true));
+    const staleAction = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: /Add subscription/ });
+    expect(staleAction.disabled).toBe(true);
+    staleAction.removeAttribute('disabled');
+    fireEvent.click(staleAction);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => {
+      nextConnection.resolve({ ok: true, backend: 'claude', installed: true, enabled: true,
+        auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
+      nextSupply.resolve(await hubReads.read());
+    });
+    const currentAction = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(currentAction.disabled).toBe(false));
+    fireEvent.click(currentAction);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('keeps a failed route read visible and retries it without claiming the model is unset', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockRejectedValueOnce(new Error('offline')).mockResolvedValue([hubChain('model-a')]);
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+
+    await waitFor(() => expect(row('Claude Code').getByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeTruthy());
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteModelUnset)).toBeNull();
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteNoModels)).toBeNull();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(row('Claude Code').getByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    })).toHaveProperty('disabled', true);
+    const connectionReads = mock.api.getBackendConnection.mock.calls.length;
+    fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(row('Claude Code').getByText('model-a')).toBeTruthy());
+    expect(row('Claude Code').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
+    expect(mock.models.getAgentChains).toHaveBeenCalledTimes(2);
+    expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(connectionReads);
+  });
+
+  it.each(['chain', 'detail'] as const)('isolates a failed %s read to its assistant', async (failure) => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    saved.agents.codex.status = 'ok';
+    const codexAgent = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent(), codexAgent], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => {
+      if (failure === 'detail' && name === 'claude') throw new Error('detail unreadable');
+      return { ok: true, agent: name === 'codex' ? codexAgent : hubAgent() };
+    });
+    mock.models.getAgentChains.mockImplementation(async (backend) => {
+      if (failure === 'chain' && backend === 'claude') throw new Error('chain unreadable');
+      return [{ ...hubChain('model-a'), backend }];
+    });
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), backend: 'codex' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText(en.settings.models.routeDialog.fail.reconcileRead);
+    expect(row('Codex').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
+    const action = row('Codex').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Codex'),
+    });
+    expect(action.disabled).toBe(false);
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('lets a ready assistant edit while another chain read remains pending', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    saved.agents.codex.status = 'ok';
+    const codexAgent = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent(), codexAgent], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true, agent: name === 'codex' ? codexAgent : hubAgent() }));
+    const delayed = pending<ReturnType<typeof hubChain>[]>();
+    mock.models.getAgentChains.mockImplementation((backend) => backend === 'claude'
+      ? delayed.promise : Promise.resolve([{ ...hubChain('model-a'), backend }]));
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), backend: 'codex' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    const action = await row('Codex').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Codex'),
+    });
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(row('Claude Code').getByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    })).toHaveProperty('disabled', true);
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    await act(async () => delayed.resolve([hubChain('model-a')]));
+  });
+
+  it('does not use an Agent archived after the brief read as a route target', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    saved.agents.codex.status = 'ok';
+    const codexAgent = { ...hubAgent(), id: 'codex-codex', name: 'codex', backend: 'codex' as const };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent(), codexAgent], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true,
+      agent: name === 'claude' ? { ...hubAgent(), archived: true } : codexAgent }));
+    mock.models.getAgentChains.mockImplementation(async (backend) => [{ ...hubChain('model-a'), backend }]);
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), backend: 'codex' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText(en.onboarding.setup.noteModelUnset);
+    expect(row('Claude Code').queryByText('model-a')).toBeNull();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(mock.models.getAgentChains).not.toHaveBeenCalledWith('claude');
+    const codexAction = row('Codex').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Codex'),
+    });
+    expect(codexAction.disabled).toBe(false);
+    fireEvent.click(codexAction);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('stops after a confirmed backend-named target, ignoring unreadable custom Agents', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const custom = { ...hubAgent(), id: 'custom', name: 'custom' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [custom, hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => {
+      if (name === 'custom') throw new Error('unreadable custom Agent');
+      return { ok: true, agent: hubAgent() };
+    });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => name === 'custom')).toHaveLength(0);
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('keeps an unreadable higher-priority target unknown instead of falling back', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const fallback = { ...hubAgent(), id: 'fallback', name: 'default' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [fallback, hubAgent()], default_agent_name: 'default' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => {
+      if (name === 'claude') throw new Error('unreadable designated Agent');
+      return { ok: true, agent: fallback };
+    });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    await row('Claude Code').findByText(en.settings.models.routeDialog.fail.reconcileRead);
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => name === 'default')).toHaveLength(0);
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(mock.models.getAgentChains).not.toHaveBeenCalledWith('claude');
+  });
+
+  it('uses the next current builtin after an archived detail, in stable name order', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    const named = { ...hubAgent(), name: 'zeta', model: 'zeta-model' };
+    const earlier = { ...hubAgent(), name: 'alpha', model: 'alpha-model' };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [named, earlier, hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async (name) => ({ ok: true,
+      agent: name === 'claude' ? { ...hubAgent(), archived: true } : name === 'alpha' ? earlier : named }));
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('model-a'), model_id: 'alpha-model' }]);
+    mock.models.getAgentChain.mockResolvedValue({ ...hubChain('model-a'), model_id: 'alpha-model' });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={hubReads} />));
+    const action = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(mock.api.getVibeAgent.mock.calls.filter(([name]) => ['claude', 'alpha', 'zeta'].includes(name))
+      .map(([name]) => name)).toEqual(['claude', 'alpha']);
+    fireEvent.click(action);
+    expect(within(await screen.findByRole('dialog')).getByText('alpha-model · Route chain')).toBeTruthy();
+  });
+
+  it('does not borrow a menu label from another backend for an upstream hop', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('shared-id')]);
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [] }]);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const },
+      { backend: 'codex' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'fixed' as const,
+        catalog_models: [{ id: 'shared-id', display_name: 'Wrong menu label' }] },
+    ] }) };
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    await row('Claude Code').findByText('shared-id');
+    expect(row('Claude Code').queryByText('Wrong menu label')).toBeNull();
+  });
+
+  it('distinguishes a confirmed missing Agent model from a configured model with an empty chain', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    let selectedModel: string | null = null;
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent: { ...hubAgent(), model: selectedModel } }));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    mock.models.getAgentChains.mockResolvedValue([]);
+    const props = { data: saved, onNext: vi.fn(), onNavigate: vi.fn(), agentReads: hubReads };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await row('Claude Code').findByText(en.onboarding.setup.noteModelUnset);
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteNoModels)).toBeNull();
+    expect(mock.models.getAgentChains).not.toHaveBeenCalled();
+
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    selectedModel = 'opus-5';
+    view.rerender(wrap(<AgentDetection {...props} active />, true));
+    await row('Claude Code').findByText(en.onboarding.setup.noteNoModels);
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteModelUnset)).toBeNull();
+    expect(mock.models.getAgentChains).toHaveBeenCalledWith('claude');
+    const action = row('Claude Code').getByRole<HTMLButtonElement>('button', { name: en.onboarding.setup.configureRoute });
+    expect(action.disabled).toBe(false);
+    fireEvent.click(action);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
+  it('refreshes connection and route ownership when a route dialog closes after Hub becomes Direct', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    let mode: 'hub' | 'direct' = 'hub';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChains.mockResolvedValue([hubChain('model-a')]);
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: mode,
+    }));
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'claude' as const, cli_present: true, mode, menu_kind: 'fixed' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    const routeAction = await row('Claude Code').findByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(routeAction.disabled).toBe(false));
+    fireEvent.click(routeAction);
+    const dialog = await screen.findByRole('dialog');
+    mode = 'direct';
+    const priorConnectionReads = mock.api.getBackendConnection.mock.calls.length;
+    fireEvent.click(dialog.querySelector('.model-hub-route-close') as HTMLButtonElement);
+    await waitFor(() => expect(mock.api.getBackendConnection.mock.calls.length).toBeGreaterThan(priorConnectionReads));
+    await waitFor(() => expect(row('Claude Code').getByRole<HTMLButtonElement>('button', { name: 'API Key connected' }).disabled).toBe(false));
+    expect(row('Claude Code').queryByText(en.onboarding.setup.ownershipChanged)).toBeNull();
+    expect(row('Claude Code').queryByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    })).toBeNull();
+  });
+
+  it('shows a disabled builtin assistant its stored route without opening the editor', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.opencode.status = 'ok';
+    saved.agents.opencode.enabled = false;
+    const agent = { ...hubAgent(false), id: 'opencode-opencode', name: 'opencode',
+      display_name: 'opencode', backend: 'opencode' as const, model: 'gpt-5.6-sol' };
+    mock.api.listVibeAgents.mockImplementation(async ({ includeDisabled }) => ({
+      ok: true, agents: includeDisabled ? [agent] : [], default_agent_name: null,
+    }));
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
+    let opencodeEnabled = false;
+    mock.api.mutateConfig.mockImplementation(async () => {
+      opencodeEnabled = true;
+      return {};
+    });
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: backend !== 'opencode' || opencodeEnabled, auth: 'api_key',
+      application: 'applied', ready: backend !== 'opencode' || opencodeEnabled,
+      entry_eligible: backend !== 'opencode' || opencodeEnabled, supply_mode: 'hub',
+    }));
+    mock.models.listSources.mockResolvedValue([{ id: 'src_a', models: [{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6-Sol' }] }]);
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('gpt-5.6-sol'), backend: 'opencode', model_id: 'gpt-5.6-sol',
+      chain: [
+        { source_id: 'src_a', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'healthy', runnable: true },
+        { source_id: 'src_a', model_id: 'claude-opus-5-5', channel: 'hub', health: 'healthy', runnable: true },
+      ],
+    }]);
+    const reads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [
+      { backend: 'opencode' as const, cli_present: true, mode: 'hub' as const, menu_kind: 'open' as const },
+    ] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    const choice = await row('OpenCode').findByRole('button', { name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'OpenCode') });
+    await waitFor(() => expect(row('OpenCode').getByText('GPT-5.6-Sol')).toBeTruthy());
+    expect(choice.textContent).toContain('1 backup');
+    expect(choice).toHaveProperty('disabled', true);
+    fireEvent.click(choice);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(mock.api.listVibeAgents).toHaveBeenCalledWith({ cache: false, includeDisabled: true });
+    fireEvent.click(row('OpenCode').getByRole('switch', { name: 'Enable OpenCode' }));
+    await waitFor(() => expect(row('OpenCode').getByRole('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'OpenCode'),
+    })).toHaveProperty('disabled', false));
+  });
+
+  it('keeps an explicitly Direct assistant out of Hub routing', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [hubAgent()], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent: hubAgent() });
+    mock.models.getAgentChain.mockResolvedValue(hubChain('model-a'));
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key',
+      application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct',
+    }));
+    const directReads = { ...hubReads, read: async () => ({ kind: 'current' as const, value: [{ backend: 'claude' as const, cli_present: true, mode: 'direct' as const, menu_kind: 'fixed' as const }] }) };
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} flowState={INITIAL_SETUP_FLOW_STATE}
+      setFlowState={vi.fn()} onNavigate={vi.fn()} agentReads={directReads} />));
+    await waitFor(() => expect(mock.api.listVibeAgents).toHaveBeenCalled());
+    expect(mock.models.getAgentChains).not.toHaveBeenCalled();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.configureRoute })).toBeNull();
+    expect(row('Claude Code').queryByText(en.onboarding.setup.defaultModel)).toBeNull();
+  });
+
+  it('cannot open a stale route while re-reading a changed Agent model on reentry', async () => {
+    const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
+    saved.agents.claude.status = 'ok';
+    let designatedModel = 'model-A';
+    const listed = { ...hubAgent(), model: designatedModel };
+    mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [listed], default_agent_name: 'claude' });
+    mock.api.getVibeAgent.mockImplementation(async () => ({ ok: true, agent: { ...listed, model: designatedModel } }));
+    mock.models.getAgentChains.mockResolvedValue([{ ...hubChain('hop-A'), model_id: 'model-A' }]);
+    const flowState = { ...INITIAL_SETUP_FLOW_STATE };
+    const setFlowState = vi.fn();
+    const props = { data: saved, onNext: vi.fn(), flowState, setFlowState, onNavigate: vi.fn(), agentReads: hubReads };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    const routeAction = () => row('Claude Code').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    await waitFor(() => expect(row('Claude Code').getByText('hop-A')).toBeTruthy());
+    expect(routeAction().disabled).toBe(false);
+    view.rerender(wrap(<AgentDetection {...props} active={false} />, false));
+    designatedModel = 'model-B';
+    const delayed = pending<ReturnType<typeof hubChain>[]>();
+    mock.models.getAgentChains.mockReturnValue(delayed.promise);
+    view.rerender(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(mock.models.getAgentChains).toHaveBeenCalledTimes(2));
+    const pendingAction = row('Claude Code').getByRole<HTMLButtonElement>('button', {
+      name: en.onboarding.setup.defaultModelNamed.replace('{{name}}', 'Claude Code'),
+    });
+    expect(pendingAction.disabled).toBe(true);
+    expect(row('Claude Code').queryByText(en.onboarding.setup.noteNoModels)).toBeNull();
+    pendingAction.removeAttribute('disabled');
+    fireEvent.click(pendingAction);
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    await act(async () => delayed.resolve([{ ...hubChain('hop-B'), model_id: 'model-B' }]));
+    await waitFor(() => expect(row('Claude Code').getByText('hop-B')).toBeTruthy());
+    expect(routeAction().disabled).toBe(false);
+    fireEvent.click(routeAction());
+    expect(within(await screen.findByRole('dialog')).getByText('model-B · Route chain')).toBeTruthy();
+  });
+
 });
 
 const pending = <T,>() => { let resolve!: (value: T) => void; let reject!: (reason: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
