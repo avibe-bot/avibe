@@ -2867,12 +2867,14 @@ class SessionHandler(BaseHandler):
         if returncode is not None:
             diagnostic = f"{diagnostic}\nClaude process terminated: {claude_process_exit_reason(returncode)}"
             resource_failure = getattr(client, "_vibe_resource_failure", None)
-            if resource_failure is None and not self.claude_teardown_is_intentional(
-                composite_key, error, client=client
-            ):
-                resource_failure = observe_agent_resource_pressure(self.controller)
-                if resource_failure is not None:
-                    setattr(client, "_vibe_resource_failure", resource_failure)
+            if not getattr(client, "_vibe_resource_failure_checked", False):
+                if resource_failure is None and not self.claude_teardown_is_intentional(
+                    composite_key, error, client=client
+                ):
+                    resource_failure = observe_agent_resource_pressure(self.controller)
+                    if resource_failure is not None:
+                        setattr(client, "_vibe_resource_failure", resource_failure)
+                setattr(client, "_vibe_resource_failure_checked", True)
             if resource_failure is not None:
                 diagnostic = f"{diagnostic}\nResource diagnosis: {resource_failure.message}"
         stderr_tail = get_claude_client_stderr_tail(client)

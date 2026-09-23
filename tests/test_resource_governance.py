@@ -16,6 +16,7 @@ from core.resource_governance import (
     governor_from_controller,
     pids_failure_labels,
     tenant_memory_limit_bytes,
+    tenant_pid_limit,
 )
 
 
@@ -27,6 +28,26 @@ def test_derive_agent_limits_uses_single_aggregate_budget() -> None:
     assert limits.cpu_weight == 50
     assert limits.io_weight == 50
     assert limits.pids_max == 4096
+
+
+def test_agent_pid_limit_reserves_runtime_capacity_below_ancestor_cap() -> None:
+    assert derive_agent_limits(None, tenant_pids_max=4096).pids_max == 3072
+    assert derive_agent_limits(
+        None, {"agent_pids_max": 8192}, tenant_pids_max=1024
+    ).pids_max == 768
+    assert derive_agent_limits(
+        None, {"agent_pids_max": 256}, tenant_pids_max=4096
+    ).pids_max == 256
+
+
+def test_tenant_pid_limit_uses_tightest_ancestor(tmp_path: Path) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (root / "pids.max").write_text("2048\n", encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
+
+    assert tenant_pid_limit(base, root) == 2048
 
 
 def test_governor_diagnoses_pid_limit_from_counter_delta(
@@ -116,6 +137,7 @@ def test_changed_limits_reconfigure_same_group_without_losing_pressure(
     group = base / "avibe-agents"
     group.mkdir(parents=True)
     (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
     for name, value in (
         ("cgroup.procs", ""),
         ("cpu.weight", "50"),
@@ -137,12 +159,15 @@ def test_changed_limits_reconfigure_same_group_without_losing_pressure(
     baseline = governor.snapshot()
     governor._event_baseline = baseline
 
-    governor.update_config({"mode": "enabled", "agent_cpu_weight": 100})
+    governor.update_config(
+        {"mode": "enabled", "agent_cpu_weight": 100, "agent_pids_max": 8192}
+    )
     (group / "pids.events").write_text("max 5\n", encoding="utf-8")
 
     assert governor.group_path == group
     assert governor._event_baseline is baseline
     assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "100"
+    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "3072"
     assert governor.observe_resource_pressure().event_delta == 1
 
 
@@ -428,6 +453,7 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     base.mkdir(parents=True)
     (root / "memory.max").write_text("max\n", encoding="utf-8")
     (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "pids.max").write_text("4096\n", encoding="utf-8")
     (base / "cgroup.controllers").write_text("memory cpu io pids\n", encoding="utf-8")
     (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
     (base / "cgroup.procs").write_text("1001\n1002\n", encoding="utf-8")
@@ -479,7 +505,7 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     assert (group / "memory.oom.group").read_text(encoding="utf-8").strip() == "1"
     assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "50"
     assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 50"
-    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "4096"
+    assert (group / "pids.max").read_text(encoding="utf-8").strip() == "3072"
 
 
 def test_governor_falls_back_when_memory_controller_is_missing(

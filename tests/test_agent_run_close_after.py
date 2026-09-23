@@ -505,6 +505,46 @@ def test_prewrite_cancel_waits_for_durable_run_settlement() -> None:
     asyncio.run(exercise())
 
 
+def test_close_after_waits_for_backend_terminal_cleanup() -> None:
+    async def exercise() -> None:
+        controller = SimpleNamespace()
+        controller.agent_service = AgentService(controller)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        cleanup = asyncio.Event()
+        context = MessageContext(
+            user_id="user",
+            channel_id="session-1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_id": "session-1",
+                "agent_backend": "claude",
+                "close_after": True,
+                "agent_runtime_turn_key": "runtime-1",
+                "agent_session_target": {
+                    "agent_backend": "claude",
+                    "session_anchor": "base-session-1",
+                },
+                "_close_after_backend_cleanup": cleanup,
+            },
+        )
+        closed = asyncio.Event()
+
+        async def end_running_agent(*_args, **_kwargs):
+            closed.set()
+            return {"ok": True}
+
+        with patch(
+            "core.services.running_agents.end_running_agent", new=end_running_agent
+        ):
+            dispatcher._schedule_close_after_runtime(context)
+            await asyncio.sleep(0)
+            assert not closed.is_set()
+            cleanup.set()
+            await asyncio.wait_for(closed.wait(), timeout=1)
+
+    asyncio.run(exercise())
+
+
 def test_deferred_close_after_does_not_stop_successor_after_run_settles() -> None:
     async def exercise() -> None:
         controller = SimpleNamespace()

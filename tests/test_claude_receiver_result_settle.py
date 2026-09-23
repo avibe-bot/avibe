@@ -1487,6 +1487,47 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mark_idle_calls, [composite_key])
         self.assertFalse(agent._has_pending_requests(composite_key))
 
+    async def test_close_after_cleanup_waits_for_result_reaction(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={"close_after": True},
+        )
+        composite_key = "session-close-after:/tmp/work"
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        reaction_started = asyncio.Event()
+        finish_reaction = asyncio.Event()
+        emitted_cleanup = None
+
+        async def emit_result(*_args, **_kwargs):
+            nonlocal emitted_cleanup
+            emitted_cleanup = context.platform_specific["_close_after_backend_cleanup"]
+
+        async def remove_reaction(*_args):
+            reaction_started.set()
+            await finish_reaction.wait()
+
+        agent.emit_result_message = AsyncMock(side_effect=emit_result)
+        agent._remove_result_pending_reaction = AsyncMock(side_effect=remove_reaction)
+        receiver = asyncio.create_task(
+            agent._receive_messages(
+                _one_result_client(),
+                "session-close-after",
+                "/tmp/work",
+                context,
+                composite_key=composite_key,
+            )
+        )
+        await asyncio.wait_for(reaction_started.wait(), timeout=1)
+        self.assertIsNotNone(emitted_cleanup)
+        self.assertFalse(emitted_cleanup.is_set())
+        finish_reaction.set()
+        await receiver
+        self.assertTrue(emitted_cleanup.is_set())
+        self.assertEqual(mark_idle_calls, [composite_key])
+
     async def test_force_cleanup_suppresses_receiver_release_until_terminal_emit(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)

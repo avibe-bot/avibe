@@ -1778,6 +1778,7 @@ class ConsolidatedMessageDispatcher:
                     release_lease(lease[0], lease[1])
             return
         self._close_after_session_ids.add(session_id)
+        backend_cleanup = payload.get("_close_after_backend_cleanup")
 
         async def _close() -> None:
             # A backend may finish its own post-result cleanup after the shared
@@ -1788,6 +1789,8 @@ class ConsolidatedMessageDispatcher:
                     wait_for_run_ids
                 ):
                     return
+                if isinstance(backend_cleanup, asyncio.Event):
+                    await backend_cleanup.wait()
                 await asyncio.sleep(0)
                 if current_lease is not None and current_lease[2] is not None:
                     await asyncio.wait({current_lease[2]})

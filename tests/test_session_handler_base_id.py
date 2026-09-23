@@ -686,6 +686,33 @@ def test_intentional_claude_exit_does_not_consume_shared_resource_pressure(monke
     assert observations == [True]
 
 
+def test_negative_claude_pressure_check_is_cached_for_exited_client(monkeypatch) -> None:
+    controller = _Controller(platform="slack")
+    handler = SessionHandler(controller)
+    client = SimpleNamespace(
+        _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-9)),
+    )
+    observations = []
+
+    def observe(_controller):
+        observations.append(True)
+        return None if len(observations) == 1 else AgentResourceFailure(
+            kind="pids", message="later shared event"
+        )
+
+    monkeypatch.setattr(
+        "core.handlers.session_handler.observe_agent_resource_pressure", observe
+    )
+    for _ in range(2):
+        diagnostic = handler.claude_error_diagnostic(
+            "slack_C123:/tmp/workdir",
+            RuntimeError("old generation ended"),
+            client=client,
+        )
+        assert "later shared event" not in diagnostic
+    assert observations == [True]
+
+
 def test_service_initiated_teardown_signal_is_not_reported_as_session_error() -> None:
     """A SIGKILL the service issued itself must not read as a backend crash.
 

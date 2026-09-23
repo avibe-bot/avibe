@@ -205,9 +205,29 @@ def tenant_memory_limit_bytes(cgroup: Path | None = None, root: Path | None = No
     return None
 
 
+def tenant_pid_limit(cgroup: Path, root: Path) -> int | None:
+    """The tightest PID cap from the tenant through its cgroup ancestors."""
+
+    root = root.resolve()
+    cursor = cgroup.resolve()
+    if cursor != root and root not in cursor.parents:
+        return None
+    limits: list[int] = []
+    while True:
+        limit = _parse_pids_max(_read_text(cursor / "pids.max"))
+        if limit is not None:
+            limits.append(limit)
+        if cursor == root:
+            break
+        cursor = cursor.parent
+    return min(limits) if limits else None
+
+
 def derive_agent_limits(
     tenant_memory_bytes: int | None,
     config: dict[str, Any] | None = None,
+    *,
+    tenant_pids_max: int | None = None,
 ) -> AgentResourceLimits:
     config = config or {}
 
@@ -224,6 +244,11 @@ def derive_agent_limits(
     cpu_weight = max(1, min(10_000, _int_config("agent_cpu_weight", DEFAULT_AGENT_CPU_WEIGHT)))
     io_weight = max(1, min(10_000, _int_config("agent_io_weight", DEFAULT_AGENT_IO_WEIGHT)))
     pids_max = max(32, _int_config("agent_pids_max", DEFAULT_AGENT_PIDS_MAX))
+    if tenant_pids_max is not None:
+        # The agent group is a sibling of avibe-runtime under this cap. Keep
+        # explicit runtime headroom even when the configured agent cap is high.
+        runtime_reserve = max(64, tenant_pids_max // 4)
+        pids_max = min(pids_max, max(1, tenant_pids_max - runtime_reserve))
     oom_score_adj = max(-1000, min(1000, _int_config("agent_oom_score_adj", DEFAULT_AGENT_OOM_SCORE_ADJ)))
 
     explicit_max = _int_config("agent_memory_max_bytes", 0)
@@ -479,7 +504,11 @@ class AgentResourceGovernor:
             if self.mode != "disabled":
                 root = self.root or detect_cgroup_root()
                 if root is not None and self._base is not None:
-                    limits = derive_agent_limits(tenant_memory_limit_bytes(self._base, root), self.config)
+                    limits = derive_agent_limits(
+                        tenant_memory_limit_bytes(self._base, root),
+                        self.config,
+                        tenant_pids_max=tenant_pid_limit(self._base, root),
+                    )
                     try:
                         self._configure_group(self._group, limits)
                     except OSError as exc:
@@ -613,7 +642,11 @@ class AgentResourceGovernor:
             self._prepare_base_cgroup(base, runtime_group, group, root, known_agent_pids=known_agent_pids)
             self._enable_subtree_controllers(base)
             group.mkdir(exist_ok=True)
-            limits = derive_agent_limits(tenant_memory_limit_bytes(base, root), self.config)
+            limits = derive_agent_limits(
+                tenant_memory_limit_bytes(base, root),
+                self.config,
+                tenant_pids_max=tenant_pid_limit(base, root),
+            )
             self._configure_group(group, limits)
         except OSError as exc:
             self._disabled_reason = str(exc)

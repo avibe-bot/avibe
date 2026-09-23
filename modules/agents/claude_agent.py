@@ -2047,6 +2047,14 @@ class ClaudeAgent(BaseAgent):
                         # the result to the live sink instead of rejecting it as a
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
+                        close_after_payload = getattr(context, "platform_specific", None) or {}
+                        backend_cleanup = (
+                            asyncio.Event()
+                            if close_after_payload.get("close_after")
+                            else None
+                        )
+                        if backend_cleanup is not None:
+                            close_after_payload["_close_after_backend_cleanup"] = backend_cleanup
 
                         # A terminal result consumes this Turn even when IM delivery
                         # fails. A failed Activity delivery is requeued below, but its
@@ -2131,29 +2139,35 @@ class ClaudeAgent(BaseAgent):
                                         exc_info=True,
                                     )
                         finally:
-                            await self._remove_result_pending_reaction(
-                                composite_key,
-                                context,
-                                pending_request,
-                            )
-                            self._last_assistant_text.pop(composite_key, None)
-                            self._foreground_tool_use_ids.pop(composite_key, None)
-                            self._turns_with_foreground_tools.discard(composite_key)
-                            is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
                             try:
-                                session = await self.session_manager.get_or_create_session(
-                                    context.user_id, context.channel_id
-                                )
-                                if session and is_idle:
-                                    session.session_active[composite_key] = False
-                            except Exception:
-                                logger.debug(
-                                    "claude: failed to update session_active after result for %s",
+                                await self._remove_result_pending_reaction(
                                     composite_key,
-                                    exc_info=True,
+                                    context,
+                                    pending_request,
                                 )
-                            if emit_failed:
-                                self._release_service_runtime_turn(context)
+                                self._last_assistant_text.pop(composite_key, None)
+                                self._foreground_tool_use_ids.pop(composite_key, None)
+                                self._turns_with_foreground_tools.discard(composite_key)
+                                is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
+                                try:
+                                    session = await self.session_manager.get_or_create_session(
+                                        context.user_id, context.channel_id
+                                    )
+                                    if session and is_idle:
+                                        session.session_active[composite_key] = False
+                                except Exception:
+                                    logger.debug(
+                                        "claude: failed to update session_active after result for %s",
+                                        composite_key,
+                                        exc_info=True,
+                                    )
+                                if emit_failed:
+                                    self._release_service_runtime_turn(context)
+                            finally:
+                                if backend_cleanup is not None:
+                                    backend_cleanup.set()
+                                    if close_after_payload.get("_close_after_backend_cleanup") is backend_cleanup:
+                                        close_after_payload.pop("_close_after_backend_cleanup", None)
                         if settling_ambiguous_primary:
                             return
                         continue
@@ -2711,6 +2725,7 @@ class ClaudeAgent(BaseAgent):
             "task_trigger_kind",
             "task_execution_id",
             "accepted_agent_run_ids",
+            "close_after",
         )
         current_payload = getattr(context, "platform_specific", None) or {}
         updates_attribution = any(
