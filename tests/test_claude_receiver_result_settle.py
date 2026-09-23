@@ -806,14 +806,14 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         await flush_task
         self.assertIs(receipt.outcome, SteerOutcome.ACCEPTED)
         self.assertEqual(agent._pending_requests[composite_key], [primary_request])
-        agent._claim_activity_batch_for_turns.assert_called_once()
-        registry.requeue_completed_outputs.assert_called_once_with([activity])
+        agent._claim_activity_batch_for_turns.assert_not_called()
+        registry.requeue_completed_outputs.assert_not_called()
         agent.emit_result_message.assert_not_awaited()
 
         receiver_task.cancel()
         await asyncio.gather(receiver_task, return_exceptions=True)
 
-    async def test_activity_settlement_clears_ambiguous_interrupt(self):
+    async def test_activity_flush_does_not_consume_pending_human_turn(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)
         context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
@@ -842,10 +842,10 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertFalse(retry)
-        self.assertFalse(agent._has_pending_requests(composite_key))
-        self.assertNotIn(composite_key, agent._ambiguous_interrupt_keys())
-        agent._emit_activity_result.assert_awaited_once()
+        self.assertTrue(retry)
+        self.assertEqual(agent._pending_requests[composite_key], [primary_request])
+        self.assertIn(composite_key, agent._ambiguous_interrupt_keys())
+        agent._emit_activity_result.assert_not_awaited()
         self.assertFalse(receiver_task.done())
 
         receiver_task.cancel()

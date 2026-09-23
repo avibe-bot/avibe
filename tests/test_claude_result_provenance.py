@@ -298,6 +298,38 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(service.activities.has_completed_output("claude", key))
 
+    async def test_activity_flush_defers_without_assistant_frame_until_terminal_owner(self):
+        key = "session-provenance-flush-without-assistant:/tmp/work"
+        agent, service = _build_agent()
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.emit_result_message = _dispatcher_owned_emit(service)
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-provenance-flush-without-assistant",
+            activity_id="task-flush-without-assistant",
+            kind="local_agent",
+            turn_id="task-turn",
+        )
+        service.activities.complete(
+            backend="claude",
+            runtime_key=key,
+            activity_id="task-flush-without-assistant",
+            status="completed",
+            metadata={"summary": "background finished"},
+            expects_output=True,
+        )
+
+        should_retry = await agent._flush_completed_activity_outputs(key, context)
+
+        self.assertTrue(should_retry)
+        self.assertIn(key, agent._activity_provenance_barriers)
+        self.assertIs(agent._pending_requests[key][0], request)
+        self.assertTrue(service.activities.has_completed_output("claude", key))
+        agent.emit_result_message.assert_not_awaited()
+
     async def test_buffered_assistant_replay_failure_still_settles_terminal_result(self):
         key = "session-buffered-replay-failure:/tmp/work"
         agent, service = _build_agent()
@@ -543,6 +575,263 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
         agent.emit_result_message.assert_not_awaited()
         self.assertIs(agent._pending_requests[key][0], request)
+
+    async def test_eof_replays_buffered_failure_before_human_fallback_and_detached_flush(self):
+        key = "session-buffered-failure-eof:/tmp/work"
+        agent, service = _build_agent()
+        agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+        agent._handle_assistant_terminal_failure = (
+            ClaudeAgent._handle_assistant_terminal_failure.__get__(agent)
+        )
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.controller.emit_agent_message = _dispatcher_owned_emit(service)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent.controller.agent_auth_service = SimpleNamespace(
+            maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+        )
+        agent.controller.claude_sessions[key] = SimpleNamespace(
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=None)),
+        )
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-buffered-failure-eof",
+            activity_id="task-buffered-failure-eof",
+            kind="local_agent",
+            turn_id="task-turn",
+        )
+        await agent._receive_messages(
+            _client(
+                [
+                    TaskStartedMessage("task-buffered-failure-eof"),
+                    TaskNotificationMessage(
+                        "task-buffered-failure-eof",
+                        "background finished",
+                    ),
+                    _failure_assistant("backend exploded"),
+                ]
+            ),
+            "sess-buffered-failure-eof",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        event_types = [
+            call.args[1]
+            for call in agent.controller.emit_agent_message.await_args_list
+        ]
+        self.assertEqual(event_types, ["notify", "result", "result"])
+        self.assertIn(
+            "backend exploded",
+            agent.controller.emit_agent_message.await_args_list[1].kwargs[
+                "terminal_error"
+            ],
+        )
+        self.assertTrue(
+            agent.controller.emit_agent_message.await_args_list[2]
+            .kwargs["output"]
+            .detached
+        )
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_receiver_error_replays_buffered_failure_before_detached_flush(self):
+        key = "session-buffered-failure-error:/tmp/work"
+        agent, service = _build_agent()
+        agent._handle_receiver_eof = ClaudeAgent._handle_receiver_eof.__get__(agent)
+        agent._handle_receiver_exception = ClaudeAgent._handle_receiver_exception.__get__(
+            agent
+        )
+        agent._handle_assistant_terminal_failure = (
+            ClaudeAgent._handle_assistant_terminal_failure.__get__(agent)
+        )
+        context = _context(key)
+        request = _pending_request(key)
+        agent._pending_requests[key] = [request]
+        agent.controller.emit_agent_message = _dispatcher_owned_emit(service)
+        agent.record_model_hub_native_failure = AsyncMock()
+        agent.controller.agent_auth_service = SimpleNamespace(
+            maybe_emit_auth_recovery_message=AsyncMock(return_value=False),
+        )
+        agent.session_handler.handle_session_error = AsyncMock(return_value=False)
+        service.activities.start(
+            backend="claude",
+            runtime_key=key,
+            session_id="sess-buffered-failure-error",
+            activity_id="task-buffered-failure-error",
+            kind="local_agent",
+            turn_id="task-turn",
+        )
+
+        class _FailingClient:
+            def receive_messages(self):
+                async def _iterate():
+                    yield TaskStartedMessage("task-buffered-failure-error")
+                    yield TaskNotificationMessage(
+                        "task-buffered-failure-error",
+                        "background finished",
+                    )
+                    yield _failure_assistant("backend exploded")
+                    raise RuntimeError("receiver disconnected")
+
+                return _iterate()
+
+        await agent._receive_messages(
+            _FailingClient(),
+            "sess-buffered-failure-error",
+            "/tmp/work",
+            context,
+            composite_key=key,
+        )
+
+        event_types = [
+            call.args[1]
+            for call in agent.controller.emit_agent_message.await_args_list
+        ]
+        self.assertEqual(event_types, ["notify", "result", "result"])
+        self.assertIn(
+            "backend exploded",
+            agent.controller.emit_agent_message.await_args_list[1].kwargs[
+                "terminal_error"
+            ],
+        )
+        self.assertTrue(
+            agent.controller.emit_agent_message.await_args_list[2]
+            .kwargs["output"]
+            .detached
+        )
+        self.assertFalse(service.activities.has_completed_output("claude", key))
+
+    async def test_primary_write_and_stop_share_the_native_write_fence(self):
+        key = "session-primary-stop-fence:/tmp/work"
+        agent, _service = _build_agent()
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        interrupt_called = asyncio.Event()
+
+        class _Client:
+            _vibe_runtime_base_session_id = "sess-primary-stop-fence"
+            _vibe_runtime_session_key = key
+
+            async def query(self, _messages, *, session_id):
+                self.assert_session_id = session_id
+                query_started.set()
+                await release_query.wait()
+
+            async def interrupt(self):
+                interrupt_called.set()
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    await asyncio.Future()
+                    yield None
+
+                return _iterate()
+
+        client = _Client()
+        agent.claude_sessions[key] = client
+        receiver_task = asyncio.create_task(asyncio.Event().wait())
+        agent.receiver_tasks[key] = receiver_task
+        agent.session_handler.get_or_create_claude_session = AsyncMock(
+            return_value=client,
+        )
+        agent.session_handler.mark_session_active = Mock()
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent.mark_runtime_turn_started = Mock()
+        context = _context(key)
+        request = SimpleNamespace(
+            context=context,
+            message="primary input",
+            working_path="/tmp/work",
+            base_session_id="sess-primary-stop-fence",
+            composite_session_id=key,
+            session_key="session-key",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+            vibe_agent_system_prompt=None,
+            input_metadata=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+        stop_request = SimpleNamespace(
+            context=_context(key, turn_token="stop-turn"),
+            composite_session_id=key,
+            stop_failure_reason=None,
+        )
+
+        primary_task = asyncio.create_task(agent.handle_message(request))
+        await asyncio.wait_for(query_started.wait(), timeout=1)
+        stop_task = asyncio.create_task(agent.handle_stop(stop_request))
+        await asyncio.sleep(0)
+        self.assertFalse(interrupt_called.is_set())
+
+        release_query.set()
+        await primary_task
+        self.assertTrue(await asyncio.wait_for(stop_task, timeout=1))
+        self.assertTrue(interrupt_called.is_set())
+        receiver_task.cancel()
+        await asyncio.gather(receiver_task, return_exceptions=True)
+
+    async def test_generation_retirement_waits_for_write_without_lock_cycle(self):
+        key = "session-generation-eviction-watchdog:/tmp/work"
+        agent, _service = _build_agent()
+        query_started = asyncio.Event()
+        release_query = asyncio.Event()
+        generation_lock = asyncio.Lock()
+
+        class _Client:
+            async def query(self, _messages, *, session_id):
+                query_started.set()
+                await release_query.wait()
+
+            async def disconnect(self):
+                return None
+
+        client = _Client()
+        agent.claude_sessions[key] = client
+        agent._pending_requests[key] = [_pending_request(key)]
+        agent.session_handler._claude_runtime_generation_lock = (
+            lambda _key: generation_lock
+        )
+        agent.session_handler._cleanup_session_locked = AsyncMock()
+
+        async def _primary_write():
+            async with agent._steering_lock(key):
+                await agent._write_human_query(
+                    client,
+                    key,
+                    "primary input",
+                    _context(key),
+                )
+
+        await generation_lock.acquire()
+        writer = asyncio.create_task(_primary_write())
+        await asyncio.wait_for(query_started.wait(), timeout=1)
+        eviction = asyncio.create_task(
+            agent.force_cleanup_stuck_active_session(
+                key,
+                runtime_lock_held=True,
+            )
+        )
+        await asyncio.sleep(0)
+        self.assertFalse(eviction.done())
+
+        release_query.set()
+        await writer
+        await asyncio.wait_for(eviction, timeout=1)
+        self.assertTrue(generation_lock.locked())
+        generation_lock.release()
 
     async def test_handle_message_persists_definitely_unsent_input_recovery_evidence(self):
         key = "session-unsent-recovery:/tmp/work"

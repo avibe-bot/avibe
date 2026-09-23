@@ -2197,7 +2197,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.sent, ["Background verification finished"])
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
-    async def test_timed_flush_drains_prequeued_same_turn_batch(self):
+    async def test_timed_flush_defers_prequeued_same_turn_batch_until_result(self):
         agent, service = _build_agent()
         composite_key = "session-batched-flush:/tmp/work"
         pending_request = SimpleNamespace(
@@ -2235,11 +2235,9 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             context,
         )
 
-        self.assertFalse(should_retry)
-        agent.emit_result_message.assert_awaited_once()
-        output = agent.emit_result_message.await_args.kwargs["output"]
-        self.assertEqual(output.activity_id, "task-rebuild")
-        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
+        self.assertTrue(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
         self.assertEqual(pending_request.output_activities, [])
 
     async def test_detached_activity_output_requeues_when_delivery_returns_none(self):
@@ -2414,7 +2412,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(service.activities.requeue_completed_outputs(retried), 2)
 
-    async def test_failed_pending_batch_restores_older_global_output_order(self):
+    async def test_pending_batch_defers_without_explicit_activity_binding(self):
         agent, service = _build_agent()
         composite_key = "session-global-requeue-order:/tmp/work"
         pending_request = SimpleNamespace(
@@ -2450,26 +2448,15 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             )
         agent.emit_result_message = AsyncMock(return_value=None)
 
-        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
-            await agent._flush_completed_activity_outputs(composite_key, context)
-
-        restored = []
-        while activity := service.activities.claim_completed_output(
-            "claude",
+        should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
-        ):
-            restored.append(activity)
-            service.activities.ack_completed_output(activity)
-        self.assertEqual(
-            [activity.id for activity in restored],
-            ["task-old", "task-current-b"],
+            context,
         )
-        self.assertEqual(
-            restored[-1].metadata["output_batch_activity_ids"],
-            ["task-current-a", "task-current-b"],
-        )
-        for activity in restored:
-            service.activities.ack_completed_output(activity)
+
+        self.assertTrue(should_retry)
+        agent.emit_result_message.assert_not_awaited()
+        self.assertTrue(service.activities.has_completed_output("claude", composite_key))
+        self.assertEqual(pending_request.output_activities, [])
 
     async def test_terminal_only_activity_waits_queued_until_pending_turn_finishes(self):
         agent, service = _build_agent()
@@ -2518,7 +2505,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service.activities.has_completed_output("claude", composite_key))
         self.assertFalse(agent._activity_output_pending(composite_key))
 
-    async def test_same_turn_summary_delivery_failure_retries_detached(self):
+    async def test_same_turn_summary_does_not_claim_pending_turn(self):
         agent, service = _build_agent()
         composite_key = "session-same-turn-retry:/tmp/work"
         pending_request = SimpleNamespace(
@@ -2544,48 +2531,17 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        emit_attempts = 0
+        agent.emit_result_message = AsyncMock(return_value=None)
 
-        async def emit_result(*_args, **kwargs):
-            nonlocal emit_attempts
-            emit_attempts += 1
-            if emit_attempts == 1:
-                return None
-            self.assertTrue(
-                service.activities.settle_completed_output_batch(
-                    kwargs["output"],
-                    accepted_message_exists=True,
-                )
-            )
-            return "delivered-message-id"
-
-        agent.emit_result_message = AsyncMock(side_effect=emit_result)
-        agent._remove_result_pending_reaction = AsyncMock()
-
-        with self.assertRaisesRegex(RuntimeError, "was not persisted or delivered"):
-            await agent._flush_completed_activity_outputs(composite_key, context)
-
-        self.assertFalse(agent._has_pending_requests(composite_key))
-        agent._remove_result_pending_reaction.assert_awaited_once_with(
+        should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
             context,
-            pending_request,
         )
+
+        self.assertTrue(should_retry)
+        self.assertTrue(agent._has_pending_requests(composite_key))
+        agent.emit_result_message.assert_not_awaited()
         self.assertTrue(service.activities.has_completed_output("claude", composite_key))
-        tidy_output = agent.controller.emit_agent_message.await_args.kwargs["output"]
-        self.assertTrue(tidy_output.completes_turn)
-        self.assertFalse(tidy_output.settles_run)
-
-        await agent._flush_completed_activity_outputs(composite_key, context)
-
-        self.assertFalse(agent._has_pending_requests(composite_key))
-        first_output = agent.emit_result_message.await_args_list[0].kwargs["output"]
-        second_output = agent.emit_result_message.await_args_list[1].kwargs["output"]
-        self.assertFalse(first_output.detached)
-        self.assertTrue(first_output.completes_turn)
-        self.assertTrue(second_output.detached)
-        self.assertFalse(second_output.completes_turn)
-        self.assertFalse(service.activities.has_completed_output("claude", composite_key))
 
     async def test_result_frame_activity_delivery_failure_retries_detached(self):
         agent, service = _build_agent()
