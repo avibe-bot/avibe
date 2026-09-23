@@ -1370,12 +1370,11 @@
 .onboarding-handoff-layer { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
 .onboarding-handoff-layer * { animation-play-state: paused !important; }
 .onboarding-handoff-card { position: absolute; pointer-events: none; }
-.onboarding-handoff-surface { position: absolute; inset: 0; border: 1px solid; transform-origin: top left;
-  /* The halo a working card wears is a token, so the flight borrows it through the same
-     name and fades it out on the token's own terms rather than carrying a computed
-     shadow string through the animation. */
-  transition: box-shadow 360ms ease 480ms; }
-.onboarding-handoff-surface[data-glow="true"] { box-shadow: var(--ob-active-shadow); }
+.onboarding-handoff-surface { position: absolute; inset: 0; border: 1px solid; transform-origin: top left; }
+/* The card an identity is flying onto is held until it lands: the moving shell is the
+   one that should be seen crossing, and the two drawn at once read as a double. */
+.onboarding-step[data-handoff="providers"] .setup-destinations,
+.onboarding-step[data-handoff="assistants"] .onboarding-assistant { visibility: hidden; }
 .onboarding-step[data-handoff] .onboarding-primary-action:disabled { opacity: 1; }
 .onboarding-heading h1:focus { outline: none; }
 .onboarding-flow-error { width: 100%; margin-top: 16px; text-align: center; color: var(--destructive-ink); overflow-wrap: anywhere; }
@@ -1401,7 +1400,7 @@
   --ob-provider-card-name: 18px;
   --ob-provider-card-key: 11px;
   --ob-wire-h: 48px;
-  --ob-destination-h: 84px;
+  --ob-destination-h: 76px;
   --ob-gap: 10px;
 }
 @media (max-height: 800px) and (min-width: 760px) {

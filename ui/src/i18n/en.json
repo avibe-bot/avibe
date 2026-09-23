@@ -5423,6 +5423,7 @@
       "addMoreAction": "Add a new subscription or API Key",
       "addMoreCount_one": "{{count}} added",
       "addMoreCount_other": "{{count}} added",
+      "summaryNameSeparator": ", ",
       "summaryNone": "No provider selected",
       "summarySelected_one": "{{count}} provider selected: {{names}}",
       "summarySelected_other": "{{count}} providers selected: {{names}}",

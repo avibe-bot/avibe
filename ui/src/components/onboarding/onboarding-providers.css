@@ -36,16 +36,19 @@
      measured at. Reading through the token first means a promotion upstream lands
      here automatically and a missing token never silently drops the diagram. */
   --obp-card-h: var(--ob-provider-card-h, calc(88 * var(--ob-u)));
-  --obp-card-pv: var(--ob-provider-card-pad-v, calc(14 * var(--ob-u)));
-  --obp-card-ph: var(--ob-provider-card-pad-h, calc(16 * var(--ob-u)));
+  /* L1 authors one inset per tier for this card — the reference pads all four sides
+     equally — so both axes read that token and only fall back to the scaled default. */
+  --obp-card-pv: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
+  --obp-card-ph: var(--ob-provider-card-pad, calc(14 * var(--ob-u)));
   --obp-card-gap: var(--ob-provider-card-gap, calc(10 * var(--ob-u)));
   --obp-card-key: var(--ob-provider-card-key, calc(var(--ob-cap-fs) - 1px));
   --obp-check: var(--ob-provider-card-check, calc(20 * var(--ob-u)));
   --obp-add: var(--ob-provider-card-add, calc(28 * var(--ob-u)));
+  --obp-logo: var(--ob-provider-card-logo, calc(32 * var(--ob-u)));
   --obp-wire-h: var(--ob-wire-h, calc(40 * var(--ob-u)));
   --obp-gateway-h: var(--ob-gateway-h, calc(72 * var(--ob-u)));
   --obp-gateway-name: var(--ob-gateway-name, calc(var(--ob-card-name) + 2px));
-  --obp-destination-h: var(--ob-destination-h, calc(84 * var(--ob-u)));
+  --obp-destination-h: var(--ob-destination-h, calc(76 * var(--ob-u)));
   --obp-summary-h: var(--ob-summary-h, calc(34 * var(--ob-u)));
   --obp-offer-gap: var(--ob-gap, calc(16 * var(--ob-u)));
 
@@ -86,7 +89,8 @@
 .setup-provider-card[data-state='connected'],
 .setup-provider-card[aria-pressed='true'] {
   border-color: var(--mint);
-  background: var(--card-wash);
+  background: var(--mint-soft);
+  box-shadow: var(--ob-active-shadow, var(--shadow-glow-onboarding-mint));
 }
 .setup-provider-card[aria-pressed]:hover:not(:disabled),
 .setup-provider-card[aria-pressed]:focus-visible {
@@ -99,9 +103,10 @@
 }
 /* The third card is an invitation rather than a thing that exists, but it is one of
    the row's three cards: the reference gives it the same shell as the two beside it,
-   so it carries the same surface and edge and says what it is through the plus and
-   its copy. */
+   so it carries the same surface as the two beside it and says what it is on its
+   edge: the reference keeps this one card's border dashed. */
 .setup-provider-card[data-state='add'] {
+  border-style: dashed;
   border-color: var(--ob-card-border);
   background: var(--ob-card);
 }
@@ -127,8 +132,8 @@
 .setup-provider-logo,
 .setup-destination-logo,
 .setup-destination-logo > span {
-  width: var(--ob-card-logo) !important;
-  height: var(--ob-card-logo) !important;
+  width: var(--obp-logo) !important;
+  height: var(--obp-logo) !important;
 }
 /* The destination's mark is a full-bleed brand path and fills its box, exactly as
    the story card it morphs out of does. */
@@ -137,18 +142,13 @@
   height: 100%;
   display: block;
 }
-/* A vendor mark is single-color ink, not a brand lockup, so it is drawn small in a
-   well rather than full-bleed — the same treatment, and the same 15-in-28 ink, the
-   provider picker already gives it. The descendant selector also settles the size
+/* A bare mark, like the destination's and like the reference's: no well, no border
+   and no second scale inside the box. The descendant selector also settles the size
    without depending on whether the Model Hub sheet is loaded on this route. */
-.setup-provider-logo {
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--logo-well-background);
-}
 .setup-provider-logo svg {
-  height: calc(var(--ob-card-logo) * 15 / 28);
-  width: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   display: block;
   color: var(--foreground);
 }
@@ -208,6 +208,15 @@
    real cards. Stretching one viewBox over the whole diagram — which is how the
    story draws its fixed circuit — would skew every curve the moment the column
    width changed. */
+/* The reference overrides the story's port fill for the setup screens — `setup-flow`
+   sets `#D6EEE5` over `welcome`'s translucent mint — because a translucent dot on a
+   card edge reads as a hole in the wire rather than as a terminal. Same token, this
+   screen's scope; the story's own circuit keeps the value it was measured at. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .setup-provider-stage { --ob-port: #d6eee5; }
+}
+[data-theme="light"] .setup-provider-stage { --ob-port: #d6eee5; }
+
 .setup-wires {
   position: relative;
   width: 100%;
@@ -218,7 +227,10 @@
   display: block;
   width: 100%;
   height: 100%;
-  overflow: visible;
+  /* The reference clips its band (`.gateway-lines`): a port sits on the edge the
+     wire leaves from, and the half outside the band is meant to be cut rather than
+     to ring above the card it hangs from. */
+  overflow: hidden;
   pointer-events: none;
 }
 /* What a wire, a port and a pulse *are* is the story's, by class. This band only says
@@ -341,10 +353,9 @@
   align-items: center;
   justify-content: center;
   gap: var(--obp-card-gap);
-  padding: 0 var(--obp-card-ph);
-  border-radius: 12px;
-  border: 1px solid var(--border-strong);
-  background: transparent;
+  border-radius: 9px;
+  border: 1px solid var(--ob-card-border);
+  background: var(--ob-card);
 }
 .setup-destination-name {
   font-size: var(--ob-card-name);

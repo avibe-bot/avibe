@@ -112,7 +112,7 @@ export const SupplyWires: FC<{
   return (
     <div ref={bandRef} className={`setup-wires setup-wires--${direction}`} aria-hidden="true">
       {geometry && (
-        <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} width={geometry.width} height={geometry.height}>
+        <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} width={geometry.width} height={geometry.height} fill="none">
           {geometry.paths.map((path, index) => (
             <g key={`wire-${index}`}>
               <path className="onboarding-wire" d={path} fill="none" />

@@ -142,15 +142,11 @@ const observationOf = (runtime: RuntimeDependency | null): string => (runtime ==
     runtime.manifest.resolution,
   ].join(':'));
 
-/** Locale-correct enumeration without inventing a separator string for each language.
- *  Falls back to the ASCII list on a runtime without `Intl.ListFormat`. */
-const formatNames = (names: readonly string[], locale: string): string => {
-  try {
-    return new Intl.ListFormat(locale, { style: 'narrow', type: 'unit' }).format([...names]);
-  } catch {
-    return names.join(', ');
-  }
-};
+/** Enumeration joined with the separator the active language punctuates lists with
+ *  (`, ` in English, `、` in Chinese), which `Intl.ListFormat`'s unit style drops
+ *  entirely for zh. */
+const formatNames = (names: readonly string[], separator: string): string =>
+  names.join(separator);
 
 /**
  * C4 names one owner for every setup supply read, so the shell may hand this screen
@@ -175,7 +171,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
     onNavigate,
     agentReads: sharedAgentReads,
   }, ref) {
-    const { t, i18n } = useTranslation();
+    const { t } = useTranslation();
     const motion = useOnboardingMotion();
     const attachMotion = motion.ref;
 
@@ -692,7 +688,7 @@ export const ProvidersScreen = React.forwardRef<SetupScreenHandle, ProvidersScre
             summary.kind === 'added'
               ? 'onboarding.providers.summaryAdded'
               : 'onboarding.providers.summarySelected',
-            { count: summary.count, names: formatNames(summary.names, i18n.language) },
+            { count: summary.count, names: formatNames(summary.names, t('onboarding.providers.summaryNameSeparator')) },
           ),
           // What a consented-but-not-yet-taken-over credential is about to do, which
           // is the half of the sentence that answers 「what happens to my key」.
