@@ -74,6 +74,8 @@ export const buttonVariants = cva(
         accent: 'gap-1.5 border border-cyan/40 bg-cyan-soft text-cyan-ink hover:bg-cyan/15',
       },
       size: {
+        // h-6 inline chips beside a chat notice (failure retry).
+        '2xs': 'h-6 rounded-md px-2 text-[11px] [&_svg]:size-3',
         // h-8 toolbar buttons (LogsPanel/DoctorPanel/SettingsServicePage/AgentDetection toolbar).
         xs: 'h-8 px-3 text-[12px] [&_svg]:size-3.5',
         // h-9 config-inline CTAs (Slack/Discord/Telegram/...).

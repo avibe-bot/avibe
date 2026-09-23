@@ -52,14 +52,16 @@ function mount(message: WorkbenchMessage = notice) {
 
 describe('failed-turn upstream details', () => {
   it('stays hidden for a notice that is not a linked backend failure', () => {
+    const read = vi.spyOn(modelsApi, 'getTurnProvenance');
     mount({ ...notice, metadata: { event: 'backend_failure' } } as WorkbenchMessage);
     expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('expands to the upstream status, error code and reason for every attempt', async () => {
     const read = vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue(record);
     mount();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看详情' })); });
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
     expect(read).toHaveBeenCalledExactlyOnceWith('turn-1');
     expect(screen.getByText('上游 API 拒绝了 grok-4.6 的请求。')).toBeTruthy();
     expect(screen.getByText('xAI 官方 · grok-4.6')).toBeTruthy();
@@ -76,24 +78,16 @@ describe('failed-turn upstream details', () => {
     expect(screen.queryByText('429')).toBeNull();
   });
 
-  it('explains a turn that never went through the gateway instead of failing', async () => {
-    vi.spyOn(modelsApi, 'getTurnProvenance').mockRejectedValue(
-      new ApiCallError('provenance_unavailable', 'models.provenance.direct_mode'),
-    );
+  it.each([
+    new ApiCallError('provenance_unavailable', 'models.provenance.direct_mode'),
+    new ApiCallError('provenance_unavailable', 'models.provenance.attribution_ambiguous'),
+    new ApiCallError('turn_not_found', 'not found'),
+    new Error('offline'),
+  ])('offers no details when the record cannot be shown (%s)', async (error) => {
+    const read = vi.spyOn(modelsApi, 'getTurnProvenance').mockRejectedValue(error);
     mount();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看详情' })); });
-    expect(screen.getByText('这一轮没有经过模型网关，所以没有上游记录。')).toBeTruthy();
-  });
-
-  it('offers a retry when the record cannot be read', async () => {
-    const read = vi.spyOn(modelsApi, 'getTurnProvenance')
-      .mockRejectedValueOnce(new Error('offline'))
-      .mockResolvedValueOnce(record);
-    mount();
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '查看详情' })); });
-    expect(screen.getByRole('alert').textContent).toContain('详情读取失败');
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '重试' })); });
-    expect(read).toHaveBeenCalledTimes(2);
-    expect(screen.getByText('model_not_found')).toBeTruthy();
+    await act(async () => { await Promise.resolve(); });
+    expect(read).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: '查看详情' })).toBeNull();
   });
 });

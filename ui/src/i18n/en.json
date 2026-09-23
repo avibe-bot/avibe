@@ -4357,13 +4357,6 @@
     "failureDetails": {
       "show": "Show details",
       "hide": "Hide details",
-      "loading": "Loading what happened upstream…",
-      "failed": "Couldn't load the details.",
-      "unavailable": {
-        "not_found": "No gateway record exists for this turn, so there are no upstream details to show.",
-        "direct_mode": "This turn didn't go through the model gateway, so there's no upstream record.",
-        "attribution_ambiguous": "This turn's gateway record couldn't be matched reliably, so it isn't shown."
-      },
       "outcome": {
         "served": "{{model}} was eventually served.",
         "exhausted": "Every source for {{model}} failed upstream.",

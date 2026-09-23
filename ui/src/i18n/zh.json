@@ -4357,13 +4357,6 @@
     "failureDetails": {
       "show": "查看详情",
       "hide": "收起详情",
-      "loading": "正在读取上游返回的情况…",
-      "failed": "详情读取失败。",
-      "unavailable": {
-        "not_found": "这一轮没有模型网关记录，暂无上游详情可看。",
-        "direct_mode": "这一轮没有经过模型网关，所以没有上游记录。",
-        "attribution_ambiguous": "这一轮的网关记录无法准确对应，因此不予显示。"
-      },
       "outcome": {
         "served": "{{model}} 最终已成功响应。",
         "exhausted": "{{model}} 的所有供应商在上游都失败了。",

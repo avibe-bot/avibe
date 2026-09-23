@@ -4861,14 +4861,17 @@ export const MessageRow = memo(function MessageRow({
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
           <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold-ink">
             <Bell className="mt-px size-3 shrink-0" />
-            <span className="min-w-0 break-words">
-              <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
-              {vaultStatusKey && (
-                <span className="font-normal text-gold-ink/80"> · {t(vaultStatusKey)}</span>
-              )}
-              {resultPresentation.body && (
-                <span className="font-normal text-gold-ink/80"> · {resultPresentation.body}</span>
-              )}
+            <span className="flex min-w-0 flex-col">
+              <span className="min-w-0 break-words">
+                <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
+                {vaultStatusKey && (
+                  <span className="font-normal text-gold-ink/80"> · {t(vaultStatusKey)}</span>
+                )}
+                {resultPresentation.body && (
+                  <span className="font-normal text-gold-ink/80"> · {resultPresentation.body}</span>
+                )}
+              </span>
+              <FailureDetails message={message} />
             </span>
           </div>
           {onFailureRetry && (
@@ -4879,7 +4882,6 @@ export const MessageRow = memo(function MessageRow({
               onRetry={onFailureRetry}
             />
           )}
-          <FailureDetails message={message} />
           {time}
         </div>
       </div>

@@ -10,14 +10,13 @@
 // machine codes and status only, so a credential echoed in an error body can
 // never reach the transcript. The details say so rather than implying more.
 import * as React from 'react';
-import { ChevronDown, ChevronRight, LoaderCircle, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { WorkbenchMessage } from '../../context/ApiContext';
 import { isRetryableFailureNotice } from '../../lib/chatMessageTypes';
-import { apiFailure, modelsApi } from '../settings/models/modelsApi';
+import { modelsApi } from '../settings/models/modelsApi';
 import type { ChainUnavailableReason, Source, TurnProvenance } from '../settings/models/types';
-import { Button } from '../ui/button';
 import { CopyButton } from '../ui/copy-button';
 
 type Row = {
@@ -29,49 +28,41 @@ type Row = {
   reason: string;
 };
 
-type Answer =
-  | { kind: 'loading' }
-  | { kind: 'ready'; record: TurnProvenance; names: Record<string, string> }
-  | { kind: 'unavailable'; detail: 'direct_mode' | 'attribution_ambiguous' | 'not_found' }
-  | { kind: 'failed' };
+type Detail = { record: TurnProvenance; names: Record<string, string> };
 
 const sourceNames = (sources: Source[]): Record<string, string> =>
   Object.fromEntries(sources.map((source) => [source.id, source.display_name]));
 
+// Drawn as the notice bubble's second line. The record is read up front, and
+// a turn with no readable record (direct mode, no gateway record, an ambiguous
+// attribution, a failed read) offers no details at all rather than a toggle
+// that opens onto an apology.
 export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
-  const [answer, setAnswer] = React.useState<Answer>({ kind: 'loading' });
-  const [attempt, setAttempt] = React.useState(0);
+  const [detail, setDetail] = React.useState<Detail | null>(null);
+  const eligible = isRetryableFailureNotice(message);
   const turnId = typeof message.metadata?.turn_id === 'string' ? message.metadata.turn_id : '';
 
   React.useEffect(() => {
-    if (!open || !turnId) return;
+    if (!eligible || !turnId) return;
     let active = true;
-    setAnswer({ kind: 'loading' });
+    setDetail(null);
     void (async () => {
       try {
         const record = await modelsApi.getTurnProvenance(turnId);
         // Names are a courtesy: a role that cannot read Sources, or a source
         // deleted since, still gets the stable id.
         const names = await modelsApi.listSources().then(sourceNames, () => ({}));
-        if (active) setAnswer({ kind: 'ready', record, names });
-      } catch (error) {
-        if (!active) return;
-        const failure = apiFailure(error);
-        if (failure?.code === 'turn_not_found') setAnswer({ kind: 'unavailable', detail: 'not_found' });
-        else if (failure?.code === 'provenance_unavailable') {
-          setAnswer({
-            kind: 'unavailable',
-            detail: failure.detail === 'models.provenance.direct_mode' ? 'direct_mode' : 'attribution_ambiguous',
-          });
-        } else setAnswer({ kind: 'failed' });
+        if (active) setDetail({ record, names });
+      } catch {
+        // Nothing to show is shown as nothing.
       }
     })();
     return () => { active = false; };
-  }, [open, turnId, attempt]);
+  }, [eligible, turnId]);
 
-  if (!isRetryableFailureNotice(message) || !turnId) return null;
+  if (!eligible || !turnId || !detail) return null;
 
   const blockerLabel = (reason: ChainUnavailableReason): string => {
     if (reason === 'native_cli_unavailable') return t('models.probe.native_cli_unavailable');
@@ -105,36 +96,22 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   };
 
   const body = (() => {
-    if (answer.kind === 'loading') {
-      return <p className="flex items-center gap-1.5 text-muted"><LoaderCircle className="size-3 animate-spin" aria-hidden />{t('chat.failureDetails.loading')}</p>;
-    }
-    if (answer.kind === 'failed') {
-      return (
-        <p className="flex items-center gap-2 text-muted" role="alert">
-          {t('chat.failureDetails.failed')}
-          <Button type="button" variant="ghost" size="sm" onClick={() => setAttempt((value) => value + 1)}>
-            <RefreshCw className="size-3" aria-hidden />{t('common.retry')}
-          </Button>
-        </p>
-      );
-    }
-    if (answer.kind === 'unavailable') return <p className="text-muted">{t(`chat.failureDetails.unavailable.${answer.detail}`)}</p>;
-    const { record, names } = answer;
+    const { record, names } = detail;
     const attempts = rows(record, names);
     return (
       <div className="flex flex-col gap-2">
-        <p className="text-foreground">
+        <p className="text-gold-ink">
           {t(`chat.failureDetails.outcome.${record.outcome}`, { model: record.requested_model_id })}
         </p>
         {attempts.length > 0 && (
           <ol className="flex flex-col gap-1.5">
             {attempts.map((row) => (
-              <li key={row.key} className="flex flex-col gap-0.5 rounded-md border border-border bg-background px-2.5 py-1.5">
-                <span className="font-mono text-foreground">{row.source} · {row.model ?? '—'}</span>
-                <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-muted">
-                  <span>{t('chat.failureDetails.httpStatus')}: <span className="font-mono text-foreground">{row.status ?? '—'}</span></span>
-                  {row.code && <span>{t('chat.failureDetails.errorCode')}: <span className="font-mono text-foreground">{row.code}</span></span>}
-                  <span>{t('chat.failureDetails.reasonLabel')}: <span className="text-foreground">{row.reason}</span></span>
+              <li key={row.key} className="flex flex-col gap-0.5 rounded-md border border-gold/25 bg-gold/[0.06] px-2.5 py-1.5">
+                <span className="font-mono text-gold-ink">{row.source} · {row.model ?? '—'}</span>
+                <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-gold-ink/70">
+                  <span>{t('chat.failureDetails.httpStatus')}: <span className="font-mono text-gold-ink">{row.status ?? '—'}</span></span>
+                  {row.code && <span>{t('chat.failureDetails.errorCode')}: <span className="font-mono text-gold-ink">{row.code}</span></span>}
+                  <span>{t('chat.failureDetails.reasonLabel')}: <span className="text-gold-ink">{row.reason}</span></span>
                 </span>
               </li>
             ))}
@@ -142,19 +119,19 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
         )}
         {record.blockers.length > 0 && (
           <div className="flex flex-col gap-1">
-            <span className="text-muted">{t('chat.failureDetails.blockers')}</span>
+            <span className="text-gold-ink/70">{t('chat.failureDetails.blockers')}</span>
             <ul className="flex flex-col gap-0.5">
               {record.blockers.map((blocker, index) => (
-                <li key={index} className="font-mono text-foreground">
+                <li key={index} className="font-mono text-gold-ink">
                   {names[blocker.source_id] ?? blocker.source_id} · {blocker.model_id}
-                  <span className="font-sans text-muted"> — {blockerLabel(blocker.reason)}</span>
+                  <span className="font-sans text-gold-ink/70"> — {blockerLabel(blocker.reason)}</span>
                 </li>
               ))}
             </ul>
           </div>
         )}
-        <p className="text-muted">{t('chat.failureDetails.upstreamNote')}</p>
-        <span className="flex items-center gap-2 text-muted">
+        <p className="text-gold-ink/70">{t('chat.failureDetails.upstreamNote')}</p>
+        <span className="flex items-center gap-2 text-gold-ink/70">
           <span className="font-mono">{record.turn_id}</span>
           <CopyButton value={JSON.stringify(record, null, 2)} label={t('chat.failureDetails.copyRecord') as string} />
         </span>
@@ -163,19 +140,17 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
   })();
 
   return (
-    <div className="flex w-full max-w-full flex-col gap-1.5">
-      <Button
+    <>
+      <button
         type="button"
-        size="sm"
-        variant="ghost"
-        className="self-start"
+        className="mt-0.5 inline-flex items-center gap-0.5 self-start rounded text-[12px] text-gold-ink/80 hover:text-gold-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        {open ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />}
+        {open ? <ChevronDown className="size-3" aria-hidden /> : <ChevronRight className="size-3" aria-hidden />}
         {t(open ? 'chat.failureDetails.hide' : 'chat.failureDetails.show')}
-      </Button>
-      {open && <div className="rounded-lg border border-border bg-surface-2/60 px-3 py-2 text-[12px] leading-relaxed">{body}</div>}
-    </div>
+      </button>
+      {open && <div className="mt-1.5 text-[12px] leading-relaxed">{body}</div>}
+    </>
   );
 }
