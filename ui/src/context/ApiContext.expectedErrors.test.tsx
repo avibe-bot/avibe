@@ -69,6 +69,25 @@ const mountApi = async () => {
 const apiContextSource = () => readFileSync(join(__dirname, 'ApiContext.tsx'), 'utf8');
 
 describe('ApiProvider expected error codes', () => {
+  it('marks push-triggered Inbox reads as non-renewing without changing interactive reads', async () => {
+    const api = await mountApi();
+    const inbox = { sessions: [], next_cursor: null, unread_by_session: {} };
+    apiFetch.mockImplementation(async () => Response.json(inbox));
+
+    await expect(api.listInbox({ platform: 'avibe', limit: 1, backgroundPush: true })).resolves.toEqual(inbox);
+    expect(apiFetch).toHaveBeenLastCalledWith('/api/inbox?platform=avibe&limit=1', {
+      headers: { 'X-Avibe-Background-Push': '1' },
+    });
+
+    await expect(api.listInbox({ platform: 'avibe', limit: 1, cache: false })).resolves.toEqual(inbox);
+    expect(apiFetch).toHaveBeenLastCalledWith('/api/inbox?platform=avibe&limit=1');
+
+    apiFetch.mockResolvedValue(Response.json({ error: 'remote_access_login_required' }, { status: 401 }));
+    await expect(api.listInbox({ platform: 'avibe', limit: 1, backgroundPush: true })).rejects.toThrow(
+      'Background Inbox refresh failed (401)',
+    );
+  });
+
   it('suppresses only the expected refusal for the OpenCode picker POST', async () => {
     const api = await mountApi();
 

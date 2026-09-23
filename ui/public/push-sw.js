@@ -47,6 +47,8 @@ async function appWindowClients() {
 
 function requestForegroundBadgeRefresh(clients) {
   for (const client of clients) {
+    // A hidden page's ordinary Inbox read could renew an unattended login.
+    if (client.visibilityState !== 'visible') continue;
     try {
       client.postMessage({ type: 'vibe.push-badge-refresh' });
     } catch {
@@ -80,7 +82,7 @@ async function refreshAppBadge() {
       return;
     }
     await queueAppBadge(payload?.unread_total, refreshId, pageRevisionAtStart);
-    requestForegroundBadgeRefresh(clients);
+    requestForegroundBadgeRefresh(await appWindowClients());
   } catch {
     // An unavailable or unauthenticated read is not evidence that the badge is zero.
   }

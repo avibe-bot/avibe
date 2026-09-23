@@ -336,6 +336,90 @@ describe('push service worker notification launches', () => {
     expect(client.postMessage).toHaveBeenCalledWith({ type: 'vibe.push-badge-refresh' });
   });
 
+  it('does not ask a hidden page to make an interactive Inbox read after Push', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const client = {
+      url: 'https://avibe.local/inbox',
+      visibilityState: 'hidden',
+      postMessage: vi.fn(),
+    };
+    const setAppBadge = vi.fn(async () => {});
+    const fetchMock = vi.fn(async () => Response.json({ unread_total: 2 }));
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => [client]) },
+      registration: { showNotification: vi.fn(async () => {}) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, {
+      self: worker,
+      fetch: fetchMock,
+      navigator: { setAppBadge },
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ badge_count: 1 }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/inbox?platform=avibe&limit=1', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'X-Avibe-Background-Push': '1' },
+    });
+    expect(setAppBadge).toHaveBeenCalledWith(2);
+    expect(client.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('notifies a page that becomes visible while the worker writes a badge', async () => {
+    const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
+    const handlers = new Map<string, (event: unknown) => void>();
+    const client = {
+      url: 'https://avibe.local/inbox',
+      visibilityState: 'hidden',
+      postMessage: vi.fn(),
+    };
+    const setAppBadge = vi.fn(async () => {
+      client.visibilityState = 'visible';
+    });
+    const worker = {
+      location: { origin: 'https://avibe.local' },
+      clients: { matchAll: vi.fn(async () => [client]) },
+      registration: { showNotification: vi.fn(async () => {}) },
+      addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    };
+    runInNewContext(source, {
+      self: worker,
+      fetch: vi.fn(async () => Response.json({ unread_total: 2 })),
+      navigator: { setAppBadge },
+      URL,
+      Response,
+      Date,
+      Number,
+      JSON,
+      Promise,
+    });
+
+    let completion: Promise<unknown> | undefined;
+    handlers.get('push')?.({
+      data: { json: () => ({ badge_count: 1 }) },
+      waitUntil: (promise: Promise<unknown>) => { completion = promise; },
+    });
+    await completion;
+
+    expect(setAppBadge).toHaveBeenCalledWith(2);
+    expect(client.postMessage).toHaveBeenCalledWith({ type: 'vibe.push-badge-refresh' });
+  });
+
   it('does not apply a fetched count after the app becomes visible', async () => {
     const source = await readFile(new URL('../../public/push-sw.js', import.meta.url), 'utf8');
     const handlers = new Map<string, (event: unknown) => void>();

@@ -573,7 +573,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // cursor, so activating the feed later still starts from a real first page.
   // (The server clamps `limit` to at least 1; a true zero-row read would need an
   // API change, deliberately out of scope here.)
-  const refreshUnread = useCallback(async function refreshUnread() {
+  const refreshUnread = useCallback(async function refreshUnread(backgroundPush = false) {
     if (unreadReadInFlightRef.current) {
       unreadReadPendingRef.current = true;
       return;
@@ -601,6 +601,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
             limit: 1,
             cache: false,
             handleError: false,
+            backgroundPush,
           });
           if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
             applyWholeUnreadRead(read, result.unread_by_session ?? {});
@@ -920,6 +921,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // ``totalUnread`` is just the default 0, and clearing here would wipe a badge
   // the service worker set while the app was closed if that initial load is slow,
   // fails, or redirects on an expired session. Once loaded, a real 0 clears it.
+  // A fresh authoritative map reasserts the badge even when its numeric sum
+  // is unchanged: a worker may have written an older sum between reads.
   useEffect(() => {
     const nav = navigator as Navigator & {
       setAppBadge?: (contents?: number) => Promise<void>;
@@ -940,7 +943,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch {
       // The direct badge write above still works without a controlling worker.
     }
-  }, [totalUnread, unreadLoaded]);
+  }, [unreadBySession, totalUnread, unreadLoaded]);
 
   // A worker can finish a background badge write after this page's last
   // unread update. Revalidate on its completion signal and whenever the page
@@ -948,7 +951,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   useEffect(() => {
     if (!('serviceWorker' in navigator) || !('setAppBadge' in navigator)) return;
     const onWorkerMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'vibe.push-badge-refresh') void refreshUnread();
+      if (event.data?.type === 'vibe.push-badge-refresh') void refreshUnread(true);
     };
     const unsubscribeResume = onPageReactivated(() => void refreshUnread());
     navigator.serviceWorker.addEventListener('message', onWorkerMessage);
